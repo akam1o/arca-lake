@@ -5,9 +5,10 @@ distributed object store with native multi-tier storage management and
 configurable erasure coding. It is written in Rust and is part of the
 `arca` family of infrastructure software.
 
-> **Status: design phase.** No usable release exists yet. The repository
-> currently contains the architecture review, design decisions, and the
-> Phase 0 plan. See [`docs/`](docs/README.md).
+> **Status: design phase / Phase 0.** No usable release exists yet. The
+> repository contains the architecture review, design decisions, accepted
+> ADRs, the Phase 0 plan, and a workspace skeleton with crate stubs. See
+> [`docs/`](docs/README.md).
 
 ## Goals
 
@@ -57,5 +58,6 @@ See [`docs/CONTRIBUTING-POLICY.md`](docs/CONTRIBUTING-POLICY.md).
 
 ## License
 
-The license is not finalized. Apache-2.0 is the leading candidate; see
-[open decisions](docs/architecture/open-decisions.md).
+Licensed under the [Apache License, Version 2.0](LICENSE) (see
+[ADR-0001](docs/adr/0001-license.md)). Contributions require a Developer
+Certificate of Origin sign-off; see [CONTRIBUTING.md](CONTRIBUTING.md).

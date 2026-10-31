@@ -94,5 +94,7 @@ Rules:
 
 ## What exists today
 
-Only `README.md` and `docs/`. The workspace skeleton is the first Phase 0
-task; see [the Phase 0 plan](../roadmap/phase-0.md).
+The workspace skeleton: every crate above exists with a stub `lib.rs` (or
+`main.rs` for the CLI) and no external dependencies, plus CI, `deny.toml`,
+and the project policy files. Real implementation begins with the Phase 0
+tasks; see [the Phase 0 plan](../roadmap/phase-0.md).

@@ -3,14 +3,19 @@
 Status: **living document**. Items that need a decision by the maintainers.
 Each has a recommendation; none is decided until recorded in an ADR.
 
-## Needs a decision before Phase 0 starts
+## Decided (recorded in ADRs)
 
-| ID | Decision | Options | Recommendation | Why it blocks |
-| --- | --- | --- | --- | --- |
-| OD-01 | **License** | Apache-2.0; MIT; dual MIT/Apache-2.0 | Apache-2.0. All shortlisted dependencies are permissive and compatible (see [technology selection](technology-selection.md#license-compatibility)); Apache-2.0 adds an explicit patent grant, which matters for storage software. Final confirmation after `cargo-deny` runs on the real dependency tree. | The `LICENSE` file and headers must exist before the first public commit of code |
-| OD-02 | **Documentation language** | English only; Japanese only; English canonical with translations | English canonical. It widens the contributor base and matches the ecosystem; translations can follow. | Affects every document written from now on |
-| OD-03 | **Governance basics** | DCO sign-off; CLA; neither | DCO sign-off (low friction, standard for Apache-2.0 projects) | `CONTRIBUTING.md` content |
-| OD-04 | **Minimum supported Linux kernel and platforms** | State a minimum kernel for io_uring features; support macOS for development only | Linux as the only production platform; macOS and non-io_uring Linux for development with the blocking backend | CI matrix and feature gating |
+| ID | Decision | Outcome | ADR |
+| --- | --- | --- | --- |
+| OD-01 | License | Apache-2.0 | [ADR-0001](../adr/0001-license.md) |
+| OD-02 | Documentation language | English canonical; translations optional | [ADR-0002](../adr/0002-documentation-language.md) |
+| OD-03 | Governance basics | DCO sign-off | [ADR-0003](../adr/0003-contribution-sign-off.md) |
+| OD-04 | Supported platforms | Linux production; macOS development only; minimum kernel stated in RFC-005 | [ADR-0004](../adr/0004-supported-platforms.md) |
+| OD-11 | CopyObject data handling | Physical copy in the MVP | [ADR-0005](../adr/0005-initial-architecture-decisions.md) |
+| OD-12 | Where EC encode happens | Gateway | ADR-0005 |
+| OD-13 | Metadata layer deployment | Embedded library behind a trait | ADR-0005 |
+| OD-14 | Small object handling | Replication below a profile threshold | ADR-0005 |
+| OD-15 | Durable placement representation | Stripe groups | ADR-0005 |
 
 ## Needs a decision during or at the end of Phase 0
 
@@ -27,11 +32,6 @@ Each has a recommendation; none is decided until recorded in an ADR.
 
 | ID | Decision | Options | Recommendation |
 | --- | --- | --- | --- |
-| OD-11 | CopyObject and multipart copy data handling | Physical copy (single-owner chunks); shared chunks with reference counts | Physical copy for the MVP; revisit with a dedicated RFC if copy volume matters |
-| OD-12 | Where EC encode happens | Gateway; primary storage node | Gateway (DD-9) |
-| OD-13 | Metadata layer deployment | Embedded library; separate service | Embedded (DD-10) |
-| OD-14 | Small object handling | Replication below threshold; packing; inline in metadata | Replication below a profile threshold (DD-13) |
-| OD-15 | Durable placement representation | Stripe groups; per-chunk location lists | Stripe groups (DD-3) |
 | OD-16 | Grace-period measurement for GC | Metadata commit versions; wall clock; both | Commit versions primary, wall clock as a conservative bound (DD-7) |
 | OD-17 | `m_ack < m` (reduced acknowledgment) support in the MVP | Support as a profile option; defer | Defer to Phase 3; keep the field in the profile schema |
 | OD-18 | Versioning in the MVP | Versioned and unversioned buckets from Phase 1; unversioned only | Both from Phase 1, because the generation model already supports it and retrofitting changes the key layout |

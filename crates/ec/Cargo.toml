@@ -1,0 +1,14 @@
+[package]
+name = "arca-lake-ec"
+description = "Erasure coding traits, profiles, stripe layout, and backends for arca-lake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

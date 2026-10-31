@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/common",
+    "crates/protocol",
+    "crates/ec",
+    "crates/metadata",
+    "crates/storage",
+    "crates/storage-node",
+    "crates/placement",
+    "crates/tiering",
+    "crates/controller",
+    "crates/gateway",
+    "crates/testkit",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/akam1o/arca-lake"
+rust-version = "1.99"
+
+[workspace.dependencies]
+# Internal crates. External dependencies are added here as Phase 0 tasks
+# need them, so that every crate shares one version.
+arca-lake-common = { path = "crates/common" }
+arca-lake-protocol = { path = "crates/protocol" }
+arca-lake-ec = { path = "crates/ec" }
+arca-lake-metadata = { path = "crates/metadata" }
+arca-lake-storage = { path = "crates/storage" }
+arca-lake-storage-node = { path = "crates/storage-node" }
+arca-lake-placement = { path = "crates/placement" }
+arca-lake-tiering = { path = "crates/tiering" }
+arca-lake-controller = { path = "crates/controller" }
+arca-lake-gateway = { path = "crates/gateway" }
+arca-lake-testkit = { path = "crates/testkit" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+debug = 1
+lto = "thin"

@@ -1,0 +1,14 @@
+[package]
+name = "arca-lake-controller"
+description = "Leader-elected control plane for arca-lake: placement, tiering, repair, garbage collection, admin API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

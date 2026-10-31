@@ -1,0 +1,14 @@
+[package]
+name = "arca-lake-common"
+description = "Shared identifiers, checksums, errors, configuration loading, and telemetry initialization for arca-lake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true
