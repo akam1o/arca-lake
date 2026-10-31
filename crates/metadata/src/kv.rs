@@ -1,0 +1,231 @@
+//! Transactional key-value abstraction.
+//!
+//! The interface is deliberately shaped like FoundationDB's: a transaction
+//! reads from a snapshot, buffers writes, and commits atomically; the commit
+//! fails with [`KvError::Conflict`] if any key the transaction read was
+//! modified by a transaction that committed after the snapshot. Keys are
+//! byte strings ordered lexicographically. Backends enforce [`Limits`].
+
+use std::future::Future;
+
+use crate::MetaError;
+
+/// A key.
+pub type Key = Vec<u8>;
+/// A value.
+pub type Value = Vec<u8>;
+
+/// Half-open key range `[begin, end)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRange {
+    /// Inclusive start.
+    pub begin: Key,
+    /// Exclusive end.
+    pub end: Key,
+}
+
+impl KeyRange {
+    /// Range from `begin` (inclusive) to `end` (exclusive).
+    #[must_use]
+    pub fn new(begin: Key, end: Key) -> Self {
+        Self { begin, end }
+    }
+
+    /// All keys that start with `prefix`.
+    #[must_use]
+    pub fn prefix(prefix: &[u8]) -> Self {
+        Self {
+            begin: prefix.to_vec(),
+            end: strinc(prefix),
+        }
+    }
+
+    /// The single key `key`.
+    #[must_use]
+    pub fn point(key: &[u8]) -> Self {
+        let mut end = key.to_vec();
+        end.push(0);
+        Self {
+            begin: key.to_vec(),
+            end,
+        }
+    }
+
+    /// Whether `key` lies in the range.
+    #[must_use]
+    pub fn contains(&self, key: &[u8]) -> bool {
+        key >= self.begin.as_slice() && key < self.end.as_slice()
+    }
+
+    /// Whether the range is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.begin >= self.end
+    }
+}
+
+/// The first key greater than every key that starts with `prefix`.
+///
+/// Trailing `0xFF` bytes are dropped and the last remaining byte is
+/// incremented. A prefix consisting only of `0xFF` bytes has no such key
+/// within the keyspace; this returns a key of `0xFF` bytes one longer than
+/// the prefix, which is adequate for the layouts used here (all keys begin
+/// with a tuple type code below `0xFF`).
+#[must_use]
+pub fn strinc(prefix: &[u8]) -> Key {
+    let mut k: Vec<u8> = prefix
+        .iter()
+        .copied()
+        .rev()
+        .skip_while(|&b| b == 0xFF)
+        .collect();
+    k.reverse();
+    match k.last_mut() {
+        Some(last) => {
+            *last += 1;
+            k
+        }
+        None => vec![0xFF; prefix.len() + 1],
+    }
+}
+
+/// Size limits enforced by a backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Maximum key length in bytes.
+    pub max_key_bytes: usize,
+    /// Maximum value length in bytes.
+    pub max_value_bytes: usize,
+    /// Maximum bytes affected by one transaction (keys and values written,
+    /// keys read).
+    pub max_transaction_bytes: usize,
+}
+
+impl Limits {
+    /// FoundationDB's documented limits (Known Limitations, v8.0 docs).
+    pub const FOUNDATIONDB: Self = Self {
+        max_key_bytes: 10_000,
+        max_value_bytes: 100_000,
+        max_transaction_bytes: 10_000_000,
+    };
+}
+
+/// Errors from a key-value backend.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum KvError {
+    /// The transaction read something that was modified after its snapshot.
+    /// Retryable.
+    #[error("transaction conflict")]
+    Conflict,
+    /// A size limit was exceeded.
+    #[error("{what} of {actual} bytes exceeds the limit of {limit} bytes")]
+    TooLarge {
+        /// What was too large: "key", "value", or "transaction".
+        what: &'static str,
+        /// The limit.
+        limit: usize,
+        /// The actual size.
+        actual: usize,
+    },
+    /// Any other backend failure.
+    #[error("backend error: {0}")]
+    Backend(String),
+}
+
+/// A transactional key-value store.
+pub trait KvStore: Send + Sync {
+    /// Transaction type.
+    type Tx: Txn;
+
+    /// Begin a transaction reading from the current snapshot.
+    fn begin(&self) -> impl Future<Output = Result<Self::Tx, KvError>> + Send;
+
+    /// Limits this backend enforces.
+    fn limits(&self) -> Limits;
+}
+
+/// One transaction. Reads see the snapshot plus this transaction's own
+/// writes. Nothing is visible to others until [`Txn::commit`] succeeds.
+pub trait Txn: Send {
+    /// Read one key.
+    fn get(&mut self, key: &[u8]) -> impl Future<Output = Result<Option<Value>, KvError>> + Send;
+
+    /// Read up to `limit` key-value pairs in `range`, in key order (or
+    /// reverse order from the end if `reverse`).
+    fn get_range(
+        &mut self,
+        range: &KeyRange,
+        limit: usize,
+        reverse: bool,
+    ) -> impl Future<Output = Result<Vec<(Key, Value)>, KvError>> + Send;
+
+    /// Buffer a write. Size violations surface at commit, as in FoundationDB.
+    fn set(&mut self, key: &[u8], value: &[u8]);
+
+    /// Buffer a deletion.
+    fn clear(&mut self, key: &[u8]);
+
+    /// Buffer deletion of every key in `range`.
+    fn clear_range(&mut self, range: &KeyRange);
+
+    /// Commit. Returns the commit version, which increases monotonically.
+    fn commit(self) -> impl Future<Output = Result<u64, KvError>> + Send;
+}
+
+/// Maximum attempts for [`transact`].
+pub const MAX_ATTEMPTS: usize = 32;
+
+/// Run `body` in a transaction, retrying on [`KvError::Conflict`].
+///
+/// `body` must be idempotent with respect to its side effects outside the
+/// transaction (it may run several times). Returning any error other than a
+/// conflict aborts without retry.
+///
+/// # Errors
+///
+/// Returns the body's error, a backend error, or
+/// [`MetaError::TooManyRetries`] after [`MAX_ATTEMPTS`] conflicts.
+pub async fn transact<S, T, F>(store: &S, mut body: F) -> Result<T, MetaError>
+where
+    S: KvStore,
+    F: AsyncFnMut(&mut S::Tx) -> Result<T, MetaError>,
+{
+    for _ in 0..MAX_ATTEMPTS {
+        let mut tx = store.begin().await?;
+        match body(&mut tx).await {
+            Ok(value) => match tx.commit().await {
+                Ok(_) => return Ok(value),
+                Err(KvError::Conflict) => {}
+                Err(e) => return Err(e.into()),
+            },
+            Err(MetaError::Kv(KvError::Conflict)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MetaError::TooManyRetries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strinc_cases() {
+        assert_eq!(strinc(b"abc"), b"abd");
+        assert_eq!(strinc(b"ab\xff"), b"ac");
+        assert_eq!(strinc(b"\xff\xff"), vec![0xFF, 0xFF, 0xFF]);
+        assert_eq!(strinc(b""), vec![0xFF]);
+    }
+
+    #[test]
+    fn ranges() {
+        let r = KeyRange::prefix(b"k");
+        assert!(r.contains(b"k"));
+        assert!(r.contains(b"kzzz"));
+        assert!(!r.contains(b"l"));
+        let p = KeyRange::point(b"k");
+        assert!(p.contains(b"k"));
+        assert!(!p.contains(b"k\x01"));
+        assert!(!p.is_empty());
+    }
+}

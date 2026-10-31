@@ -22,3 +22,10 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   recovery scan distinguishing torn tails from corruption, scrub, and
   crash/corruption tests (Phase 0 task 0.3, first iteration).
 - Benchmark policy, report template, and the first EC backend report.
+- `arca-lake-metadata`: transactional key-value abstraction with
+  FoundationDB-like semantics and limits, an in-memory backend with
+  optimistic conflict detection, key layout v1, record types, and the
+  write-protocol recipes (begin/append/commit/abort, head, manifest read,
+  delete, listing with delimiter skips and continuation tokens, bucket
+  operations, lease expiry and GC queue), with concurrency tests (Phase 0
+  task 0.5, in-memory part).
