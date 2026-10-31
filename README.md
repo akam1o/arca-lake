@@ -1,0 +1,61 @@
+# arca-lake
+
+**arca-lake** is a high-performance, horizontally scalable, S3-compatible
+distributed object store with native multi-tier storage management and
+configurable erasure coding. It is written in Rust and is part of the
+`arca` family of infrastructure software.
+
+> **Status: design phase.** No usable release exists yet. The repository
+> currently contains the architecture review, design decisions, and the
+> Phase 0 plan. See [`docs/`](docs/README.md).
+
+## Goals
+
+- Broad Amazon S3 API compatibility, implemented incrementally and tracked in
+  an explicit compatibility matrix. We do not claim compatibility for anything
+  that is not implemented and verified.
+- Native multi-tier storage: arbitrary, configuration-defined tiers of
+  heterogeneous devices, with automatic promotion/demotion, explicit prefetch
+  and pinning, and a transparent read-through cache tier.
+- Erasure coding as a first-class feature, with tier-specific profiles and
+  failure-domain-aware placement.
+- Strong consistency for supported S3 operations. A write is acknowledged only
+  after its configured durability requirement has been met.
+- Horizontal scaling of aggregate throughput by adding storage nodes and
+  stateless gateways.
+- Explicit failure over silent data loss. Recoverable, idempotent, observable
+  operations.
+- Operational simplicity: a small team should be able to run it.
+
+## Non-goals (for now)
+
+- File system or block semantics (POSIX, NFS, iSCSI).
+- Reimplementing distributed consensus or erasure-coding algorithms that
+  mature, well-tested libraries already provide.
+- Embedding any environment-specific capacity, bandwidth, or performance
+  targets. Everything environment-specific is configuration.
+
+## Documentation
+
+| Document | Purpose |
+| --- | --- |
+| [Architecture overview](docs/architecture/overview.md) | Components, planes, data flow |
+| [Design decisions](docs/architecture/design-decisions.md) | Key decisions with alternatives and trade-offs |
+| [Technology selection](docs/architecture/technology-selection.md) | Libraries and systems under evaluation |
+| [Repository layout](docs/architecture/repository-layout.md) | Workspace and crate structure |
+| [Risks](docs/architecture/risks.md) | Correctness, durability, performance, and project risks |
+| [Open decisions](docs/architecture/open-decisions.md) | Items that still need a decision |
+| [RFC index](docs/rfcs/README.md) | RFC plan and dependency graph |
+| [Phase 0 plan](docs/roadmap/phase-0.md) | Architecture and performance proof of concept |
+
+## Contributing and policy
+
+This project is developed in public. All code, documentation, commit messages,
+issues, and pull requests must be suitable for public release and must not
+contain credentials, internal hostnames, or non-public infrastructure details.
+See [`docs/CONTRIBUTING-POLICY.md`](docs/CONTRIBUTING-POLICY.md).
+
+## License
+
+The license is not finalized. Apache-2.0 is the leading candidate; see
+[open decisions](docs/architecture/open-decisions.md).
