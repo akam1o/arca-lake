@@ -23,7 +23,7 @@ Each has a recommendation; none is decided until recorded in an ADR.
 | --- | --- | --- | --- | --- |
 | OD-05 | Metadata store | FoundationDB; TiKV | FoundationDB | Phase 0 metadata spike results (latency, hot spots, operability) |
 | OD-06 | S3 protocol layer | `s3s`; hand-written on hyper | `s3s` if the spike confirms streaming and error fidelity | Phase 0 S3 spike |
-| OD-07 | Default EC backend | ISA-L via FFI; pure-Rust classic RS; `reed-solomon-simd` | ISA-L for production profiles, pure Rust as oracle and fallback | Phase 0 EC benchmarks, FFI binding survey |
+| OD-07 | Default EC backend | ISA-L via FFI; pure-Rust classic RS; `reed-solomon-simd` | Classic GF(2^8) scheme as the default (ISA-L for production once bindings are evaluated, pure Rust as oracle and fallback); Leopard optional for wide profiles. First evidence: [EC backend report](../../benchmarks/reports/2026-11-01-ec-backends.md) | Server-hardware rerun of the EC benchmarks, FFI binding survey |
 | OD-08 | Shard transfer protocol | gRPC streaming; raw framed TCP | gRPC unless measured overhead is material | Phase 0 transfer measurements |
 | OD-09 | Default disk I/O backend for storage nodes | blocking pool; io_uring | blocking pool for Phase 1 unless io_uring shows a clear, reproducible win | Phase 0 I/O benchmarks |
 | OD-10 | On-disk record checksum | CRC32C; CRC64-NVME | CRC32C unless CRC64 reuse with S3 checksums is shown to save a hashing pass | Phase 0 hashing measurements |

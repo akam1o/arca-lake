@@ -27,7 +27,7 @@ update this list with what it learned.
 | R-11 | Gateway CPU (TLS + MD5 + S3 checksums + EC) caps throughput below storage capability | High | Measure each component in Phase 0; stateless gateways scale out; consider hardware-accelerated hashing; avoid redundant hashing passes |
 | R-12 | Metadata store becomes the bottleneck for small-object workloads or listing | High | Key layout designed for range reads; incremental manifests; measure in Phase 0; keep the `MetadataStore` trait so partitioning or a different store remains possible |
 | R-13 | Sequential key insertion creates write hot spots in the metadata store | Medium | Spread by bucket subspace; measure hot-spot behavior in the spike; sharded counters |
-| R-14 | EC backend decode cost for single-shard loss is high (e.g., O(n log n) codes) | Medium | Benchmark single-shard reconstruction specifically; choose classic RS for small-`m` profiles |
+| R-14 | EC backend decode cost for single-shard loss is high (e.g., O(n log n) codes) | Medium | Benchmark single-shard reconstruction specifically; choose classic RS for small-`m` profiles. First measurement (laptop, relative) confirms the concern for the Leopard code: see [report](../../benchmarks/reports/2026-11-01-ec-backends.md) |
 | R-15 | Small objects dominate and EC overhead per object is unacceptable | Medium | Replication below a profile threshold; inline-in-metadata as a later optimization |
 | R-16 | io_uring or SPDK adopted without evidence | Low | Policy: measurement before low-level optimization; abstraction keeps the blocking backend as reference |
 | R-17 | Repair traffic after a device failure saturates the network | Medium | Rate-limited repair with configurable budget; per-group parallelism caps; metrics |

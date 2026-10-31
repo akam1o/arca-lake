@@ -125,6 +125,14 @@ N+1), permissive license.
 | **`reed-solomon-simd`** | 3.1.0, MIT AND BSD-3-Clause; Leopard-RS–derived O(n log n) code over GF(2^16); SIMD on x86-64 and AArch64; README benchmarks show decode throughput essentially independent of how many shards are lost and note that another crate may be faster at decoding with about 42 or fewer recovery shards; shard size must be even; one-time table initialization. | Excellent for very wide codes. For storage-typical `m ≤ 6`, its decode cost does not shrink for single-shard loss, which is our common case. Also not wire-compatible with classic RS. *Hypothesis*: not the best fit for the default profile; worth keeping as an optional backend for wide profiles. Phase 0 measures. |
 | **`reed-solomon-erasure`** | 6.0.0, MIT; classic GF(2^8) RS with SIMD; last release 2022-09 (crates.io). | Correct and widely used, but low maintenance activity is a long-term risk. Acceptable as a pure-Rust fallback or test oracle. |
 
+**First measurement (2026-11-01, single core, developer laptop; relative
+comparison only).** See
+[the report](../../benchmarks/reports/2026-11-01-ec-backends.md). The classic
+GF(2^8) backend reconstructed a single lost shard 6–14× faster than the
+Leopard backend across all profiles, while the Leopard backend encoded
+1.2–2.3× faster. This supports the hypothesis above for the common
+single-shard loss case; confirmation on server hardware is still needed.
+
 **Recommendation.** Define `ErasureCoder` as a trait; implement a pure-Rust
 classic RS backend (via an existing crate) for portability and as a test
 oracle, and an ISA-L backend as the performance option. The EC *profile*
