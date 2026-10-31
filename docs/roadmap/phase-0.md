@@ -1,7 +1,21 @@
 # Phase 0: Architecture and performance proof of concept
 
-Status: **proposal**. Phase 0 exists to replace hypotheses with measurements
+Status: **in progress**. Phase 0 exists to replace hypotheses with measurements
 before Phase 1 commits to a design. It produces no user-facing product.
+
+## Progress
+
+| Task | State | Notes |
+| --- | --- | --- |
+| 0.1 skeleton and CI | done | fmt, clippy, test, doc, cargo-deny, gitleaks CLI, DCO, link check |
+| 0.2 EC evaluation | done (first pass) | `arca-lake-ec`; [laptop report](../../benchmarks/reports/2026-11-01-ec-backends.md); ISA-L and server-hardware run outstanding |
+| 0.3 storage engine prototype | first iteration | `arca-lake-storage`: format v1, durable put/delete, range reads, recovery, scrub, crash tests, I/O benchmark. Outstanding: group commit, `O_DIRECT`, io_uring backend (Linux), process-kill crash test in CI, `fio` comparison |
+| 0.4 protocol and transfer | not started | |
+| 0.5 metadata spike | in-memory part done | `arca-lake-metadata`: KV abstraction with FoundationDB semantics, layout v1, write-protocol recipes, concurrency tests. Outstanding: FoundationDB backend and measurements (needs a Linux host or CI service) |
+| 0.6 S3 spike | not started | |
+| 0.7 single-node harness | not started | |
+| 0.8 multi-node functional test | not started | |
+| 0.9 RFCs and ADRs | ADR-0001..0005 done | RFC-001/002 drafts outstanding |
 
 ## Scope
 
