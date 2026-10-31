@@ -23,8 +23,7 @@ repository = "https://github.com/akam1o/arca-lake"
 rust-version = "1.99"
 
 [workspace.dependencies]
-# Internal crates. External dependencies are added here as Phase 0 tasks
-# need them, so that every crate shares one version.
+# Internal crates.
 arca-lake-common = { path = "crates/common" }
 arca-lake-protocol = { path = "crates/protocol" }
 arca-lake-ec = { path = "crates/ec" }
@@ -36,6 +35,13 @@ arca-lake-tiering = { path = "crates/tiering" }
 arca-lake-controller = { path = "crates/controller" }
 arca-lake-gateway = { path = "crates/gateway" }
 arca-lake-testkit = { path = "crates/testkit" }
+
+# External dependencies. Every crate takes its version from here.
+thiserror = "2"
+reed-solomon-erasure = { version = "6", default-features = false, features = ["std"] }
+reed-solomon-simd = "3.1"
+proptest = "1.12"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -48,9 +48,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      # The gitleaks GitHub Action fails on the first push of a branch
+      # (empty "before" SHA), so run the pinned CLI directly and scan the
+      # full history plus the working tree.
+      - name: install gitleaks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          set -euo pipefail
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -sSL -o gitleaks.tar.gz "${base}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSL -o checksums.txt "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" checksums.txt \
+            | sed "s#gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz#gitleaks.tar.gz#" \
+            | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf gitleaks.tar.gz -C "$HOME/.local/bin" gitleaks
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: scan git history
+        run: gitleaks git --no-banner --redact --verbose --exit-code 1 .
+      - name: scan working tree
+        run: gitleaks dir --no-banner --redact --verbose --exit-code 1 .
 
   dco:
     name: DCO sign-off

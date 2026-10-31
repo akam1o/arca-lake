@@ -8,7 +8,27 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = ["rs-classic"]
+# Classic systematic Reed-Solomon over GF(2^8) (pure Rust).
+rs-classic = ["dep:reed-solomon-erasure"]
+# Same code, with the backend's C/SIMD acceleration (needs a C compiler).
+rs-classic-simd = ["rs-classic", "reed-solomon-erasure/simd-accel"]
+# Leopard-RS style O(n log n) Reed-Solomon over GF(2^16) (pure Rust, SIMD).
+rs-leopard = ["dep:reed-solomon-simd"]
+
 [dependencies]
+thiserror.workspace = true
+reed-solomon-erasure = { workspace = true, optional = true }
+reed-solomon-simd = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "ec"
+harness = false
 
 [lints]
 workspace = true
