@@ -1,4 +1,22 @@
-//! Local append-only chunk storage engine for arca-lake storage nodes
+//! Local append-only chunk storage engine for arca-lake storage nodes.
 //!
-//! This crate is a Phase 0 stub. See `docs/architecture/repository-layout.md`
-//! for its responsibilities and dependency rules.
+//! Shards are stored as immutable, checksummed records appended to large
+//! segment files. An in-memory index maps shard keys to record locations and
+//! is rebuilt by scanning the segments on open, so the segments are the only
+//! source of truth. The on-disk layout is described in `FORMAT.md` next to
+//! this crate and is versioned.
+//!
+//! Phase 0 status: blocking I/O, single writer, no compaction. This crate
+//! exists to measure the I/O path and to prove crash consistency before
+//! RFC-005 fixes the production format.
+
+mod error;
+pub mod format;
+mod index;
+mod segment;
+mod store;
+
+pub use error::StorageError;
+pub use format::ShardKey;
+pub use index::Location;
+pub use store::{OpenReport, ScrubReport, Store, StoreConfig, StoreStats, SyncPolicy};

@@ -26,6 +26,11 @@ reed-solomon-simd = { workspace = true, optional = true }
 proptest.workspace = true
 criterion.workspace = true
 
+# Disable the libtest bench harness so that criterion's command-line options
+# (`--warm-up-time`, `--measurement-time`, ...) reach the only real benchmark.
+[lib]
+bench = false
+
 [[bench]]
 name = "ec"
 harness = false

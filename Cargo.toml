@@ -38,7 +38,12 @@ arca-lake-testkit = { path = "crates/testkit" }
 
 # External dependencies. Every crate takes its version from here.
 thiserror = "2"
-reed-solomon-erasure = { version = "6", default-features = false, features = ["std"] }
+crc32c = "0.6"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+# `std` is deliberately off: it pulls parking_lot 0.11 -> `instant`, which is
+# flagged unmaintained by cargo-deny. The no_std build uses `spin` instead.
+reed-solomon-erasure = { version = "6", default-features = false }
 reed-solomon-simd = "3.1"
 proptest = "1.12"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

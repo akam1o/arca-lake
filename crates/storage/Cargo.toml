@@ -9,6 +9,21 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+thiserror.workspace = true
+crc32c.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+
+[lib]
+bench = false
+
+[[bench]]
+name = "io"
+harness = false
 
 [lints]
 workspace = true

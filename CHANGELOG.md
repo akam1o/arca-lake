@@ -17,3 +17,8 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   `StripeLayout`, replication / classic GF(2^8) / Leopard GF(2^16)
   backends, property tests, golden parity vectors, and criterion
   benchmarks (Phase 0 task 0.2).
+- `arca-lake-storage`: append-only segment format v1 (`FORMAT.md`), store
+  with durable put/delete, range reads with per-block CRC verification,
+  recovery scan distinguishing torn tails from corruption, scrub, and
+  crash/corruption tests (Phase 0 task 0.3, first iteration).
+- Benchmark policy, report template, and the first EC backend report.
