@@ -28,8 +28,12 @@ port=\$((4499 + n))
 case "\$1" in
   start)
     mkdir -p "/var/fdb/data/\$n"
+    # Each process pretends to be its own machine and zone so that
+    # redundancy modes above `single` can place replicas (a test-only
+    # topology; real deployments spread processes over hosts).
     nohup fdbserver -p "${IP}:\$port" -d "/var/fdb/data/\$n" -L /var/fdb/logs \\
-      -C /var/fdb/fdb.cluster > "/var/fdb/logs/proc-\$n.out" 2>&1 &
+      -C /var/fdb/fdb.cluster --locality-machineid "m\$n" --locality-zoneid "z\$n" \\
+      > "/var/fdb/logs/proc-\$n.out" 2>&1 &
     echo \$! > "/var/fdb/pid-\$n"
     echo "started \$n (pid \$!)"
     ;;
