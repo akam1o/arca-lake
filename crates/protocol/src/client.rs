@@ -135,6 +135,11 @@ pub enum FaultAction {
 /// A fault hook.
 pub type FaultHook = Arc<dyn Fn(&RpcContext<'_>) -> FaultAction + Send + Sync>;
 
+/// HTTP/2 initial stream window for shard transfers.
+pub const STREAM_WINDOW: u32 = 8 << 20;
+/// HTTP/2 initial connection window for shard transfers.
+pub const CONNECTION_WINDOW: u32 = 32 << 20;
+
 /// Shared pool of channels keyed by node address.
 #[derive(Clone, Default)]
 pub struct NodeClients {
@@ -224,9 +229,14 @@ impl NodeClients {
         if let Some(c) = map.get(addr) {
             return Ok(c.clone());
         }
+        // HTTP/2 flow-control windows sized for multi-MiB shards over
+        // high-latency links: with the 64 KiB defaults a 4 MiB shard needs
+        // 64 round trips (RFC-009 §7, namespace fault runs).
         let mut ep = Endpoint::from_shared(format!("http://{addr}"))
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?
-            .tcp_nodelay(true);
+            .tcp_nodelay(true)
+            .initial_stream_window_size(Some(STREAM_WINDOW))
+            .initial_connection_window_size(Some(CONNECTION_WINDOW));
         if let Some(t) = self.timeout {
             ep = ep.timeout(t).connect_timeout(t / 5);
         }

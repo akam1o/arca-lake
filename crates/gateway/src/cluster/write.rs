@@ -311,6 +311,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let crc = arca_lake_storage::format::crc32c(&chunk);
 
         let mut tried: Vec<u64> = Vec::new();
+        let mut last_reason: Option<String> = None;
         let mut map = self.map_up_to_date().await.map_err(meta_err)?;
         for attempt in 0..4u32 {
             let Some(group) = self.choose_group(
@@ -321,10 +322,16 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 &tried,
                 u64::from(index) + u64::from(attempt),
             ) else {
-                return Err(s3_error!(
-                    ServiceUnavailable,
-                    "no active stripe group can accept writes"
-                ));
+                return Err(match last_reason {
+                    Some(reason) => s3_error!(
+                        ServiceUnavailable,
+                        "no active stripe group can accept writes (last group failed: {reason})"
+                    ),
+                    None => s3_error!(
+                        ServiceUnavailable,
+                        "no active stripe group can accept writes"
+                    ),
+                });
             };
             match self.write_shards(&map, &group, cid, &shards).await {
                 Ok(()) => {
@@ -350,6 +357,8 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                     // Same group, fresh epoch: do not mark it as tried.
                 }
                 Err(WriteError::Failed(reason)) => {
+                    tracing::warn!(group = group.id, index, %reason, "shard write failed");
+                    last_reason = Some(reason.clone());
                     tried.push(group.id);
                     if attempt == 3 {
                         return Err(s3_error!(

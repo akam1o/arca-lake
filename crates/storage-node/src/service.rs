@@ -410,6 +410,9 @@ pub async fn serve(
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
     let task = tokio::spawn(async move {
         let _ = tonic::transport::Server::builder()
+            .initial_stream_window_size(Some(arca_lake_protocol::client::STREAM_WINDOW))
+            .initial_connection_window_size(Some(arca_lake_protocol::client::CONNECTION_WINDOW))
+            .tcp_nodelay(true)
             .add_service(svc)
             .serve_with_incoming_shutdown(incoming, async move {
                 let _ = rx.await;
