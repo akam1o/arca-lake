@@ -90,8 +90,8 @@ def fmt(v, spec="{:.1f}"):
 
 def main():
     root, cores, iface = parse_args(sys.argv[1:])
-    print("| label | phase | ops | MiB/s | ops/s | p50 ms | p99 ms | errors | A CPU-s/GiB | B CPU-s/GiB | A net B/GiB | B net B/GiB | hits | misses | degraded | fallbacks |")
-    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    print("| label | phase | ops | MiB/s | ops/s | p50 ms | p99 ms | errors | CPU-s/GiB per host | net B/GiB per host | hits | misses | degraded | fallbacks |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for label in sorted(os.listdir(root)):
         d = os.path.join(root, label)
         if not os.path.isdir(d):
@@ -110,11 +110,14 @@ def main():
             s = rows[-1]
             gib = s["bytes"] / float(1 << 30) if s["bytes"] else None
             sar = os.path.join(d, phase)
-            cpu_a = cpu_seconds(os.path.join(sar, "sar-cpu-a.txt"), cores)
-            cpu_b = cpu_seconds(os.path.join(sar, "sar-cpu-b.txt"), cores)
-            net_a = net_bytes(os.path.join(sar, "sar-net-a.txt"), iface)
-            net_b = net_bytes(os.path.join(sar, "sar-net-b.txt"), iface)
             per = lambda v: (v / gib) if (v is not None and gib) else None
+            hosts = sorted(
+                f[8:-4] for f in os.listdir(sar) if f.startswith("sar-cpu-")
+            ) if os.path.isdir(sar) else []
+            cpu = {h: per(cpu_seconds(os.path.join(sar, f"sar-cpu-{h}.txt"), cores)) for h in hosts}
+            net = {h: per(net_bytes(os.path.join(sar, f"sar-net-{h}.txt"), iface)) for h in hosts}
+            cpu_cell = " / ".join(f"{h}:{fmt(cpu[h])}" for h in hosts) or "n/a"
+            net_cell = " / ".join(f"{h}:{fmt(net[h], '{:.2e}')}" for h in hosts) or "n/a"
             hits = misses = degraded = fallbacks = None
             if phase.startswith("get"):
                 b = os.path.join(d, "metrics-before-" + phase + ".txt")
@@ -131,7 +134,7 @@ def main():
             print(
                 f"| {label} | {phase} | {s['ops']} | {s['mib_per_s']:.1f} | {s['ops_per_s']:.2f} | "
                 f"{s['lat_ms_p50']:.1f} | {s['lat_ms_p99']:.1f} | {s['errors']}+{s['mismatches']} | "
-                f"{fmt(per(cpu_a))} | {fmt(per(cpu_b))} | {fmt(per(net_a), '{:.3e}')} | {fmt(per(net_b), '{:.3e}')} | "
+                f"{cpu_cell} | {net_cell} | "
                 f"{fmt(hits, '{}')} | {fmt(misses, '{}')} | {fmt(degraded, '{}')} | {fmt(fallbacks, '{}')} |"
             )
 

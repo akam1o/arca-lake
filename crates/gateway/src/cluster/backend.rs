@@ -100,6 +100,8 @@ pub struct CacheStats {
     pub shard_repair_failures: std::sync::atomic::AtomicU64,
     /// Read-triggered cache repairs skipped for lack of a permit.
     pub shard_repairs_skipped: std::sync::atomic::AtomicU64,
+    /// Populations skipped because `max_populations_in_flight` were running.
+    pub populations_skipped: std::sync::atomic::AtomicU64,
 }
 
 impl CacheStats {
@@ -118,6 +120,7 @@ impl CacheStats {
             shards_repaired: self.shards_repaired.load(Relaxed),
             shard_repair_failures: self.shard_repair_failures.load(Relaxed),
             shard_repairs_skipped: self.shard_repairs_skipped.load(Relaxed),
+            populations_skipped: self.populations_skipped.load(Relaxed),
         }
     }
 }
@@ -149,6 +152,8 @@ pub struct CacheStatsSnapshot {
     pub shard_repair_failures: u64,
     /// See [`CacheStats::shard_repairs_skipped`].
     pub shard_repairs_skipped: u64,
+    /// See [`CacheStats::populations_skipped`].
+    pub populations_skipped: u64,
 }
 
 /// Per-gateway in-memory state of the cache: in-flight populations
@@ -162,6 +167,8 @@ pub struct CacheState {
     access: Mutex<HashMap<GenId, (u64, u64)>>,
     /// Concurrency limit of read-triggered cache repairs (RFC-006 §5.9).
     pub(super) repair_permits: Arc<tokio::sync::Semaphore>,
+    /// Concurrency limit of populations (RFC-006 §5.3).
+    pub(super) populate_permits: Arc<tokio::sync::Semaphore>,
 }
 
 /// Read-triggered cache repairs in flight at once, per gateway.
@@ -169,12 +176,19 @@ const CACHE_REPAIR_PERMITS: usize = 2;
 
 impl Default for CacheState {
     fn default() -> Self {
+        Self::with_population_permits(8)
+    }
+}
+
+impl CacheState {
+    pub(super) fn with_population_permits(n: usize) -> Self {
         Self {
             populating: Mutex::default(),
             misses: Mutex::default(),
             touched: Mutex::default(),
             access: Mutex::default(),
             repair_permits: Arc::new(tokio::sync::Semaphore::new(CACHE_REPAIR_PERMITS)),
+            populate_permits: Arc::new(tokio::sync::Semaphore::new(n.max(1))),
         }
     }
 }
@@ -290,6 +304,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .validate()
             .map_err(|e| MetaError::InvalidArgument(e.to_string()))?;
         let map = ClusterMap::load(meta.as_ref()).await?;
+        let permits = cfg
+            .cache
+            .as_ref()
+            .map_or(8, CacheTierConfig::population_permits);
         Ok(Self {
             meta,
             clients: NodeClients::new(cfg.node_timeout),
@@ -298,7 +316,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             coders: Arc::new(Coders::default()),
             fault: Arc::new(Mutex::new(None)),
             cache_stats: Arc::new(CacheStats::default()),
-            cache_state: Arc::new(CacheState::default()),
+            cache_state: Arc::new(CacheState::with_population_permits(permits)),
         })
     }
 

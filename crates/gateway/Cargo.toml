@@ -16,6 +16,7 @@ arca-lake-placement.workspace = true
 arca-lake-protocol.workspace = true
 arca-lake-storage.workspace = true
 arca-lake-tiering.workspace = true
+tracing.workspace = true
 s3s.workspace = true
 async-trait.workspace = true
 bytes.workspace = true

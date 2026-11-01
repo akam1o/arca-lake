@@ -109,6 +109,7 @@ impl ClusterOptions {
             low_watermark: 0.7,
             max_cacheable_bytes: 0,
             admit_after_misses: 0,
+            max_populations_in_flight: 64,
         }
     }
 }

@@ -345,6 +345,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         else {
             return;
         };
+        let Ok(permit) = Arc::clone(&self.cache_state.populate_permits).try_acquire_owned() else {
+            self.cache_stats
+                .populations_skipped
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        };
         if !self.cache_state.begin_populate(generation, index) {
             self.cache_stats
                 .populations_deduplicated
@@ -355,6 +361,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let cfg = cfg.clone();
         let map = Arc::clone(map);
         tokio::spawn(async move {
+            let _permit = permit;
             let r = tcache::populate(
                 backend.meta.as_ref(),
                 &backend.clients,
@@ -383,7 +390,8 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         .admissions_rejected
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                Err(_) => {
+                Err(e) => {
+                    tracing::debug!(error = %e, index, "cache population failed");
                     backend
                         .cache_stats
                         .population_failures

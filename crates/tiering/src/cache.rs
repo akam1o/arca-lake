@@ -44,6 +44,21 @@ pub struct CacheTierConfig {
     /// Admit a chunk only after this many misses were observed for it by
     /// this gateway (0 or 1 = admit on the first miss).
     pub admit_after_misses: u32,
+    /// Populations a gateway runs at once; a miss that finds no free slot
+    /// is served normally and not populated (counted as skipped). 0 = 8.
+    pub max_populations_in_flight: u32,
+}
+
+impl CacheTierConfig {
+    /// Effective population concurrency.
+    #[must_use]
+    pub fn population_permits(&self) -> usize {
+        if self.max_populations_in_flight == 0 {
+            8
+        } else {
+            usize::try_from(self.max_populations_in_flight).unwrap_or(8)
+        }
+    }
 }
 
 impl CacheTierConfig {

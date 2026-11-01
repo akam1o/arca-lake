@@ -76,50 +76,54 @@ impl ProfileArgs {
 }
 
 /// Read-through cache tier (RFC-006). Absent `--cache-tier` disables it.
+/// Field names carry the `cache_` prefix on purpose: clap identifies
+/// flattened arguments by field name, and `tier` already exists on the
+/// gateway arguments.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, clap::Args)]
 struct CacheArgs {
     /// Name of the cache tier (its cache groups are created with
     /// `admin create-cache-groups`).
     #[arg(long = "cache-tier")]
-    tier: Option<String>,
+    cache_tier: Option<String>,
     /// Capacity of the cache tier in bytes (0 = unlimited, no eviction).
     #[arg(long = "cache-capacity-bytes", default_value_t = 0)]
-    capacity_bytes: u64,
+    cache_capacity_bytes: u64,
     /// Fraction of the capacity above which eviction starts and admissions
     /// are rejected.
     #[arg(long = "cache-high-watermark", default_value_t = 0.9)]
-    high_watermark: f64,
+    cache_high_watermark: f64,
     /// Fraction of the capacity eviction aims for.
     #[arg(long = "cache-low-watermark", default_value_t = 0.8)]
-    low_watermark: f64,
+    cache_low_watermark: f64,
     /// Chunks larger than this are never cached (0 = no limit).
     #[arg(long = "cache-max-chunk-bytes", default_value_t = 0)]
-    max_chunk_bytes: u64,
+    cache_max_chunk_bytes: u64,
     /// Admit a chunk after this many misses observed by one gateway
     /// (0 or 1 = on the first miss).
     #[arg(long = "cache-admit-after-misses", default_value_t = 1)]
-    admit_after_misses: u32,
+    cache_admit_after_misses: u32,
 }
 
 impl CacheArgs {
     fn config(&self) -> Result<Option<arca_lake_tiering::cache::CacheTierConfig>, String> {
-        let Some(tier) = self.tier.clone() else {
+        let Some(tier) = self.cache_tier.clone() else {
             return Ok(None);
         };
         let ok = |f: f64| (0.0..=1.0).contains(&f);
-        if !ok(self.high_watermark)
-            || !ok(self.low_watermark)
-            || self.low_watermark > self.high_watermark
+        if !ok(self.cache_high_watermark)
+            || !ok(self.cache_low_watermark)
+            || self.cache_low_watermark > self.cache_high_watermark
         {
             return Err("cache watermarks must satisfy 0 <= low <= high <= 1".into());
         }
         Ok(Some(arca_lake_tiering::cache::CacheTierConfig {
             tier,
-            capacity_bytes: self.capacity_bytes,
-            high_watermark: self.high_watermark,
-            low_watermark: self.low_watermark,
-            max_cacheable_bytes: self.max_chunk_bytes,
-            admit_after_misses: self.admit_after_misses,
+            capacity_bytes: self.cache_capacity_bytes,
+            high_watermark: self.cache_high_watermark,
+            low_watermark: self.cache_low_watermark,
+            max_cacheable_bytes: self.cache_max_chunk_bytes,
+            admit_after_misses: self.cache_admit_after_misses,
         }))
     }
 }
@@ -729,6 +733,10 @@ fn render_cache_stats(s: &arca_lake_gateway::cluster::CacheStatsSnapshot) -> Str
         (
             "arca_gateway_cache_shard_repairs_skipped_total",
             s.shard_repairs_skipped,
+        ),
+        (
+            "arca_gateway_cache_populations_skipped_total",
+            s.populations_skipped,
         ),
     ] {
         let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");

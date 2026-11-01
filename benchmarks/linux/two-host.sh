@@ -9,10 +9,16 @@
 # and `foundationdb-clients` installed; host A also needs `fdbserver` on the
 # PATH (foundationdb-server package).
 #
+# With HOST_C set, a three-host layout is used instead: one durable node and
+# one cache node per host (host = failure domain), FoundationDB and the
+# controller on A, the gateway and the load generator on C. Every durable
+# shard and every cache shard then crosses a host boundary except the one on
+# the gateway's host.
+#
 # Host addresses come only from the environment. Nothing in this script, in
 # its output directory, or in the summaries it produces records them.
 #
-#   HOST_A=user@a HOST_B=user@b benchmarks/linux/two-host.sh setup <mode>
+#   HOST_A=user@a HOST_B=user@b [HOST_C=user@c] benchmarks/linux/two-host.sh setup <mode>
 #   HOST_A=... HOST_B=... benchmarks/linux/two-host.sh run <label> [opts]
 #   HOST_A=... HOST_B=... benchmarks/linux/two-host.sh teardown
 #
@@ -31,12 +37,18 @@ CHUNK_BYTES="${CHUNK_BYTES:-$((4 << 20))}"
 CACHE_CAPACITY="${CACHE_CAPACITY:-0}"
 OUT="${OUT:-benchmarks/linux/results}"
 
+HOST_C="${HOST_C:-}"
 sa() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_A" "$@"; }
 sb() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_B" "$@"; }
+sc() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_C" "$@"; }
 addr_of() { ssh -o BatchMode=yes "$1" "hostname -I | awk '{print \$1}'"; }
 
 ADDR_A="$(addr_of "$HOST_A")"
 ADDR_B="$(addr_of "$HOST_B")"
+ADDR_C=""; [ -n "$HOST_C" ] && ADDR_C="$(addr_of "$HOST_C")"
+# The gateway host: C in the three-host layout, B otherwise.
+if [ -n "$HOST_C" ]; then sg() { sc "$@"; }; ADDR_G="$ADDR_C"; else sg() { sb "$@"; }; ADDR_G="$ADDR_B"; fi
+HOSTS_FNS="sa sb"; [ -n "$HOST_C" ] && HOSTS_FNS="sa sb sc"
 BIN="$REMOTE_REPO/target/release/arca-lake"
 S3LOAD="$REMOTE_REPO/target/release/s3load"
 CLUSTER_FILE="$RUN_DIR/fdb.cluster"
@@ -58,33 +70,55 @@ register() { # <ssh-fn> <addr> <name> <class>
 
 cmd_setup() {
   local mode="${1:?mode: durable|none|repl|ec}"
-  stop_all sa; stop_all sb
+  for fn in $HOSTS_FNS; do stop_all "$fn"; done
   sa "mkdir -p $RUN_DIR/fdb/data $RUN_DIR/fdb/log $RUN_DIR/logs && echo 'arca:bench@$ADDR_A:$FDB_PORT' > $CLUSTER_FILE"
   start sa fdb "fdbserver -p $ADDR_A:$FDB_PORT -C $CLUSTER_FILE -d $RUN_DIR/fdb/data -L $RUN_DIR/fdb/log"
   sleep 2
   sa "fdbcli -C $CLUSTER_FILE --exec 'configure new single ssd' >/dev/null; for i in \$(seq 1 30); do fdbcli -C $CLUSTER_FILE --exec 'status minimal' | grep -q 'is available' && break; sleep 1; done; fdbcli -C $CLUSTER_FILE --exec 'status minimal'"
   sb "mkdir -p $RUN_DIR/logs && echo 'arca:bench@$ADDR_A:$FDB_PORT' > $CLUSTER_FILE"
+  [ -n "$HOST_C" ] && sc "mkdir -p $RUN_DIR/logs && echo 'arca:bench@$ADDR_A:$FDB_PORT' > $CLUSTER_FILE"
 
-  # Durable nodes: two on A, one on B.
-  start sa d0 "$BIN storage-node --listen $ADDR_A:9100 --dir $RUN_DIR/d0"
-  start sa d1 "$BIN storage-node --listen $ADDR_A:9101 --dir $RUN_DIR/d1"
-  start sb d2 "$BIN storage-node --listen $ADDR_B:9100 --dir $RUN_DIR/d2"
-  # Cache nodes: c0 on A, c2 on B, c1 on A and c3 on B for coded modes.
-  if [ "$mode" != durable ]; then
-    start sa c0 "$BIN storage-node --listen $ADDR_A:9110 --dir $RUN_DIR/c0"
-    start sb c2 "$BIN storage-node --listen $ADDR_B:9110 --dir $RUN_DIR/c2"
-    if [ "$mode" = ec ]; then
-      start sb c3 "$BIN storage-node --listen $ADDR_B:9111 --dir $RUN_DIR/c3"
+  if [ -n "$HOST_C" ]; then
+    # Three hosts: one durable node and one cache node per host.
+    start sa d0 "$BIN storage-node --listen $ADDR_A:9100 --dir $RUN_DIR/d0"
+    start sb d1 "$BIN storage-node --listen $ADDR_B:9100 --dir $RUN_DIR/d1"
+    start sc d2 "$BIN storage-node --listen $ADDR_C:9100 --dir $RUN_DIR/d2"
+    if [ "$mode" != durable ]; then
+      start sa c0 "$BIN storage-node --listen $ADDR_A:9110 --dir $RUN_DIR/c0"
+      start sb c1 "$BIN storage-node --listen $ADDR_B:9110 --dir $RUN_DIR/c1"
+      start sc c2 "$BIN storage-node --listen $ADDR_C:9110 --dir $RUN_DIR/c2"
     fi
-  fi
-  sleep 2
-  register sa "$ADDR_A:9100" a-d0 hdd
-  register sa "$ADDR_A:9101" a-d1 hdd
-  register sa "$ADDR_B:9100" b-d2 hdd
-  if [ "$mode" != durable ]; then
-    register sa "$ADDR_A:9110" a-c0 nvme
-    register sa "$ADDR_B:9110" b-c2 nvme
-    [ "$mode" = ec ] && register sa "$ADDR_B:9111" b-c3 nvme
+    sleep 2
+    register sa "$ADDR_A:9100" a-d0 hdd
+    register sa "$ADDR_B:9100" b-d1 hdd
+    register sa "$ADDR_C:9100" c-d2 hdd
+    if [ "$mode" != durable ]; then
+      register sa "$ADDR_A:9110" a-c0 nvme
+      register sa "$ADDR_B:9110" b-c1 nvme
+      register sa "$ADDR_C:9110" c-c2 nvme
+    fi
+  else
+    # Two hosts: durable nodes two on A, one on B; cache c0 on A, c2 on B,
+    # and c3 on B for the coded mode.
+    start sa d0 "$BIN storage-node --listen $ADDR_A:9100 --dir $RUN_DIR/d0"
+    start sa d1 "$BIN storage-node --listen $ADDR_A:9101 --dir $RUN_DIR/d1"
+    start sb d2 "$BIN storage-node --listen $ADDR_B:9100 --dir $RUN_DIR/d2"
+    if [ "$mode" != durable ]; then
+      start sa c0 "$BIN storage-node --listen $ADDR_A:9110 --dir $RUN_DIR/c0"
+      start sb c2 "$BIN storage-node --listen $ADDR_B:9110 --dir $RUN_DIR/c2"
+      if [ "$mode" = ec ]; then
+        start sb c3 "$BIN storage-node --listen $ADDR_B:9111 --dir $RUN_DIR/c3"
+      fi
+    fi
+    sleep 2
+    register sa "$ADDR_A:9100" a-d0 hdd
+    register sa "$ADDR_A:9101" a-d1 hdd
+    register sa "$ADDR_B:9100" b-d2 hdd
+    if [ "$mode" != durable ]; then
+      register sa "$ADDR_A:9110" a-c0 nvme
+      register sa "$ADDR_B:9110" b-c2 nvme
+      [ "$mode" = ec ] && register sa "$ADDR_B:9111" b-c3 nvme
+    fi
   fi
   sa "$ADMIN create-groups --tier default --device-class hdd --failure-domain node --count 1 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0"
   local cache_args=""
@@ -96,39 +130,52 @@ cmd_setup() {
     *) echo "unknown mode $mode" >&2; exit 2 ;;
   esac
   if [ "$mode" != durable ]; then
-    cache_args="--cache-tier fast --cache-capacity-bytes $CACHE_CAPACITY --cache-high-watermark 0.9 --cache-low-watermark 0.8"
+    cache_args="--cache-tier fast --cache-capacity-bytes $CACHE_CAPACITY --cache-high-watermark 0.9 --cache-low-watermark 0.8 --cache-max-populations ${CACHE_MAX_POPULATIONS:-8}"
   fi
-  start sa controller "$BIN controller --cluster-file $CLUSTER_FILE --id ctl-a --http 127.0.0.1:9901 --failure-domain node --evict-interval-secs 2 $cache_args"
-  start sb gateway "$BIN gateway --backend cluster --cluster-file $CLUSTER_FILE --allow-anonymous --listen $ADDR_B:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node $cache_args"
+  start sa controller "$BIN controller --cluster-file $CLUSTER_FILE --id ctl-a --http 127.0.0.1:9901 --failure-domain node --evict-interval-secs 2 --gc-interval-secs 10 --gc-grace-secs 30 $cache_args"
+  start sg gateway "$BIN gateway --backend cluster --cluster-file $CLUSTER_FILE --allow-anonymous --listen $ADDR_G:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node $cache_args"
   sleep 2
   sa "$ADMIN status" | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g'
-  echo "mode=$mode chunk_bytes=$CHUNK_BYTES cache_capacity=$CACHE_CAPACITY" > /tmp/arca-two-host.mode
+  echo "mode=$mode chunk_bytes=$CHUNK_BYTES cache_capacity=$CACHE_CAPACITY hosts=$( [ -n "$HOST_C" ] && echo 3 || echo 2 )" > /tmp/arca-two-host.mode
 }
 
 # sar collectors on both hosts for the duration of one command.
 with_sar() { # <dir> <command...>
   local dir="$1"; shift
   mkdir -p "$dir"
-  for fn in sa sb; do
+  for fn in $HOSTS_FNS; do
     "$fn" "mkdir -p $RUN_DIR/sar && (sar -u 1 > $RUN_DIR/sar/cpu.txt 2>&1 < /dev/null & echo \$! > $RUN_DIR/sar/cpu.pid) && (sar -n DEV 1 > $RUN_DIR/sar/net.txt 2>&1 < /dev/null & echo \$! > $RUN_DIR/sar/net.pid)"
   done
   local rc=0
   "$@" || rc=$?
-  for fn in sa sb; do
+  for fn in $HOSTS_FNS; do
     "$fn" "kill \$(cat $RUN_DIR/sar/cpu.pid) \$(cat $RUN_DIR/sar/net.pid) 2>/dev/null; sleep 0.2; true"
+    local suffix="${fn#s}"
+    "$fn" "cat $RUN_DIR/sar/cpu.txt" > "$dir/sar-cpu-$suffix.txt"
+    "$fn" "cat $RUN_DIR/sar/net.txt" > "$dir/sar-net-$suffix.txt"
   done
-  sa "cat $RUN_DIR/sar/cpu.txt" > "$dir/sar-cpu-a.txt"
-  sa "cat $RUN_DIR/sar/net.txt" > "$dir/sar-net-a.txt"
-  sb "cat $RUN_DIR/sar/cpu.txt" > "$dir/sar-cpu-b.txt"
-  sb "cat $RUN_DIR/sar/net.txt" > "$dir/sar-net-b.txt"
   return $rc
 }
 
-metrics() { sb "curl -s http://127.0.0.1:9900/metrics" 2>/dev/null || true; }
+metrics() { sg "curl -s http://127.0.0.1:9900/metrics" 2>/dev/null || true; }
 cache_usage() { sa "$ADMIN cache-usage --tier fast" 2>/dev/null || echo '{"usage_bytes":0}'; }
 rss() { # memory of arca-lake processes per host, kB
-  echo "a: $(sa "ps -o rss=,comm=,args= -C arca-lake,fdbserver | awk '{printf \"%s=%d \", \$2, \$1}'")"
-  echo "b: $(sb "ps -o rss=,comm=,args= -C arca-lake,s3load | awk '{printf \"%s=%d \", \$2, \$1}'")"
+  for fn in $HOSTS_FNS; do
+    echo "${fn#s}: $("$fn" "ps -o rss=,comm=,args= -C arca-lake,fdbserver,s3load | awk '{printf \"%s=%d \", \$2, \$1}'")"
+  done
+}
+
+wait_populations() { # <log>
+  local last=-1 stable=0 i u
+  : > "$1"
+  for i in $(seq 1 180); do
+    u="$(cache_usage | sed -E 's/.*"usage_bytes":([0-9]+).*/\1/')"
+    echo "$(date +%s) $u" >> "$1"
+    if [ "$u" = "$last" ]; then stable=$((stable + 1)); else stable=0; fi
+    [ "$stable" -ge 3 ] && return 0
+    last="$u"
+    sleep 1
+  done
 }
 
 cmd_run() {
@@ -138,18 +185,21 @@ cmd_run() {
   mkdir -p "$dir"
   cp /tmp/arca-two-host.mode "$dir/mode.txt" 2>/dev/null || true
   echo "objects=$objects size=$size concurrency=$conc passes=$passes range_bytes=$range" > "$dir/params.txt"
-  local ep="http://$ADDR_B:9000"
-  sb "$S3LOAD --endpoint $ep --bucket bench --op create-bucket" >/dev/null
-  with_sar "$dir/put" sb "$S3LOAD --endpoint $ep --bucket bench --op put --objects $objects --size $size --concurrency $conc --label $label-put" > "$dir/put.jsonl"
+  local ep="http://$ADDR_G:9000"
+  sg "$S3LOAD --endpoint $ep --bucket bench --op create-bucket" >/dev/null
+  with_sar "$dir/put" sg "$S3LOAD --endpoint $ep --bucket bench --op put --objects $objects --size $size --concurrency $conc --label $label-put" > "$dir/put.jsonl"
   cat "$dir/put.jsonl"
   sleep 2
   cache_usage > "$dir/cache-usage-after-put.json"
   for p in $(seq 1 "$passes"); do
     metrics > "$dir/metrics-before-get$p.txt"
-    with_sar "$dir/get$p" sb "$S3LOAD --endpoint $ep --bucket bench --op get --objects $objects --size $size --concurrency $conc --range-bytes $range --verify --label $label-get$p" > "$dir/get$p.jsonl"
+    with_sar "$dir/get$p" sg "$S3LOAD --endpoint $ep --bucket bench --op get --objects $objects --size $size --concurrency $conc --range-bytes $range --verify --label $label-get$p" > "$dir/get$p.jsonl"
     cat "$dir/get$p.jsonl"
-    # Let asynchronous populations finish before the next pass.
-    sleep 3
+    # Let asynchronous populations finish before the next pass: poll the
+    # tier usage until it has not changed for three consecutive seconds
+    # (or 180 s), logging the series so that population throughput can be
+    # derived from it.
+    wait_populations "$dir/population-after-get$p.txt"
     metrics > "$dir/metrics-after-get$p.txt"
     cache_usage > "$dir/cache-usage-after-get$p.json"
   done
@@ -157,7 +207,7 @@ cmd_run() {
   echo "results in $dir"
 }
 
-cmd_teardown() { stop_all sa; stop_all sb; echo "stopped and removed $RUN_DIR on both hosts"; }
+cmd_teardown() { for fn in $HOSTS_FNS; do stop_all "$fn"; done; echo "stopped and removed $RUN_DIR on every host"; }
 cmd_status() { sa "$ADMIN status" | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g'; metrics; }
 
 case "${1:-}" in

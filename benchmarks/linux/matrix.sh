@@ -12,11 +12,13 @@ run() { # <label> <conc> <passes> [range]
   CONC="$2" PASSES="$3" RANGE_BYTES="${4:-0}" bash "$TH" run "$1" | grep -E '^\{' | cut -c1-200
 }
 
-echo "== durable only (4 MiB chunks)"
-CHUNK_BYTES=$((4 * MIB)) bash "$TH" setup durable >/dev/null
-run durable-c1 1 2
-run durable-c4 4 2
-run durable-c8 8 2
+if [ "${SKIP_DURABLE:-0}" != 1 ]; then
+  echo "== durable only (4 MiB chunks)"
+  CHUNK_BYTES=$((4 * MIB)) bash "$TH" setup durable >/dev/null
+  run durable-c1 1 2
+  run durable-c4 4 2
+  run durable-c8 8 2
+fi
 
 for mode in none repl ec; do
   echo "== cache $mode (4 MiB chunks, unlimited capacity)"
