@@ -260,23 +260,29 @@ async fn connection_reset_during_repair_is_resumed_after_healing() {
     c.stop_node(lost).await;
     let new_node = c.add_node().await;
     let target = c.nodes[new_node].addr.to_string();
-    // The second PutShard to the replacement hits a reset.
+    // From the second PutShard to the replacement on, every attempt hits a
+    // reset (a link that stays broken): the policy's retries are exhausted
+    // and the repair stops.
     let puts = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&puts);
     c.clients.set_fault_hook(Some(hook(move |ctx| {
         if ctx.rpc == Rpc::PutShard
             && ctx.addr == target
-            && counter.fetch_add(1, Ordering::SeqCst) == 1
+            && counter.fetch_add(1, Ordering::SeqCst) >= 1
         {
             return FaultAction::Reset;
         }
         FaultAction::None
     })));
+    let before = c.clients.stats();
     let err = c
         .repair_with(group.id, 0, new_node, async |_| Ok(()))
         .await
         .unwrap_err();
     assert!(matches!(err, ControlError::Node { .. }), "{err}");
+    let stats = c.clients.stats();
+    assert!(stats.retries > before.retries, "{stats:?}");
+    assert_eq!(stats.exhausted - before.exhausted, 1, "{stats:?}");
     let mid = c
         .groups()
         .await
@@ -295,5 +301,152 @@ async fn connection_reset_during_repair_is_resumed_after_healing() {
     for (key, data) in &objects {
         assert_eq!(&s3::get(&c.backend, BUCKET, key).await.unwrap().0, data);
     }
+    c.shutdown().await;
+}
+
+/// A reset on the first attempt of a shard write is retried by the client
+/// and the PUT succeeds; the duplicate write is idempotent on the node.
+#[tokio::test]
+async fn transient_reset_on_put_shard_is_retried_and_commits_once() {
+    let c = cluster(1).await;
+    let data = payload(usize::try_from(MIB + MIB / 2).unwrap(), 30);
+    let resets = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&resets);
+    c.backend
+        .node_clients()
+        .set_fault_hook(Some(hook(move |ctx| {
+            if ctx.rpc == Rpc::PutShard
+                && ctx.shard.is_some_and(|s| s.shard_index == 1)
+                && counter.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                return FaultAction::Reset;
+            }
+            FaultAction::None
+        })));
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let stats = c.backend.node_clients().stats();
+    assert_eq!(stats.retries, 1, "{stats:?}");
+    assert_eq!(stats.exhausted, 0, "{stats:?}");
+    c.backend.node_clients().set_fault_hook(None);
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    // Two chunks, three shards each, exactly once.
+    assert_eq!(c.total_shards().await, 6);
+    c.shutdown().await;
+}
+
+/// A shard stream that stops after its header is detected by the progress
+/// watchdog (not by an absolute timeout), the attempt is retried, and the
+/// PUT succeeds; a slow but progressing stream is never cut.
+#[tokio::test]
+async fn stalled_shard_stream_is_detected_and_retried_slow_stream_is_not() {
+    let c = cluster(1).await;
+    let data = payload(usize::try_from(MIB / 2).unwrap(), 31);
+    let stalls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&stalls);
+    c.backend
+        .node_clients()
+        .set_fault_hook(Some(hook(move |ctx| {
+            if ctx.rpc != Rpc::PutShard {
+                return FaultAction::None;
+            }
+            match ctx.shard.map(|s| s.shard_index) {
+                // Shard 0: stalls once, then flows.
+                Some(0) if counter.fetch_add(1, Ordering::SeqCst) == 0 => FaultAction::StallStream,
+                // Shard 2: slow (one frame per 300 ms) but progressing.
+                Some(2) => FaultAction::SlowStream(Duration::from_millis(300)),
+                _ => FaultAction::None,
+            }
+        })));
+    let started = std::time::Instant::now();
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let elapsed = started.elapsed();
+    let stats = c.backend.node_clients().stats();
+    assert_eq!(stats.stalled, 1, "{stats:?}");
+    assert_eq!(stats.deadline_exceeded, 0, "{stats:?}");
+    assert_eq!(stats.retries, 1, "{stats:?}");
+    let policy = c.backend.node_clients().policy().clone();
+    assert!(
+        elapsed >= policy.progress_timeout,
+        "the stall was detected by the progress timeout: {elapsed:?}"
+    );
+    assert!(
+        elapsed < policy.base_deadline + Duration::from_secs(2),
+        "not by the absolute deadline: {elapsed:?}"
+    );
+    c.backend.node_clients().set_fault_hook(None);
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    assert_eq!(c.total_shards().await, 3);
+    c.shutdown().await;
+}
+
+/// A stream that progresses but too slowly hits the absolute deadline even
+/// though no single gap exceeds the progress timeout.
+#[tokio::test]
+async fn too_slow_shard_stream_hits_the_absolute_deadline() {
+    use arca_lake_protocol::client::{NodeClients, RpcPolicy, ShardRef};
+    let c = cluster(1).await;
+    let clients = NodeClients::with_policy(RpcPolicy {
+        connect_timeout: Duration::from_secs(1),
+        unary_timeout: Duration::from_secs(5),
+        progress_timeout: Duration::from_secs(5),
+        base_deadline: Duration::from_millis(600),
+        min_rate_bytes_per_s: 0,
+        max_attempts: 1,
+        backoff: Duration::from_millis(10),
+    });
+    clients.set_fault_hook(Some(hook(|ctx| {
+        if ctx.rpc == Rpc::PutShard {
+            FaultAction::SlowStream(Duration::from_millis(250))
+        } else {
+            FaultAction::None
+        }
+    })));
+    let group = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| !g.is_cache())
+        .unwrap();
+    let addr = c.nodes[c.node_index(&group.members[0]).unwrap()]
+        .addr
+        .to_string();
+    let shard = ShardRef {
+        group_id: group.id,
+        chunk_id: [7; 16],
+        shard_index: 0,
+    };
+    let err = clients
+        .put_shard(&addr, shard, group.epoch, payload(256 << 10, 32), 64 << 10)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::DeadlineExceeded, "{err}");
+    assert!(err.message().contains("absolute deadline"), "{err}");
+    let stats = clients.stats();
+    assert_eq!(
+        (stats.deadline_exceeded, stats.stalled),
+        (1, 0),
+        "{stats:?}"
+    );
+    // Nothing was stored: the node only commits a complete stream.
+    assert_eq!(
+        c.shard_count(c.node_index(&group.members[0]).unwrap(), group.id),
+        0
+    );
     c.shutdown().await;
 }

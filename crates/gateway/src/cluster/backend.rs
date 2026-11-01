@@ -36,8 +36,12 @@ pub struct ClusterConfig {
     pub chunk_batch: usize,
     /// Frame size for shard streaming.
     pub shard_frame_bytes: usize,
-    /// Per-RPC timeout to storage nodes.
+    /// Per-RPC timeout to storage nodes (used to derive the RPC policy when
+    /// `rpc_policy` is `None`).
     pub node_timeout: Duration,
+    /// Deadlines and retries of node RPCs (R-47); `None` derives them from
+    /// `node_timeout`.
+    pub rpc_policy: Option<arca_lake_protocol::client::RpcPolicy>,
     /// Read-through cache tier (RFC-006); `None` disables caching.
     pub cache: Option<CacheTierConfig>,
 }
@@ -102,6 +106,31 @@ pub struct CacheStats {
     pub shard_repairs_skipped: std::sync::atomic::AtomicU64,
     /// Populations skipped because `max_populations_in_flight` were running.
     pub populations_skipped: std::sync::atomic::AtomicU64,
+    /// Chunks whose manifest carried a cache placement (lookup hits), before
+    /// the copy was read; `hits + fallbacks` by construction.
+    pub lookup_hits: std::sync::atomic::AtomicU64,
+    /// Fallbacks whose copy had fewer than `k` readable shards.
+    pub fallback_unreadable: std::sync::atomic::AtomicU64,
+    /// Fallbacks whose assembled copy failed the length or CRC check.
+    pub fallback_corrupt: std::sync::atomic::AtomicU64,
+    /// Fallbacks on a node or transport error of a raw copy.
+    pub fallback_node: std::sync::atomic::AtomicU64,
+    /// Fallbacks because the placement's group is unknown to the map.
+    pub fallback_unknown_group: std::sync::atomic::AtomicU64,
+    /// Admissions refused by `max_cacheable_bytes`.
+    pub admission_rejected_size: std::sync::atomic::AtomicU64,
+    /// Admissions deferred by `admit_after_misses`.
+    pub admission_rejected_threshold: std::sync::atomic::AtomicU64,
+    /// Populations refused because the tier is at capacity.
+    pub admission_rejected_capacity: std::sync::atomic::AtomicU64,
+    /// Populations refused because the generation was retired meanwhile.
+    pub admission_rejected_generation: std::sync::atomic::AtomicU64,
+    /// Population failures on a node or transport error.
+    pub population_failures_node: std::sync::atomic::AtomicU64,
+    /// Population failures on a metadata error.
+    pub population_failures_meta: std::sync::atomic::AtomicU64,
+    /// Population failures because a node stored different bytes.
+    pub population_failures_corrupt: std::sync::atomic::AtomicU64,
 }
 
 impl CacheStats {
@@ -121,6 +150,18 @@ impl CacheStats {
             shard_repair_failures: self.shard_repair_failures.load(Relaxed),
             shard_repairs_skipped: self.shard_repairs_skipped.load(Relaxed),
             populations_skipped: self.populations_skipped.load(Relaxed),
+            lookup_hits: self.lookup_hits.load(Relaxed),
+            fallback_unreadable: self.fallback_unreadable.load(Relaxed),
+            fallback_corrupt: self.fallback_corrupt.load(Relaxed),
+            fallback_node: self.fallback_node.load(Relaxed),
+            fallback_unknown_group: self.fallback_unknown_group.load(Relaxed),
+            admission_rejected_size: self.admission_rejected_size.load(Relaxed),
+            admission_rejected_threshold: self.admission_rejected_threshold.load(Relaxed),
+            admission_rejected_capacity: self.admission_rejected_capacity.load(Relaxed),
+            admission_rejected_generation: self.admission_rejected_generation.load(Relaxed),
+            population_failures_node: self.population_failures_node.load(Relaxed),
+            population_failures_meta: self.population_failures_meta.load(Relaxed),
+            population_failures_corrupt: self.population_failures_corrupt.load(Relaxed),
         }
     }
 }
@@ -154,6 +195,30 @@ pub struct CacheStatsSnapshot {
     pub shard_repairs_skipped: u64,
     /// See [`CacheStats::populations_skipped`].
     pub populations_skipped: u64,
+    /// See [`CacheStats::lookup_hits`].
+    pub lookup_hits: u64,
+    /// See [`CacheStats::fallback_unreadable`].
+    pub fallback_unreadable: u64,
+    /// See [`CacheStats::fallback_corrupt`].
+    pub fallback_corrupt: u64,
+    /// See [`CacheStats::fallback_node`].
+    pub fallback_node: u64,
+    /// See [`CacheStats::fallback_unknown_group`].
+    pub fallback_unknown_group: u64,
+    /// See [`CacheStats::admission_rejected_size`].
+    pub admission_rejected_size: u64,
+    /// See [`CacheStats::admission_rejected_threshold`].
+    pub admission_rejected_threshold: u64,
+    /// See [`CacheStats::admission_rejected_capacity`].
+    pub admission_rejected_capacity: u64,
+    /// See [`CacheStats::admission_rejected_generation`].
+    pub admission_rejected_generation: u64,
+    /// See [`CacheStats::population_failures_node`].
+    pub population_failures_node: u64,
+    /// See [`CacheStats::population_failures_meta`].
+    pub population_failures_meta: u64,
+    /// See [`CacheStats::population_failures_corrupt`].
+    pub population_failures_corrupt: u64,
 }
 
 /// Per-gateway in-memory state of the cache: in-flight populations
@@ -310,7 +375,9 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .map_or(8, CacheTierConfig::population_permits);
         Ok(Self {
             meta,
-            clients: NodeClients::new(cfg.node_timeout),
+            clients: NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
+                arca_lake_protocol::client::RpcPolicy::from_timeout(cfg.node_timeout)
+            })),
             map: Arc::new(RwLock::new(Arc::new(map))),
             cfg: Arc::new(cfg),
             coders: Arc::new(Coders::default()),

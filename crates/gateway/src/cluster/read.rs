@@ -128,6 +128,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         cached: Option<&CachePlacement>,
     ) -> Result<Bytes, S3Error> {
         if let (Some(_), Some(p)) = (self.cfg.cache.as_ref(), cached) {
+            self.cache_stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
             if let Some(bytes) = self.try_cache_hit(map, generation, index, chunk, p).await {
                 self.cache_stats.hits.fetch_add(1, Ordering::Relaxed);
                 self.touch_cache(generation, index);
@@ -189,10 +190,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         p: &CachePlacement,
     ) -> Option<Bytes> {
         let Some(group) = map.groups.get(&p.group_id) else {
+            self.cache_stats
+                .fallback_unknown_group
+                .fetch_add(1, Ordering::Relaxed);
             self.invalidate_cache(Arc::clone(map), None, generation, index);
             return None;
         };
-        let Ok(r) = tcache::read_cached(
+        let r = match tcache::read_cached(
             &self.clients,
             &self.coders,
             group,
@@ -202,9 +206,21 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             chunk,
         )
         .await
-        else {
-            self.invalidate_cache(Arc::clone(map), Some(group.clone()), generation, index);
-            return None;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let counter = match e {
+                    TierError::Unreadable { .. } => &self.cache_stats.fallback_unreadable,
+                    TierError::Corrupt(_) => &self.cache_stats.fallback_corrupt,
+                    TierError::Node { .. } => &self.cache_stats.fallback_node,
+                    TierError::Meta(_) | TierError::Other(_) => {
+                        &self.cache_stats.fallback_unknown_group
+                    }
+                };
+                counter.fetch_add(1, Ordering::Relaxed);
+                self.invalidate_cache(Arc::clone(map), Some(group.clone()), generation, index);
+                return None;
+            }
         };
         if !r.missing.is_empty() {
             self.cache_stats
@@ -332,12 +348,18 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             self.cache_stats
                 .admissions_rejected
                 .fetch_add(1, Ordering::Relaxed);
+            self.cache_stats
+                .admission_rejected_size
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
         if !self
             .cache_state
             .admit(generation, index, cfg.admit_after_misses)
         {
+            self.cache_stats
+                .admission_rejected_threshold
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
         let cid = arca_lake_common::chunk_id(&generation, index);
@@ -384,11 +406,17 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 Ok(tcache::PopulateOutcome::AlreadyPresent) => {}
-                Ok(tcache::PopulateOutcome::Rejected(_)) => {
+                Ok(tcache::PopulateOutcome::Rejected(why)) => {
                     backend
                         .cache_stats
                         .admissions_rejected
                         .fetch_add(1, Ordering::Relaxed);
+                    let counter = if why == "over capacity" {
+                        &backend.cache_stats.admission_rejected_capacity
+                    } else {
+                        &backend.cache_stats.admission_rejected_generation
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, index, "cache population failed");
@@ -396,6 +424,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         .cache_stats
                         .population_failures
                         .fetch_add(1, Ordering::Relaxed);
+                    let counter = match e {
+                        TierError::Node { .. } => &backend.cache_stats.population_failures_node,
+                        TierError::Corrupt(_) => &backend.cache_stats.population_failures_corrupt,
+                        _ => &backend.cache_stats.population_failures_meta,
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
                 }
             }
         });

@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use arca_lake_protocol::storage::v1 as pb;
 use arca_lake_protocol::storage::v1::storage_node_server::{StorageNode, StorageNodeServer};
@@ -24,6 +25,9 @@ pub struct NodeConfig {
     pub store: StoreConfig,
     /// Frame size for streamed reads.
     pub frame_bytes: usize,
+    /// A `PutShard` stream whose client sends no frame for this long is
+    /// aborted (slow or stalled client detection, R-47).
+    pub stream_progress_timeout: Duration,
 }
 
 impl NodeConfig {
@@ -34,6 +38,7 @@ impl NodeConfig {
             listen,
             store: StoreConfig::new(dir),
             frame_bytes: 256 << 10,
+            stream_progress_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -44,6 +49,7 @@ pub struct StorageNodeService {
     store: Arc<Store>,
     epochs: Mutex<EpochTable>,
     frame_bytes: usize,
+    stream_progress_timeout: Duration,
 }
 
 impl StorageNodeService {
@@ -59,6 +65,7 @@ impl StorageNodeService {
             store: Arc::new(store),
             epochs: Mutex::new(epochs),
             frame_bytes: cfg.frame_bytes,
+            stream_progress_timeout: cfg.stream_progress_timeout,
         })
     }
 
@@ -163,7 +170,16 @@ impl StorageNode for StorageNodeService {
         let expected = usize::try_from(header.payload_len)
             .map_err(|_| tonic::Status::invalid_argument("payload too large"))?;
         let mut payload = Vec::with_capacity(expected);
-        while let Some(msg) = stream.next().await {
+        loop {
+            let next = tokio::time::timeout(self.stream_progress_timeout, stream.next()).await;
+            let Ok(msg) = next else {
+                return Err(tonic::Status::aborted(format!(
+                    "client sent no frame for {:?} ({} of {expected} bytes received)",
+                    self.stream_progress_timeout,
+                    payload.len()
+                )));
+            };
+            let Some(msg) = msg else { break };
             match msg?.body {
                 Some(pb::put_shard_request::Body::Data(d)) => {
                     if payload.len() + d.len() > expected {

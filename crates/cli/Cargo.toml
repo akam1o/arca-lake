@@ -22,6 +22,7 @@ arca-lake-common.workspace = true
 arca-lake-controller.workspace = true
 arca-lake-gateway.workspace = true
 arca-lake-metadata.workspace = true
+arca-lake-protocol.workspace = true
 arca-lake-storage-node.workspace = true
 arca-lake-tiering.workspace = true
 clap.workspace = true

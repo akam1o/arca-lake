@@ -277,6 +277,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 chunk_batch: 16,
                 shard_frame_bytes: 256 << 10,
                 node_timeout: Duration::from_secs(5),
+                rpc_policy: None,
                 cache,
             },
         )

@@ -133,6 +133,39 @@ impl CacheArgs {
     }
 }
 
+/// Deadlines and retries of storage node RPCs (RFC-009 §7, R-47).
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, clap::Args)]
+struct NodeRpcArgs {
+    /// Timeout of unary node RPCs and deadline floor of shard streams, s.
+    #[arg(long = "node-timeout-secs", default_value_t = 10)]
+    node_timeout_secs: u64,
+    /// A shard stream with no frame moving for this long is aborted, s.
+    #[arg(long = "node-progress-timeout-secs", default_value_t = 5)]
+    node_progress_timeout_secs: u64,
+    /// Minimum transfer rate added to the absolute deadline, MiB/s (0 = none).
+    #[arg(long = "node-min-rate-mib", default_value_t = 1)]
+    node_min_rate_mib: u64,
+    /// Attempts per shard RPC on transport errors (1 = no retry).
+    #[arg(long = "node-max-attempts", default_value_t = 3)]
+    node_max_attempts: u32,
+}
+
+impl NodeRpcArgs {
+    fn policy(&self) -> arca_lake_protocol::client::RpcPolicy {
+        let timeout = Duration::from_secs(self.node_timeout_secs.max(1));
+        arca_lake_protocol::client::RpcPolicy {
+            connect_timeout: (timeout / 5).max(Duration::from_millis(200)),
+            unary_timeout: timeout,
+            progress_timeout: Duration::from_secs(self.node_progress_timeout_secs.max(1)),
+            base_deadline: timeout,
+            min_rate_bytes_per_s: self.node_min_rate_mib << 20,
+            max_attempts: self.node_max_attempts.max(1),
+            backoff: Duration::from_millis(100),
+        }
+    }
+}
+
 #[derive(Debug, clap::Args)]
 struct GatewayArgs {
     /// Address to listen on.
@@ -169,6 +202,8 @@ struct GatewayArgs {
     profile: ProfileArgs,
     #[command(flatten)]
     cache: CacheArgs,
+    #[command(flatten)]
+    rpc: NodeRpcArgs,
     /// Serve gateway cache counters as Prometheus text on this address
     /// (`GET /metrics`); cluster backend only.
     #[arg(long)]
@@ -251,6 +286,8 @@ struct ControllerArgs {
     /// Chunks a cache-group repair may reconstruct per pass (0 = unlimited).
     #[arg(long, default_value_t = 256)]
     cache_repair_chunks_per_pass: usize,
+    #[command(flatten)]
+    rpc: NodeRpcArgs,
 }
 
 #[derive(Debug, clap::Args)]
@@ -428,6 +465,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 chunk_batch: 64,
                 shard_frame_bytes: 256 << 10,
                 node_timeout: Duration::from_secs(10),
+                rpc_policy: Some(args.rpc.policy()),
                 cache,
             },
         )
@@ -444,7 +482,10 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
             tracing::info!(%addr, "gateway metrics endpoint");
             let stats_backend = backend.clone();
             tokio::spawn(serve_gateway_metrics(listener, move || {
-                render_cache_stats(&stats_backend.cache_stats())
+                render_cache_stats(
+                    &stats_backend.cache_stats(),
+                    &stats_backend.node_clients().stats(),
+                )
             }));
         }
         arca_lake_gateway::serve(cfg, backend).await
@@ -511,6 +552,8 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     }
     cfg.tiering_interval = Duration::from_secs(args.tiering_interval_secs);
     cfg.cache_repair_chunks_per_pass = args.cache_repair_chunks_per_pass;
+    cfg.node_timeout = Duration::from_secs(args.rpc.node_timeout_secs.max(1));
+    cfg.rpc_policy = Some(args.rpc.policy());
     let handle = match arca_lake_controller::process::spawn(meta, cfg).await {
         Ok(h) => h,
         Err(e) => return fail(format!("cannot start the controller: {e}")),
@@ -705,7 +748,10 @@ fn print_groups(groups: &[arca_lake_metadata::records::GroupRecord]) {
     }
 }
 
-fn render_cache_stats(s: &arca_lake_gateway::cluster::CacheStatsSnapshot) -> String {
+fn render_cache_stats(
+    s: &arca_lake_gateway::cluster::CacheStatsSnapshot,
+    r: &arca_lake_protocol::client::RpcStatsSnapshot,
+) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     for (name, value) in [
@@ -743,6 +789,59 @@ fn render_cache_stats(s: &arca_lake_gateway::cluster::CacheStatsSnapshot) -> Str
             "arca_gateway_cache_populations_skipped_total",
             s.populations_skipped,
         ),
+        ("arca_gateway_cache_lookup_hits_total", s.lookup_hits),
+        (
+            "arca_gateway_cache_fallback_unreadable_total",
+            s.fallback_unreadable,
+        ),
+        (
+            "arca_gateway_cache_fallback_corrupt_total",
+            s.fallback_corrupt,
+        ),
+        ("arca_gateway_cache_fallback_node_total", s.fallback_node),
+        (
+            "arca_gateway_cache_fallback_unknown_group_total",
+            s.fallback_unknown_group,
+        ),
+        (
+            "arca_gateway_cache_admission_rejected_size_total",
+            s.admission_rejected_size,
+        ),
+        (
+            "arca_gateway_cache_admission_rejected_threshold_total",
+            s.admission_rejected_threshold,
+        ),
+        (
+            "arca_gateway_cache_admission_rejected_capacity_total",
+            s.admission_rejected_capacity,
+        ),
+        (
+            "arca_gateway_cache_admission_rejected_generation_total",
+            s.admission_rejected_generation,
+        ),
+        (
+            "arca_gateway_cache_population_failures_node_total",
+            s.population_failures_node,
+        ),
+        (
+            "arca_gateway_cache_population_failures_meta_total",
+            s.population_failures_meta,
+        ),
+        (
+            "arca_gateway_cache_population_failures_corrupt_total",
+            s.population_failures_corrupt,
+        ),
+        ("arca_gateway_node_rpc_stalled_total", r.stalled),
+        (
+            "arca_gateway_node_rpc_deadline_exceeded_total",
+            r.deadline_exceeded,
+        ),
+        (
+            "arca_gateway_node_rpc_unary_timeouts_total",
+            r.unary_timeouts,
+        ),
+        ("arca_gateway_node_rpc_retries_total", r.retries),
+        ("arca_gateway_node_rpc_exhausted_total", r.exhausted),
     ] {
         let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
     }

@@ -110,6 +110,7 @@ dependencies = [
  "arca-lake-controller",
  "arca-lake-gateway",
  "arca-lake-metadata",
+ "arca-lake-protocol",
  "arca-lake-storage-node",
  "arca-lake-tiering",
  "clap",

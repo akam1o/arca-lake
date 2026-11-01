@@ -57,8 +57,11 @@ pub struct ControllerConfig {
     pub failure_domain: String,
     /// `ListShards`/`VerifyShards` page size (0 = node default).
     pub page_size: u32,
-    /// Per-RPC timeout to storage nodes.
+    /// Per-RPC timeout to storage nodes (derives the RPC policy when
+    /// `rpc_policy` is `None`).
     pub node_timeout: Duration,
+    /// Deadlines and retries of node RPCs (R-47).
+    pub rpc_policy: Option<arca_lake_protocol::client::RpcPolicy>,
     /// Metrics and health endpoint; `None` disables it.
     pub http_listen: Option<SocketAddr>,
     /// Cache tiers to evict (RFC-006 §5.4).
@@ -93,6 +96,7 @@ impl ControllerConfig {
             failure_domain: "host".into(),
             page_size: 0,
             node_timeout: Duration::from_secs(5),
+            rpc_policy: None,
             http_listen: None,
             cache_tiers: Vec::new(),
             evict_interval: Duration::from_secs(10),
@@ -259,7 +263,10 @@ fn start_leader_tasks<S: KvStore + 'static>(
     metrics: &Arc<Metrics>,
     stop: watch::Receiver<bool>,
 ) -> Vec<JoinHandle<()>> {
-    let clients = NodeClients::new(cfg.node_timeout);
+    let clients =
+        NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
+            arca_lake_protocol::client::RpcPolicy::from_timeout(cfg.node_timeout)
+        }));
     vec![
         tokio::spawn(scheduler(
             "gc",
