@@ -189,3 +189,26 @@ where
     })
     .await
 }
+
+/// Record that a node answered a health probe at `now_ms`. Does not bump
+/// the map version (gateways do not care about liveness timestamps).
+///
+/// # Errors
+///
+/// Backend errors; an unknown node is ignored.
+pub async fn touch_node<S: KvStore>(store: &S, node_id: u64, now_ms: u64) -> Result<()> {
+    transact(store, (node_id, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (node_id, now_ms) = *env;
+            let Some(mut record) = read::<NodeRecord, _>(tx, &keys::node(node_id)).await? else {
+                return Ok(());
+            };
+            if record.last_seen_ms < now_ms {
+                record.last_seen_ms = now_ms;
+                write(tx, &keys::node(node_id), &record)?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}

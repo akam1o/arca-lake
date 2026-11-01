@@ -16,12 +16,18 @@
 //!   generations that were `Pending` with `lease_until <= now`.
 //! - I5 (commit exclusivity): after a generation is retired, its commit
 //!   fails; after it is committed, abort and a second commit fail.
+//! - I6 (shard attribution): for every chunk a generation ever placed, and
+//!   for a group it was not placed in, `attribute_shard` answers exactly
+//!   what the model predicts: `Referenced` while the generation is pending
+//!   or the record places the chunk there, `NoGeneration` once the
+//!   generation is gone, `Unreferenced` otherwise.
 
 #![allow(clippy::too_many_lines)]
 
 use std::collections::BTreeMap;
 
 use arca_lake_metadata::mem::MemKv;
+use arca_lake_metadata::ops::gc::ShardAttribution;
 use arca_lake_metadata::ops::object::{
     CommitInfo, Precondition, abort_put, append_chunks, begin_put, commit_put, delete_object,
     get_generation, head_object,
@@ -37,7 +43,8 @@ const KEYS: [&str; 3] = ["a", "b", "c"];
 #[derive(Debug, Clone)]
 enum Op {
     Begin(usize),
-    Append(usize),
+    /// Append a chunk record to generation `0`, placed in group `1` (1 or 2).
+    Append(usize, u64),
     /// Commit generation `0` with `If-None-Match: *` when `1` is true.
     Commit(usize, bool),
     Abort(usize),
@@ -50,7 +57,7 @@ enum Op {
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         (0..3usize).prop_map(Op::Begin),
-        (0..6usize).prop_map(Op::Append),
+        (0..6usize, 1..3u64).prop_map(|(g, grp)| Op::Append(g, grp)),
         (0..6usize, any::<bool>()).prop_map(|(g, c)| Op::Commit(g, c)),
         (0..6usize).prop_map(Op::Abort),
         (0..3usize).prop_map(Op::Delete),
@@ -73,6 +80,8 @@ struct ModelGen {
     id: GenId,
     key: usize,
     state: ModelState,
+    /// Chunk index → group the record places it in.
+    chunks: BTreeMap<u32, u64>,
 }
 
 #[derive(Debug, Default)]
@@ -83,21 +92,18 @@ struct Model {
     visible: BTreeMap<usize, usize>,
 }
 
-fn chunk(i: u32) -> (u32, ChunkRecord) {
+fn chunk(generation: &GenId, i: u32, group_id: u64) -> (u32, ChunkRecord) {
     (
         i,
         ChunkRecord {
-            chunk_id: [u8::try_from(i % 256).unwrap(); 16],
+            chunk_id: arca_lake_common::chunk_id(generation, i),
             offset: 0,
             len: 1,
             scheme: "rs-gf8-v1".into(),
             data_shards: 2,
             parity_shards: 1,
             crc32c: i,
-            placement: DurablePlacement {
-                group_id: 1,
-                epoch: 1,
-            },
+            placement: DurablePlacement { group_id, epoch: 1 },
         },
     )
 }
@@ -112,15 +118,20 @@ async fn step(kv: &MemKv, m: &mut Model, op: &Op) {
                 state: ModelState::Pending {
                     lease_until: m.now + LEASE,
                 },
+                chunks: BTreeMap::new(),
             });
         }
-        Op::Append(g) => {
+        Op::Append(g, group_id) => {
             let Some(entry) = m.gens.get(g).cloned() else {
                 return;
             };
-            let r = append_chunks(kv, &entry.id, &[chunk(0)], m.now).await;
+            let index = u32::try_from(entry.chunks.len()).unwrap();
+            let r = append_chunks(kv, &entry.id, &[chunk(&entry.id, index, group_id)], m.now).await;
             match entry.state {
-                ModelState::Pending { lease_until } if lease_until > m.now => r.unwrap(),
+                ModelState::Pending { lease_until } if lease_until > m.now => {
+                    r.unwrap();
+                    m.gens[g].chunks.insert(index, group_id);
+                }
                 ModelState::Pending { .. } => assert_eq!(r.unwrap_err(), MetaError::LeaseExpired),
                 _ => assert!(r.is_err(), "append to a non-pending generation"),
             }
@@ -263,6 +274,39 @@ async fn check_invariants(kv: &MemKv, m: &Model) {
                 );
             }
         }
+    }
+    // I6: shard attribution for every placed chunk, in its group and in the
+    // other group, and for a chunk index that was never recorded.
+    for g in &m.gens {
+        let (prefix, _) = arca_lake_common::split_chunk_id(&arca_lake_common::chunk_id(&g.id, 0));
+        let pending = matches!(g.state, ModelState::Pending { .. });
+        let mut probes: Vec<(u32, u64)> = g
+            .chunks
+            .iter()
+            .flat_map(|(i, placed)| [(*i, *placed), (*i, 3 - placed)])
+            .collect();
+        probes.push((u32::MAX, 1));
+        for (index, group_id) in probes {
+            let got = gc::attribute_shard(kv, &prefix, index, group_id)
+                .await
+                .unwrap();
+            let expected = match g.state {
+                ModelState::Gone => ShardAttribution::NoGeneration,
+                _ if pending || g.chunks.get(&index) == Some(&group_id) => {
+                    ShardAttribution::Referenced
+                }
+                _ => ShardAttribution::Unreferenced,
+            };
+            assert_eq!(
+                got, expected,
+                "I6: gen {:?} chunk {index} group {group_id}",
+                g.state
+            );
+        }
+        assert_eq!(
+            gc::generation_is_live(kv, &prefix).await.unwrap(),
+            matches!(g.state, ModelState::Pending { .. } | ModelState::Committed)
+        );
     }
     // No stray pending-index or retired-index entries point at unknown
     // generations.

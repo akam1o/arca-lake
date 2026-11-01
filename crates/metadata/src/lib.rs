@@ -19,6 +19,7 @@ mod error;
 pub mod fault;
 #[cfg(feature = "fdb")]
 pub mod fdb;
+pub mod fence;
 pub mod keys;
 pub mod kv;
 pub mod mem;

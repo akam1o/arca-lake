@@ -178,6 +178,12 @@ pub fn retired_until_range(cutoff_ms: u64) -> KeyRange {
     )
 }
 
+/// Controller leader record (holder, fencing token, lease).
+#[must_use]
+pub fn leader() -> Key {
+    pack(&(ROOT, "leader"))
+}
+
 /// Every arca-lake key (for test setup and teardown).
 #[must_use]
 pub fn all_range() -> KeyRange {

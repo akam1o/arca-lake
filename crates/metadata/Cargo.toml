@@ -24,6 +24,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
+arca-lake-common.workspace = true
 proptest.workspace = true
 
 [[test]]

@@ -9,6 +9,7 @@
 pub mod bucket;
 pub mod cluster;
 pub mod gc;
+pub mod leader;
 pub mod list;
 pub mod object;
 

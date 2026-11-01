@@ -133,6 +133,10 @@ pub enum KvError {
     /// transaction may or may not have been applied; a later read decides.
     #[error("commit outcome unknown: {0}")]
     CommitUnknown(String),
+    /// The transaction was fenced: the leadership token it relied on is no
+    /// longer current (see `fence::FencedKv`). Never retried.
+    #[error("fenced: {0}")]
+    Fenced(String),
     /// Any other backend failure.
     #[error("backend error: {0}")]
     Backend(String),

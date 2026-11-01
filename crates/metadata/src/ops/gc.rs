@@ -10,9 +10,9 @@
 //! caller's job and must complete before [`finish`].
 
 use crate::error::Result;
-use crate::kv::{KvStore, Txn};
+use crate::kv::{KeyRange, KvStore, Txn};
 use crate::ops::{generation_header, write};
-use crate::records::{GenId, GenState, GenerationHeader};
+use crate::records::{ChunkRecord, GenId, GenState, GenerationHeader, decode};
 use crate::{MetaError, keys, transact};
 
 /// Retire pending generations whose lease expired at or before `now_ms`.
@@ -127,6 +127,144 @@ pub async fn finish<S: KvStore>(store: &S, generation: &GenId) -> Result<()> {
             tx.clear(&keys::retired(since_ms, generation));
             tx.clear_range(&keys::gen_range(generation));
             Ok(())
+        })
+    })
+    .await
+}
+
+/// What metadata says about a shard `(generation prefix, chunk index)`
+/// stored in a group (RFC-008 §6.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShardAttribution {
+    /// A generation with the prefix is pending, or one places this chunk in
+    /// this group: the shard must be kept.
+    Referenced,
+    /// No generation with the prefix exists at all.
+    NoGeneration,
+    /// Generations with the prefix exist, none is pending, none places this
+    /// chunk in this group.
+    Unreferenced,
+}
+
+/// Every generation whose ID starts with `prefix`, with its header if the
+/// header exists, read in one transaction. Prefix collisions are
+/// practically nonexistent, so this is almost always one entry.
+async fn generations_with_prefix<X: Txn>(
+    tx: &mut X,
+    prefix: &[u8; 12],
+) -> Result<Vec<(GenId, Option<GenerationHeader>)>> {
+    let full = keys::gen_prefix_range(prefix);
+    let mut begin = full.begin.clone();
+    let mut out = Vec::new();
+    // The range also covers chunk records; jump over each generation's
+    // subspace after reading its header.
+    while begin < full.end {
+        let first = tx
+            .get_range(&KeyRange::new(begin.clone(), full.end.clone()), 1, false)
+            .await?;
+        let Some((k, _)) = first.into_iter().next() else {
+            break;
+        };
+        let Some(generation) = keys::gen_from_gen_key(&k) else {
+            break;
+        };
+        let header = match tx.get(&keys::gen_header(&generation)).await? {
+            Some(h) => Some(decode::<GenerationHeader>(&h)?),
+            None => None,
+        };
+        out.push((generation, header));
+        begin = keys::gen_range(&generation).end;
+    }
+    Ok(out)
+}
+
+fn is_pending(header: Option<&GenerationHeader>) -> bool {
+    header.is_some_and(|h| matches!(h.state, GenState::Pending { .. }))
+}
+
+fn is_live(header: Option<&GenerationHeader>) -> bool {
+    header.is_some_and(|h| matches!(h.state, GenState::Pending { .. } | GenState::Committed))
+}
+
+/// Classify a shard by metadata reference, in one transaction.
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn attribute_shard<S: KvStore>(
+    store: &S,
+    prefix: &[u8; 12],
+    index: u32,
+    group_id: u64,
+) -> Result<ShardAttribution> {
+    transact(store, (*prefix, index, group_id), |tx, env| {
+        Box::pin(async move {
+            let (prefix, index, group_id) = *env;
+            let gens = generations_with_prefix(tx, &prefix).await?;
+            if gens.is_empty() {
+                return Ok(ShardAttribution::NoGeneration);
+            }
+            for (generation, header) in &gens {
+                if is_pending(header.as_ref()) {
+                    return Ok(ShardAttribution::Referenced);
+                }
+                if let Some(v) = tx.get(&keys::gen_chunk(generation, index)).await? {
+                    let record: ChunkRecord = decode(&v)?;
+                    if record.placement.group_id == group_id {
+                        return Ok(ShardAttribution::Referenced);
+                    }
+                }
+            }
+            Ok(ShardAttribution::Unreferenced)
+        })
+    })
+    .await
+}
+
+/// Whether a pending or committed generation with `prefix` exists (a
+/// retiring or finished generation's chunks are garbage).
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn generation_is_live<S: KvStore>(store: &S, prefix: &[u8; 12]) -> Result<bool> {
+    transact(store, *prefix, |tx, prefix| {
+        Box::pin(async move {
+            let gens = generations_with_prefix(tx, prefix).await?;
+            Ok(gens.iter().any(|(_, h)| is_live(h.as_ref())))
+        })
+    })
+    .await
+}
+
+/// The chunk record of a live generation with `prefix` that places chunk
+/// `index` in `group_id`, if any (used by repair to validate reconstructed
+/// bytes against the recorded checksum).
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn chunk_record_in_group<S: KvStore>(
+    store: &S,
+    prefix: &[u8; 12],
+    index: u32,
+    group_id: u64,
+) -> Result<Option<ChunkRecord>> {
+    transact(store, (*prefix, index, group_id), |tx, env| {
+        Box::pin(async move {
+            let (prefix, index, group_id) = *env;
+            for (generation, header) in generations_with_prefix(tx, &prefix).await? {
+                if !is_live(header.as_ref()) {
+                    continue;
+                }
+                if let Some(v) = tx.get(&keys::gen_chunk(&generation, index)).await? {
+                    let record: ChunkRecord = decode(&v)?;
+                    if record.placement.group_id == group_id {
+                        return Ok(Some(record));
+                    }
+                }
+            }
+            Ok(None)
         })
     })
     .await

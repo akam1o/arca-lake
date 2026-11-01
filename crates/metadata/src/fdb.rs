@@ -21,6 +21,9 @@ use crate::kv::{Key, KeyRange, KvError, KvStore, Limits, Txn, Value};
 
 static NETWORK: OnceLock<NetworkAutoStop> = OnceLock::new();
 
+/// Default per-transaction timeout (overridable with `ARCA_FDB_TX_TIMEOUT_MS`).
+pub const DEFAULT_TX_TIMEOUT_MS: i32 = 10_000;
+
 /// Start the FoundationDB client network thread if it is not running.
 ///
 /// The guard is kept in a process-wide static, so the network thread runs
@@ -56,8 +59,28 @@ impl FdbKv {
     ///
     /// Returns a backend error if the database handle cannot be created.
     pub fn open(cluster_file: Option<&str>) -> Result<Self, KvError> {
+        let timeout_ms = std::env::var("ARCA_FDB_TX_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_TX_TIMEOUT_MS);
+        Self::open_with_timeout(cluster_file, timeout_ms)
+    }
+
+    /// Like [`FdbKv::open`], with an explicit per-transaction timeout. Every
+    /// read and commit fails with a backend error after `timeout_ms` instead
+    /// of waiting for the cluster to come back (RFC-011 §6: operations
+    /// fail explicitly when the store has lost its quorum).
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error if the database handle cannot be created.
+    pub fn open_with_timeout(cluster_file: Option<&str>, timeout_ms: i32) -> Result<Self, KvError> {
         ensure_network();
         let db = Database::new(cluster_file).map_err(map_err)?;
+        db.set_option(foundationdb::options::DatabaseOption::TransactionTimeout(
+            timeout_ms,
+        ))
+        .map_err(map_err)?;
         Ok(Self { db })
     }
 
@@ -169,6 +192,7 @@ impl Txn for FdbTx {
 
 /// FoundationDB error codes we map specially.
 mod codes {
+    pub const TRANSACTION_TIMED_OUT: i32 = 1031;
     pub const TRANSACTION_TOO_LARGE: i32 = 2101;
     pub const KEY_TOO_LARGE: i32 = 2102;
     pub const VALUE_TOO_LARGE: i32 = 2103;
@@ -192,6 +216,9 @@ fn map_err(e: FdbError) -> KvError {
             limit: limits.max_value_bytes,
             actual: 0,
         },
+        // A timed-out transaction is not retried blindly: with the cluster
+        // unavailable every retry would wait the full timeout again.
+        codes::TRANSACTION_TIMED_OUT => KvError::Backend(format!("transaction timed out: {e}")),
         _ if e.is_maybe_committed() => KvError::CommitUnknown(e.to_string()),
         _ if e.is_retryable() => KvError::Conflict,
         _ => KvError::Backend(e.to_string()),
