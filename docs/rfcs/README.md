@@ -26,7 +26,7 @@ acceptance criteria are testable.
 | [RFC-003](RFC-003-distributed-metadata-and-consistency.md) | Distributed Metadata and Consistency | 001, 002 | draft | DD-4, DD-5, Phase 0 metadata spike |
 | [RFC-004](RFC-004-erasure-coding-and-placement.md) | Erasure Coding and Placement | 002, 003, 005 | draft (Phase 1 implementation, §11) | DD-1, DD-3, DD-9, Phase 0 EC benchmarks, Phase 1 E2E tests |
 | [RFC-005](RFC-005-storage-engine-and-on-disk-format.md) | Storage Engine and On-disk Format | 002 | draft | DD-2, Phase 0 I/O and crash experiments |
-| RFC-006 | Multi-Tier Storage | 002, 003, 004 | planned | DD-6, DD-11, DD-12 |
+| [RFC-006](RFC-006-multi-tier-storage.md) | Multi-Tier Storage | 002, 003, 004, 008 | draft | DD-6, DD-11, DD-12, Phase 2 cache and tiering tests |
 | RFC-007 | S3 Gateway Compatibility | 001, 003 | planned | Phase 0 `s3s` spike; compatibility matrix |
 | [RFC-008](RFC-008-failure-recovery-and-garbage-collection.md) | Failure Recovery and Garbage Collection | 003, 004, 005 | draft | DD-7, DD-8, Phase 1 hardening tests |
 | RFC-009 | Performance Architecture | 004, 005, 007 | planned | Phase 0 measurements |
