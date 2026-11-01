@@ -127,6 +127,24 @@ impl Txn for FdbTx {
         Ok(v.map(|s| s.to_vec()))
     }
 
+    async fn get_snapshot(&mut self, key: &[u8]) -> Result<Option<Value>, KvError> {
+        let v = self.trx.get(key, true).await.map_err(map_err)?;
+        Ok(v.map(|s| s.to_vec()))
+    }
+
+    fn atomic_add(
+        &mut self,
+        key: &[u8],
+        delta: i64,
+    ) -> impl std::future::Future<Output = Result<(), KvError>> + Send {
+        self.trx.atomic_op(
+            key,
+            &delta.to_le_bytes(),
+            foundationdb::options::MutationType::Add,
+        );
+        std::future::ready(Ok(()))
+    }
+
     async fn get_range(
         &mut self,
         range: &KeyRange,

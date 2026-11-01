@@ -84,6 +84,14 @@ impl<T: Txn> Txn for FencedTx<T> {
         self.inner.get(key).await
     }
 
+    async fn get_snapshot(&mut self, key: &[u8]) -> Result<Option<Value>, KvError> {
+        self.inner.get_snapshot(key).await
+    }
+
+    async fn atomic_add(&mut self, key: &[u8], delta: i64) -> Result<(), KvError> {
+        self.inner.atomic_add(key, delta).await
+    }
+
     async fn get_range(
         &mut self,
         range: &KeyRange,

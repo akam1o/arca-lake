@@ -103,6 +103,7 @@ impl KvStore for MemKv {
             snapshot,
             reads: Vec::new(),
             writes: BTreeMap::new(),
+            adds: BTreeMap::new(),
             range_clears: Vec::new(),
             affected_bytes: 0,
             pending_error: None,
@@ -124,6 +125,8 @@ pub struct MemTx {
     reads: Vec<KeyRange>,
     /// `None` means cleared.
     writes: BTreeMap<Key, Option<Value>>,
+    /// Atomic additions applied against the committed value at commit.
+    adds: BTreeMap<Key, i64>,
     range_clears: Vec<KeyRange>,
     affected_bytes: usize,
     pending_error: Option<KvError>,
@@ -133,13 +136,17 @@ impl MemTx {
     /// Value as this transaction sees it: own writes, then range clears,
     /// then the snapshot.
     fn view(&self, key: &[u8]) -> Option<Value> {
-        if let Some(w) = self.writes.get(key) {
-            return w.clone();
+        let base = if let Some(w) = self.writes.get(key) {
+            w.clone()
+        } else if self.range_clears.iter().any(|r| r.contains(key)) {
+            None
+        } else {
+            self.snapshot.get(key).cloned()
+        };
+        match self.adds.get(key) {
+            Some(delta) => Some(add_le(base.as_deref(), *delta)),
+            None => base,
         }
-        if self.range_clears.iter().any(|r| r.contains(key)) {
-            return None;
-        }
-        self.snapshot.get(key).cloned()
     }
 
     fn note_write(&mut self, key: &[u8], value_len: usize) {
@@ -161,12 +168,36 @@ impl MemTx {
     }
 }
 
+/// `i64` little-endian addition on an optional stored value.
+fn add_le(base: Option<&[u8]>, delta: i64) -> Value {
+    let cur = base
+        .and_then(|b| <[u8; 8]>::try_from(b).ok())
+        .map_or(0, i64::from_le_bytes);
+    cur.wrapping_add(delta).to_le_bytes().to_vec()
+}
+
 impl Txn for MemTx {
     async fn get(&mut self, key: &[u8]) -> Result<Option<Value>, KvError> {
         yield_once().await;
         self.reads.push(KeyRange::point(key));
         self.affected_bytes += key.len();
         Ok(self.view(key))
+    }
+
+    async fn get_snapshot(&mut self, key: &[u8]) -> Result<Option<Value>, KvError> {
+        yield_once().await;
+        self.affected_bytes += key.len();
+        Ok(self.view(key))
+    }
+
+    fn atomic_add(
+        &mut self,
+        key: &[u8],
+        delta: i64,
+    ) -> impl Future<Output = Result<(), KvError>> + Send {
+        self.note_write(key, 8);
+        *self.adds.entry(key.to_vec()).or_insert(0) += delta;
+        std::future::ready(Ok(()))
     }
 
     async fn get_range(
@@ -244,7 +275,7 @@ impl Txn for MemTx {
         }
         let mut s = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         // Read-only transactions cannot conflict and need no version.
-        if self.writes.is_empty() && self.range_clears.is_empty() {
+        if self.writes.is_empty() && self.range_clears.is_empty() && self.adds.is_empty() {
             return Ok(s.version);
         }
         for r in &self.reads {
@@ -277,6 +308,12 @@ impl Txn for MemTx {
                     s.data.remove(&k);
                 }
             }
+            s.modified.insert(k, version);
+        }
+        // Atomic additions see the value as committed by everyone else.
+        for (k, delta) in self.adds {
+            let next = add_le(s.data.get(&k).map(Vec::as_slice), delta);
+            s.data.insert(k.clone(), next);
             s.modified.insert(k, version);
         }
         Ok(version)

@@ -29,14 +29,18 @@ pub enum InsertOutcome {
 
 fn usage_of(v: Option<Vec<u8>>) -> u64 {
     v.and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
-        .map_or(0, u64::from_le_bytes)
+        .map_or(0, |b| u64::try_from(i64::from_le_bytes(b)).unwrap_or(0))
 }
 
-async fn add_usage<X: Txn>(tx: &mut X, tier: &str, delta: i128) -> Result<u64> {
-    let cur = usage_of(tx.get(&keys::cache_usage(tier)).await?);
-    let next = u64::try_from((i128::from(cur) + delta).max(0)).unwrap_or(0);
-    tx.set(&keys::cache_usage(tier), &next.to_le_bytes());
-    Ok(next)
+fn delta_of(bytes: u64) -> i64 {
+    i64::try_from(bytes).unwrap_or(i64::MAX)
+}
+
+/// Usage is kept with an atomic addition so that concurrent populations
+/// and evictions of one tier do not conflict on the counter (R-42).
+async fn add_usage<X: Txn>(tx: &mut X, tier: &str, delta: i64) -> Result<()> {
+    tx.atomic_add(&keys::cache_usage(tier), delta).await?;
+    Ok(())
 }
 
 /// Record a cache copy of chunk `index` of `generation` as ready, in one
@@ -74,7 +78,10 @@ pub async fn insert<S: KvStore>(
                 {
                     return Ok(InsertOutcome::AlreadyPresent);
                 }
-                let usage = usage_of(tx.get(&keys::cache_usage(&placement.tier)).await?);
+                // Snapshot read: the capacity check must not make every
+                // concurrent population conflict on the usage key; eviction
+                // corrects any overshoot (RFC-006 §5.4).
+                let usage = usage_of(tx.get_snapshot(&keys::cache_usage(&placement.tier)).await?);
                 if capacity_bytes > 0 && usage + placement.bytes > capacity_bytes {
                     return Ok(InsertOutcome::OverCapacity);
                 }
@@ -88,7 +95,7 @@ pub async fn insert<S: KvStore>(
                     ),
                     &[],
                 );
-                add_usage(tx, &placement.tier, i128::from(placement.bytes)).await?;
+                add_usage(tx, &placement.tier, delta_of(placement.bytes)).await?;
                 Ok(InsertOutcome::Inserted)
             })
         },
@@ -123,7 +130,7 @@ pub async fn remove<S: KvStore>(
                 &generation,
                 index,
             ));
-            add_usage(tx, &p.tier, -i128::from(p.bytes)).await?;
+            add_usage(tx, &p.tier, -delta_of(p.bytes)).await?;
             Ok(Some(p))
         })
     })
@@ -332,7 +339,7 @@ pub async fn finish_cache<S: KvStore>(
                     *index,
                 ));
                 tx.clear(&keys::cache_placement(generation, *index));
-                add_usage(tx, &p.tier, -i128::from(p.bytes)).await?;
+                add_usage(tx, &p.tier, -delta_of(p.bytes)).await?;
             }
             Ok(entries)
         })

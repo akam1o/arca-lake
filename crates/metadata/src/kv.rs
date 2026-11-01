@@ -180,6 +180,37 @@ pub trait Txn: Send {
 
     /// Commit. Returns the commit version, which increases monotonically.
     fn commit(self) -> impl Future<Output = Result<u64, KvError>> + Send;
+
+    /// Read one key *without* adding it to the transaction's conflict set
+    /// (a snapshot read): the commit does not fail if another transaction
+    /// writes the key meanwhile. For values that only guide a decision
+    /// which a later pass corrects (cache capacity, RFC-006 §5.4).
+    fn get_snapshot(
+        &mut self,
+        key: &[u8],
+    ) -> impl Future<Output = Result<Option<Value>, KvError>> + Send {
+        self.get(key)
+    }
+
+    /// Add `delta` to the little-endian `i64` at `key` (missing = 0) as an
+    /// atomic mutation: no read conflict, and concurrent adds commute.
+    /// Backends without atomic mutations fall back to read-modify-write
+    /// (which does conflict).
+    fn atomic_add(
+        &mut self,
+        key: &[u8],
+        delta: i64,
+    ) -> impl Future<Output = Result<(), KvError>> + Send {
+        async move {
+            let cur = self
+                .get(key)
+                .await?
+                .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+                .map_or(0, i64::from_le_bytes);
+            self.set(key, &cur.wrapping_add(delta).to_le_bytes());
+            Ok(())
+        }
+    }
 }
 
 /// Maximum attempts for [`transact`].

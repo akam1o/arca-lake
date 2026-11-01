@@ -133,15 +133,11 @@ pub async fn finish<S: KvStore>(store: &S, generation: &GenId) -> Result<()> {
                     generation,
                     index,
                 ));
-                let cur = tx
-                    .get(&keys::cache_usage(&p.tier))
-                    .await?
-                    .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
-                    .map_or(0, u64::from_le_bytes);
-                tx.set(
+                tx.atomic_add(
                     &keys::cache_usage(&p.tier),
-                    &cur.saturating_sub(p.bytes).to_le_bytes(),
-                );
+                    -i64::try_from(p.bytes).unwrap_or(i64::MAX),
+                )
+                .await?;
             }
             tx.clear(&keys::retired(since_ms, generation));
             tx.clear(&keys::access(generation));
