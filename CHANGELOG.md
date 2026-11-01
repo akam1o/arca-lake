@@ -29,3 +29,6 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   delete, listing with delimiter skips and continuation tokens, bucket
   operations, lease expiry and GC queue), with concurrency tests (Phase 0
   task 0.5, in-memory part).
+- `arca-lake-metadata` `fdb` feature: FoundationDB backend, protocol tests
+  against a real cluster, containerized runner (`deploy/dev/fdb-test.sh`)
+  and a CI job.

@@ -16,6 +16,8 @@
 //! Phase 0 status: in-memory backend only; record encoding is a prototype.
 
 mod error;
+#[cfg(feature = "fdb")]
+pub mod fdb;
 pub mod keys;
 pub mod kv;
 pub mod mem;

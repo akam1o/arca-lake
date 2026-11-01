@@ -87,7 +87,14 @@ pub async fn append_chunks<S: KvStore>(
     chunks: &[(u32, ChunkRecord)],
     now_ms: u64,
 ) -> Result<()> {
-    let budget = store.limits().max_transaction_bytes / 2;
+    // FoundationDB counts more than the raw key and value bytes of a
+    // mutation: each `set` also contributes a write conflict range (the key
+    // twice) and per-mutation overhead. Charge a conservative estimate per
+    // record and stay well below the documented limit; a batch that is too
+    // large fails the whole PUT, while a batch that is too small only costs
+    // an extra round trip.
+    const PER_MUTATION_OVERHEAD: usize = 128;
+    let budget = store.limits().max_transaction_bytes / 4;
     let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut batch_bytes = 0;
     let flush = async |batch: &[(Vec<u8>, Vec<u8>)]| -> Result<()> {
@@ -103,7 +110,7 @@ pub async fn append_chunks<S: KvStore>(
     for (index, chunk) in chunks {
         let k = keys::gen_chunk(generation, *index);
         let v = encode(chunk)?;
-        let bytes = k.len() + v.len();
+        let bytes = 3 * k.len() + v.len() + PER_MUTATION_OVERHEAD;
         if batch_bytes + bytes > budget && !batch.is_empty() {
             flush(&batch).await?;
             batch.clear();

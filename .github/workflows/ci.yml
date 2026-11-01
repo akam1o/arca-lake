@@ -27,10 +27,65 @@ jobs:
           toolchain: "1.99"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The `fdb` feature links libfdb_c; install the client library on Linux
+      # so that --all-features builds and runs. macOS tests skip that feature.
+      - name: install FoundationDB client library (Linux)
+        if: runner.os == 'Linux'
+        env:
+          FDB_VERSION: 7.3.77
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/fdb-clients.deb \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          sudo apt-get install -y /tmp/fdb-clients.deb
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features
-      - run: cargo test --workspace --all-features
-      - run: cargo doc --workspace --no-deps
+      - name: test (Linux, all features)
+        if: runner.os == 'Linux'
+        run: cargo test --workspace --all-features
+      - name: test (macOS, without the fdb feature)
+        if: runner.os == 'macOS'
+        run: cargo test --workspace --features arca-lake-ec/rs-leopard
+      - run: cargo doc --workspace --no-deps --all-features
+
+  fdb:
+    name: FoundationDB backend tests
+    runs-on: ubuntu-latest
+    env:
+      FDB_VERSION: 7.3.77
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+      - name: install FoundationDB client library
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/fdb-clients.deb \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          sudo apt-get install -y /tmp/fdb-clients.deb
+      - name: start FoundationDB server
+        run: |
+          set -euo pipefail
+          docker run -d --name fdb --network host -e FDB_NETWORKING_MODE=host \
+            "foundationdb/foundationdb:${FDB_VERSION}"
+          for _ in $(seq 1 30); do
+            docker exec fdb fdbcli --exec "status minimal" 2>/dev/null | grep -q "available" && break
+            sleep 1
+          done
+          docker exec fdb fdbcli --exec "configure new single memory" || true
+          for _ in $(seq 1 60); do
+            docker exec fdb fdbcli --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+            sleep 1
+          done
+          docker exec fdb fdbcli --exec "status minimal"
+          docker exec fdb cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
+      - name: run tests
+        env:
+          ARCA_FDB_TESTS: "1"
+          ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
+        run: cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
 
   deny:
     name: licenses and advisories

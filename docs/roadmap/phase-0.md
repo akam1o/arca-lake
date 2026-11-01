@@ -11,7 +11,7 @@ before Phase 1 commits to a design. It produces no user-facing product.
 | 0.2 EC evaluation | done (first pass) | `arca-lake-ec`; [laptop report](../../benchmarks/reports/2026-11-01-ec-backends.md); ISA-L and server-hardware run outstanding |
 | 0.3 storage engine prototype | first iteration | `arca-lake-storage`: format v1, durable put/delete, range reads, recovery, scrub, crash tests, I/O benchmark. Outstanding: group commit, `O_DIRECT`, io_uring backend (Linux), process-kill crash test in CI, `fio` comparison |
 | 0.4 protocol and transfer | not started | |
-| 0.5 metadata spike | in-memory part done | `arca-lake-metadata`: KV abstraction with FoundationDB semantics, layout v1, write-protocol recipes, concurrency tests. Outstanding: FoundationDB backend and measurements (needs a Linux host or CI service) |
+| 0.5 metadata spike | backend done, measurements outstanding | `arca-lake-metadata`: KV abstraction with FoundationDB semantics, layout v1, write-protocol recipes, concurrency tests; FoundationDB backend (`fdb` feature) passing the protocol tests against a real single-process cluster in a container (`deploy/dev/fdb-test.sh`) and in CI. Outstanding: publishable latency/listing/hot-spot measurements on a described environment |
 | 0.6 S3 spike | not started | |
 | 0.7 single-node harness | not started | |
 | 0.8 multi-node functional test | not started | |

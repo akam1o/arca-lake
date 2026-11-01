@@ -42,6 +42,7 @@ crc32c = "0.6"
 uuid = { version = "1", features = ["v4", "v7"] }
 tempfile = "3"
 foundationdb-tuple = "0.11"
+foundationdb = { version = "0.11", default-features = false, features = ["fdb-7_3", "embedded-fdb-include"] }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 futures = "0.3"
@@ -53,7 +54,9 @@ proptest = "1.12"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` rather than `forbid` so that FFI wrappers can allow individual,
+# documented `unsafe` blocks (see docs/architecture/repository-layout.md).
+unsafe_code = "deny"
 missing_docs = "warn"
 
 [workspace.lints.clippy]

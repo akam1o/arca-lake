@@ -85,8 +85,8 @@ Rules:
 ## Workspace conventions
 
 - Edition 2024, MSRV pinned in `rust-toolchain.toml` and checked in CI.
-- `#![forbid(unsafe_code)]` everywhere except crates that wrap FFI or
-  io_uring, which must document each `unsafe` block.
+- `unsafe_code = "deny"` as a workspace lint; only code that wraps FFI or
+  io_uring may `allow` it, per item, with a `SAFETY` comment on each block.
 - Clippy `pedantic` as warnings with an explicit allow-list in the workspace
   `[lints]` table.
 - All configuration structs derive a JSON schema that is checked into
