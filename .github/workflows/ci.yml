@@ -108,12 +108,13 @@ jobs:
           curl -sSL -o /tmp/fdb-clients.deb \
             "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
           sudo apt-get install -y /tmp/fdb-clients.deb
-      - name: start a three-process FoundationDB cluster (host network)
+      - name: start a three-process FoundationDB cluster (bridge network)
         run: |
           set -euo pipefail
-          # Host network; the processes advertise the host's own address
-          # (as the single-process job does), not loopback.
-          docker run -d --name arca-fdb --network host \
+          # Bridge network: the processes advertise the container's address,
+          # which the runner host can reach directly (same topology as the
+          # local script, where fdbcli and the test container reach it).
+          docker run -d --name arca-fdb \
             -v "$PWD/deploy/dev/fdb-multi-entrypoint.sh:/entry.sh:ro" \
             --entrypoint bash "foundationdb/foundationdb:${FDB_VERSION}" /entry.sh
           sleep 8
@@ -128,9 +129,9 @@ jobs:
           fdbcli "configure new double memory" || true
           sleep 3
           fdbcli "coordinators ${IP}:4500 ${IP}:4501 ${IP}:4502" || true
-          for _ in $(seq 1 12); do
+          for _ in $(seq 1 20); do
             fdbcli "status minimal" 2>/dev/null | grep -q "is available" && break
-            sleep 2
+            sleep 3
           done
           fdbcli "status minimal" | tee /tmp/status.txt
           grep -q "is available" /tmp/status.txt || { echo "cluster not available"; fdbcli "status details" || true; docker logs arca-fdb; exit 1; }

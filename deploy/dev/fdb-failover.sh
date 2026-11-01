@@ -33,7 +33,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fdbcli() { timeout 90 docker exec "$FDB" fdbcli --timeout 30 --exec "$1"; }
+# `timeout` is coreutils; macOS has it only as `gtimeout` (brew coreutils).
+with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$@";
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@";
+  else shift; "$@"; fi
+}
+fdbcli() { with_timeout 90 docker exec "$FDB" fdbcli --timeout 30 --exec "$1"; }
 
 echo "==> starting a three-process FoundationDB cluster ($FDB_VERSION)"
 docker rm -f "$FDB" >/dev/null 2>&1 || true
@@ -92,7 +98,7 @@ while docker inspect -f '{{.State.Running}}' "$TEST_CONTAINER" 2>/dev/null | gre
     echo "==> chaos: $action"
     read -r verb n <<<"$action"
     case "$verb" in
-      kill|start) timeout 60 docker exec "$FDB" fdbproc "$verb" "$n" || echo "chaos action failed: $action" >&2 ;;
+      kill|start) with_timeout 60 docker exec "$FDB" fdbproc "$verb" "$n" || echo "chaos action failed: $action" >&2 ;;
       *) echo "unknown chaos action: $action" >&2 ;;
     esac
     : > "$CHAOS_DIR/ack-$next"
