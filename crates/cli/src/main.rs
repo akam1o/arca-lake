@@ -103,6 +103,10 @@ struct CacheArgs {
     /// (0 or 1 = on the first miss).
     #[arg(long = "cache-admit-after-misses", default_value_t = 1)]
     cache_admit_after_misses: u32,
+    /// Populations one gateway runs at once; misses beyond that are served
+    /// without populating.
+    #[arg(long = "cache-max-populations", default_value_t = 8)]
+    cache_max_populations: u32,
 }
 
 impl CacheArgs {
@@ -124,6 +128,7 @@ impl CacheArgs {
             low_watermark: self.cache_low_watermark,
             max_cacheable_bytes: self.cache_max_chunk_bytes,
             admit_after_misses: self.cache_admit_after_misses,
+            max_populations_in_flight: self.cache_max_populations,
         }))
     }
 }
