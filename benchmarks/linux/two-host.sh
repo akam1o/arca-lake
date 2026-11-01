@@ -145,15 +145,16 @@ with_sar() { # <dir> <command...>
   local dir="$1"; shift
   mkdir -p "$dir"
   for fn in $HOSTS_FNS; do
-    "$fn" "mkdir -p $RUN_DIR/sar && (sar -u 1 > $RUN_DIR/sar/cpu.txt 2>&1 < /dev/null & echo \$! > $RUN_DIR/sar/cpu.pid) && (sar -n DEV 1 > $RUN_DIR/sar/net.txt 2>&1 < /dev/null & echo \$! > $RUN_DIR/sar/net.pid)"
+    "$fn" "mkdir -p $RUN_DIR/sar && (sar -u 1 > $RUN_DIR/sar/cpu.txt 2>&1 < /dev/null & echo \$! > $RUN_DIR/sar/cpu.pid) && (sar -n DEV 1 > $RUN_DIR/sar/net.txt 2>&1 < /dev/null & echo \$! > $RUN_DIR/sar/net.pid) && (sar -b 1 > $RUN_DIR/sar/disk.txt 2>&1 < /dev/null & echo \$! > $RUN_DIR/sar/disk.pid)"
   done
   local rc=0
   "$@" || rc=$?
   for fn in $HOSTS_FNS; do
-    "$fn" "kill \$(cat $RUN_DIR/sar/cpu.pid) \$(cat $RUN_DIR/sar/net.pid) 2>/dev/null; sleep 0.2; true"
+    "$fn" "kill \$(cat $RUN_DIR/sar/cpu.pid) \$(cat $RUN_DIR/sar/net.pid) \$(cat $RUN_DIR/sar/disk.pid) 2>/dev/null; sleep 0.2; true"
     local suffix="${fn#s}"
     "$fn" "cat $RUN_DIR/sar/cpu.txt" > "$dir/sar-cpu-$suffix.txt"
     "$fn" "cat $RUN_DIR/sar/net.txt" > "$dir/sar-net-$suffix.txt"
+    "$fn" "cat $RUN_DIR/sar/disk.txt" > "$dir/sar-disk-$suffix.txt"
   done
   return $rc
 }

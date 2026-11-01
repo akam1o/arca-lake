@@ -75,6 +75,31 @@ def net_bytes(path, iface):
     return total if seen else None
 
 
+def disk_read_bytes(path):
+    """Bytes read from block devices over the capture (`sar -b`, bread/s in
+    512-byte blocks, one sample per second)."""
+    if not os.path.exists(path):
+        return None
+    total = 0.0
+    seen = False
+    header = None
+    for line in open(path, encoding="utf-8", errors="replace"):
+        parts = line.split()
+        if len(parts) < 5 or parts[0] == "Average:" or not re.match(r"^\d\d:\d\d:\d\d", parts[0]):
+            continue
+        if "bread/s" in parts:
+            header = parts
+            continue
+        if header is None:
+            continue
+        try:
+            total += float(parts[header.index("bread/s")]) * 512.0
+        except (ValueError, IndexError):
+            continue
+        seen = True
+    return total if seen else None
+
+
 def metric(path, name):
     if not os.path.exists(path):
         return None
@@ -90,8 +115,8 @@ def fmt(v, spec="{:.1f}"):
 
 def main():
     root, cores, iface = parse_args(sys.argv[1:])
-    print("| label | phase | ops | MiB/s | ops/s | p50 ms | p99 ms | errors | CPU-s/GiB per host | net B/GiB per host | hits | misses | degraded | fallbacks |")
-    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    print("| label | phase | ops | MiB/s | ops/s | p50 ms | p99 ms | errors | CPU-s/GiB per host | net B/GiB per host | disk read B/GiB per host | hits | misses | degraded | fallbacks |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for label in sorted(os.listdir(root)):
         d = os.path.join(root, label)
         if not os.path.isdir(d):
@@ -118,6 +143,8 @@ def main():
             net = {h: per(net_bytes(os.path.join(sar, f"sar-net-{h}.txt"), iface)) for h in hosts}
             cpu_cell = " / ".join(f"{h}:{fmt(cpu[h])}" for h in hosts) or "n/a"
             net_cell = " / ".join(f"{h}:{fmt(net[h], '{:.2e}')}" for h in hosts) or "n/a"
+            disk = {h: per(disk_read_bytes(os.path.join(sar, f"sar-disk-{h}.txt"))) for h in hosts}
+            disk_cell = " / ".join(f"{h}:{fmt(disk[h], '{:.2e}')}" for h in hosts) or "n/a"
             hits = misses = degraded = fallbacks = None
             if phase.startswith("get"):
                 b = os.path.join(d, "metrics-before-" + phase + ".txt")
@@ -134,7 +161,7 @@ def main():
             print(
                 f"| {label} | {phase} | {s['ops']} | {s['mib_per_s']:.1f} | {s['ops_per_s']:.2f} | "
                 f"{s['lat_ms_p50']:.1f} | {s['lat_ms_p99']:.1f} | {s['errors']}+{s['mismatches']} | "
-                f"{cpu_cell} | {net_cell} | "
+                f"{cpu_cell} | {net_cell} | {disk_cell} | "
                 f"{fmt(hits, '{}')} | {fmt(misses, '{}')} | {fmt(degraded, '{}')} | {fmt(fallbacks, '{}')} |"
             )
 
