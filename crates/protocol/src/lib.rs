@@ -4,6 +4,8 @@
 //! with a vendored `protoc`. Generated types are re-exported per package and
 //! version so that call sites name the version explicitly.
 
+pub mod client;
+
 /// Storage node API, version 1.
 pub mod storage {
     /// Version 1.

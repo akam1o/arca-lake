@@ -123,6 +123,19 @@ dependencies = [
 [[package]]
 name = "arca-lake-controller"
 version = "0.0.0"
+dependencies = [
+ "arca-lake-common",
+ "arca-lake-ec",
+ "arca-lake-metadata",
+ "arca-lake-placement",
+ "arca-lake-protocol",
+ "arca-lake-storage",
+ "bytes",
+ "futures",
+ "thiserror",
+ "tokio",
+ "tonic",
+]
 
 [[package]]
 name = "arca-lake-ec"
@@ -139,6 +152,12 @@ dependencies = [
 name = "arca-lake-gateway"
 version = "0.0.0"
 dependencies = [
+ "arca-lake-common",
+ "arca-lake-ec",
+ "arca-lake-metadata",
+ "arca-lake-placement",
+ "arca-lake-protocol",
+ "arca-lake-storage",
  "async-trait",
  "bytes",
  "futures",
@@ -147,6 +166,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "uuid",
 ]
 
@@ -179,6 +199,8 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -213,6 +235,24 @@ dependencies = [
 [[package]]
 name = "arca-lake-testkit"
 version = "0.0.0"
+dependencies = [
+ "arca-lake-common",
+ "arca-lake-controller",
+ "arca-lake-gateway",
+ "arca-lake-metadata",
+ "arca-lake-protocol",
+ "arca-lake-storage",
+ "arca-lake-storage-node",
+ "bytes",
+ "futures",
+ "http",
+ "s3s",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "uuid",
+]
 
 [[package]]
 name = "arca-lake-tiering"

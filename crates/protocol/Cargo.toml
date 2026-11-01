@@ -13,6 +13,8 @@ tonic = { workspace = true, features = ["codegen", "server", "channel", "transpo
 tonic-prost.workspace = true
 prost.workspace = true
 bytes.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+tokio-stream.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
