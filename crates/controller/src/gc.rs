@@ -46,11 +46,15 @@ pub async fn run_once<S: KvStore>(
     grace_ms: u64,
     limit: usize,
 ) -> Result<GcReport, ControlError> {
-    let expired = gc::expire_pending(meta, now_ms, limit).await?.len();
-    let mut report = GcReport {
-        expired,
-        ..GcReport::default()
-    };
+    // An unknown commit outcome on a GC transaction is never retried here:
+    // every GC step re-reads the state it changes, so the next pass either
+    // sees the change applied or does it again.
+    let mut report = GcReport::default();
+    match gc::expire_pending(meta, now_ms, limit).await {
+        Ok(expired) => report.expired = expired.len(),
+        Err(e) if is_deferrable(&e) => report.deferred += 1,
+        Err(e) => return Err(e.into()),
+    }
 
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
@@ -67,14 +71,28 @@ pub async fn run_once<S: KvStore>(
         match delete_generation_shards(meta, clients, &nodes, &groups, &generation).await {
             Ok(n) => {
                 report.shards_deleted += n;
-                gc::finish(meta, &generation).await?;
-                report.collected += 1;
+                match gc::finish(meta, &generation).await {
+                    Ok(()) => report.collected += 1,
+                    Err(e) if is_deferrable(&e) => report.deferred += 1,
+                    Err(e) => return Err(e.into()),
+                }
             }
             Err(ControlError::Node { .. }) => report.deferred += 1,
+            Err(ControlError::Meta(e)) if is_deferrable(&e) => report.deferred += 1,
             Err(e) => return Err(e),
         }
     }
     Ok(report)
+}
+
+/// Whether a metadata error means "try again next pass" rather than "stop".
+fn is_deferrable(e: &arca_lake_metadata::MetaError) -> bool {
+    matches!(
+        e,
+        arca_lake_metadata::MetaError::Kv(
+            arca_lake_metadata::KvError::CommitUnknown(_) | arca_lake_metadata::KvError::Backend(_)
+        ) | arca_lake_metadata::MetaError::TooManyRetries
+    )
 }
 
 /// Delete every shard of a generation's recorded chunks. Returns the number

@@ -211,6 +211,9 @@ pub(super) fn meta_err(e: MetaError) -> s3s::S3Error {
                 "object metadata exceeds the store's size limit"
             )
         }
+        MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r)) => {
+            s3_error!(ServiceUnavailable, "metadata commit outcome unknown: {r}")
+        }
         other => s3_error!(InternalError, "metadata: {other}"),
     }
 }
@@ -370,14 +373,29 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<DeleteObjectInput>,
     ) -> S3Result<S3Response<DeleteObjectOutput>> {
-        object::delete_object(
+        let mut result = object::delete_object(
             self.meta.as_ref(),
             &req.input.bucket,
             &req.input.key,
             now_ms(),
         )
-        .await
-        .map_err(meta_err)?;
+        .await;
+        if matches!(
+            result,
+            Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(_)))
+        ) {
+            // Buckets created through this gateway are unversioned, where a
+            // repeated delete is idempotent (RFC-003 §5.8). A versioned
+            // bucket would need a resolution step before a second marker.
+            result = object::delete_object(
+                self.meta.as_ref(),
+                &req.input.bucket,
+                &req.input.key,
+                now_ms(),
+            )
+            .await;
+        }
+        result.map_err(meta_err)?;
         Ok(S3Response::new(DeleteObjectOutput::default()))
     }
 

@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use arca_lake_common::chunk_id;
 use arca_lake_ec::{ErasureCoder, StripeLayout};
-use arca_lake_metadata::KvStore;
-use arca_lake_metadata::ops::object::{self, CommitInfo, Precondition};
+use arca_lake_metadata::ops::object::{self, CommitInfo, CommitOutcome, Precondition};
 use arca_lake_metadata::records::{ChunkRecord, DurablePlacement, GenId, GroupRecord};
+use arca_lake_metadata::{KvError, KvStore, MetaError};
 use arca_lake_placement::WritableGroup;
 use arca_lake_protocol::client::{NodeClients, ShardRef};
 use bytes::{Bytes, BytesMut};
@@ -27,6 +27,20 @@ pub struct Committed {
     pub etag: String,
     /// Size.
     pub size: u64,
+}
+
+/// A failed write and whether the generation should be aborted. After a
+/// commit whose outcome was decided (committed, or fenced by an abort)
+/// nothing must touch the generation again.
+struct WriteFailure {
+    error: S3Error,
+    abort: bool,
+}
+
+impl From<S3Error> for WriteFailure {
+    fn from(error: S3Error) -> Self {
+        Self { error, abort: true }
+    }
 }
 
 /// One chunk written to a group.
@@ -68,13 +82,95 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .await;
         match result {
             Ok(c) => Ok(c),
-            Err(e) => {
+            Err(WriteFailure { error, abort }) => {
                 // Best effort: mark the generation retiring so GC reclaims
                 // its shards sooner than the lease would. If this fails the
-                // lease expiry sweep handles it.
-                let _ = object::abort_put(self.meta.as_ref(), &generation, now_ms()).await;
-                Err(e)
+                // lease expiry sweep handles it. `abort_put` re-reads the
+                // generation, so it can never retire a committed one.
+                if abort {
+                    let _ = object::abort_put(self.meta.as_ref(), &generation, now_ms()).await;
+                }
+                Err(error)
             }
+        }
+    }
+
+    /// Commit, resolving an unknown outcome (RFC-003 §5.8). A lost reply is
+    /// decided by re-reading the generation: committed means success; still
+    /// pending means the commit is retried a bounded number of times, after
+    /// which the generation is aborted so that a late commit is rejected by
+    /// the store. If the abort finds the generation committed, the PUT
+    /// succeeded after all.
+    async fn commit_resolving(
+        &self,
+        generation: GenId,
+        info: &CommitInfo,
+        pre: &Precondition,
+    ) -> Result<(), WriteFailure> {
+        const MAX_COMMIT_ATTEMPTS: usize = 4;
+        let meta = self.meta.as_ref();
+        let mut reason = String::new();
+        for attempt in 1..=MAX_COMMIT_ATTEMPTS {
+            match object::commit_put(meta, &generation, info, pre, now_ms()).await {
+                Ok(_) => return Ok(()),
+                Err(MetaError::Kv(KvError::CommitUnknown(r))) => reason = r,
+                Err(e) => return Err(meta_err(e).into()),
+            }
+            match object::resolve_commit(meta, &generation, now_ms()).await {
+                Ok(CommitOutcome::Committed(_)) => return Ok(()),
+                Ok(CommitOutcome::Pending) if attempt < MAX_COMMIT_ATTEMPTS => {}
+                Ok(CommitOutcome::Pending | CommitOutcome::PendingExpired) => break,
+                Ok(CommitOutcome::Retiring | CommitOutcome::Missing) => {
+                    return Err(WriteFailure {
+                        error: s3_error!(
+                            InternalError,
+                            "commit outcome unknown ({reason}) and the generation was retired"
+                        ),
+                        abort: false,
+                    });
+                }
+                Err(e) => {
+                    return Err(WriteFailure {
+                        error: s3_error!(
+                            ServiceUnavailable,
+                            "commit outcome unknown ({reason}) and unresolved ({e}); the write stays pending until its lease expires"
+                        ),
+                        abort: false,
+                    });
+                }
+            }
+        }
+        self.fence_unknown(generation, &reason).await
+    }
+
+    /// Decide a commit that is still unknown after the retries: abort the
+    /// generation. The abort transaction reads the generation header, so it
+    /// conflicts with (and therefore excludes) a late commit; if it finds
+    /// the generation already committed, the write succeeded.
+    async fn fence_unknown(&self, generation: GenId, reason: &str) -> Result<(), WriteFailure> {
+        match object::abort_put(self.meta.as_ref(), &generation, now_ms()).await {
+            Ok(()) => Err(WriteFailure {
+                error: s3_error!(
+                    ServiceUnavailable,
+                    "commit outcome unknown ({reason}); the write was aborted and is not visible"
+                ),
+                abort: false,
+            }),
+            Err(MetaError::WrongGenerationState("committed", _)) => Ok(()),
+            Err(MetaError::WrongGenerationState(state, _)) => Err(WriteFailure {
+                error: s3_error!(
+                    InternalError,
+                    "commit outcome unknown ({reason}); the generation is {state} and not visible"
+                ),
+                abort: false,
+            }),
+            Err(e) => Err(WriteFailure {
+                error: s3_error!(
+                    ServiceUnavailable,
+                    "commit outcome unknown ({reason}); fencing failed ({e}); the write stays pending until its lease expires"
+                ),
+                abort: false,
+            }),
         }
     }
 
@@ -86,7 +182,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         content_type: Option<String>,
         user_metadata: Option<HashMap<String, String>>,
         pre: &Precondition,
-    ) -> Result<Committed, S3Error> {
+    ) -> Result<Committed, WriteFailure> {
         let mut md5 = Md5::new();
         let mut size = 0u64;
         let mut index = 0u32;
@@ -128,7 +224,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             index += 1;
 
             if self.take_fault(FaultPoint::AfterShardsBeforeManifest) {
-                return Err(s3_error!(InternalError, "injected crash after shards"));
+                return Err(s3_error!(InternalError, "injected crash after shards").into());
             }
             if batch.len() >= self.cfg.chunk_batch {
                 object::append_chunks(self.meta.as_ref(), &generation, &batch, now_ms())
@@ -146,7 +242,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 .map_err(meta_err)?;
         }
         if self.take_fault(FaultPoint::BeforeCommit) {
-            return Err(s3_error!(InternalError, "injected crash before commit"));
+            return Err(s3_error!(InternalError, "injected crash before commit").into());
         }
 
         let etag = hex(md5.finalize().as_ref());
@@ -159,11 +255,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 .unwrap_or_default(),
             chunk_count: index,
         };
-        object::commit_put(self.meta.as_ref(), &generation, &info, pre, now_ms())
-            .await
-            .map_err(meta_err)?;
+        self.commit_resolving(generation, &info, pre).await?;
         if self.take_fault(FaultPoint::AfterCommit) {
-            return Err(s3_error!(InternalError, "injected crash after commit"));
+            return Err(WriteFailure {
+                error: s3_error!(InternalError, "injected crash after commit"),
+                abort: false,
+            });
         }
         Ok(Committed {
             generation,

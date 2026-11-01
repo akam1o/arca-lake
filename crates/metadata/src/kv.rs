@@ -128,6 +128,11 @@ pub enum KvError {
         /// The actual size.
         actual: usize,
     },
+    /// The commit was sent but its outcome is unknown (timeout, lost
+    /// connection, or the backend's own "maybe committed" signal). The
+    /// transaction may or may not have been applied; a later read decides.
+    #[error("commit outcome unknown: {0}")]
+    CommitUnknown(String),
     /// Any other backend failure.
     #[error("backend error: {0}")]
     Backend(String),
@@ -196,18 +201,62 @@ pub type TxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, MetaError>> + S
 ///
 /// Returns the body's error, a backend error, or
 /// [`MetaError::TooManyRetries`] after [`MAX_ATTEMPTS`] conflicts.
-pub async fn transact<S, D, T, F>(store: &S, env: D, mut body: F) -> Result<T, MetaError>
+pub async fn transact<S, D, T, F>(store: &S, env: D, body: F) -> Result<T, MetaError>
 where
     S: KvStore,
     D: Send + Sync,
     F: for<'a> FnMut(&'a mut S::Tx, &'a D) -> TxFuture<'a, T>,
 {
+    transact_inner(store, env, body, false).await
+}
+
+/// Unknown-outcome retries allowed by [`transact_idempotent`].
+pub const MAX_UNKNOWN_RETRIES: usize = 3;
+
+/// Like [`transact`], but also re-runs `body` when the commit outcome is
+/// unknown ([`KvError::CommitUnknown`]), up to [`MAX_UNKNOWN_RETRIES`] times.
+///
+/// Only for bodies whose re-execution after an actual commit is harmless
+/// (writing the same keys to the same values, such as `begin_put` with a
+/// pre-chosen generation ID or appending chunk records). Never use it for a
+/// body that publishes, retires, or allocates.
+///
+/// # Errors
+///
+/// As [`transact`]; a still-unknown outcome after the retries is returned
+/// as [`KvError::CommitUnknown`].
+pub async fn transact_idempotent<S, D, T, F>(store: &S, env: D, body: F) -> Result<T, MetaError>
+where
+    S: KvStore,
+    D: Send + Sync,
+    F: for<'a> FnMut(&'a mut S::Tx, &'a D) -> TxFuture<'a, T>,
+{
+    transact_inner(store, env, body, true).await
+}
+
+async fn transact_inner<S, D, T, F>(
+    store: &S,
+    env: D,
+    mut body: F,
+    retry_unknown: bool,
+) -> Result<T, MetaError>
+where
+    S: KvStore,
+    D: Send + Sync,
+    F: for<'a> FnMut(&'a mut S::Tx, &'a D) -> TxFuture<'a, T>,
+{
+    let mut unknown = 0;
     for _ in 0..MAX_ATTEMPTS {
         let mut tx = store.begin().await?;
         match body(&mut tx, &env).await {
             Ok(value) => match tx.commit().await {
                 Ok(_) => return Ok(value),
                 Err(KvError::Conflict) => {}
+                Err(KvError::CommitUnknown(_))
+                    if retry_unknown && unknown < MAX_UNKNOWN_RETRIES =>
+                {
+                    unknown += 1;
+                }
                 Err(e) => return Err(e.into()),
             },
             Err(MetaError::Kv(KvError::Conflict)) => {}

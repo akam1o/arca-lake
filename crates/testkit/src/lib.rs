@@ -8,6 +8,7 @@
 pub mod fdb;
 pub mod s3;
 pub mod suite;
+pub mod suite_faults;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use arca_lake_controller::{gc, groups, repair};
 use arca_lake_gateway::cluster::{ClusterBackend, ClusterConfig};
 use arca_lake_gateway::{GatewayConfig, ServerHandle, serve};
 use arca_lake_metadata::KvStore;
+use arca_lake_metadata::fault::FaultKv;
 use arca_lake_metadata::mem::MemKv;
 use arca_lake_metadata::ops::{cluster, object};
 use arca_lake_metadata::records::{GroupMember, GroupRecord};
@@ -117,6 +119,17 @@ impl TestCluster<MemKv> {
 pub fn mem_starter() -> impl suite::Starter<MemKv> {
     |opts: ClusterOptions| -> futures::future::BoxFuture<'static, TestCluster<MemKv>> {
         Box::pin(TestCluster::start(opts))
+    }
+}
+
+/// Starter for the in-memory backend wrapped in a fault injector, for
+/// [`fault_suite!`].
+pub fn fault_mem_starter() -> impl suite_faults::FaultStarter<MemKv> {
+    |opts: ClusterOptions| -> futures::future::BoxFuture<'static, TestCluster<FaultKv<MemKv>>> {
+        Box::pin(TestCluster::start_with(
+            Arc::new(FaultKv::new(MemKv::default())),
+            opts,
+        ))
     }
 }
 

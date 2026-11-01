@@ -4,8 +4,9 @@
 //! [`crate::transact`]: retryable commit errors become [`KvError::Conflict`];
 //! an unknown commit outcome (`commit_unknown_result`) is **not** retried
 //! here because the recipes above are not all idempotent with respect to
-//! re-execution after an actual commit. That case surfaces as a backend
-//! error and must be resolved by the caller (DD-4: re-read and decide).
+//! re-execution after an actual commit. That case surfaces as
+//! [`KvError::CommitUnknown`] and is resolved by the caller (RFC-003 §5.8:
+//! re-read the generation and decide).
 //!
 //! The client network thread can be started only once per process;
 //! [`ensure_network`] does that lazily and keeps it running for the life of
@@ -191,7 +192,7 @@ fn map_err(e: FdbError) -> KvError {
             limit: limits.max_value_bytes,
             actual: 0,
         },
-        _ if e.is_maybe_committed() => KvError::Backend(format!("commit outcome unknown: {e}")),
+        _ if e.is_maybe_committed() => KvError::CommitUnknown(e.to_string()),
         _ if e.is_retryable() => KvError::Conflict,
         _ => KvError::Backend(e.to_string()),
     }

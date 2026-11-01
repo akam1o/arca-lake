@@ -16,6 +16,7 @@
 //! Phase 0 status: in-memory backend only; record encoding is a prototype.
 
 mod error;
+pub mod fault;
 #[cfg(feature = "fdb")]
 pub mod fdb;
 pub mod keys;
@@ -25,4 +26,4 @@ pub mod ops;
 pub mod records;
 
 pub use error::MetaError;
-pub use kv::{KvError, KvStore, Txn, transact};
+pub use kv::{KvError, KvStore, Txn, transact, transact_idempotent};

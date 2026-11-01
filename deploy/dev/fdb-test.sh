@@ -86,5 +86,5 @@ docker run --rm \
     apt-get install -y -qq "$deb" libclang-dev >/dev/null
     echo "$FDB_CLUSTER_FILE_CONTENTS" > /tmp/fdb.cluster
     cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1 "$@"
-    exec cargo test -p arca-lake-testkit --features fdb --test e2e_fdb -- --nocapture --test-threads=1 "$@"
+    exec cargo test -p arca-lake-testkit --features fdb --test e2e_fdb --test faults_fdb -- --nocapture --test-threads=1 "$@"
   ' -- "$@"

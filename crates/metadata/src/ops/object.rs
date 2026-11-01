@@ -21,7 +21,7 @@ use crate::records::{
     ChunkRecord, CurrentPointer, GenId, GenState, GenerationHeader, NULL_VERSION_ID, VersionRecord,
     Versioning, encode, new_gen_id, new_version_id,
 };
-use crate::{MetaError, keys, transact};
+use crate::{MetaError, keys, transact, transact_idempotent};
 
 /// Result of [`begin_put`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +49,9 @@ pub async fn begin_put<S: KvStore>(
     validate_key(key)?;
     let generation = new_gen_id();
     let lease_until_ms = now_ms + lease_ms;
-    transact(
+    // Idempotent: the generation ID is chosen once, so re-running after an
+    // unknown commit outcome writes the same header again.
+    transact_idempotent(
         store,
         (bucket, key, now_ms, lease_until_ms, generation),
         |tx, env| {
@@ -128,7 +130,8 @@ async fn flush_batch<S: KvStore>(
     now_ms: u64,
     batch: &[(Vec<u8>, Vec<u8>)],
 ) -> Result<()> {
-    transact(store, (*generation, now_ms, batch), |tx, env| {
+    // Idempotent: chunk records are a pure function of the chunk.
+    transact_idempotent(store, (*generation, now_ms, batch), |tx, env| {
         Box::pin(async move {
             let (generation, now_ms, batch) = *env;
             require_pending(tx, &generation, now_ms).await?;
@@ -277,6 +280,56 @@ pub async fn abort_put<S: KvStore>(store: &S, generation: &GenId, now_ms: u64) -
             };
             tx.clear(&keys::pending(lease_until_ms, &generation));
             retire(tx, &generation, &header, now_ms)
+        })
+    })
+    .await
+}
+
+/// What a generation turned out to be after a commit whose outcome was
+/// unknown (RFC-003 §5.8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// The commit was applied: the generation is current (or a version).
+    Committed(GenerationHeader),
+    /// Not applied yet and still leased: the commit may be retried.
+    Pending,
+    /// Not applied and the lease has passed: expiry may retire it at any
+    /// moment; the caller must not retry the commit.
+    PendingExpired,
+    /// The generation was retired (aborted, expired, or displaced).
+    Retiring,
+    /// No metadata for the generation.
+    Missing,
+}
+
+/// Resolve the state of `generation` after a commit with an unknown
+/// outcome. Reads only; the decision what to do next belongs to the caller
+/// ([`abort_put`] to fence a late commit, or retry [`commit_put`]).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn resolve_commit<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    now_ms: u64,
+) -> Result<CommitOutcome> {
+    transact(store, (*generation, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (generation, now_ms) = *env;
+            let header = match generation_header(tx, &generation).await {
+                Ok(h) => h,
+                Err(MetaError::NoSuchGeneration) => return Ok(CommitOutcome::Missing),
+                Err(e) => return Err(e),
+            };
+            Ok(match header.state {
+                GenState::Committed => CommitOutcome::Committed(header),
+                GenState::Pending { lease_until_ms } if lease_until_ms > now_ms => {
+                    CommitOutcome::Pending
+                }
+                GenState::Pending { .. } => CommitOutcome::PendingExpired,
+                GenState::Retiring { .. } => CommitOutcome::Retiring,
+            })
         })
     })
     .await

@@ -35,5 +35,9 @@ uuid.workspace = true
 name = "e2e_fdb"
 required-features = ["fdb"]
 
+[[test]]
+name = "faults_fdb"
+required-features = ["fdb"]
+
 [lints]
 workspace = true
