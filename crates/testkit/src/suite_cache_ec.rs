@@ -421,13 +421,14 @@ pub async fn eviction_with_a_member_down_leaves_orphans_for_reconciliation<S: Kv
     }
     assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
 
-    // The dead member comes back with its two orphan shards.
+    // The dead member comes back with its two orphan shards (the GET above
+    // could not populate: one member was unreachable, so nothing was
+    // recorded).
     c.start_node(nodes[1 % nodes.len()]).await;
     assert_eq!(c.shard_count(nodes[1 % nodes.len()], g.id), 2);
-    // The GET above repopulated the chunks; wait, then reconcile: live
-    // placements keep their shards, the stale ones are deleted. Repopulated
-    // shards on the returned member were written under the same chunk IDs
-    // only if the member was reachable, so count what reconciliation removes.
+    // A read now repopulates both chunks over the stale shards (same chunk
+    // IDs); reconciliation then finds every shard referenced.
+    s3::get(&c.backend, BUCKET, "o").await.unwrap();
     c.wait_cached(BUCKET, "o", 2, Duration::from_secs(10)).await;
     let deleted = c.reconcile_cache().await;
     assert!(deleted <= 2, "{deleted}");
