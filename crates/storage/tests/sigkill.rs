@@ -24,8 +24,9 @@
 #![allow(clippy::assert_is_empty)]
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arca_lake_storage::{ShardKey, StorageError, Store, StoreConfig, SyncPolicy};
@@ -152,18 +153,30 @@ fn run_one(iteration: u64, policy: &str) -> (usize, usize) {
         .spawn()
         .expect("spawn crash_writer");
 
-    // Let it run for a pseudo-random time, then kill it hard.
+    // Collect acknowledgments as they arrive, wait for the writer to have
+    // acknowledged at least one operation (its start-up, including the
+    // first group commit, can take longer than the kill delay on a slow
+    // disk), then let it run for a pseudo-random time and kill it hard.
+    let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let lines = Arc::clone(&lines);
+        let stdout = child.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                lines.lock().unwrap().push(line);
+            }
+        })
+    };
+    let started = std::time::Instant::now();
+    while lines.lock().unwrap().is_empty() && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let ms = 30 + (iteration * 7919 + 13) % 400;
     std::thread::sleep(Duration::from_millis(ms));
     child.kill().expect("kill");
-    let mut out = String::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut out)
-        .unwrap();
     let _ = child.wait();
+    reader.join().unwrap();
+    let out = lines.lock().unwrap().join("\n");
 
     // Acknowledged operations, in order. The last line may be cut off by the
     // kill; `Op::parse` rejects such fragments and the loop stops there.

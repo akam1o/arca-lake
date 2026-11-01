@@ -7,3 +7,4 @@
 *.pem
 *.key
 /target-linux
+__pycache__/
