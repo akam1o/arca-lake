@@ -149,7 +149,16 @@ errors and stops at once on `Fenced`. *Verified*:
 
 Verified: everything with a test name above, on the in-memory backend and
 (election, failover, repair/GC across process loss) on a three-process
-FoundationDB cluster.
+FoundationDB cluster, both in CI (bridge network, test on the runner host)
+and in containers on a developer machine. Observed in those runs: six
+concurrent PUTs all committed across the loss of one process; with two of
+three coordinators killed, PUT and GET failed with an explicit
+"transaction timed out" error after the configured 5 s and nothing hung;
+the repair that was running when a process died stopped with a real
+`commit_unknown_result` from FoundationDB and the re-run completed; a GC
+pass during a process loss collected what it could and deferred the rest.
+The test cluster declares a distinct machine and zone per process so that
+`double` redundancy can place replicas; this is a test topology.
 
 Not verified: leader change while a repair's node RPC is in flight on a
 real network; two controllers partitioned from each other but both

@@ -38,3 +38,17 @@ require a cluster.
 
 The latency figures these tests print are local and relative only; they are
 not benchmark results in the sense of `benchmarks/README.md`.
+
+## FoundationDB failover (three processes)
+
+```sh
+deploy/dev/fdb-failover.sh
+```
+
+Starts one container running three `fdbserver` processes
+(`fdb-multi-entrypoint.sh`, distinct machine/zone localities, `double`
+redundancy, three coordinators) and runs
+`crates/testkit/tests/fdb_failover.rs` in a Rust container; the script
+answers the test's kill/start requests through a shared directory. On
+macOS install coreutils for `gtimeout`, or the script runs without
+command timeouts. The topology is for tests only.
