@@ -398,6 +398,14 @@ recorded in ADR-0009; the roadmap page is `docs/roadmap/phase-2.md`.
 | T8 cache with GC, repair, reconciliation, epoch change | verified (single-pass interleavings) | `cache_survives_durable_repair_gc_and_fenced_cache_epoch`, `overwrite_…` (GC); sustained concurrent load not run |
 | Record invariants C1–C4 | verified (model) | `cache_model.rs` |
 | FoundationDB instantiation | verified | `cache_fdb.rs` 12/12 in CI and in the local container runner |
+| Cache protection `none` / `replication` / `ec` selectable per tier; `k`, `m`, `r` as parameters (§5.9) | verified | `cache_ec.rs` (replication 2 and RS 2+1 modules), `cache_ec_fdb.rs`; `create-cache-groups --protection` |
+| Coded cache hit from `k` shards; durable placement untouched; members on distinct failure domains | verified | `coded_hit_reads_shards_and_leaves_durable_alone` |
+| Degraded cache read on shard loss, node down, or corruption; read-triggered cache repair | verified | `shard_loss_is_a_degraded_hit_repaired_on_read`, `member_down_degrades_then_unreadable_falls_back`, `corrupt_shards_are_missing_and_too_many_fall_back` |
+| Unrecoverable cache copy falls back to the durable tier and is invalidated | verified | same cases (fewer than `k` members, all shards corrupt) |
+| Population or eviction with a member down: nothing partial recorded; orphans reconciled | verified | `population_with_a_member_down_records_nothing`, `eviction_with_a_member_down_leaves_orphans_for_reconciliation` |
+| Controller cache repair: verified completion, per-pass budget, subordinate to durable repair | verified (budget and completion); priority by construction in `repair_pass`, no dedicated test | `controller_cache_repair_rebuilds_a_lost_member_within_budget` |
+| Epoch change fences stale cache populations; placements stay readable | verified | `epoch_change_fences_stale_population_and_keeps_placements` |
+| Durable repair and GC with a coded cache | verified | `durable_repair_and_gc_leave_the_coded_cache_alone` |
 | Write-through population | not implemented | §5.3, Phase 2.1 option |
 | Per-bucket tier policies | not implemented | §10 |
 | Performance (§9) | not measured | hypotheses only; RFC-009 |

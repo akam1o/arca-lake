@@ -58,6 +58,10 @@ struct Args {
     /// Verify GET bodies against the deterministic pattern (costs CPU).
     #[arg(long)]
     verify: bool,
+    /// Count `404 Not Found` on GET as `missing` instead of an error (for
+    /// verify passes after faults: a failed PUT leaves no object).
+    #[arg(long)]
+    allow_missing: bool,
     #[arg(long, default_value = "obj")]
     prefix: String,
     #[arg(long, default_value_t = 1)]
@@ -85,6 +89,7 @@ struct Summary {
     bytes: u64,
     errors: u64,
     mismatches: u64,
+    missing: u64,
     ops_per_s: f64,
     mib_per_s: f64,
     lat_ms_mean: f64,
@@ -135,6 +140,7 @@ struct Counters {
     bytes: AtomicU64,
     errors: AtomicU64,
     mismatches: AtomicU64,
+    missing: AtomicU64,
     latencies: Mutex<Vec<f64>>,
 }
 
@@ -181,6 +187,10 @@ async fn one_request(
         Op::CreateBucket => unreachable!(),
     };
     let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+    if args.allow_missing && args.op == Op::Get && status.as_u16() == 404 {
+        counters.missing.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    }
     if !status.is_success() {
         return Err(format!("{key}: HTTP {status}"));
     }
@@ -250,6 +260,7 @@ async fn run_pass(client: &HttpClient, args: &Arc<Args>, pass: u32) -> Summary {
         bytes,
         errors: counters.errors.load(Ordering::Relaxed),
         mismatches: counters.mismatches.load(Ordering::Relaxed),
+        missing: counters.missing.load(Ordering::Relaxed),
         ops_per_s: ops as f64 / secs,
         mib_per_s: bytes as f64 / (1024.0 * 1024.0) / secs,
         lat_ms_mean: if lats.is_empty() {

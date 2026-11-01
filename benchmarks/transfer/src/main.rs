@@ -589,7 +589,7 @@ async fn run_client(a: ClientArgs) {
             for _ in 0..a.connections.max(1) {
                 let scheme = if a.tls { "https" } else { "http" };
                 let mut ep =
-                    Channel::from_shared(format!("{scheme}://localhost:{}", a.addr.port()))
+                    Channel::from_shared(format!("{scheme}://{}", a.addr))
                         .unwrap()
                         .tcp_nodelay(true)
                         .initial_stream_window_size(Some(8 << 20))
