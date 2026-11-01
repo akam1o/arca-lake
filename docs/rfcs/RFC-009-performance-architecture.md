@@ -227,6 +227,68 @@ controller 32 MiB, gateway 87–142 MiB (highest in the `ec` runs at
 concurrency 8), the private `fdbserver` 95–98 MiB. `s3load` had exited
 when the snapshot was taken and is not included.
 
+### 6.8 Phase 2.2: deadlines and retries under impairment (R-47)
+
+Method: the namespace pair of `docs/verification/network-faults.md`,
+`ec 2+1` cache, 8 MiB objects, 4 MiB chunks, PUT concurrency 4 (2 for
+the partition and node scenarios), run twice with the same code against
+two gateway policies: *old* (one attempt, a single 10 s bound equivalent
+to the former per-RPC timeout: `--node-max-attempts 1
+--node-progress-timeout-secs 10 --node-min-rate-mib 0`) and *new*
+(defaults: progress timeout 5 s, absolute deadline 10 s + 1 MiB/s, three
+attempts with 100 ms exponential backoff). Conditions: loss 0 / 2 / 5 /
+10 %, delay 50 ms with and without ± 10 ms jitter, socket resets, a 10 s
+partition, a node rate-limited to 8 Mbit/s, a node stopped with
+`SIGSTOP` for 20 s. Recorded per scenario: PUT success count, throughput,
+p50 / p95 / p99, verify pass (missing / mismatches), and the gateway's
+RPC counters (stalled, deadline exceeded, retries, exhausted).
+
+<!-- R47-RESULTS -->
+
+### 6.9 Phase 2.2: cache hit-ratio analysis
+
+Method: two hosts (A: FoundationDB, controller, `d0`, `d1`, `c0`, `c1`;
+B: `d2`, `c2`, gateway), none / replication 2 / ec 2+1, 96 × 16 MiB,
+concurrency 4, three GET passes with populations allowed to settle
+between passes, with 8 and with 32 in-flight populations per gateway;
+the counters of RFC-006 §5.3 "Hit accounting" before and after each pass.
+
+<!-- HIT-RESULTS -->
+
+### 6.10 Phase 2.2: parallel chunk fetch
+
+Method: same layout as §6.9, durable only and cache `none`, concurrency
+1 and 4, `--read-parallelism 1` versus `4`, three repetitions each in
+shuffled order (`repeat.sh`).
+
+<!-- PARALLEL-RESULTS -->
+
+### 6.11 Phase 2.2: gRPC transport matrix
+
+Method: `transport-matrix.sh` between two hosts, 1 MiB shards, 6 s per
+cell: gRPC and raw framed TCP, with and without TLS, 1 / 2 / 4
+connections, 1 / 4 / 8 streams, 64 KiB / 256 KiB / 1 MiB frames, GET and
+PUT; client and server CPU seconds from the bench's own accounting.
+
+<!-- TRANSPORT-RESULTS -->
+
+### 6.12 Phase 2.2: repeated cache protection comparison
+
+Method: `repeat.sh`, three repetitions in shuffled order with a warm-up
+pass per setup, durable only and the three protection modes at
+concurrency 4; `aggregate.py` statistics.
+
+<!-- REPEAT-RESULTS -->
+
+### 6.13 Phase 2.2: disk-bound runs
+
+Method: `diskbound.sh`, durable only, data set larger than the page cache
+of every node (`free -m` recorded before and after), sequential then
+random GET passes, 256 KiB objects, and a GET pass with a concurrent PUT
+stream. No cache drops, no direct I/O.
+
+<!-- DISK-RESULTS -->
+
 ## 7. Interpretation
 
 *Verified on this environment* (one run each; see §4 for the error

@@ -148,6 +148,20 @@ GET ─▶ read_manifest (pointer, header, chunk records, cache placements: one 
 - Cache nodes are storage nodes; the cache group's placement epoch fences
   writes exactly as for durable groups.
 
+**Hit accounting (Phase 2.2).** "Hit ratio" is not one number. The gateway
+counts, per chunk read: *lookup hits* (the manifest carried a cache
+placement), *served hits* (the copy was read and validated), *degraded
+hits* (served with at least one shard missing), and *fallbacks* by cause
+(fewer than `k` readable shards, length or CRC mismatch, node error,
+unknown group). On the population side it counts admissions refused by
+size, by the miss threshold, at capacity, or because the generation was
+retired; populations skipped for lack of an in-flight permit; populations
+deduplicated; and population failures by cause (node, metadata,
+checksum). `served hits / (served hits + misses + fallbacks)` is the
+readable hit ratio; `lookup hits − served hits` is the fallback count.
+RFC-009 §6 uses these to explain the differences between protection
+modes.
+
 Write-through (populate on PUT) is a policy flag on the same mechanism
 (populate from the chunk bytes the gateway already holds). Phase 2 ships
 read-through; write-through is listed as a Phase 2.1 option and is not
