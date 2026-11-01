@@ -1,6 +1,7 @@
 //! Write path (RFC-003 §5.3, RFC-004 §5.5).
 
 use std::collections::HashMap;
+use std::future::Future;
 
 use arca_lake_common::chunk_id;
 use arca_lake_metadata::ops::object::{self, CommitInfo, CommitOutcome, Precondition};
@@ -206,6 +207,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                     break;
                 };
                 buf.extend_from_slice(&b);
+                // Bytes from the client are progress: keep the generation
+                // alive on a slow client link (R-47).
+                self.renew_if_due(generation, lease_ms, &mut last_renewal)
+                    .await?;
             }
             let chunk = if buf.len() > max_chunk {
                 buf.split_to(max_chunk).freeze()
@@ -218,24 +223,25 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             let small = first && finished && self.cfg.profile.is_small_object(chunk.len() as u64);
             first = false;
             md5.update(&chunk);
+            // Shard uploads on a lossy link can outlast the lease on their
+            // own; renew while they are still being attempted (a stalled
+            // stream fails within the RPC policy's progress timeout and
+            // retry budget, after which renewal stops and the lease runs
+            // out).
             let placed = self
-                .place_chunk(generation, index, chunk.clone(), size, small)
-                .await?;
+                .renewing(
+                    generation,
+                    lease_ms,
+                    &mut last_renewal,
+                    self.place_chunk(generation, index, chunk.clone(), size, small),
+                )
+                .await??;
             size += chunk.len() as u64;
             batch.push((placed.index, placed.record));
             index += 1;
 
             if self.take_fault(FaultPoint::AfterShardsBeforeManifest) {
                 return Err(s3_error!(InternalError, "injected crash after shards").into());
-            }
-            // Keep the generation alive while bytes keep arriving: renew
-            // the lease once a third of it has passed since the last
-            // renewal (slow links, R-47). A stalled upload renews nothing.
-            if last_renewal.elapsed() >= self.cfg.lease / 3 {
-                object::renew_lease(self.meta.as_ref(), &generation, now_ms(), lease_ms)
-                    .await
-                    .map_err(meta_err)?;
-                last_renewal = std::time::Instant::now();
             }
             if batch.len() >= self.cfg.chunk_batch {
                 object::append_chunks_renewing(
@@ -301,6 +307,44 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// Encode one chunk and write its shards to a stripe group, retrying
     /// with a refreshed map on epoch rejection and with another group on
     /// node failures.
+    /// Renew the pending generation's lease if a third of it has passed
+    /// since `last_renewal`.
+    async fn renew_if_due(
+        &self,
+        generation: GenId,
+        lease_ms: u64,
+        last_renewal: &mut std::time::Instant,
+    ) -> Result<(), WriteFailure> {
+        if last_renewal.elapsed() >= self.cfg.lease / 3 {
+            object::renew_lease(self.meta.as_ref(), &generation, now_ms(), lease_ms)
+                .await
+                .map_err(meta_err)?;
+            *last_renewal = std::time::Instant::now();
+        }
+        Ok(())
+    }
+
+    /// Drive `fut` to completion, renewing the lease every third of it
+    /// meanwhile.
+    async fn renewing<T>(
+        &self,
+        generation: GenId,
+        lease_ms: u64,
+        last_renewal: &mut std::time::Instant,
+        fut: impl Future<Output = T>,
+    ) -> Result<T, WriteFailure> {
+        tokio::pin!(fut);
+        loop {
+            let due = *last_renewal + self.cfg.lease / 3;
+            tokio::select! {
+                out = &mut fut => return Ok(out),
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(due)) => {
+                    self.renew_if_due(generation, lease_ms, last_renewal).await?;
+                }
+            }
+        }
+    }
+
     async fn place_chunk(
         &self,
         generation: GenId,

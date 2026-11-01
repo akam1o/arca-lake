@@ -458,13 +458,14 @@ async fn too_slow_shard_stream_hits_the_absolute_deadline() {
 async fn slow_upload_renews_its_lease_and_commits() {
     let c = TestCluster::start(ClusterOptions {
         groups: 1,
-        lease: Duration::from_millis(1500),
+        lease: Duration::from_millis(1000),
         ..ClusterOptions::rs(3, 2, 1, 256 << 10, 0)
     })
     .await;
     s3::create_bucket(&c.backend, BUCKET).await.unwrap();
-    // Every shard write crawls: ~600 ms per 64 KiB frame step on one shard,
-    // so a 6-chunk object takes several seconds, well past the lease.
+    // Every shard write crawls: 600 ms per frame on one shard, two frames
+    // per 128 KiB shard, so a single chunk's upload (1.2 s) already
+    // outlasts the lease and the 6-chunk object takes several seconds.
     c.backend.node_clients().set_fault_hook(Some(hook(|ctx| {
         if ctx.rpc == Rpc::PutShard && ctx.shard.is_some_and(|s| s.shard_index == 0) {
             FaultAction::SlowStream(Duration::from_millis(600))
@@ -484,8 +485,8 @@ async fn slow_upload_renews_its_lease_and_commits() {
     .await
     .unwrap();
     assert!(
-        started.elapsed() > Duration::from_millis(1500),
-        "the upload must outlast the lease for this test to mean anything"
+        started.elapsed() > Duration::from_millis(3000),
+        "the upload must outlast the lease several times for this test to mean anything"
     );
     c.backend.node_clients().set_fault_hook(None);
     assert_eq!(s3::get(&c.backend, BUCKET, "slow").await.unwrap().0, data);
