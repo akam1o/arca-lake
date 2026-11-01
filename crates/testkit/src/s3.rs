@@ -135,7 +135,12 @@ pub async fn get_range(
     collect(out.body).await
 }
 
-async fn collect(body: Option<StreamingBlob>) -> S3Result<Bytes> {
+/// Collect a streaming body into memory.
+///
+/// # Errors
+///
+/// Stream errors.
+pub async fn collect(body: Option<StreamingBlob>) -> S3Result<Bytes> {
     let Some(mut body) = body else {
         return Ok(Bytes::new());
     };

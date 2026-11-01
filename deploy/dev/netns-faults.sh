@@ -110,7 +110,8 @@ cmd_setup() {
     *) echo "unknown mode $mode" >&2; exit 2 ;;
   esac
   start_controller "$cache_args"
-  start 2 gateway "$BIN gateway --backend cluster --cluster-file $CF --allow-anonymous --listen $IP2:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node --lease-secs 20 $cache_args"
+  # GW_EXTRA_ARGS: e.g. the R-47 policy under test (--node-* flags).
+  start 2 gateway "$BIN gateway --backend cluster --cluster-file $CF --allow-anonymous --listen $IP2:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node --lease-secs 20 $cache_args ${GW_EXTRA_ARGS:-}"
   echo "$mode" > "$RUN/mode"
   sleep 1.5
   in2 $S3LOAD --endpoint "$EP" --bucket faults --op create-bucket
@@ -133,6 +134,24 @@ bandwidth() { # <rate>
 clear_impairment() {
   root1 tc qdisc del dev "$V1" root 2>/dev/null || true
   root2 tc qdisc del dev "$V2" root 2>/dev/null || true
+}
+# Rate-limit only the traffic that d0 (port 9100 in namespace 1) sends:
+# a prio root on the namespace-1 veth end with a tbf child selected by a
+# u32 filter on the source port. Everything else in the namespace is
+# untouched. `slow_node off` removes it.
+slow_node() { # on <rate> | off
+  if [ "$1" = on ]; then
+    root1 tc qdisc replace dev "$V1" root handle 1: prio bands 3 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    root1 tc qdisc add dev "$V1" parent 1:1 handle 10: tbf rate "$2" burst 32kb latency 400ms
+    root1 tc filter add dev "$V1" parent 1: protocol ip prio 1 u32 match ip sport 9100 0xffff flowid 1:1
+  else
+    root1 tc qdisc del dev "$V1" root 2>/dev/null || true
+  fi
+}
+stall_node() { # <name> on|off  (SIGSTOP keeps connections open with no progress)
+  local pid; pid="$(cat "$RUN/$1.pid" 2>/dev/null || true)"
+  [ -z "$pid" ] && return 0
+  if [ "$2" = on ]; then kill -STOP "$pid"; else kill -CONT "$pid"; fi
 }
 partition() { # on|off
   if [ "$1" = on ]; then root2 ip link set "$V2" down; else root2 ip link set "$V2" up; fi
@@ -172,7 +191,12 @@ cmd_scenario() {
       load "$dir/put.jsonl" --op put --prefix base --objects $n --size $size --concurrency 4 --label base-put
       load "$dir/get.jsonl" --op get --prefix base --objects $n --size $size --concurrency 4 --passes 2 --verify --label base-get
       ;;
-    loss2|loss10)
+    loss0)
+      load "$dir/put.jsonl" --op put --prefix loss0 --objects $n --size $size --concurrency 4 --label loss0-put
+      load "$dir/get.jsonl" --op get --prefix loss0 --objects $n --size $size --concurrency 4 --passes 2 --verify --label loss0-get
+      verify_all "$dir/verify.jsonl" loss0 $n $size
+      ;;
+    loss2|loss5|loss10)
       local pct="${name#loss}"
       impair loss "${pct}%"
       load "$dir/put.jsonl" --op put --prefix "$name" --objects $n --size $size --concurrency 4 --label "$name-put"
@@ -253,6 +277,25 @@ cmd_scenario() {
       cat "$dir/get.jsonl"
       verify_all "$dir/verify-get.jsonl" rst 96 $size
       ;;
+    slow-node)
+      # d0 (one of the two data shards' nodes) answers at 8 Mbit/s: every
+      # PUT and durable GET crosses it; streams progress but slowly.
+      slow_node on 8mbit
+      load "$dir/put.jsonl" --op put --prefix slow --objects 4 --size $size --concurrency 2 --label slow-put
+      load "$dir/get.jsonl" --op get --prefix slow --objects 4 --size $size --concurrency 2 --passes 2 --verify --label slow-get
+      slow_node off
+      verify_all "$dir/verify.jsonl" slow 4 $size
+      ;;
+    stalled-node)
+      # d0 is SIGSTOPped for 20 s in the middle of PUTs: its connections stay
+      # open but no frame moves; then it resumes.
+      (in2 $S3LOAD --endpoint "$EP" --bucket faults --op put --prefix stall --objects 48 --size $size --concurrency 2 --label stall-put > "$dir/put.jsonl" 2> "$dir/put.err" || true) &
+      sleep 1.0; stall_node d0 on; sleep 20; stall_node d0 off
+      wait
+      cat "$dir/put.jsonl"
+      verify_all "$dir/verify.jsonl" stall 48 $size
+      load "$dir/put-after.jsonl" --op put --prefix stall2 --objects 4 --size $size --concurrency 2 --label stall-put-after
+      ;;
     repair-under-loss)
       load "$dir/put.jsonl" --op put --prefix rep --objects $n --size $size --concurrency 4 --label rep-put
       impair loss 2%
@@ -293,6 +336,14 @@ cmd_all() {
   done
 }
 
+# The R-47 matrix: the ten conditions of Phase 2.2 §1, run against the
+# gateway policy given in GW_EXTRA_ARGS at setup time.
+cmd_r47() {
+  for s in loss0 loss2 loss5 loss10 delay-nojitter delay reset partition slow-node stalled-node; do
+    cmd_scenario "$s"
+  done
+}
+
 cmd_teardown() {
   clear_impairment 2>/dev/null || true
   for p in "$RUN"/*.pid; do [ -f "$p" ] && kill "$(cat "$p")" 2>/dev/null || true; done
@@ -307,6 +358,7 @@ case "${1:-}" in
   setup) shift; cmd_setup "$@" ;;
   scenario) shift; cmd_scenario "$@" ;;
   all) cmd_all ;;
+  r47) cmd_r47 ;;
   teardown) cmd_teardown ;;
   *) echo "usage: $0 setup [mode] | scenario <name> | all | teardown" >&2; exit 2 ;;
 esac

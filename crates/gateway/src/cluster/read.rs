@@ -17,6 +17,9 @@ use s3s::{S3Error, S3Response, S3Result, s3_error};
 use super::backend::{ClusterBackend, meta_err, now_ms};
 use super::map::ClusterMap;
 
+/// An in-flight chunk read.
+type ChunkTask = tokio::task::JoinHandle<Result<Bytes, S3Error>>;
+
 fn addr_of(map: &ClusterMap) -> impl Fn(u64) -> Option<String> + Sync + '_ {
     move |node_id| map.node_addr(node_id).map(str::to_string)
 }
@@ -67,9 +70,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }))
     }
 
-    /// Stream bytes `[start, end)` of the object, chunk by chunk. Errors
-    /// after the first byte terminate the stream with an error (the client
-    /// observes a truncated body), never with wrong bytes.
+    /// Stream bytes `[start, end)` of the object, chunk by chunk, with up
+    /// to `read_parallelism` chunks in flight ahead of the one being sent
+    /// (RFC-009 §9). Delivery stays in order; memory is bounded by the
+    /// in-flight chunks plus the channel buffer; a dropped body (client
+    /// cancellation) aborts every in-flight read. Errors after the first
+    /// byte terminate the stream with an error (the client observes a
+    /// truncated body), never with wrong bytes.
     fn stream_range(
         &self,
         map: Arc<ClusterMap>,
@@ -92,16 +99,46 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             })
             .collect();
         let backend = self.clone();
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, S3Error>>(2);
+        let parallelism = self.cfg.read_parallelism.max(1);
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, S3Error>>(1);
         tokio::spawn(async move {
-            for (index, chunk, cached) in chunks {
-                let result = backend
-                    .read_chunk_bytes(&map, generation, index, &chunk, cached.as_ref())
-                    .await;
-                let bytes = match result {
-                    Ok(b) => b,
-                    Err(e) => {
+            let mut pending: std::collections::VecDeque<(ChunkRecord, ChunkTask)> =
+                std::collections::VecDeque::new();
+            let mut queue = chunks.into_iter();
+            let abort_all = |pending: &mut std::collections::VecDeque<(ChunkRecord, ChunkTask)>| {
+                for (_, task) in pending.drain(..) {
+                    task.abort();
+                }
+            };
+            loop {
+                while pending.len() < parallelism {
+                    let Some((index, chunk, cached)) = queue.next() else {
+                        break;
+                    };
+                    let backend = backend.clone();
+                    let map = Arc::clone(&map);
+                    let record = chunk.clone();
+                    let task = tokio::spawn(async move {
+                        backend
+                            .read_chunk_bytes(&map, generation, index, &record, cached.as_ref())
+                            .await
+                    });
+                    pending.push_back((chunk, task));
+                }
+                let Some((chunk, task)) = pending.pop_front() else {
+                    return;
+                };
+                let bytes = match task.await {
+                    Ok(Ok(b)) => b,
+                    Ok(Err(e)) => {
+                        abort_all(&mut pending);
                         let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                    Err(join) => {
+                        abort_all(&mut pending);
+                        let err = s3_error!(InternalError, "chunk read task failed: {join}");
+                        let _ = tx.send(Err(err)).await;
                         return;
                     }
                 };
@@ -110,6 +147,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 let from = usize::try_from(start.max(cs) - cs).unwrap_or(0);
                 let to = usize::try_from(end.min(ce) - cs).unwrap_or(bytes.len());
                 if tx.send(Ok(bytes.slice(from..to))).await.is_err() {
+                    abort_all(&mut pending);
                     return;
                 }
             }

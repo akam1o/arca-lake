@@ -95,6 +95,7 @@ struct Summary {
     lat_ms_mean: f64,
     lat_ms_p50: f64,
     lat_ms_p90: f64,
+    lat_ms_p95: f64,
     lat_ms_p99: f64,
     lat_ms_max: f64,
 }
@@ -270,6 +271,7 @@ async fn run_pass(client: &HttpClient, args: &Arc<Args>, pass: u32) -> Summary {
         },
         lat_ms_p50: percentile(&lats, 0.50),
         lat_ms_p90: percentile(&lats, 0.90),
+        lat_ms_p95: percentile(&lats, 0.95),
         lat_ms_p99: percentile(&lats, 0.99),
         lat_ms_max: lats.last().copied().unwrap_or(0.0),
     }

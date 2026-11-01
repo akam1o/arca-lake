@@ -44,6 +44,10 @@ pub struct ClusterConfig {
     pub rpc_policy: Option<arca_lake_protocol::client::RpcPolicy>,
     /// Read-through cache tier (RFC-006); `None` disables caching.
     pub cache: Option<CacheTierConfig>,
+    /// Chunks read ahead of the one being streamed to the client (1 =
+    /// sequential). Bounds the gateway's buffered bytes per GET to about
+    /// `read_parallelism` chunks (RFC-009 §9).
+    pub read_parallelism: usize,
 }
 
 /// Fault-injection points in the write path (tests only).

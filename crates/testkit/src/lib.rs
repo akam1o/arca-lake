@@ -92,6 +92,10 @@ pub struct ClusterOptions {
     pub cache_protection: CacheProtection,
     /// Cache groups to create for replicated or coded protection.
     pub cache_groups: usize,
+    /// Gateway chunk read-ahead (see `ClusterConfig::read_parallelism`).
+    /// Test clusters default to 3 so that every suite exercises ordered
+    /// parallel delivery.
+    pub read_parallelism: usize,
 }
 
 /// The cache tier name used by test clusters.
@@ -139,6 +143,7 @@ impl ClusterOptions {
             cache: None,
             cache_protection: CacheProtection::None,
             cache_groups: 1,
+            read_parallelism: 3,
         }
     }
 }
@@ -279,6 +284,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 node_timeout: Duration::from_secs(5),
                 rpc_policy: None,
                 cache,
+                read_parallelism: opts.read_parallelism,
             },
         )
         .await

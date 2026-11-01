@@ -204,6 +204,10 @@ struct GatewayArgs {
     cache: CacheArgs,
     #[command(flatten)]
     rpc: NodeRpcArgs,
+    /// Chunks read ahead of the one being streamed per GET (1 = sequential);
+    /// bounds buffered bytes per GET to about this many chunks.
+    #[arg(long, default_value_t = 4)]
+    read_parallelism: usize,
     /// Serve gateway cache counters as Prometheus text on this address
     /// (`GET /metrics`); cluster backend only.
     #[arg(long)]
@@ -467,6 +471,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 node_timeout: Duration::from_secs(10),
                 rpc_policy: Some(args.rpc.policy()),
                 cache,
+                read_parallelism: args.read_parallelism,
             },
         )
         .await
