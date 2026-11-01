@@ -7,7 +7,10 @@
 
 pub mod gc;
 pub mod groups;
+pub mod metrics;
+pub mod process;
 pub mod repair;
+pub mod walk;
 
 /// Errors from control-plane operations.
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +54,10 @@ pub enum ControlError {
         /// Epoch found afterwards (0 when reported by a node's fence).
         found: u64,
     },
+    /// Reconstructed or stored bytes do not match what metadata or the
+    /// writer recorded; nothing was written.
+    #[error("integrity: {0}")]
+    Corrupt(String),
     /// Anything else.
     #[error("{0}")]
     Other(String),

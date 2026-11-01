@@ -190,6 +190,7 @@ async fn reconcile_reclaims_former_member_shards_only_after_repair_completes() {
                     &g,
                     now_ms() + 3_600_000,
                     0,
+                    0,
                 )
                 .await
                 .unwrap();

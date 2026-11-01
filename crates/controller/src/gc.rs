@@ -237,7 +237,7 @@ async fn delete_shards(
     Ok(deleted)
 }
 
-/// Reconcile one node's shards of `group` against metadata.
+/// Reconcile one node's shards of `group` against metadata, page by page.
 ///
 /// A shard is kept when a generation with its prefix is pending, or when a
 /// generation with its prefix has a chunk record for its index placed in
@@ -246,7 +246,9 @@ async fn delete_shards(
 /// no generation with the prefix exists at all and the shard is at least
 /// `min_age_ms` old by the time encoded in its chunk ID; or when `node_id`
 /// is not a current member of `group` and the group is not being repaired
-/// (a former member's copies are never read).
+/// (a former member's copies are never read). Every delete carries the
+/// group epoch the decision was made under; a node fenced to a newer epoch
+/// rejects it (RFC-008 §6.4).
 ///
 /// `min_age_ms` applies only to the no-generation case and must be at
 /// least the pending lease: a shard younger than that may belong to a
@@ -254,9 +256,13 @@ async fn delete_shards(
 /// disagreement between the writer that chose the chunk ID and this
 /// controller; it is never the criterion for deletion.
 ///
+/// Memory is bounded by the page size; a shard added or removed on the node
+/// during the walk may be missed or seen stale, which the next pass fixes.
+///
 /// # Errors
 ///
 /// Metadata or node errors.
+#[allow(clippy::too_many_arguments)]
 pub async fn reconcile_node<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -265,121 +271,90 @@ pub async fn reconcile_node<S: KvStore>(
     group: &GroupRecord,
     now_ms: u64,
     min_age_ms: u64,
+    page_size: u32,
 ) -> Result<ReconcileReport, ControlError> {
-    let shards = clients
-        .list_shards(node_addr, group.id)
-        .await
-        .map_err(|status| ControlError::Node {
-            addr: node_addr.to_string(),
-            status,
-        })?;
-    let is_member = group.members.iter().any(|m| m.node_id == node_id);
     let mut report = ReconcileReport::default();
-    for shard in shards {
-        if !is_member {
-            if group.state == GroupState::Repairing {
-                report.kept_referenced += 1;
-                continue;
-            }
-            // Re-read the group: membership may have changed since the
-            // caller loaded it (the node could have been re-added).
-            let current = cluster::get_group(meta, group.id).await?;
-            if current.members.iter().any(|m| m.node_id == node_id)
-                || current.state == GroupState::Repairing
-            {
-                report.kept_referenced += 1;
-                continue;
-            }
-            delete_one(clients, node_addr, shard, current.epoch).await?;
-            report.former_member_deleted += 1;
-            continue;
+    let mut after = None;
+    loop {
+        let page = clients
+            .list_shards_page(node_addr, group.id, after, page_size)
+            .await
+            .map_err(|status| ControlError::Node {
+                addr: node_addr.to_string(),
+                status,
+            })?;
+        for (shard, _) in &page.entries {
+            reconcile_shard(
+                meta,
+                clients,
+                node_id,
+                node_addr,
+                group,
+                now_ms,
+                min_age_ms,
+                *shard,
+                &mut report,
+            )
+            .await?;
         }
-        let (prefix, index) = split_chunk_id(&shard.chunk_id);
-        match classify(meta, &prefix, index, group.id).await? {
-            Attribution::Referenced => {
-                report.kept_referenced += 1;
-                continue;
-            }
-            Attribution::NoGeneration => {
-                let age = now_ms.saturating_sub(uuid_v7_unix_ms(&prefix));
-                if age < min_age_ms {
-                    report.kept_young += 1;
-                    continue;
-                }
-            }
-            Attribution::Unreferenced => {}
+        match page.next {
+            Some(n) => after = Some(n),
+            None => return Ok(report),
         }
-        delete_one(clients, node_addr, shard, group.epoch).await?;
-        report.orphans_deleted += 1;
     }
-    Ok(report)
 }
 
-/// What metadata says about a shard.
-enum Attribution {
-    /// A generation with the shard's prefix is pending, or places this
-    /// chunk in this group: keep.
-    Referenced,
-    /// No generation with the prefix exists at all.
-    NoGeneration,
-    /// Generations with the prefix exist, none is pending, and none places
-    /// this chunk in this group (a diverted or failed write): garbage.
-    Unreferenced,
-}
-
-/// One transaction: every generation header with `prefix`, and for each the
-/// chunk record `index`.
-async fn classify<S: KvStore>(
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_shard<S: KvStore>(
     meta: &S,
-    prefix: &[u8; 12],
-    index: u32,
-    group_id: u64,
-) -> Result<Attribution, MetaError> {
-    transact(meta, (*prefix, index, group_id), |tx, env| {
-        Box::pin(async move {
-            let (prefix, index, group_id) = *env;
-            let full = keys::gen_prefix_range(&prefix);
-            let mut begin = full.begin.clone();
-            let mut any = false;
-            // Walk generation by generation (the range also covers chunk
-            // records; jump over each generation's subspace).
-            while begin < full.end {
-                let first = tx
-                    .get_range(
-                        &arca_lake_metadata::kv::KeyRange::new(begin.clone(), full.end.clone()),
-                        1,
-                        false,
-                    )
-                    .await?;
-                let Some((k, _)) = first.into_iter().next() else {
-                    break;
-                };
-                let Some(generation) = keys::gen_from_gen_key(&k) else {
-                    break;
-                };
-                any = true;
-                if let Some(h) = tx.get(&keys::gen_header(&generation)).await? {
-                    let header: GenerationHeader = decode(&h)?;
-                    if matches!(header.state, GenState::Pending { .. }) {
-                        return Ok(Attribution::Referenced);
-                    }
-                }
-                if let Some(v) = tx.get(&keys::gen_chunk(&generation, index)).await? {
-                    let record: ChunkRecord = decode(&v)?;
-                    if record.placement.group_id == group_id {
-                        return Ok(Attribution::Referenced);
-                    }
-                }
-                begin = keys::gen_range(&generation).end;
+    clients: &NodeClients,
+    node_id: u64,
+    node_addr: &str,
+    group: &GroupRecord,
+    now_ms: u64,
+    min_age_ms: u64,
+    shard: ShardRef,
+    report: &mut ReconcileReport,
+) -> Result<(), ControlError> {
+    let is_member = group.members.iter().any(|m| m.node_id == node_id);
+    if !is_member {
+        if group.state == GroupState::Repairing {
+            report.kept_referenced += 1;
+            return Ok(());
+        }
+        // Re-read the group: membership may have changed since the caller
+        // loaded it (the node could have been re-added). The delete carries
+        // the epoch read here; a node re-added since has been fenced to a
+        // newer epoch and rejects it.
+        let current = cluster::get_group(meta, group.id).await?;
+        if current.members.iter().any(|m| m.node_id == node_id)
+            || current.state == GroupState::Repairing
+        {
+            report.kept_referenced += 1;
+            return Ok(());
+        }
+        delete_one(clients, node_addr, shard, current.epoch).await?;
+        report.former_member_deleted += 1;
+        return Ok(());
+    }
+    let (prefix, index) = split_chunk_id(&shard.chunk_id);
+    match gc::attribute_shard(meta, &prefix, index, group.id).await? {
+        gc::ShardAttribution::Referenced => {
+            report.kept_referenced += 1;
+            return Ok(());
+        }
+        gc::ShardAttribution::NoGeneration => {
+            let age = now_ms.saturating_sub(uuid_v7_unix_ms(&prefix));
+            if age < min_age_ms {
+                report.kept_young += 1;
+                return Ok(());
             }
-            Ok(if any {
-                Attribution::Unreferenced
-            } else {
-                Attribution::NoGeneration
-            })
-        })
-    })
-    .await
+        }
+        gc::ShardAttribution::Unreferenced => {}
+    }
+    delete_one(clients, node_addr, shard, group.epoch).await?;
+    report.orphans_deleted += 1;
+    Ok(())
 }
 
 async fn delete_one(

@@ -19,7 +19,8 @@ bytes.workspace = true
 futures.workspace = true
 tonic = { workspace = true, features = ["codegen", "channel", "transport"] }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 
 [lints]
 workspace = true

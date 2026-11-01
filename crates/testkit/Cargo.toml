@@ -39,5 +39,9 @@ required-features = ["fdb"]
 name = "faults_fdb"
 required-features = ["fdb"]
 
+[[test]]
+name = "fdb_failover"
+required-features = ["fdb"]
+
 [lints]
 workspace = true

@@ -1,25 +1,31 @@
-//! Member replacement and reconstruction (RFC-004 §5.4, §5.7).
+//! Member replacement and reconstruction (RFC-004 §5.4, §5.7; RFC-008 §7).
 //!
 //! Order of operations and the meaning of "complete":
 //!
 //! 1. **Fence.** Every reachable member of the old and new membership
-//!    learns `epoch + 1`. From here on, writers holding the old epoch are
-//!    rejected by every member that received the fence.
+//!    learns `epoch + 1`. The replacement must acknowledge the fence (it is
+//!    about to receive writes under the new epoch, and a pending delete
+//!    decided under the old epoch must be rejected by it, RFC-008 §6.4).
 //! 2. **Commit membership.** One transaction replaces the member, sets
 //!    `epoch + 1`, state `Repairing`, and clears the cursor. It fails if the
 //!    group changed since it was read ([`ControlError::EpochChanged`]).
 //!    Writers keep using the group (`Repairing` accepts writes); their new
 //!    chunks carry the new epoch and include the replacement directly.
-//! 3. **Reconstruct.** Chunk IDs are the union of what every member lists,
-//!    in sorted order; for each one missing on the replacement, `k` shards
-//!    are read, the missing shard is reconstructed and written with the new
-//!    epoch. The cursor (last processed chunk ID) is persisted after every
-//!    chunk so that a crashed controller resumes by re-issuing the same
-//!    command. A shard already present on the replacement (written by a
-//!    concurrent writer) is skipped: both would write identical bytes.
-//! 4. **Complete.** The group becomes `Active` only when every member lists
-//!    the same set of chunk IDs (nothing is missing anywhere). If another
-//!    membership change happened meanwhile, the repair stops with
+//! 3. **Reconstruct.** Chunks are walked in chunk-ID order with bounded
+//!    memory ([`crate::walk::GroupWalker`]). For each chunk the replacement
+//!    lacks (or holds corrupt, per `VerifyShards`), `k` shards are read, the
+//!    missing shard is reconstructed, the whole chunk is checked against the
+//!    checksum, scheme, and placement recorded in metadata, and the shard is
+//!    written with the new epoch; the node's returned CRC must match. The
+//!    cursor `(member, chunk ID)` is persisted after every chunk so that a
+//!    crashed controller resumes by re-issuing the same command.
+//! 4. **Complete.** The group becomes `Active` only when the completeness
+//!    check passes (§ `Completeness`): every member lists every chunk with
+//!    the same payload length, and the replacement's shards verify. If the
+//!    check fails, the cursor is cleared so that the next run walks the
+//!    whole group again (a shard the node quarantined during verification
+//!    is then found missing and rebuilt). If another membership change
+//!    happened meanwhile, the repair stops with
 //!    [`ControlError::EpochChanged`] and must be re-issued; the group stays
 //!    `Repairing`.
 //!
@@ -27,20 +33,28 @@
 //! they are and are reclaimed by reconciliation once the group is `Active`
 //! and the node is no longer a member (`gc::reconcile_node`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
-use arca_lake_ec::{CodeParams, SchemeId};
+use arca_lake_common::split_chunk_id;
+use arca_lake_ec::{CodeParams, ErasureCoder, SchemeId, StripeLayout};
 use arca_lake_metadata::KvStore;
-use arca_lake_metadata::ops::cluster;
-use arca_lake_metadata::records::{
-    GenState, GenerationHeader, GroupMember, GroupRecord, GroupState, NodeRecord, RepairCursor,
-    decode,
-};
-use arca_lake_metadata::{MetaError, Txn, keys, transact};
+use arca_lake_metadata::ops::{cluster, gc};
+use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord, RepairCursor};
 use arca_lake_protocol::client::{NodeClients, ShardRef};
 use bytes::Bytes;
 
 use crate::ControlError;
+use crate::walk::{ChunkPresence, GroupWalker};
+
+/// Tunables. Defaults: node default page size, verify only the replacement.
+#[derive(Debug, Clone, Default)]
+pub struct RepairOptions {
+    /// `ListShards`/`VerifyShards` page size (0 = node default).
+    pub page_size: u32,
+    /// Verify every member's shards (not only the replacement's) before
+    /// declaring the group complete. Reads all data of the group.
+    pub verify_all_members: bool,
+}
 
 /// Result of a repair.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,13 +63,40 @@ pub struct RepairReport {
     pub epoch: u64,
     /// Chunks whose shard was reconstructed and written.
     pub reconstructed: usize,
-    /// Chunks already present on the replacement (written concurrently or
-    /// by an earlier, interrupted run).
+    /// Chunks already present (and verified) on the replacement.
     pub skipped: usize,
     /// Whether this run continued an interrupted repair.
     pub resumed: bool,
-    /// Whether the group is `Active` again (every member holds every chunk).
+    /// Whether the group is `Active` again.
     pub complete: bool,
+    /// What the completeness check found.
+    pub completeness: Completeness,
+}
+
+/// Outcome of the completeness check (RFC-008 §7).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Completeness {
+    /// Chunks walked.
+    pub chunks: usize,
+    /// Chunks missing on at least one member.
+    pub missing: usize,
+    /// Chunks whose shards have different payload lengths across members.
+    pub length_mismatch: usize,
+    /// Shards that failed verification, per member index.
+    pub corrupt: Vec<(usize, usize)>,
+    /// Members that did not answer.
+    pub unavailable: Vec<usize>,
+}
+
+impl Completeness {
+    /// All members answered, nothing missing, nothing corrupt.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.missing == 0
+            && self.length_mismatch == 0
+            && self.corrupt.is_empty()
+            && self.unavailable.is_empty()
+    }
 }
 
 /// Points at which a [`replace_member_with`] hook is called.
@@ -93,8 +134,8 @@ fn hex(bytes: &[u8]) -> String {
 ///
 /// # Errors
 ///
-/// Metadata errors, node errors on the replacement, an unrecoverable
-/// chunk, or [`ControlError::EpochChanged`].
+/// Metadata errors, node errors on the replacement, an unrecoverable or
+/// corrupt chunk, or [`ControlError::EpochChanged`].
 pub async fn replace_member<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -108,14 +149,16 @@ pub async fn replace_member<S: KvStore>(
         group_id,
         index,
         replacement,
+        &RepairOptions::default(),
         async |_| Ok(()),
     )
     .await
 }
 
-/// [`replace_member`] with a hook called at every [`RepairStep`]; an error
-/// from the hook stops the repair at that point (tests use it to emulate a
-/// controller crash or to run concurrent operations).
+/// [`replace_member`] with options and a hook called at every
+/// [`RepairStep`]; an error from the hook stops the repair at that point
+/// (tests use it to emulate a controller crash or to run concurrent
+/// operations).
 ///
 /// # Errors
 ///
@@ -126,6 +169,7 @@ pub async fn replace_member_with<S: KvStore>(
     group_id: u64,
     index: usize,
     replacement: GroupMember,
+    opts: &RepairOptions,
     mut hook: impl AsyncFnMut(RepairStep) -> Result<(), ControlError>,
 ) -> Result<RepairReport, ControlError> {
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
@@ -154,7 +198,7 @@ pub async fn replace_member_with<S: KvStore>(
         }
     } else {
         let new_epoch = group.epoch + 1;
-        fence(clients, &nodes, &group, replacement, new_epoch).await;
+        fence(clients, &nodes, &group, replacement, new_epoch).await?;
         hook(RepairStep::Fenced).await?;
         let expected_epoch = group.epoch;
         let updated = cluster::update_group(meta, group_id, |g| {
@@ -164,7 +208,12 @@ pub async fn replace_member_with<S: KvStore>(
             g.members[index] = replacement;
             g.epoch = new_epoch;
             g.state = GroupState::Repairing;
-            g.repair_cursor = None;
+            // The cursor names the member being rebuilt from the start, so
+            // that any controller can resume the repair (RFC-011 §5.5).
+            g.repair_cursor = Some(RepairCursor {
+                member: u16::try_from(index).unwrap_or(u16::MAX),
+                chunk_id: [0; 16],
+            });
             true
         })
         .await?;
@@ -179,12 +228,29 @@ pub async fn replace_member_with<S: KvStore>(
         (updated, false)
     };
 
-    let mut report = reconstruct_member(meta, clients, &nodes, &group, index, &mut hook).await?;
+    let mut report =
+        reconstruct_member(meta, clients, &nodes, &group, index, opts, &mut hook).await?;
     report.resumed = resumed;
     hook(RepairStep::Reconstructed).await?;
 
-    // Complete only when nothing is missing anywhere in the group.
-    let complete = group_is_complete(clients, &nodes, &group).await?;
+    let completeness = check_completeness(clients, &nodes, &group, index, opts).await?;
+    let complete = completeness.is_complete();
+    if !complete {
+        // The next run must walk from the start again: the cursor only
+        // records how far reconstruction got, and the check found something
+        // (a corrupt or missing shard, an unreachable member) that a resumed
+        // walk from the cursor would never revisit.
+        let epoch = group.epoch;
+        cluster::update_group(meta, group_id, |g| {
+            if g.epoch == epoch && g.state == GroupState::Repairing && g.repair_cursor.is_some() {
+                g.repair_cursor = None;
+                true
+            } else {
+                false
+            }
+        })
+        .await?;
+    }
     if complete {
         let epoch = group.epoch;
         let after = cluster::update_group(meta, group_id, |g| {
@@ -206,23 +272,22 @@ pub async fn replace_member_with<S: KvStore>(
         }
     }
     report.complete = complete;
+    report.completeness = completeness;
     Ok(report)
 }
 
 /// Tell every reachable member of old ∪ new the new epoch. Unreachable
-/// members are the ones being replaced; if one returns later it is no
-/// longer a member and its shards are reclaimed by reconciliation.
+/// *old* members are the ones being replaced; the replacement must
+/// acknowledge, otherwise the change is not started.
 async fn fence(
     clients: &NodeClients,
     nodes: &HashMap<u64, NodeRecord>,
     group: &GroupRecord,
     replacement: GroupMember,
     new_epoch: u64,
-) {
+) -> Result<(), ControlError> {
     let mut fenced: BTreeSet<u64> = BTreeSet::new();
-    let mut targets: Vec<GroupMember> = group.members.clone();
-    targets.push(replacement);
-    for m in &targets {
+    for m in &group.members {
         if !fenced.insert(m.node_id) {
             continue;
         }
@@ -230,82 +295,51 @@ async fn fence(
             let _ = clients.update_epoch(&n.address, group.id, new_epoch).await;
         }
     }
+    let n = nodes.get(&replacement.node_id).ok_or_else(|| {
+        ControlError::Other(format!("replacement node {} unknown", replacement.node_id))
+    })?;
+    clients
+        .update_epoch(&n.address, group.id, new_epoch)
+        .await
+        .map_err(|status| ControlError::Node {
+            addr: n.address.clone(),
+            status,
+        })?;
+    Ok(())
 }
 
-/// Chunk IDs per member (shard index == member index), for the members
-/// that answer.
-async fn list_members(
+/// Shards on the target that fail verification (walks `VerifyShards`).
+async fn corrupt_on_target(
     clients: &NodeClients,
-    nodes: &HashMap<u64, NodeRecord>,
-    group: &GroupRecord,
-) -> BTreeMap<usize, Option<BTreeSet<[u8; 16]>>> {
-    let mut out = BTreeMap::new();
-    for (i, m) in group.members.iter().enumerate() {
-        let Some(n) = nodes.get(&m.node_id) else {
-            out.insert(i, None);
-            continue;
-        };
-        let listed = clients
-            .list_shards(&n.address, group.id)
-            .await
-            .ok()
-            .map(|list| {
-                list.into_iter()
-                    .filter(|s| usize::from(s.shard_index) == i)
-                    .map(|s| s.chunk_id)
-                    .collect::<BTreeSet<_>>()
-            });
-        out.insert(i, listed);
-    }
-    out
-}
-
-/// Every member answers and lists the same chunk IDs.
-async fn group_is_complete(
-    clients: &NodeClients,
-    nodes: &HashMap<u64, NodeRecord>,
-    group: &GroupRecord,
-) -> Result<bool, ControlError> {
-    let lists = list_members(clients, nodes, group).await;
-    let mut union: BTreeSet<[u8; 16]> = BTreeSet::new();
-    for l in lists.values().flatten() {
-        union.extend(l.iter().copied());
-    }
-    Ok(lists
-        .values()
-        .all(|l| l.as_ref().is_some_and(|l| *l == union)))
-}
-
-async fn reconstruct_member<S: KvStore>(
-    meta: &S,
-    clients: &NodeClients,
-    nodes: &HashMap<u64, NodeRecord>,
+    addr: &str,
     group: &GroupRecord,
     index: usize,
-    hook: &mut impl AsyncFnMut(RepairStep) -> Result<(), ControlError>,
-) -> Result<RepairReport, ControlError> {
-    let addr_of = |m: &GroupMember| nodes.get(&m.node_id).map(|n| n.address.clone());
-    let target_addr = addr_of(&group.members[index]).ok_or_else(|| {
-        ControlError::Other(format!(
-            "replacement node {} unknown",
-            group.members[index].node_id
-        ))
-    })?;
-
-    // Enumerate chunk IDs from every member (union), including the target
-    // so that concurrently written chunks are known.
-    let lists = list_members(clients, nodes, group).await;
-    if lists.get(&index).is_none_or(Option::is_none) {
-        return Err(ControlError::Other(format!(
-            "replacement {target_addr} did not answer ListShards"
-        )));
+    page_size: u32,
+) -> Result<BTreeSet<[u8; 16]>, ControlError> {
+    let own = u16::try_from(index).unwrap_or(u16::MAX);
+    let mut out = BTreeSet::new();
+    let mut after = None;
+    loop {
+        let page = clients
+            .verify_shards_page(addr, group.id, after, page_size)
+            .await
+            .map_err(|status| ControlError::Node {
+                addr: addr.to_string(),
+                status,
+            })?;
+        for v in &page.shards {
+            if v.shard.shard_index == own && !v.ok {
+                out.insert(v.shard.chunk_id);
+            }
+        }
+        match page.next {
+            Some(n) => after = Some(n),
+            None => return Ok(out),
+        }
     }
-    let mut chunk_ids: BTreeSet<[u8; 16]> = BTreeSet::new();
-    for l in lists.values().flatten() {
-        chunk_ids.extend(l.iter().copied());
-    }
-    let present_on_target = lists[&index].clone().unwrap_or_default();
+}
 
+fn coder_for(group: &GroupRecord) -> Result<(Box<dyn ErasureCoder>, CodeParams), ControlError> {
     let scheme = SchemeId::parse(&group.scheme)
         .ok_or_else(|| ControlError::Other(format!("unknown scheme {}", group.scheme)))?;
     let params = CodeParams::new(
@@ -315,34 +349,65 @@ async fn reconstruct_member<S: KvStore>(
     .map_err(|e| ControlError::Other(e.to_string()))?;
     let coder =
         arca_lake_ec::new_coder(scheme, params).map_err(|e| ControlError::Other(e.to_string()))?;
+    Ok((coder, params))
+}
+
+async fn reconstruct_member<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+    group: &GroupRecord,
+    index: usize,
+    opts: &RepairOptions,
+    hook: &mut impl AsyncFnMut(RepairStep) -> Result<(), ControlError>,
+) -> Result<RepairReport, ControlError> {
+    let target_addr = nodes
+        .get(&group.members[index].node_id)
+        .map(|n| n.address.clone())
+        .ok_or_else(|| {
+            ControlError::Other(format!(
+                "replacement node {} unknown",
+                group.members[index].node_id
+            ))
+        })?;
+    // Shards the target holds but cannot read back are treated as missing.
+    let corrupt = corrupt_on_target(clients, &target_addr, group, index, opts.page_size).await?;
+    let cursor = group
+        .repair_cursor
+        .filter(|c| usize::from(c.member) == index && c.chunk_id != [0; 16])
+        .map(|c| c.chunk_id);
+    let (coder, params) = coder_for(group)?;
+
     let mut report = RepairReport {
         epoch: group.epoch,
         ..RepairReport::default()
     };
-    for cid in chunk_ids {
-        let cursor = group
-            .repair_cursor
-            .filter(|c| usize::from(c.member) == index)
-            .map(|c| c.chunk_id);
-        if cursor.is_some_and(|c| cid <= c) {
-            // Processed by an earlier run (or written since, with the new
-            // epoch and therefore already on the target).
-            report.skipped += 1;
-            continue;
-        }
-        if present_on_target.contains(&cid) {
+    let mut walker = GroupWalker::new(clients, nodes, group, cursor, opts.page_size);
+    while let Some(chunk) = walker.next().await? {
+        let cid = chunk.chunk_id;
+        if chunk.present[index].is_some() && !corrupt.contains(&cid) {
             report.skipped += 1;
             persist_cursor(meta, group, index, cid).await?;
             continue;
         }
-        let Some(bytes) =
-            reconstruct_one(meta, clients, nodes, group, index, cid, coder.as_ref()).await?
+        let Some(bytes) = reconstruct_one(
+            meta,
+            clients,
+            nodes,
+            group,
+            index,
+            &chunk,
+            coder.as_ref(),
+            params,
+        )
+        .await?
         else {
             // Deleted meanwhile (no live generation accounts for it).
             report.skipped += 1;
             persist_cursor(meta, group, index, cid).await?;
             continue;
         };
+        let expected_crc = arca_lake_storage::format::crc32c(&bytes);
         let shard = ShardRef {
             group_id: group.id,
             chunk_id: cid,
@@ -352,7 +417,14 @@ async fn reconstruct_member<S: KvStore>(
             .put_shard(&target_addr, shard, group.epoch, bytes, 256 << 10)
             .await
         {
-            Ok(_) => {}
+            Ok(resp) if resp.crc32c == expected_crc => {}
+            Ok(resp) => {
+                return Err(ControlError::Corrupt(format!(
+                    "replacement {target_addr} stored chunk {} with crc {:08x}, expected {expected_crc:08x}",
+                    hex(&cid),
+                    resp.crc32c
+                )));
+            }
             Err(status) if NodeClients::is_epoch_rejected(&status) => {
                 return Err(ControlError::EpochChanged {
                     group: group.id,
@@ -376,32 +448,47 @@ async fn reconstruct_member<S: KvStore>(
         })
         .await?;
     }
+    if walker.unavailable().contains(&index) {
+        return Err(ControlError::Other(format!(
+            "replacement {target_addr} did not answer ListShards"
+        )));
+    }
     Ok(report)
 }
 
-/// Read any `k` shards of `cid` from the members other than `index` and
-/// reconstruct shard `index`. `None` when fewer than `k` shards exist and
-/// metadata no longer has a live generation for the chunk (it was deleted
-/// while the repair ran); fewer than `k` shards for a live generation is
-/// [`ControlError::Unrecoverable`].
+/// Read any `k` shards of the chunk from the members other than `index`,
+/// reconstruct shard `index`, and validate the whole chunk against its
+/// metadata record (checksum, scheme, placement) when one exists.
+///
+/// `None` when fewer than `k` shards exist and metadata has no live
+/// generation for the chunk (deleted while the repair ran).
+#[allow(clippy::too_many_arguments)]
 async fn reconstruct_one<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
     nodes: &HashMap<u64, NodeRecord>,
     group: &GroupRecord,
     index: usize,
-    cid: [u8; 16],
-    coder: &dyn arca_lake_ec::ErasureCoder,
+    chunk: &ChunkPresence,
+    coder: &dyn ErasureCoder,
+    params: CodeParams,
 ) -> Result<Option<Bytes>, ControlError> {
-    let params = coder.params();
+    let cid = chunk.chunk_id;
     let k = params.data;
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; params.total()];
     let mut have = 0;
-    for (i, m) in group.members.iter().enumerate() {
-        if i == index || have >= k {
+    // Prefer members that list the shard; try the others too (the listing
+    // may be stale).
+    let order: Vec<usize> = chunk
+        .holders()
+        .chain(0..group.members.len())
+        .filter(|&i| i != index)
+        .collect();
+    for i in order {
+        if have >= k || shards[i].is_some() {
             continue;
         }
-        let Some(n) = nodes.get(&m.node_id) else {
+        let Some(n) = nodes.get(&group.members[i].node_id) else {
             continue;
         };
         let shard = ShardRef {
@@ -414,8 +501,9 @@ async fn reconstruct_one<S: KvStore>(
             have += 1;
         }
     }
+    let (prefix, chunk_index) = split_chunk_id(&cid);
     if have < k {
-        if chunk_is_garbage(meta, cid).await? {
+        if !gc::generation_is_live(meta, &prefix).await? {
             return Ok(None);
         }
         return Err(ControlError::Unrecoverable {
@@ -428,43 +516,86 @@ async fn reconstruct_one<S: KvStore>(
     coder
         .reconstruct(&mut shards)
         .map_err(|e| ControlError::Other(format!("reconstruct: {e}")))?;
+
+    // Validate against metadata when the chunk is recorded (a pending
+    // generation may not have appended its record yet).
+    if let Some(record) = gc::chunk_record_in_group(meta, &prefix, chunk_index, group.id).await? {
+        if record.scheme != group.scheme
+            || record.data_shards != group.data_shards
+            || record.parity_shards != group.parity_shards
+        {
+            return Err(ControlError::Corrupt(format!(
+                "chunk {} recorded as {} {}+{} but group {} is {} {}+{}",
+                hex(&cid),
+                record.scheme,
+                record.data_shards,
+                record.parity_shards,
+                group.id,
+                group.scheme,
+                group.data_shards,
+                group.parity_shards
+            )));
+        }
+        let layout = StripeLayout::new(
+            usize::try_from(record.len).unwrap_or(0),
+            k,
+            coder.shard_alignment(),
+        );
+        let data: Vec<&[u8]> = shards[..k]
+            .iter()
+            .map(|s| s.as_deref().unwrap_or(&[]))
+            .collect();
+        let joined = layout.join(&data);
+        if arca_lake_storage::format::crc32c(&joined) != record.crc32c {
+            return Err(ControlError::Corrupt(format!(
+                "chunk {} reconstructed from {} shards does not match its recorded checksum",
+                hex(&cid),
+                have
+            )));
+        }
+    }
     Ok(Some(Bytes::from(shards[index].take().unwrap_or_default())))
 }
 
-/// Whether no pending or committed generation with the chunk's prefix
-/// exists (a retiring or finished generation's chunks are garbage).
-async fn chunk_is_garbage<S: KvStore>(meta: &S, cid: [u8; 16]) -> Result<bool, MetaError> {
-    let (prefix, _) = arca_lake_common::split_chunk_id(&cid);
-    transact(meta, prefix, |tx, prefix| {
-        Box::pin(async move {
-            let full = keys::gen_prefix_range(prefix);
-            let mut begin = full.begin.clone();
-            while begin < full.end {
-                let first = tx
-                    .get_range(
-                        &arca_lake_metadata::kv::KeyRange::new(begin.clone(), full.end.clone()),
-                        1,
-                        false,
-                    )
-                    .await?;
-                let Some((k, _)) = first.into_iter().next() else {
-                    break;
-                };
-                let Some(generation) = keys::gen_from_gen_key(&k) else {
-                    break;
-                };
-                if let Some(h) = tx.get(&keys::gen_header(&generation)).await? {
-                    let header: GenerationHeader = decode(&h)?;
-                    if matches!(header.state, GenState::Pending { .. } | GenState::Committed) {
-                        return Ok(false);
-                    }
-                }
-                begin = keys::gen_range(&generation).end;
-            }
-            Ok(true)
-        })
-    })
-    .await
+/// Completeness check: walk every member's listing (same chunk IDs, same
+/// payload lengths), verify the replacement's shards (and every member's
+/// when `verify_all_members`).
+async fn check_completeness(
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+    group: &GroupRecord,
+    index: usize,
+    opts: &RepairOptions,
+) -> Result<Completeness, ControlError> {
+    let mut c = Completeness::default();
+    let mut walker = GroupWalker::new(clients, nodes, group, None, opts.page_size);
+    while let Some(chunk) = walker.next().await? {
+        c.chunks += 1;
+        if chunk.present.iter().any(Option::is_none) {
+            c.missing += 1;
+        }
+        let lens: BTreeSet<u64> = chunk.present.iter().flatten().copied().collect();
+        if lens.len() > 1 {
+            c.length_mismatch += 1;
+        }
+    }
+    c.unavailable = walker.unavailable();
+    let to_verify: Vec<usize> = if opts.verify_all_members {
+        (0..group.members.len()).collect()
+    } else {
+        vec![index]
+    };
+    for i in to_verify {
+        let Some(n) = nodes.get(&group.members[i].node_id) else {
+            c.unavailable.push(i);
+            continue;
+        };
+        let corrupt = corrupt_on_target(clients, &n.address, group, i, opts.page_size).await?;
+        if !corrupt.is_empty() {
+            c.corrupt.push((i, corrupt.len()));
+        }
+    }
+    Ok(c)
 }
 
 /// Record progress; fails with [`ControlError::EpochChanged`] if the group

@@ -57,6 +57,11 @@ pub struct TestCluster<S: KvStore + 'static = MemKv> {
     pub clients: NodeClients,
     /// EC profile in use.
     pub profile: EcProfile,
+    /// `ListShards`/`VerifyShards` page size used by GC and repair helpers
+    /// (0 = node default).
+    pub page_size: u32,
+    /// Repair options used by [`TestCluster::repair`].
+    pub repair_options: repair::RepairOptions,
     tmp: tempfile::TempDir,
 }
 
@@ -210,6 +215,8 @@ impl<S: KvStore + 'static> TestCluster<S> {
             credentials,
             clients,
             profile: opts.profile,
+            page_size: 0,
+            repair_options: repair::RepairOptions::default(),
             tmp,
         }
     }
@@ -399,6 +406,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                     &g,
                     now_ms,
                     min_age_ms,
+                    self.page_size,
                 )
                 .await
                 .unwrap()
@@ -431,6 +439,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             group_id,
             index,
             member,
+            &self.repair_options,
             hook,
         )
         .await
@@ -447,11 +456,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         index: usize,
         new_node: usize,
     ) -> repair::RepairReport {
-        let member = GroupMember {
-            node_id: self.nodes[new_node].id,
-            device_id: 0,
-        };
-        repair::replace_member(self.meta.as_ref(), &self.clients, group_id, index, member)
+        self.repair_with(group_id, index, new_node, async |_| Ok(()))
             .await
             .unwrap()
     }
