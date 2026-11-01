@@ -1,0 +1,10 @@
+== host
+               total        used        free      shared  buff/cache   available
+Mem:            7936         586        5940          35        1704        7349
+Swap:              0           0           0
+ 0  0      0 6080952  77828 1667560    0    0     0    68  885  817  0  0 99  0  0  0
+== host
+               total        used        free      shared  buff/cache   available
+Mem:            7936         487        6204           0        1500        7448
+Swap:              0           0           0
+ 0  0      0 6355884  75408 1461180    0    0     0     0  126   59  0  0 100  0  0  0

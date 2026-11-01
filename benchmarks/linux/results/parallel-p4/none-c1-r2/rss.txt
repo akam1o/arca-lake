@@ -1,2 +1,2 @@
-a: fdbserver=87596 fdbserver=96800 arca-lake=54436 arca-lake=52436 arca-lake=96516 arca-lake=32084 
-b: arca-lake=34980 arca-lake=83236 arca-lake=102112 
+a: fdbserver=76916 fdbserver=96124 arca-lake=54164 arca-lake=52532 arca-lake=74848 arca-lake=31888 
+b: arca-lake=34824 arca-lake=80488 arca-lake=78272 

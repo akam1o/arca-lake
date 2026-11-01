@@ -1,0 +1,1 @@
+large_gib=24 large_objects=1536 small_count=8192

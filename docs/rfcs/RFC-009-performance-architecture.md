@@ -391,28 +391,36 @@ Method: same layout as §6.9, durable only and cache `none`, concurrency
 1 and 4, `--read-parallelism 1` versus `4`, three repetitions each in
 shuffled order (`repeat.sh`).
 
-Three repetitions each, shuffled order, warm-up pass per setup
-(`results/parallel-p1`, `results/parallel-p4`; medians, min–max in the
-raw tables):
+Three repetitions each, shuffled order, warm-up pass per setup, taken
+after the storage node's no-delay fix (§6.11; `results/parallel-p1`,
+`results/parallel-p4`; medians, min–max in the raw tables):
 
 | Configuration | Phase | `read_parallelism 1` MiB/s (p50 / p95 ms) | `read_parallelism 4` MiB/s (p50 / p95 ms) | Change |
 | --- | --- | --- | --- | --- |
-| durable, concurrency 1 | GET warm (pass 3) | 346 (33 / 69) | 417 (29 / 33) | +21 %, p95 −53 % |
-| durable, concurrency 4 | GET warm | 587 (96 / 122) | 561 (93 / 130) | within noise (CPU-bound) |
-| none, concurrency 1 | GET pass 1 (miss) | 278 (45 / 78) | 309 (41 / 47) | +11 % |
-| none, concurrency 1 | GET pass 3 (100 % hits) | 229 (52 / 111) | 428 (26 / 31) | **+87 %, p50 −50 %** |
-| none, concurrency 4 | GET pass 3 | 557 (98 / 129) at 71 % hits | 534 (99 / 142) at 49 % hits | within noise |
+| durable, concurrency 1 | GET warm (pass 3) | 377 (32 / 34) | 420 (29 / 32) | +12 % |
+| durable, concurrency 4 | GET warm | 606 (92 / 107) | 585 (96 / 121) | within noise (CPU-bound) |
+| none, concurrency 1 | GET pass 1 (miss + populate) | 294 (44 / 48) | 327 (38 / 42) | +11 % |
+| none, concurrency 1 | GET pass 3 (100 % hits) | 405 (30 / 32) | 474 (25 / 29) | **+17 %, p50 −16 %** |
+| none, concurrency 4 | GET pass 3 (97–100 % hits) | 701 (78 / 93) | 668 (80 / 107) | within noise |
 
-Gateway host RSS: 91–103 MiB with parallelism 1, 95–109 MiB with 4
-(about one extra 4 MiB chunk in flight). PUT is unchanged by design; its
-run-to-run spread (sd 14–90 MiB/s) is the dominant noise in these tables.
+Largest `arca-lake` process RSS on either host: 93–109 MiB with
+parallelism 1, 95–133 MiB with 4. PUT is unchanged by design; its
+run-to-run spread (sd 10–74 MiB/s) is the dominant noise in these tables.
 
-The cache hit at concurrency 1 now beats the durable read (428 versus
-417 MiB/s, p50 26 versus 29 ms), which reverses the Phase 2.1 finding:
-the hit's single 4 MiB RPC per chunk gained the most from reading the
-next chunks ahead, the durable read (two parallel 2 MiB shard RPCs per
-chunk) gained less, and at concurrency 4 the gateway host is CPU-bound
-either way.
+The same comparison taken *before* the no-delay fix
+(`results/parallel-p1-nagle`, `results/parallel-p4-nagle`) showed +87 %
+for the all-hit single request (229 → 428 MiB/s) and +21 % for the
+durable one (346 → 417): a serial reader paid the 40 ms stall of §6.11
+in full on every affected RPC, while four reads in flight overlapped it.
+Most of that gain belonged to the stall, not to parallel fetch; the
+numbers above are the gain parallel fetch has on its own.
+
+With both in place the cache hit at concurrency 1 beats the durable read
+(474 versus 420 MiB/s, p50 25 versus 29 ms), reversing the Phase 2.1
+finding: the hit's single 4 MiB RPC per chunk gains the most from
+reading the next chunks ahead, the durable read (two parallel 2 MiB
+shard RPCs per chunk) gains less, and at concurrency 4 the gateway host
+is CPU-bound either way.
 
 ### 6.11 Phase 2.2: gRPC transport matrix
 
@@ -492,14 +500,16 @@ What the matrix shows:
   both transports about 0.5–0.7 CPU-s/GiB and halves the single-stream
   rate; the raw-with-TLS cells sit between gRPC-without-TLS and
   gRPC-with-TLS.
-- **The gateway's own bound is elsewhere.** A gateway host serving a
-  durable GET at concurrency 4 spends about 3.3 CPU-s per GiB (§6.12);
-  the transport's share of that is at most the 1.2–1.5 CPU-s/GiB the
-  matrix attributes to a gRPC client, and the node side about 1.2. A
-  hybrid data path (raw framed TCP for shard bytes, gRPC for control)
-  would save at most 0.6–1.0 CPU-s/GiB on each side, i.e. 20–30 % of the
-  gateway host's CPU per GiB, at the cost of a second transport with its
-  own framing, TLS, timeouts, fencing and fault tests.
+- **The gateway's own bound is elsewhere.** In the two-host layout the
+  gateway host (gateway, load generator and one node) spends about 6.0
+  CPU-s per GiB on a durable GET at concurrency 4 and the host with two
+  durable nodes and FoundationDB about 3.5 (§6.12); the transport's
+  share is at most the 1.2–1.5 CPU-s/GiB the matrix attributes to a
+  gRPC client and about 1.2 to a server. A hybrid data path (raw framed
+  TCP for shard bytes, gRPC for control) would save at most 0.6–1.0
+  CPU-s/GiB on each side, i.e. 10–20 % of the gateway host's and 20–30 %
+  of the node host's CPU per GiB, at the cost of a second transport with
+  its own framing, TLS, timeouts, fencing and fault tests.
 
 Judgment: not now. The measured upper bound on the gain is 20–30 % of
 CPU per GiB on a path that is first bounded by the gateway's own
@@ -520,7 +530,7 @@ Before and after the storage node's no-delay fix (§6.11), three
 repetitions each in shuffled order (`results/repeat-c4-nagle`,
 `results/repeat-c4`; 96 × 16 MiB objects, 4 MiB chunks, 2 hosts):
 
-| Configuration | Phase | Before: MiB/s median (min–max) | After: MiB/s median (min–max) | After: p50 / p95 / p99 ms | After: hit ratio | After: CPU-s/GiB gateway host / node host | After: net GB per GiB, gateway host | Gateway-host RSS MiB |
+| Configuration | Phase | Before: MiB/s median (min–max) | After: MiB/s median (min–max) | After: p50 / p95 / p99 ms | After: hit ratio | After: CPU-s/GiB, node host (2 durable nodes + FoundationDB) / gateway host (gateway + 1 node + load generator) | After: net GB per GiB, node host | Largest `arca-lake` process RSS MiB |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | durable only | PUT | 326 (217–329) | 251 (178–338) | 188 / 602 / 648 | n/a | 7.4 / 10.2 | 1.07 | 102 |
 | durable only | GET warm (pass 3) | 592 (589–594) | 574 (574–575) | 97 / 121 / 129 | n/a | 3.5 / 6.0 | 1.06 | 102 |
@@ -551,21 +561,24 @@ What repetition adds to the single runs of Phase 2.1:
   streams, and the gateway host's CPU is the bound. The fix matters at
   low concurrency (§6.11, §6.10).
 - **Cost per GiB served from the cache.** With 97 % hits (`none`, pass
-  3) the gateway host spends 1.7 CPU-s and moves 0.43 GB of network per
-  GiB, against 3.5 CPU-s and 1.06 GB for the durable read: a hit halves
-  the gateway's CPU and takes 40 % of the network. Replication 2 at 80 %
-  hits still moves 1.02 GB per GiB (both copies are on the other host's
-  nodes in this two-host layout) and spends 3.8 CPU-s; ec 2+1 at 76 %
-  hits moves 0.66 GB and spends 3.2 CPU-s.
+  3) the durable node host spends 1.7 CPU-s and moves 0.43 GB of network
+  per GiB, against 3.5 CPU-s and 1.06 GB for the durable read: a hit
+  halves that host's CPU and takes 40 % of its network, which is the
+  cache's purpose (the durable tier is relieved). The gateway host
+  changes little (5.5 versus 6.0 CPU-s/GiB): it still terminates HTTP,
+  hashes and copies every byte. Replication 2 at 80 % hits still moves
+  1.02 GB per GiB on the node host (one of the two copies lives there)
+  and costs it 3.8 CPU-s; ec 2+1 at 76 % hits moves 0.66 GB and costs
+  3.2 CPU-s.
 - **Population cost.** Pass 1 (every chunk a miss that is also
-  populated) costs 5.3–5.9 CPU-s and 1.26–1.44 GB per GiB on the gateway
-  host against 3.5 and 1.06 for the plain durable read: populating adds
-  60–70 % CPU and 20–35 % network to the miss, independent of protection
-  mode, because the gateway writes the copy; the node-host side carries
-  the extra write (8.9–10.5 versus 6.0 CPU-s/GiB).
-- **Memory.** Gateway-host RSS: 102 MiB durable, 105 ec, 133 none,
-  170 replication 2 (the replication writer holds two full copies in
-  flight per population).
+  populated) costs the node host 5.3–5.9 CPU-s and 1.26–1.44 GB per GiB
+  against 3.5 and 1.06 for the plain durable read, and the gateway host
+  8.9–10.5 against 6.0: populating adds 50–70 % CPU and 20–35 % network
+  to a miss on both sides, independent of protection mode, because the
+  gateway writes the copy and a node receives it.
+- **Memory.** Largest `arca-lake` process on either host: 102 MiB
+  durable, 105 ec, 133 none, 170 replication 2 (the replication writer
+  holds two full copies in flight per population).
 
 ### 6.13 Phase 2.2: disk-bound runs
 
@@ -574,7 +587,57 @@ of every node (`free -m` recorded before and after), sequential then
 random GET passes, 256 KiB objects, and a GET pass with a concurrent PUT
 stream. No cache drops, no direct I/O.
 
-<!-- DISK-RESULTS -->
+Layout: the first host runs FoundationDB and two durable nodes (the two
+data shards of every chunk), the second the third node (parity), the
+gateway and the load generator. 24 GiB of 16 MiB objects, 4 MiB chunks,
+`rs 2+1` (36 GiB of shards: 24 GiB on the first host, 12 GiB on the
+second), 7.7 GiB of RAM per host; after the PUT each host's page cache
+held 6.8–7.2 GB. Single run (`results/diskbound`; disk reads from
+`sar -b`, page cache from `free -m` before and after each phase):
+
+| Phase | Objects | MiB/s | ops/s | p50 / p99 ms | Disk read per GiB served, first host / second host | CPU-s/GiB first / second host |
+| --- | --- | --- | --- | --- | --- | --- |
+| PUT 24 GiB, concurrency 4 | 1536 × 16 MiB | 207 | 12.9 | 289 / 801 | — | 9.6 / 10.8 |
+| GET sequential, first pass | 1536 × 16 MiB | 554 | 34.6 | 99 / 156 | 0.93 GB / 0 | 4.3 / 6.1 |
+| GET random, pass 1 | 1536 × 16 MiB | 546 | 34.1 | 101 / 144 | 1.52 GB / 0 | 4.8 / 6.2 |
+| GET random, pass 2 | 1536 × 16 MiB | 541 | 33.8 | 103 / 152 | 1.55 GB / 0 | 4.9 / 6.2 |
+| GET random with a concurrent PUT stream (107 MiB/s, 256 × 16 MiB, p50 0.58 s) | 1536 × 16 MiB | 442 | 27.6 | 123 / 218 | 1.61 GB / 0 | 6.8 / 7.9 |
+| PUT 8192 × 256 KiB, concurrency 8 | 8192 | 65 | 259 | 24 / 115 | — | 39.6 / 26.1 |
+| GET 256 KiB sequential | 8192 | 282 | 1130 | 6.9 / 9.0 | 0 / 0 (2 GiB set, page-cache resident) | 8.8 / 8.3 |
+| GET 256 KiB random, passes 1–2 | 8192 | 292–296 | 1166–1182 | 6.7 / 9.1 | 0 / 0 | 7.1 / 7.9 |
+
+What it shows:
+
+- **The large random reads came from the device**: 1.5 GB read from
+  disk per GiB served on the host with the data shards (the two 2 MiB
+  shards of every chunk plus readahead), nothing on the parity host (a
+  healthy cluster never reads the parity shard). The sequential first
+  pass found a third of its data still in the page cache from the PUT.
+- **On this hardware the device is not the bound.** Random reads from
+  disk run at 541–546 MiB/s against 574–606 MiB/s for the same request
+  stream from a page-cache-resident set (§6.10, §6.12), a 5–10 % cost;
+  the virtio disks sustain the ~800 MB/s of shard reads this needs, and
+  the gateway host's CPU (6.2 CPU-s/GiB, the same as warm) remains the
+  limit. The "disk-bound" condition was met in the sense of the data
+  coming from disk, not in the sense of the disk limiting throughput;
+  on HDD-backed nodes the same run would be seek-bound and the cache
+  tier's latency benefit correspondingly larger (not measured).
+- **A concurrent PUT stream costs the reads 19 % of throughput and 50 %
+  of p99** (442 MiB/s, p99 218 ms): the PUT's shard writes and metadata
+  commits compete for the same CPU, not for the disk (the PUT host's
+  disk reads stay at 1.6 GB per GiB served).
+- **Small objects are metadata-bound, not disk-bound.** 256 KiB objects
+  GET at 1130–1180 per second (p50 6.7 ms) from the page cache, and PUT
+  at 259 per second with 40 CPU-s per GiB on the FoundationDB host: the
+  per-object begin / append / commit transactions dominate. The 2 GiB
+  small set fitted in the page cache, so a disk-bound small-object read
+  was not measured here.
+
+Harness note: the first run of this script overwrote the first 1536
+large objects with the small ones (same key space) and reported every
+GET of the mixed phase as a mismatch; the small phases now use their own
+prefix and the run was repeated (`results/diskbound-overlap-bug` keeps
+the first run's data for the record; its large-object phases are valid).
 
 ## 7. Interpretation
 
@@ -622,8 +685,10 @@ bars):
 
 - **The cache hit is now parallel too, and beats the durable read at
   low concurrency.** With `read_parallelism 4` the single-request `none`
-  hit overtook the durable read (§6.10); at concurrency 4 the gateway
-  host's CPU still bounds every mode.
+  hit overtook the durable read (474 versus 420 MiB/s, §6.10); parallel
+  fetch alone is worth 12–17 % at concurrency 1 and nothing at 4, where
+  the gateway host's CPU bounds every mode. The larger gain first seen
+  (+87 %) was the Nagle stall below being overlapped, not parallel fetch.
 - **The two Phase 2.1 "transport floor" conclusions were half right.**
   The gateway is CPU-bound, but the transport it was measured on had a
   40 ms Nagle/delayed-ACK stall on about 1 % of RPCs (every RPC on a
@@ -634,9 +699,10 @@ bars):
   behind the gateway's own CPU work (§6.11, §9).
 - **Hit ratio is population bandwidth, not readability.** Every lookup
   hit was served; the modes differ only in how many populations complete
-  under the in-flight bound (§6.9). A hit costs the gateway host half the
-  CPU and 40 % of the network of a durable read (§6.12); a populating
-  miss costs 60–70 % more CPU than a plain miss.
+  under the in-flight bound (§6.9). A hit costs the durable node host
+  half the CPU and 40 % of the network of a durable read while the
+  gateway host's cost barely moves (§6.12); a populating miss costs
+  50–70 % more CPU than a plain miss on both sides.
 - **PUT varies 2.7× between repetitions of one configuration** with p95
   latencies of 0.2–0.8 s (§6.12); GET varies by a few percent. Single-run
   PUT comparisons in §6.3–§6.4 should be read with that spread; the
@@ -646,7 +712,12 @@ bars):
   to 48/48, with slow-but-progressing links never timing out and every
   verify pass clean (§6.8).
 
-<!-- INTERP-DISK -->
+- **Reads from disk cost 5–10 % here, and nothing else changes.** With
+  a 24 GiB set the random GET pass read 1.5 GB from the device per GiB
+  served and still ran at 541–546 MiB/s against 574–606 from the page
+  cache (§6.13); the virtio disks are faster than the gateway's CPU
+  budget. Small objects are bound by the per-object metadata
+  transactions (259 PUT/s, 1130–1180 GET/s), not by any device.
 
 *Hypotheses* (not measured): a dedicated gateway host would move the PUT
 bound from CPU to the network; on hosts whose durable tier is HDD-bound
@@ -670,7 +741,9 @@ the cache's latency benefit would be larger than measured here.
 | gRPC versus raw framed TCP × TLS × connections × streams × frame size, with client and server CPU | measured, one run per cell, corrected server configuration | §6.11, `results/transport/` (first pass: `results/transport-nagle/`) |
 | Effect of `TCP_NODELAY` on accepted storage-node sockets | measured before/after on a veth link and between hosts | §6.11, `results/nagle/` |
 | Variance across runs | measured: three repetitions, shuffled order, warm-up separated (GET 1–13 %, PUT up to 2.7×) | §6.12, `results/repeat-c4/` |
-<!-- VERIFIED-DISK -->
+| Disk-bound behaviour: 24 GiB set, sequential and random GET, small objects, concurrent PUT/GET, with device reads per GiB | measured, one run; data came from disk, the device was not the bound on this hardware | §6.13, `results/diskbound/` |
+| Disk-bound behaviour on HDD or slower devices; small-object set larger than the page cache | not measured | §6.13 |
+| Cause of the PUT run-to-run variance (R-48) | not identified | §6.12, §9 |
 | Multi-gateway scaling, more than one FoundationDB process | not measured | §3 |
 | Any number on other hardware | not claimed | — |
 

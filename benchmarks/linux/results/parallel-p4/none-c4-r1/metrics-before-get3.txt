@@ -1,13 +1,13 @@
 # TYPE arca_gateway_cache_hits_total counter
-arca_gateway_cache_hits_total 52
+arca_gateway_cache_hits_total 275
 # TYPE arca_gateway_cache_misses_total counter
-arca_gateway_cache_misses_total 780
+arca_gateway_cache_misses_total 557
 # TYPE arca_gateway_cache_fallbacks_total counter
 arca_gateway_cache_fallbacks_total 0
 # TYPE arca_gateway_cache_invalidations_total counter
 arca_gateway_cache_invalidations_total 0
 # TYPE arca_gateway_cache_populated_total counter
-arca_gateway_cache_populated_total 222
+arca_gateway_cache_populated_total 429
 # TYPE arca_gateway_cache_population_failures_total counter
 arca_gateway_cache_population_failures_total 0
 # TYPE arca_gateway_cache_populations_deduplicated_total counter
@@ -23,9 +23,9 @@ arca_gateway_cache_shard_repair_failures_total 0
 # TYPE arca_gateway_cache_shard_repairs_skipped_total counter
 arca_gateway_cache_shard_repairs_skipped_total 0
 # TYPE arca_gateway_cache_populations_skipped_total counter
-arca_gateway_cache_populations_skipped_total 558
+arca_gateway_cache_populations_skipped_total 128
 # TYPE arca_gateway_cache_lookup_hits_total counter
-arca_gateway_cache_lookup_hits_total 52
+arca_gateway_cache_lookup_hits_total 275
 # TYPE arca_gateway_cache_fallback_unreadable_total counter
 arca_gateway_cache_fallback_unreadable_total 0
 # TYPE arca_gateway_cache_fallback_corrupt_total counter

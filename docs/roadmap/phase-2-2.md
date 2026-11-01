@@ -1,6 +1,6 @@
 # Phase 2.2: Performance and resilience optimization
 
-Status: **in progress**. Phase 2.2 acts on the Phase 2.1 measurements:
+Status: **complete** (measurements and documents below). Phase 2.2 acts on the Phase 2.1 measurements:
 progress-based deadlines and retries for shard streams (R-47), the cache
 hit-ratio analysis, bounded parallel chunk fetch, the gRPC transport
 analysis, repeated measurements, and disk-bound runs. Design records:
@@ -38,10 +38,12 @@ Numbers are in RFC-009; the summaries here are the decisions they support.
   bytes for none / ec 2+1 / replication 2). Raising the bound to 32
   exposed the R-42 hot key (9–45 failed populations per pass), now fixed
   with an atomic usage counter and a snapshot capacity check.
-- **Parallel chunk fetch (§6.10)**: at concurrency 1 the warm durable GET
-  gains 21 % (p95 halves) and the 100 %-hit GET 87 %; at concurrency 4
-  the gateway host is CPU-bound either way. Gateway RSS grows by about
-  one chunk.
+- **Parallel chunk fetch (§6.10)**: measured after the no-delay fix, at
+  concurrency 1 the warm durable GET gains 12 % and the 100 %-hit GET
+  17 % (p50 −16 %), and the hit now beats the durable read; at
+  concurrency 4 the gateway host is CPU-bound either way. The +87 % first
+  measured was mostly the Nagle stall being overlapped. Largest process
+  RSS grows by about one chunk.
 
 - **gRPC versus raw TCP (§6.11)**: the first matrix pass found a
   40 ms Nagle/delayed-ACK stall on the storage node's accepted sockets
@@ -56,8 +58,37 @@ Numbers are in RFC-009; the summaries here are the decisions they support.
   gateway half the CPU and 40 % of the network of a durable read;
   populating costs 60–70 % more CPU than a plain miss.
 
-<!-- PHASE-2-2-RESULTS-3 -->
+- **Disk-bound runs (§6.13)**: with a 24 GiB set the random GET pass
+  read 1.5 GB from the device per GiB served and ran at 541–546 MiB/s
+  against 574–606 from the page cache; on this hardware the device is
+  not the bound, the gateway host's CPU is. A concurrent PUT stream
+  costs reads 19 % of throughput and 50 % of p99. Small objects are
+  metadata-bound (259 PUT/s, 1130–1180 GET/s).
+- **Fixed along the way**: the R-42 hot usage key (atomic counter), the
+  pending-generation lease expiring under slow uploads, `TCP_NODELAY`
+  missing on accepted storage-node sockets, the netem queue limit and
+  one-way slow-node shaping in the fault harness, the sigkill harness on
+  slow disks, the transport bench's server windows, and the disk-bound
+  script's key overlap.
 
 ## Not verified
 
-<!-- PHASE-2-2-NOT-VERIFIED -->
+- Every fault-matrix and transport-matrix cell is a single run; only the
+  cache comparison and the parallel-fetch comparison have three
+  repetitions. Throughput under loss varied ±40 % between runs of one
+  policy; PUT success counts and RPC counters are the signal there.
+- The PUT run-to-run variance (up to 2.7×, R-48) is measured but not
+  explained.
+- Disk-bound behaviour on HDD-class devices, and small-object sets
+  larger than the page cache, were not measured; the virtio disks here
+  were faster than the gateway's CPU budget.
+- The transport matrix measured the bench, not the gateway: TLS between
+  gateway and nodes is not enabled in the cluster runs.
+- A hybrid raw-TCP data path was not built; its entry condition is
+  recorded in RFC-009 §9.
+- Multi-gateway scaling and a multi-process FoundationDB were not
+  measured (unchanged from Phase 2.1).
+- GitHub Actions did not run for the last commits of this phase (the
+  account's Actions billing refused to start jobs); the workspace tests
+  and the FoundationDB-backed suites were run locally and on a
+  validation host instead.
