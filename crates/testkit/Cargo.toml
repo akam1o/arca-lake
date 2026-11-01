@@ -9,6 +9,22 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+arca-lake-common.workspace = true
+arca-lake-controller.workspace = true
+arca-lake-gateway.workspace = true
+arca-lake-metadata.workspace = true
+arca-lake-protocol.workspace = true
+arca-lake-storage.workspace = true
+arca-lake-storage-node.workspace = true
+s3s.workspace = true
+http.workspace = true
+tonic = { workspace = true, features = ["codegen", "channel", "transport"] }
+bytes.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs", "io-util"] }
+tempfile.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
