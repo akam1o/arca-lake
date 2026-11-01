@@ -9,11 +9,18 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+arca-lake-common.workspace = true
+arca-lake-ec.workspace = true
+arca-lake-metadata.workspace = true
+arca-lake-placement.workspace = true
+arca-lake-protocol.workspace = true
+arca-lake-storage.workspace = true
 s3s.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+tokio-stream.workspace = true
 hyper-util = { workspace = true, features = ["server-auto", "server-graceful", "http1", "http2", "tokio"] }
 
 [dev-dependencies]

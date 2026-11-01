@@ -1,4 +1,44 @@
-//! Leader-elected control plane for arca-lake: placement, tiering, repair, garbage collection, admin API
+//! Control-plane logic: stripe-group bootstrap, garbage collection, and
+//! member repair (RFC-004 §5.7, §5.10; RFC-008).
 //!
-//! This crate is a Phase 0 stub. See `docs/architecture/repository-layout.md`
-//! for its responsibilities and dependency rules.
+//! Phase 1 status: the functions here are driven explicitly (by tests and
+//! tooling). Leader election, scheduling, and the admin API come with the
+//! controller process.
+
+pub mod gc;
+pub mod groups;
+pub mod repair;
+
+/// Errors from control-plane operations.
+#[derive(Debug, thiserror::Error)]
+pub enum ControlError {
+    /// Metadata error.
+    #[error(transparent)]
+    Meta(#[from] arca_lake_metadata::MetaError),
+    /// Placement error.
+    #[error(transparent)]
+    Placement(#[from] arca_lake_placement::PlacementError),
+    /// Storage node RPC error.
+    #[error("node {addr}: {status}")]
+    Node {
+        /// Node address.
+        addr: String,
+        /// Status.
+        status: tonic::Status,
+    },
+    /// Not enough shards to reconstruct a chunk.
+    #[error("chunk {chunk} of group {group} unrecoverable: {have} of {need} shards")]
+    Unrecoverable {
+        /// Group.
+        group: u64,
+        /// Chunk ID, hex.
+        chunk: String,
+        /// Shards available.
+        have: usize,
+        /// Shards required.
+        need: usize,
+    },
+    /// Anything else.
+    #[error("{0}")]
+    Other(String),
+}

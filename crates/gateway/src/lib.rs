@@ -1,14 +1,13 @@
 //! S3-compatible gateway for arca-lake.
 //!
-//! Phase 0 status: a spike of the S3 protocol layer. The HTTP and S3
-//! request/response handling is provided by the `s3s` crate; this crate
-//! supplies an [`s3s::S3`] implementation and the server wiring. The only
-//! backend so far is [`memory::MemoryBackend`], which exists to verify
-//! client compatibility and to measure protocol overhead; the real
-//! gateway will implement the write and read protocols from the design
-//! documents on top of `arca-lake-metadata`, `arca-lake-ec`, and the
-//! storage-node client.
+//! The HTTP and S3 request/response handling is provided by the `s3s`
+//! crate; this crate supplies the [`s3s::S3`] implementations and the server
+//! wiring. Two backends exist: [`memory::MemoryBackend`] (protocol
+//! experiments and tests) and [`cluster::ClusterBackend`], which implements
+//! the distributed write and read protocols over `arca-lake-metadata`,
+//! `arca-lake-ec`, and storage nodes (RFC-003, RFC-004).
 
+pub mod cluster;
 pub mod memory;
 mod server;
 
