@@ -146,3 +146,28 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     CI and `deploy/dev/fdb-test.sh`), `tiering.rs` (5).
   - RFC-006 Multi-Tier Storage draft with Phase 2 status; ADR-0009;
     Phase 2 roadmap page; risks R-41–R-45.
+- Phase 2.1 cache protection and Linux validation:
+  - `arca-lake-metadata`: `GroupRecord.role` (durable or cache),
+    `chunk_record_of`, `live_generation_with_prefix`.
+  - `arca-lake-tiering`: cache protection `none` / `replication` /
+    erasure coding on the shared `read_coded` / `write_coded` path,
+    atomic population, degraded hits with read-triggered shard repair,
+    per-member deletion; populations bounded per gateway; admission at
+    capacity (eviction between the watermarks).
+  - `arca-lake-controller`: `CacheProtection` and failure-domain-aware
+    cache groups; cache repair on the durable repair state machine with
+    a per-pass budget, subordinate to durable repair; metrics.
+  - `arca-lake-protocol` / `arca-lake-storage-node`: 8 MiB HTTP/2 stream
+    window, 32 MiB connection window.
+  - `arca-lake-gateway`: degraded-hit and repair counters, population
+    skip counter, shard write failures logged with their reason.
+  - `arca-lake` CLI: `create-cache-groups --protection`, `--cache-max-populations`,
+    `--cache-repair-chunks-per-pass`, `--metrics-listen`, `admin cache-usage`;
+    fixed `--cache-tier` overriding `--tier`.
+  - `benchmarks/s3load`, `benchmarks/linux/` (two- or three-host driver,
+    matrix, summarizer, sanitizer) and `deploy/dev/netns-faults.sh`
+    (namespace-pair fault injection) with committed, sanitized results.
+  - Tests: `cache_ec.rs` / `cache_ec_fdb.rs` (9 cases × replication, EC).
+  - RFC-006 §5.9 and §11; RFC-009 Performance Architecture draft with the
+    three-host measurements; ADR-0010; Phase 2.1 roadmap page;
+    `docs/verification/network-faults.md`; risks R-46, R-47, R-40 narrowed.

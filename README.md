@@ -52,6 +52,7 @@ configurable erasure coding. It is written in Rust and is part of the
 | [Phase 1](docs/roadmap/phase-1.md) | Single-cluster durable object store and reliability hardening |
 | [Phase 1.2](docs/roadmap/phase-1-2.md) | Distributed operations and failover |
 | [Phase 2](docs/roadmap/phase-2.md) | Native multi-tier storage: cache tiers, read-through cache, automatic tiering |
+| [Phase 2.1](docs/roadmap/phase-2-1.md) | Cache protection (replication / erasure coding) and Linux validation: measurements, fault injection |
 
 ## Contributing and policy
 

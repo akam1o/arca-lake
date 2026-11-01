@@ -41,7 +41,17 @@ Results are written by criterion to `target/criterion/`.
 
 ## End-to-end harness
 
-Planned for Phase 0 task 0.7. It will live under `benchmarks/e2e/`.
+- `s3load/`: S3 PUT/GET load generator (anonymous gateway) with
+  deterministic verifiable bodies, range GETs, repeated GET passes and one
+  JSON summary line per pass.
+- `linux/two-host.sh`: starts a cluster on two or three Linux hosts (host
+  addresses only from the environment), runs `s3load` phases while
+  sampling CPU and network with `sar`, collects gateway cache counters;
+  `linux/matrix.sh` is the RFC-009 matrix, `linux/summarize.py` renders
+  Markdown, `linux/sanitize.sh` strips hostnames and addresses before
+  results are committed. Results: `linux/results/` (RFC-009 §6).
+- `transfer/`: shard transfer floors (raw framed TCP versus gRPC, with
+  and without TLS), usable across hosts.
 
 ## Reports
 

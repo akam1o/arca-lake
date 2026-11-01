@@ -43,6 +43,23 @@ require a cluster.
 The latency figures these tests print are local and relative only; they are
 not benchmark results in the sense of `benchmarks/README.md`.
 
+## Network fault injection on a Linux host
+
+`netns-faults.sh` runs a complete cluster split across two network
+namespaces joined by a `veth` pair on one Linux host, applies `netem`,
+`tbf`, link down and socket destruction to the veth ends only, and runs
+the scenarios of `docs/verification/network-faults.md`. It needs
+passwordless `sudo` for `ip netns`, `tc` and `ss -K`, a release build of
+`arca-lake` and `s3load` with the `fdb` feature, and `fdbserver` on the
+PATH. It never touches an existing interface, route or firewall rule and
+removes the namespaces at the end.
+
+```sh
+bash deploy/dev/netns-faults.sh setup ec
+bash deploy/dev/netns-faults.sh all
+bash deploy/dev/netns-faults.sh teardown
+```
+
 ## FoundationDB failover (three processes)
 
 ```sh

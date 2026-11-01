@@ -1,0 +1,1 @@
+mode=ec chunk_bytes=4194304 cache_capacity=838860800 hosts=3

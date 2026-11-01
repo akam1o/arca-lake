@@ -1,0 +1,6 @@
+listeners in ns2 after killing d2:
+State  Recv-Q Send-Q Local Address:Port Peer Address:Port
+LISTEN 0      128        <addr>      <addr>:*   
+LISTEN 0      128        <addr>      <addr>:*   
+LISTEN 0      128        <addr>      <addr>:*   
+LISTEN 0      128        <addr>      <addr>:*   

@@ -1,0 +1,1 @@
+{"label":"nr-put-down","op":"put","pass":1,"objects":2,"size":8388608,"concurrency":2,"range_bytes":0,"verify":false,"duration_s":0.095249101,"ops":0,"bytes":0,"errors":2,"mismatches":0,"missing":0,"ops_per_s":0.0,"mib_per_s":0.0,"lat_ms_mean":0.0,"lat_ms_p50":0.0,"lat_ms_p90":0.0,"lat_ms_p99":0.0,"lat_ms_max":0.0}

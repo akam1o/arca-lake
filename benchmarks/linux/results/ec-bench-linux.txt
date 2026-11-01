@@ -1,0 +1,1397 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.06s
+     Running benches/ec.rs (target/release/deps/ec-df8f426cd585a19f)
+Benchmarking encode/rs-gf8-v1/4+2/65536
+Benchmarking encode/rs-gf8-v1/4+2/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/4+2/65536: Collecting 100 samples in estimated 3.0543 s (232k iterations)
+Benchmarking encode/rs-gf8-v1/4+2/65536: Analyzing
+encode/rs-gf8-v1/4+2/65536
+                        time:   [13.212 µs 13.257 µs 13.324 µs]
+                        thrpt:  [18.324 GiB/s 18.417 GiB/s 18.479 GiB/s]
+                 change:
+                        time:   [−2.2713% −1.7369% −1.1886%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.2029% +1.7676% +2.3241%]
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking encode/rs-gf8-v1/4+2/262144
+Benchmarking encode/rs-gf8-v1/4+2/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/4+2/262144: Collecting 100 samples in estimated 3.1075 s (50k iterations)
+Benchmarking encode/rs-gf8-v1/4+2/262144: Analyzing
+encode/rs-gf8-v1/4+2/262144
+                        time:   [61.379 µs 61.421 µs 61.468 µs]
+                        thrpt:  [15.887 GiB/s 15.900 GiB/s 15.910 GiB/s]
+                 change:
+                        time:   [+1.7785% +2.0525% +2.2899%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.2386% −2.0112% −1.7474%]
+                        Performance has regressed.
+Found 12 outliers among 100 measurements (12.00%)
+  3 (3.00%) low severe
+  1 (1.00%) low mild
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+Benchmarking encode/rs-gf8-v1/4+2/1048576
+Benchmarking encode/rs-gf8-v1/4+2/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/4+2/1048576: Collecting 100 samples in estimated 5.0923 s (10k iterations)
+Benchmarking encode/rs-gf8-v1/4+2/1048576: Analyzing
+encode/rs-gf8-v1/4+2/1048576
+                        time:   [543.37 µs 550.75 µs 559.11 µs]
+                        thrpt:  [6.9865 GiB/s 7.0926 GiB/s 7.1889 GiB/s]
+                 change:
+                        time:   [+3.6790% +5.1897% +7.0149%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.5551% −4.9336% −3.5485%]
+                        Performance has regressed.
+Found 12 outliers among 100 measurements (12.00%)
+  3 (3.00%) high mild
+  9 (9.00%) high severe
+Benchmarking encode/rs-gf8-v1/6+3/65536
+Benchmarking encode/rs-gf8-v1/6+3/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/6+3/65536: Collecting 100 samples in estimated 3.0995 s (111k iterations)
+Benchmarking encode/rs-gf8-v1/6+3/65536: Analyzing
+encode/rs-gf8-v1/6+3/65536
+                        time:   [27.929 µs 27.979 µs 28.033 µs]
+                        thrpt:  [13.064 GiB/s 13.089 GiB/s 13.112 GiB/s]
+                 change:
+                        time:   [−3.4367% −3.3380% −3.2263%] (p = 0.00 < 0.05)
+                        thrpt:  [+3.3339% +3.4533% +3.5590%]
+                        Performance has improved.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking encode/rs-gf8-v1/6+3/262144
+Benchmarking encode/rs-gf8-v1/6+3/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/6+3/262144: Collecting 100 samples in estimated 3.1099 s (25k iterations)
+Benchmarking encode/rs-gf8-v1/6+3/262144: Analyzing
+encode/rs-gf8-v1/6+3/262144
+                        time:   [129.27 µs 132.72 µs 136.15 µs]
+                        thrpt:  [10.759 GiB/s 11.037 GiB/s 11.332 GiB/s]
+                 change:
+                        time:   [−6.5025% −5.2869% −3.8675%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.0231% +5.5820% +6.9547%]
+                        Performance has improved.
+Found 22 outliers among 100 measurements (22.00%)
+  3 (3.00%) low mild
+  5 (5.00%) high mild
+  14 (14.00%) high severe
+Benchmarking encode/rs-gf8-v1/6+3/1048576
+Benchmarking encode/rs-gf8-v1/6+3/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/6+3/1048576: Collecting 100 samples in estimated 3.1434 s (1900 iterations)
+Benchmarking encode/rs-gf8-v1/6+3/1048576: Analyzing
+encode/rs-gf8-v1/6+3/1048576
+                        time:   [1.7072 ms 1.8033 ms 1.9098 ms]
+                        thrpt:  [3.0681 GiB/s 3.2493 GiB/s 3.4322 GiB/s]
+                 change:
+                        time:   [+2.0703% +8.1391% +14.873%] (p = 0.01 < 0.05)
+                        thrpt:  [−12.947% −7.5265% −2.0283%]
+                        Performance has regressed.
+Found 18 outliers among 100 measurements (18.00%)
+  2 (2.00%) high mild
+  16 (16.00%) high severe
+Benchmarking encode/rs-gf8-v1/8+3/65536
+Benchmarking encode/rs-gf8-v1/8+3/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/8+3/65536: Collecting 100 samples in estimated 3.0352 s (81k iterations)
+Benchmarking encode/rs-gf8-v1/8+3/65536: Analyzing
+encode/rs-gf8-v1/8+3/65536
+                        time:   [37.902 µs 38.069 µs 38.229 µs]
+                        thrpt:  [12.772 GiB/s 12.826 GiB/s 12.883 GiB/s]
+                 change:
+                        time:   [−4.7775% −4.5576% −4.3152%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.5098% +4.7753% +5.0172%]
+                        Performance has improved.
+Found 14 outliers among 100 measurements (14.00%)
+  3 (3.00%) high mild
+  11 (11.00%) high severe
+Benchmarking encode/rs-gf8-v1/8+3/262144
+Benchmarking encode/rs-gf8-v1/8+3/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/8+3/262144: Collecting 100 samples in estimated 3.5665 s (20k iterations)
+Benchmarking encode/rs-gf8-v1/8+3/262144: Analyzing
+encode/rs-gf8-v1/8+3/262144
+                        time:   [177.85 µs 178.46 µs 179.24 µs]
+                        thrpt:  [10.897 GiB/s 10.944 GiB/s 10.982 GiB/s]
+                 change:
+                        time:   [+2.0299% +2.5285% +3.0502%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.9599% −2.4662% −1.9895%]
+                        Performance has regressed.
+Found 9 outliers among 100 measurements (9.00%)
+  5 (5.00%) low mild
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking encode/rs-gf8-v1/8+3/1048576
+Benchmarking encode/rs-gf8-v1/8+3/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/8+3/1048576: Collecting 100 samples in estimated 3.1998 s (1500 iterations)
+Benchmarking encode/rs-gf8-v1/8+3/1048576: Analyzing
+encode/rs-gf8-v1/8+3/1048576
+                        time:   [2.1059 ms 2.1277 ms 2.1538 ms]
+                        thrpt:  [3.6272 GiB/s 3.6718 GiB/s 3.7098 GiB/s]
+                 change:
+                        time:   [+1.5761% +2.7578% +3.9425%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.7929% −2.6838% −1.5516%]
+                        Performance has regressed.
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) high mild
+  5 (5.00%) high severe
+Benchmarking encode/rs-gf8-v1/8+4/65536
+Benchmarking encode/rs-gf8-v1/8+4/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/8+4/65536: Collecting 100 samples in estimated 3.0822 s (61k iterations)
+Benchmarking encode/rs-gf8-v1/8+4/65536: Analyzing
+encode/rs-gf8-v1/8+4/65536
+                        time:   [50.867 µs 50.893 µs 50.923 µs]
+                        thrpt:  [9.5886 GiB/s 9.5943 GiB/s 9.5992 GiB/s]
+                 change:
+                        time:   [+2.1935% +2.6606% +2.9327%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.8491% −2.5917% −2.1464%]
+                        Performance has regressed.
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking encode/rs-gf8-v1/8+4/262144
+Benchmarking encode/rs-gf8-v1/8+4/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/8+4/262144: Collecting 100 samples in estimated 3.4435 s (15k iterations)
+Benchmarking encode/rs-gf8-v1/8+4/262144: Analyzing
+encode/rs-gf8-v1/8+4/262144
+                        time:   [227.97 µs 228.78 µs 229.89 µs]
+                        thrpt:  [8.4959 GiB/s 8.5370 GiB/s 8.5675 GiB/s]
+                 change:
+                        time:   [−0.4665% +0.0495% +0.6881%] (p = 0.87 > 0.05)
+                        thrpt:  [−0.6834% −0.0494% +0.4686%]
+                        No change in performance detected.
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking encode/rs-gf8-v1/8+4/1048576
+Benchmarking encode/rs-gf8-v1/8+4/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/8+4/1048576: Collecting 100 samples in estimated 3.1338 s (1000 iterations)
+Benchmarking encode/rs-gf8-v1/8+4/1048576: Analyzing
+encode/rs-gf8-v1/8+4/1048576
+                        time:   [3.1315 ms 3.1411 ms 3.1525 ms]
+                        thrpt:  [2.4782 GiB/s 2.4872 GiB/s 2.4948 GiB/s]
+                 change:
+                        time:   [−1.4925% −1.0697% −0.6299%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.6339% +1.0813% +1.5151%]
+                        Change within noise threshold.
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+Benchmarking encode/rs-gf8-v1/12+4/65536
+Benchmarking encode/rs-gf8-v1/12+4/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/12+4/65536: Collecting 100 samples in estimated 3.0947 s (40k iterations)
+Benchmarking encode/rs-gf8-v1/12+4/65536: Analyzing
+encode/rs-gf8-v1/12+4/65536
+                        time:   [76.563 µs 76.823 µs 77.169 µs]
+                        thrpt:  [9.4912 GiB/s 9.5339 GiB/s 9.5663 GiB/s]
+                 change:
+                        time:   [+3.3151% +3.6748% +4.1192%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.9562% −3.5445% −3.2087%]
+                        Performance has regressed.
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking encode/rs-gf8-v1/12+4/262144
+Benchmarking encode/rs-gf8-v1/12+4/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/12+4/262144: Collecting 100 samples in estimated 3.9261 s (10k iterations)
+Benchmarking encode/rs-gf8-v1/12+4/262144: Analyzing
+encode/rs-gf8-v1/12+4/262144
+                        time:   [390.42 µs 392.60 µs 395.23 µs]
+                        thrpt:  [7.4126 GiB/s 7.4622 GiB/s 7.5039 GiB/s]
+                 change:
+                        time:   [+2.3007% +2.8351% +3.5133%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.3940% −2.7569% −2.2490%]
+                        Performance has regressed.
+Found 15 outliers among 100 measurements (15.00%)
+  1 (1.00%) low severe
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  11 (11.00%) high severe
+Benchmarking encode/rs-gf8-v1/12+4/1048576
+Benchmarking encode/rs-gf8-v1/12+4/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/12+4/1048576: Collecting 100 samples in estimated 3.3224 s (700 iterations)
+Benchmarking encode/rs-gf8-v1/12+4/1048576: Analyzing
+encode/rs-gf8-v1/12+4/1048576
+                        time:   [4.7056 ms 4.7481 ms 4.7958 ms]
+                        thrpt:  [2.4436 GiB/s 2.4681 GiB/s 2.4904 GiB/s]
+                 change:
+                        time:   [+1.0597% +1.9339% +2.9984%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.9111% −1.8972% −1.0486%]
+                        Performance has regressed.
+Found 13 outliers among 100 measurements (13.00%)
+  2 (2.00%) high mild
+  11 (11.00%) high severe
+Benchmarking encode/rs-gf8-v1/16+4/65536
+Benchmarking encode/rs-gf8-v1/16+4/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/16+4/65536: Collecting 100 samples in estimated 3.0196 s (30k iterations)
+Benchmarking encode/rs-gf8-v1/16+4/65536: Analyzing
+encode/rs-gf8-v1/16+4/65536
+                        time:   [99.618 µs 99.710 µs 99.840 µs]
+                        thrpt:  [9.7813 GiB/s 9.7940 GiB/s 9.8031 GiB/s]
+                 change:
+                        time:   [−0.3519% −0.2363% −0.1262%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.1263% +0.2369% +0.3532%]
+                        Change within noise threshold.
+Found 9 outliers among 100 measurements (9.00%)
+  1 (1.00%) low mild
+  7 (7.00%) high mild
+  1 (1.00%) high severe
+Benchmarking encode/rs-gf8-v1/16+4/262144
+Benchmarking encode/rs-gf8-v1/16+4/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/16+4/262144: Collecting 100 samples in estimated 5.6305 s (10k iterations)
+Benchmarking encode/rs-gf8-v1/16+4/262144: Analyzing
+encode/rs-gf8-v1/16+4/262144
+                        time:   [547.23 µs 549.64 µs 552.80 µs]
+                        thrpt:  [7.0663 GiB/s 7.1069 GiB/s 7.1382 GiB/s]
+                 change:
+                        time:   [+3.1502% +3.6964% +4.3076%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.1297% −3.5646% −3.0540%]
+                        Performance has regressed.
+Found 9 outliers among 100 measurements (9.00%)
+  7 (7.00%) high mild
+  2 (2.00%) high severe
+Benchmarking encode/rs-gf8-v1/16+4/1048576
+Benchmarking encode/rs-gf8-v1/16+4/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-gf8-v1/16+4/1048576: Collecting 100 samples in estimated 3.1633 s (500 iterations)
+Benchmarking encode/rs-gf8-v1/16+4/1048576: Analyzing
+encode/rs-gf8-v1/16+4/1048576
+                        time:   [6.2963 ms 6.3153 ms 6.3381 ms]
+                        thrpt:  [2.4652 GiB/s 2.4741 GiB/s 2.4816 GiB/s]
+                 change:
+                        time:   [−0.6037% −0.0576% +0.4321%] (p = 0.83 > 0.05)
+                        thrpt:  [−0.4303% +0.0577% +0.6074%]
+                        No change in performance detected.
+Found 10 outliers among 100 measurements (10.00%)
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/4+2/65536
+Benchmarking encode/rs-leopard-gf16-v1/4+2/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/4+2/65536: Collecting 100 samples in estimated 3.0785 s (157k iterations)
+Benchmarking encode/rs-leopard-gf16-v1/4+2/65536: Analyzing
+encode/rs-leopard-gf16-v1/4+2/65536
+                        time:   [19.623 µs 19.640 µs 19.656 µs]
+                        thrpt:  [12.421 GiB/s 12.431 GiB/s 12.442 GiB/s]
+                 change:
+                        time:   [+0.3513% +0.8552% +1.3051%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.2883% −0.8480% −0.3501%]
+                        Change within noise threshold.
+Found 11 outliers among 100 measurements (11.00%)
+  6 (6.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/4+2/262144
+Benchmarking encode/rs-leopard-gf16-v1/4+2/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/4+2/262144: Collecting 100 samples in estimated 3.2358 s (35k iterations)
+Benchmarking encode/rs-leopard-gf16-v1/4+2/262144: Analyzing
+encode/rs-leopard-gf16-v1/4+2/262144
+                        time:   [91.227 µs 91.407 µs 91.599 µs]
+                        thrpt:  [10.661 GiB/s 10.684 GiB/s 10.705 GiB/s]
+                 change:
+                        time:   [−0.5136% +2.2422% +3.9436%] (p = 0.04 < 0.05)
+                        thrpt:  [−3.7940% −2.1930% +0.5162%]
+                        Change within noise threshold.
+Found 9 outliers among 100 measurements (9.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/4+2/1048576
+Benchmarking encode/rs-leopard-gf16-v1/4+2/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/4+2/1048576: Collecting 100 samples in estimated 3.1070 s (2500 iterations)
+Benchmarking encode/rs-leopard-gf16-v1/4+2/1048576: Analyzing
+encode/rs-leopard-gf16-v1/4+2/1048576
+                        time:   [1.2523 ms 1.2583 ms 1.2654 ms]
+                        thrpt:  [3.0870 GiB/s 3.1043 GiB/s 3.1192 GiB/s]
+                 change:
+                        time:   [−0.3793% +0.5461% +1.4293%] (p = 0.24 > 0.05)
+                        thrpt:  [−1.4091% −0.5432% +0.3807%]
+                        No change in performance detected.
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/6+3/65536
+Benchmarking encode/rs-leopard-gf16-v1/6+3/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/6+3/65536: Collecting 100 samples in estimated 3.1911 s (56k iterations)
+Benchmarking encode/rs-leopard-gf16-v1/6+3/65536: Analyzing
+encode/rs-leopard-gf16-v1/6+3/65536
+                        time:   [57.537 µs 57.614 µs 57.743 µs]
+                        thrpt:  [6.3421 GiB/s 6.3563 GiB/s 6.3648 GiB/s]
+                 change:
+                        time:   [+1.6059% +1.7983% +2.0268%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.9866% −1.7665% −1.5805%]
+                        Performance has regressed.
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low severe
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/6+3/262144
+Benchmarking encode/rs-leopard-gf16-v1/6+3/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/6+3/262144: Collecting 100 samples in estimated 4.3061 s (15k iterations)
+Benchmarking encode/rs-leopard-gf16-v1/6+3/262144: Analyzing
+encode/rs-leopard-gf16-v1/6+3/262144
+                        time:   [277.76 µs 279.37 µs 281.48 µs]
+                        thrpt:  [5.2040 GiB/s 5.2434 GiB/s 5.2738 GiB/s]
+                 change:
+                        time:   [−4.4265% −4.0148% −3.5595%] (p = 0.00 < 0.05)
+                        thrpt:  [+3.6909% +4.1827% +4.6315%]
+                        Performance has improved.
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/6+3/1048576
+Benchmarking encode/rs-leopard-gf16-v1/6+3/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/6+3/1048576: Collecting 100 samples in estimated 3.1475 s (900 iterations)
+Benchmarking encode/rs-leopard-gf16-v1/6+3/1048576: Analyzing
+encode/rs-leopard-gf16-v1/6+3/1048576
+                        time:   [3.5139 ms 3.5261 ms 3.5390 ms]
+                        thrpt:  [1.6557 GiB/s 1.6617 GiB/s 1.6675 GiB/s]
+                 change:
+                        time:   [+2.2654% +2.6137% +2.9831%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.8966% −2.5472% −2.2152%]
+                        Performance has regressed.
+Found 6 outliers among 100 measurements (6.00%)
+  6 (6.00%) high mild
+Benchmarking encode/rs-leopard-gf16-v1/8+3/65536
+Benchmarking encode/rs-leopard-gf16-v1/8+3/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/8+3/65536: Collecting 100 samples in estimated 3.1220 s (56k iterations)
+Benchmarking encode/rs-leopard-gf16-v1/8+3/65536: Analyzing
+encode/rs-leopard-gf16-v1/8+3/65536
+                        time:   [56.543 µs 56.739 µs 56.985 µs]
+                        thrpt:  [8.5686 GiB/s 8.6057 GiB/s 8.6356 GiB/s]
+                 change:
+                        time:   [−1.6203% −1.1125% −0.5418%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.5448% +1.1250% +1.6470%]
+                        Change within noise threshold.
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low mild
+  7 (7.00%) high mild
+  3 (3.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/8+3/262144
+Benchmarking encode/rs-leopard-gf16-v1/8+3/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/8+3/262144: Collecting 100 samples in estimated 3.3662 s (10k iterations)
+Benchmarking encode/rs-leopard-gf16-v1/8+3/262144: Analyzing
+encode/rs-leopard-gf16-v1/8+3/262144
+                        time:   [327.87 µs 328.61 µs 329.46 µs]
+                        thrpt:  [5.9283 GiB/s 5.9435 GiB/s 5.9571 GiB/s]
+                 change:
+                        time:   [+3.6175% +4.1061% +4.6116%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.4083% −3.9442% −3.4912%]
+                        Performance has regressed.
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/8+3/1048576
+Benchmarking encode/rs-leopard-gf16-v1/8+3/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/8+3/1048576: Collecting 100 samples in estimated 3.3150 s (900 iterations)
+Benchmarking encode/rs-leopard-gf16-v1/8+3/1048576: Analyzing
+encode/rs-leopard-gf16-v1/8+3/1048576
+                        time:   [3.6360 ms 3.6495 ms 3.6650 ms]
+                        thrpt:  [2.1316 GiB/s 2.1407 GiB/s 2.1486 GiB/s]
+                 change:
+                        time:   [+1.9431% +2.3182% +2.8062%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.7296% −2.2657% −1.9060%]
+                        Performance has regressed.
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/8+4/65536
+Benchmarking encode/rs-leopard-gf16-v1/8+4/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/8+4/65536: Collecting 100 samples in estimated 3.1714 s (61k iterations)
+Benchmarking encode/rs-leopard-gf16-v1/8+4/65536: Analyzing
+encode/rs-leopard-gf16-v1/8+4/65536
+                        time:   [52.283 µs 52.309 µs 52.336 µs]
+                        thrpt:  [9.3297 GiB/s 9.3346 GiB/s 9.3392 GiB/s]
+                 change:
+                        time:   [−9.1096% −8.9448% −8.7877%] (p = 0.00 < 0.05)
+                        thrpt:  [+9.6344% +9.8235% +10.023%]
+                        Performance has improved.
+Found 14 outliers among 100 measurements (14.00%)
+  3 (3.00%) low severe
+  2 (2.00%) low mild
+  6 (6.00%) high mild
+  3 (3.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/8+4/262144
+Benchmarking encode/rs-leopard-gf16-v1/8+4/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/8+4/262144: Collecting 100 samples in estimated 3.5493 s (10k iterations)
+Benchmarking encode/rs-leopard-gf16-v1/8+4/262144: Analyzing
+encode/rs-leopard-gf16-v1/8+4/262144
+                        time:   [353.52 µs 357.10 µs 361.02 µs]
+                        thrpt:  [5.4100 GiB/s 5.4694 GiB/s 5.5247 GiB/s]
+                 change:
+                        time:   [+2.2188% +3.2703% +4.5570%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.3584% −3.1668% −2.1707%]
+                        Performance has regressed.
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/8+4/1048576
+Benchmarking encode/rs-leopard-gf16-v1/8+4/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/8+4/1048576: Collecting 100 samples in estimated 3.0383 s (800 iterations)
+Benchmarking encode/rs-leopard-gf16-v1/8+4/1048576: Analyzing
+encode/rs-leopard-gf16-v1/8+4/1048576
+                        time:   [3.8221 ms 3.8448 ms 3.8684 ms]
+                        thrpt:  [2.0195 GiB/s 2.0320 GiB/s 2.0440 GiB/s]
+                 change:
+                        time:   [+2.8429% +3.4255% +4.1151%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.9525% −3.3120% −2.7643%]
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking encode/rs-leopard-gf16-v1/12+4/65536
+Benchmarking encode/rs-leopard-gf16-v1/12+4/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/12+4/65536: Collecting 100 samples in estimated 3.2112 s (40k iterations)
+Benchmarking encode/rs-leopard-gf16-v1/12+4/65536: Analyzing
+encode/rs-leopard-gf16-v1/12+4/65536
+                        time:   [78.561 µs 78.729 µs 78.943 µs]
+                        thrpt:  [9.2778 GiB/s 9.3031 GiB/s 9.3230 GiB/s]
+                 change:
+                        time:   [−9.5592% −9.1665% −8.7945%] (p = 0.00 < 0.05)
+                        thrpt:  [+9.6425% +10.091% +10.570%]
+                        Performance has improved.
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) low mild
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/12+4/262144
+Benchmarking encode/rs-leopard-gf16-v1/12+4/262144: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 3.6s, enable flat sampling, or reduce sample count to 60.
+Benchmarking encode/rs-leopard-gf16-v1/12+4/262144: Collecting 100 samples in estimated 3.5925 s (5050 iterations)
+Benchmarking encode/rs-leopard-gf16-v1/12+4/262144: Analyzing
+encode/rs-leopard-gf16-v1/12+4/262144
+                        time:   [778.66 µs 846.87 µs 925.81 µs]
+                        thrpt:  [3.1645 GiB/s 3.4594 GiB/s 3.7625 GiB/s]
+                 change:
+                        time:   [+6.4732% +12.266% +19.187%] (p = 0.00 < 0.05)
+                        thrpt:  [−16.098% −10.926% −6.0796%]
+                        Performance has regressed.
+Found 16 outliers among 100 measurements (16.00%)
+  2 (2.00%) high mild
+  14 (14.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/12+4/1048576
+Benchmarking encode/rs-leopard-gf16-v1/12+4/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/12+4/1048576: Collecting 100 samples in estimated 3.7074 s (500 iterations)
+Benchmarking encode/rs-leopard-gf16-v1/12+4/1048576: Analyzing
+encode/rs-leopard-gf16-v1/12+4/1048576
+                        time:   [5.5668 ms 5.5914 ms 5.6202 ms]
+                        thrpt:  [2.0851 GiB/s 2.0959 GiB/s 2.1051 GiB/s]
+                 change:
+                        time:   [+2.8861% +3.3751% +3.9613%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.8104% −3.2649% −2.8051%]
+                        Performance has regressed.
+Found 11 outliers among 100 measurements (11.00%)
+  6 (6.00%) high mild
+  5 (5.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/16+4/65536
+Benchmarking encode/rs-leopard-gf16-v1/16+4/65536: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/16+4/65536: Collecting 100 samples in estimated 3.2129 s (30k iterations)
+Benchmarking encode/rs-leopard-gf16-v1/16+4/65536: Analyzing
+encode/rs-leopard-gf16-v1/16+4/65536
+                        time:   [106.10 µs 106.32 µs 106.59 µs]
+                        thrpt:  [9.1616 GiB/s 9.1853 GiB/s 9.2045 GiB/s]
+                 change:
+                        time:   [−10.852% −10.558% −10.271%] (p = 0.00 < 0.05)
+                        thrpt:  [+11.446% +11.805% +12.173%]
+                        Performance has improved.
+Found 9 outliers among 100 measurements (9.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/16+4/262144
+Benchmarking encode/rs-leopard-gf16-v1/16+4/262144: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/16+4/262144: Collecting 100 samples in estimated 3.0233 s (2500 iterations)
+Benchmarking encode/rs-leopard-gf16-v1/16+4/262144: Analyzing
+encode/rs-leopard-gf16-v1/16+4/262144
+                        time:   [1.3176 ms 1.3888 ms 1.4673 ms]
+                        thrpt:  [2.6621 GiB/s 2.8128 GiB/s 2.9648 GiB/s]
+                 change:
+                        time:   [+10.735% +16.946% +23.075%] (p = 0.00 < 0.05)
+                        thrpt:  [−18.749% −14.491% −9.6947%]
+                        Performance has regressed.
+Found 13 outliers among 100 measurements (13.00%)
+  2 (2.00%) high mild
+  11 (11.00%) high severe
+Benchmarking encode/rs-leopard-gf16-v1/16+4/1048576
+Benchmarking encode/rs-leopard-gf16-v1/16+4/1048576: Warming up for 1.0000 s
+Benchmarking encode/rs-leopard-gf16-v1/16+4/1048576: Collecting 100 samples in estimated 3.1334 s (500 iterations)
+Benchmarking encode/rs-leopard-gf16-v1/16+4/1048576: Analyzing
+encode/rs-leopard-gf16-v1/16+4/1048576
+                        time:   [6.3755 ms 6.4377 ms 6.5060 ms]
+                        thrpt:  [2.4016 GiB/s 2.4271 GiB/s 2.4508 GiB/s]
+                 change:
+                        time:   [+2.4327% +3.4464% +4.4552%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.2651% −3.3316% −2.3749%]
+                        Performance has regressed.
+Found 18 outliers among 100 measurements (18.00%)
+  1 (1.00%) high mild
+  17 (17.00%) high severe
+
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/65536
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/65536: Collecting 100 samples in estimated 3.1888 s (81k iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/65536: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/4+2/65536
+                        time:   [8.1287 µs 8.2434 µs 8.3913 µs]
+                        thrpt:  [29.095 GiB/s 29.616 GiB/s 30.034 GiB/s]
+                 change:
+                        time:   [+3.8366% +6.8011% +9.9134%] (p = 0.00 < 0.05)
+                        thrpt:  [−9.0193% −6.3680% −3.6948%]
+                        Performance has regressed.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/262144
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/262144: Collecting 100 samples in estimated 3.3139 s (20k iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/262144: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/4+2/262144
+                        time:   [30.597 µs 30.679 µs 30.779 µs]
+                        thrpt:  [31.728 GiB/s 31.831 GiB/s 31.917 GiB/s]
+                 change:
+                        time:   [−0.9432% −0.2893% +0.4470%] (p = 0.46 > 0.05)
+                        thrpt:  [−0.4450% +0.2901% +0.9522%]
+                        No change in performance detected.
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/1048576
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/1048576: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 5.0s, enable flat sampling, or reduce sample count to 50.
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/1048576: Collecting 100 samples in estimated 5.0266 s (5050 iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/4+2/1048576: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/4+2/1048576
+                        time:   [413.74 µs 415.39 µs 417.22 µs]
+                        thrpt:  [9.3625 GiB/s 9.4038 GiB/s 9.4413 GiB/s]
+                 change:
+                        time:   [+3.2377% +3.6153% +4.0408%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.8838% −3.4892% −3.1362%]
+                        Performance has regressed.
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) low mild
+  1 (1.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/65536
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/65536: Collecting 100 samples in estimated 3.2283 s (56k iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/65536: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/6+3/65536
+                        time:   [11.022 µs 11.083 µs 11.151 µs]
+                        thrpt:  [32.842 GiB/s 33.044 GiB/s 33.225 GiB/s]
+                 change:
+                        time:   [+1.9322% +2.4245% +3.0514%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.9611% −2.3671% −1.8956%]
+                        Performance has regressed.
+Found 16 outliers among 100 measurements (16.00%)
+  10 (10.00%) low severe
+  1 (1.00%) low mild
+  5 (5.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/262144
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/262144: Collecting 100 samples in estimated 4.2011 s (15k iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/262144: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/6+3/262144
+                        time:   [85.883 µs 100.63 µs 115.82 µs]
+                        thrpt:  [12.648 GiB/s 14.556 GiB/s 17.056 GiB/s]
+                 change:
+                        time:   [+18.051% +30.175% +43.168%] (p = 0.00 < 0.05)
+                        thrpt:  [−30.152% −23.180% −15.291%]
+                        Performance has regressed.
+Found 18 outliers among 100 measurements (18.00%)
+  18 (18.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/1048576
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/1048576: Collecting 100 samples in estimated 3.0426 s (2000 iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/6+3/1048576: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/6+3/1048576
+                        time:   [570.27 µs 592.84 µs 618.31 µs]
+                        thrpt:  [9.4765 GiB/s 9.8836 GiB/s 10.275 GiB/s]
+                 change:
+                        time:   [+7.0601% +11.461% +16.531%] (p = 0.00 < 0.05)
+                        thrpt:  [−14.186% −10.283% −6.5945%]
+                        Performance has regressed.
+Found 19 outliers among 100 measurements (19.00%)
+  3 (3.00%) high mild
+  16 (16.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/65536
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/65536: Collecting 100 samples in estimated 3.2983 s (50k iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/65536: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/8+3/65536
+                        time:   [15.583 µs 15.752 µs 15.941 µs]
+                        thrpt:  [30.631 GiB/s 30.999 GiB/s 31.334 GiB/s]
+                 change:
+                        time:   [+6.7249% +7.6879% +8.7643%] (p = 0.00 < 0.05)
+                        thrpt:  [−8.0581% −7.1390% −6.3012%]
+                        Performance has regressed.
+Found 22 outliers among 100 measurements (22.00%)
+  14 (14.00%) high mild
+  8 (8.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/262144
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/262144: Collecting 100 samples in estimated 3.9408 s (10k iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/262144: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/8+3/262144
+                        time:   [114.11 µs 114.69 µs 115.27 µs]
+                        thrpt:  [16.944 GiB/s 17.029 GiB/s 17.117 GiB/s]
+                 change:
+                        time:   [+0.9027% +2.0906% +3.1298%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.0348% −2.0478% −0.8946%]
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/1048576
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/1048576: Collecting 100 samples in estimated 3.0070 s (1600 iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+3/1048576: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/8+3/1048576
+                        time:   [692.93 µs 716.72 µs 744.00 µs]
+                        thrpt:  [10.501 GiB/s 10.900 GiB/s 11.275 GiB/s]
+                 change:
+                        time:   [+2.3759% +5.9425% +9.9020%] (p = 0.00 < 0.05)
+                        thrpt:  [−9.0098% −5.6091% −2.3208%]
+                        Performance has regressed.
+Found 10 outliers among 100 measurements (10.00%)
+  10 (10.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/65536
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/65536: Collecting 100 samples in estimated 3.4753 s (35k iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/65536: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/8+4/65536
+                        time:   [14.407 µs 14.433 µs 14.473 µs]
+                        thrpt:  [33.738 GiB/s 33.830 GiB/s 33.892 GiB/s]
+                 change:
+                        time:   [+7.8026% +8.3384% +8.9292%] (p = 0.00 < 0.05)
+                        thrpt:  [−8.1973% −7.6967% −7.2378%]
+                        Performance has regressed.
+Found 10 outliers among 100 measurements (10.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  5 (5.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/262144
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/262144: Collecting 100 samples in estimated 4.6613 s (10k iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/262144: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/8+4/262144
+                        time:   [138.26 µs 141.22 µs 144.98 µs]
+                        thrpt:  [13.471 GiB/s 13.830 GiB/s 14.126 GiB/s]
+                 change:
+                        time:   [+15.231% +22.611% +30.775%] (p = 0.00 < 0.05)
+                        thrpt:  [−23.533% −18.441% −13.218%]
+                        Performance has regressed.
+Found 15 outliers among 100 measurements (15.00%)
+  8 (8.00%) high mild
+  7 (7.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/1048576
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/1048576: Collecting 100 samples in estimated 3.0185 s (1500 iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/8+4/1048576: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/8+4/1048576
+                        time:   [658.20 µs 660.70 µs 663.35 µs]
+                        thrpt:  [11.777 GiB/s 11.825 GiB/s 11.869 GiB/s]
+                 change:
+                        time:   [−1.3407% −0.8502% −0.3683%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.3696% +0.8575% +1.3589%]
+                        Change within noise threshold.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/65536
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/65536: Collecting 100 samples in estimated 3.1850 s (25k iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/65536: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/12+4/65536
+                        time:   [20.401 µs 20.454 µs 20.541 µs]
+                        thrpt:  [35.657 GiB/s 35.809 GiB/s 35.901 GiB/s]
+                 change:
+                        time:   [+0.5682% +1.2894% +1.9953%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.9563% −1.2730% −0.5650%]
+                        Change within noise threshold.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/262144
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/262144: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 3.3s, enable flat sampling, or reduce sample count to 60.
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/262144: Collecting 100 samples in estimated 3.2668 s (5050 iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/262144: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/12+4/262144
+                        time:   [261.14 µs 261.97 µs 263.01 µs]
+                        thrpt:  [11.139 GiB/s 11.183 GiB/s 11.219 GiB/s]
+                 change:
+                        time:   [+6.7833% +7.6236% +8.5503%] (p = 0.00 < 0.05)
+                        thrpt:  [−7.8768% −7.0836% −6.3524%]
+                        Performance has regressed.
+Found 13 outliers among 100 measurements (13.00%)
+  5 (5.00%) high mild
+  8 (8.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/1048576
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/1048576: Collecting 100 samples in estimated 3.0266 s (1100 iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/12+4/1048576: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/12+4/1048576
+                        time:   [912.59 µs 914.79 µs 918.32 µs]
+                        thrpt:  [12.761 GiB/s 12.810 GiB/s 12.841 GiB/s]
+                 change:
+                        time:   [−0.4410% +0.0369% +0.5887%] (p = 0.89 > 0.05)
+                        thrpt:  [−0.5853% −0.0368% +0.4430%]
+                        No change in performance detected.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/65536
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/65536: Collecting 100 samples in estimated 3.6702 s (25k iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/65536: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/16+4/65536
+                        time:   [27.129 µs 27.159 µs 27.191 µs]
+                        thrpt:  [35.915 GiB/s 35.957 GiB/s 35.997 GiB/s]
+                 change:
+                        time:   [−0.9750% −0.7252% −0.4584%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.4605% +0.7305% +0.9846%]
+                        Change within noise threshold.
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/262144
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/262144: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 4.2s, enable flat sampling, or reduce sample count to 50.
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/262144: Collecting 100 samples in estimated 4.1625 s (5050 iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/262144: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/16+4/262144
+                        time:   [360.55 µs 367.34 µs 376.24 µs]
+                        thrpt:  [10.382 GiB/s 10.634 GiB/s 10.834 GiB/s]
+                 change:
+                        time:   [+4.5882% +7.9094% +12.246%] (p = 0.00 < 0.05)
+                        thrpt:  [−10.910% −7.3297% −4.3869%]
+                        Performance has regressed.
+Found 14 outliers among 100 measurements (14.00%)
+  1 (1.00%) high mild
+  13 (13.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/1048576
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/1048576: Collecting 100 samples in estimated 3.0117 s (900 iterations)
+Benchmarking reconstruct_1_data_shard/rs-gf8-v1/16+4/1048576: Analyzing
+reconstruct_1_data_shard/rs-gf8-v1/16+4/1048576
+                        time:   [1.1849 ms 1.1954 ms 1.2063 ms]
+                        thrpt:  [12.953 GiB/s 13.071 GiB/s 13.187 GiB/s]
+                 change:
+                        time:   [+2.7685% +3.7301% +4.7559%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.5400% −3.5959% −2.6939%]
+                        Performance has regressed.
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/65536
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/65536: Collecting 100 samples in estimated 3.9114 s (15k iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/65536: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/65536
+                        time:   [247.06 µs 247.25 µs 247.50 µs]
+                        thrpt:  [1010.1 MiB/s 1011.1 MiB/s 1011.9 MiB/s]
+                 change:
+                        time:   [+1.0939% +1.2113% +1.3499%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.3320% −1.1968% −1.0820%]
+                        Performance has regressed.
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/262144
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/262144: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 4.1s, enable flat sampling, or reduce sample count to 60.
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/262144: Collecting 100 samples in estimated 4.0641 s (5050 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/262144: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/262144
+                        time:   [695.32 µs 698.16 µs 701.65 µs]
+                        thrpt:  [1.3918 GiB/s 1.3988 GiB/s 1.4045 GiB/s]
+                 change:
+                        time:   [+7.3540% +8.6094% +9.9155%] (p = 0.00 < 0.05)
+                        thrpt:  [−9.0210% −7.9270% −6.8502%]
+                        Performance has regressed.
+Found 11 outliers among 100 measurements (11.00%)
+  4 (4.00%) high mild
+  7 (7.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/1048576
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/1048576: Collecting 100 samples in estimated 3.2724 s (500 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/1048576: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/4+2/1048576
+                        time:   [5.7516 ms 5.7903 ms 5.8320 ms]
+                        thrpt:  [685.87 MiB/s 690.81 MiB/s 695.46 MiB/s]
+                 change:
+                        time:   [+4.5232% +5.3332% +6.1257%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.7721% −5.0632% −4.3275%]
+                        Performance has regressed.
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high mild
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/65536
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/65536: Collecting 100 samples in estimated 4.0804 s (10k iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/65536: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/65536
+                        time:   [380.26 µs 380.57 µs 380.99 µs]
+                        thrpt:  [984.29 MiB/s 985.36 MiB/s 986.16 MiB/s]
+                 change:
+                        time:   [−1.6060% −1.4778% −1.3511%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.3696% +1.5000% +1.6322%]
+                        Performance has improved.
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/262144
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/262144: Collecting 100 samples in estimated 3.2001 s (1500 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/262144: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/262144
+                        time:   [1.8495 ms 1.8612 ms 1.8735 ms]
+                        thrpt:  [800.63 MiB/s 805.94 MiB/s 811.01 MiB/s]
+                 change:
+                        time:   [+0.0425% +0.9101% +1.6670%] (p = 0.03 < 0.05)
+                        thrpt:  [−1.6397% −0.9019% −0.0425%]
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/1048576
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/1048576: Collecting 100 samples in estimated 4.0725 s (300 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/1048576: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/6+3/1048576
+                        time:   [12.614 ms 13.084 ms 13.630 ms]
+                        thrpt:  [440.20 MiB/s 458.57 MiB/s 475.68 MiB/s]
+                 change:
+                        time:   [+7.5051% +11.468% +16.612%] (p = 0.00 < 0.05)
+                        thrpt:  [−14.246% −10.288% −6.9811%]
+                        Performance has regressed.
+Found 11 outliers among 100 measurements (11.00%)
+  3 (3.00%) high mild
+  8 (8.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/65536
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/65536: Collecting 100 samples in estimated 4.2519 s (10k iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/65536: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/65536
+                        time:   [390.06 µs 391.72 µs 394.79 µs]
+                        thrpt:  [1.2368 GiB/s 1.2465 GiB/s 1.2518 GiB/s]
+                 change:
+                        time:   [+4.7442% +5.0849% +5.4469%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.1655% −4.8389% −4.5294%]
+                        Performance has regressed.
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/262144
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/262144: Collecting 100 samples in estimated 3.1696 s (1400 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/262144: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/262144
+                        time:   [1.9052 ms 1.9157 ms 1.9326 ms]
+                        thrpt:  [1.0106 GiB/s 1.0195 GiB/s 1.0252 GiB/s]
+                 change:
+                        time:   [+0.4021% +0.9825% +2.0110%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.9714% −0.9729% −0.4004%]
+                        Change within noise threshold.
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/1048576
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/1048576: Collecting 100 samples in estimated 4.0581 s (300 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/1048576: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/8+3/1048576
+                        time:   [12.089 ms 12.121 ms 12.169 ms]
+                        thrpt:  [657.41 MiB/s 660.03 MiB/s 661.76 MiB/s]
+                 change:
+                        time:   [+0.0206% +0.4368% +0.8862%] (p = 0.05 < 0.05)
+                        thrpt:  [−0.8784% −0.4349% −0.0206%]
+                        Change within noise threshold.
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/65536
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/65536: Collecting 100 samples in estimated 4.2669 s (10k iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/65536: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/65536
+                        time:   [368.45 µs 368.97 µs 369.58 µs]
+                        thrpt:  [1.3212 GiB/s 1.3234 GiB/s 1.3252 GiB/s]
+                 change:
+                        time:   [−6.1407% −5.9649% −5.7804%] (p = 0.00 < 0.05)
+                        thrpt:  [+6.1350% +6.3433% +6.5424%]
+                        Performance has improved.
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/262144
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/262144: Collecting 100 samples in estimated 3.0222 s (1300 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/262144: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/262144
+                        time:   [1.9411 ms 1.9451 ms 1.9494 ms]
+                        thrpt:  [1.0019 GiB/s 1.0041 GiB/s 1.0062 GiB/s]
+                 change:
+                        time:   [+2.1015% +2.3587% +2.6204%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.5535% −2.3044% −2.0582%]
+                        Performance has regressed.
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/1048576
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/1048576: Collecting 100 samples in estimated 4.0631 s (300 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/1048576: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/8+4/1048576
+                        time:   [12.041 ms 12.072 ms 12.110 ms]
+                        thrpt:  [660.61 MiB/s 662.71 MiB/s 664.41 MiB/s]
+                 change:
+                        time:   [+0.0100% +0.3669% +0.7529%] (p = 0.06 > 0.05)
+                        thrpt:  [−0.7472% −0.3656% −0.0100%]
+                        No change in performance detected.
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/65536
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/65536: Collecting 100 samples in estimated 5.0226 s (10k iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/65536: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/65536
+                        time:   [403.82 µs 404.10 µs 404.41 µs]
+                        thrpt:  [1.8111 GiB/s 1.8125 GiB/s 1.8137 GiB/s]
+                 change:
+                        time:   [−6.5674% −6.1826% −5.8567%] (p = 0.00 < 0.05)
+                        thrpt:  [+6.2210% +6.5900% +7.0290%]
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/262144
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/262144: Collecting 100 samples in estimated 3.0590 s (1100 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/262144: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/262144
+                        time:   [2.2632 ms 2.2898 ms 2.3209 ms]
+                        thrpt:  [1.2623 GiB/s 1.2795 GiB/s 1.2945 GiB/s]
+                 change:
+                        time:   [+2.2882% +3.4891% +4.9655%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.7306% −3.3714% −2.2370%]
+                        Performance has regressed.
+Found 10 outliers among 100 measurements (10.00%)
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/1048576
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/1048576: Collecting 100 samples in estimated 4.8291 s (200 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/1048576: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/12+4/1048576
+                        time:   [19.600 ms 19.647 ms 19.705 ms]
+                        thrpt:  [609.00 MiB/s 610.78 MiB/s 612.23 MiB/s]
+                 change:
+                        time:   [+2.1222% +2.3832% +2.7162%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.6444% −2.3278% −2.0781%]
+                        Performance has regressed.
+Found 9 outliers among 100 measurements (9.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  6 (6.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/65536
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/65536: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 4.7s, enable flat sampling, or reduce sample count to 50.
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/65536: Collecting 100 samples in estimated 4.7380 s (5050 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/65536: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/65536
+                        time:   [790.46 µs 799.13 µs 809.14 µs]
+                        thrpt:  [1.2069 GiB/s 1.2220 GiB/s 1.2354 GiB/s]
+Found 18 outliers among 100 measurements (18.00%)
+  6 (6.00%) low mild
+  5 (5.00%) high mild
+  7 (7.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/262144
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/262144: Collecting 100 samples in estimated 3.5925 s (500 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/262144: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/262144
+                        time:   [6.3826 ms 6.3951 ms 6.4094 ms]
+                        thrpt:  [624.09 MiB/s 625.48 MiB/s 626.70 MiB/s]
+Found 12 outliers among 100 measurements (12.00%)
+  5 (5.00%) high mild
+  7 (7.00%) high severe
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/1048576
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/1048576: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 4.0s, or reduce sample count to 70.
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/1048576: Collecting 100 samples in estimated 4.0241 s (100 iterations)
+Benchmarking reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/1048576: Analyzing
+reconstruct_1_data_shard/rs-leopard-gf16-v1/16+4/1048576
+                        time:   [38.149 ms 38.287 ms 38.437 ms]
+                        thrpt:  [416.27 MiB/s 417.90 MiB/s 419.41 MiB/s]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/65536
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/65536: Collecting 100 samples in estimated 3.1087 s (81k iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/65536: Analyzing
+reconstruct_m_shards/rs-gf8-v1/4+2/65536
+                        time:   [14.797 µs 14.985 µs 15.225 µs]
+                        thrpt:  [16.035 GiB/s 16.292 GiB/s 16.499 GiB/s]
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/262144
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/262144: Collecting 100 samples in estimated 3.2550 s (20k iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/262144: Analyzing
+reconstruct_m_shards/rs-gf8-v1/4+2/262144
+                        time:   [63.711 µs 63.898 µs 64.134 µs]
+                        thrpt:  [15.227 GiB/s 15.283 GiB/s 15.328 GiB/s]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/1048576
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/1048576: Collecting 100 samples in estimated 3.0185 s (2500 iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/4+2/1048576: Analyzing
+reconstruct_m_shards/rs-gf8-v1/4+2/1048576
+                        time:   [707.10 µs 711.38 µs 717.51 µs]
+                        thrpt:  [5.4442 GiB/s 5.4911 GiB/s 5.5243 GiB/s]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/65536
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/65536: Collecting 100 samples in estimated 3.2397 s (50k iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/65536: Analyzing
+reconstruct_m_shards/rs-gf8-v1/6+3/65536
+                        time:   [31.369 µs 31.405 µs 31.448 µs]
+                        thrpt:  [11.645 GiB/s 11.661 GiB/s 11.674 GiB/s]
+Found 12 outliers among 100 measurements (12.00%)
+  2 (2.00%) low severe
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/262144
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/262144: Collecting 100 samples in estimated 3.0616 s (10k iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/262144: Analyzing
+reconstruct_m_shards/rs-gf8-v1/6+3/262144
+                        time:   [169.17 µs 169.55 µs 169.95 µs]
+                        thrpt:  [8.6191 GiB/s 8.6395 GiB/s 8.6590 GiB/s]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/1048576
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/1048576: Collecting 100 samples in estimated 3.1205 s (1200 iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/6+3/1048576: Analyzing
+reconstruct_m_shards/rs-gf8-v1/6+3/1048576
+                        time:   [1.8070 ms 1.8093 ms 1.8119 ms]
+                        thrpt:  [3.2339 GiB/s 3.2385 GiB/s 3.2425 GiB/s]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/65536
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/65536: Collecting 100 samples in estimated 3.1142 s (40k iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/65536: Analyzing
+reconstruct_m_shards/rs-gf8-v1/8+3/65536
+                        time:   [42.748 µs 42.765 µs 42.785 µs]
+                        thrpt:  [11.412 GiB/s 11.418 GiB/s 11.422 GiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low severe
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/262144
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/262144: Collecting 100 samples in estimated 4.4728 s (10k iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/262144: Analyzing
+reconstruct_m_shards/rs-gf8-v1/8+3/262144
+                        time:   [246.93 µs 247.17 µs 247.45 µs]
+                        thrpt:  [7.8930 GiB/s 7.9019 GiB/s 7.9097 GiB/s]
+Found 17 outliers among 100 measurements (17.00%)
+  9 (9.00%) high mild
+  8 (8.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/1048576
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/1048576: Collecting 100 samples in estimated 3.3142 s (1000 iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+3/1048576: Analyzing
+reconstruct_m_shards/rs-gf8-v1/8+3/1048576
+                        time:   [2.3039 ms 2.3066 ms 2.3097 ms]
+                        thrpt:  [3.3825 GiB/s 3.3870 GiB/s 3.3910 GiB/s]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/65536
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/65536: Collecting 100 samples in estimated 3.1805 s (35k iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/65536: Analyzing
+reconstruct_m_shards/rs-gf8-v1/8+4/65536
+                        time:   [57.421 µs 57.450 µs 57.490 µs]
+                        thrpt:  [8.4934 GiB/s 8.4992 GiB/s 8.5035 GiB/s]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/262144
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/262144: Collecting 100 samples in estimated 5.0058 s (10k iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/262144: Analyzing
+reconstruct_m_shards/rs-gf8-v1/8+4/262144
+                        time:   [335.58 µs 337.84 µs 340.57 µs]
+                        thrpt:  [5.7348 GiB/s 5.7813 GiB/s 5.8202 GiB/s]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) high mild
+  7 (7.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/1048576
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/1048576: Collecting 100 samples in estimated 3.1668 s (700 iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/8+4/1048576: Analyzing
+reconstruct_m_shards/rs-gf8-v1/8+4/1048576
+                        time:   [3.4846 ms 3.4891 ms 3.4943 ms]
+                        thrpt:  [2.2358 GiB/s 2.2391 GiB/s 2.2420 GiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/65536
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/65536: Collecting 100 samples in estimated 3.2526 s (25k iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/65536: Analyzing
+reconstruct_m_shards/rs-gf8-v1/12+4/65536
+                        time:   [82.287 µs 82.308 µs 82.330 µs]
+                        thrpt:  [8.8962 GiB/s 8.8985 GiB/s 8.9008 GiB/s]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low severe
+  6 (6.00%) high mild
+  1 (1.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/262144
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/262144: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 4.2s, enable flat sampling, or reduce sample count to 50.
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/262144: Collecting 100 samples in estimated 4.1544 s (5050 iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/262144: Analyzing
+reconstruct_m_shards/rs-gf8-v1/12+4/262144
+                        time:   [526.80 µs 527.48 µs 528.24 µs]
+                        thrpt:  [5.5461 GiB/s 5.5541 GiB/s 5.5613 GiB/s]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/1048576
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/1048576: Collecting 100 samples in estimated 3.2629 s (500 iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/12+4/1048576: Analyzing
+reconstruct_m_shards/rs-gf8-v1/12+4/1048576
+                        time:   [5.0075 ms 5.0102 ms 5.0130 ms]
+                        thrpt:  [2.3377 GiB/s 2.3390 GiB/s 2.3403 GiB/s]
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/65536
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/65536: Collecting 100 samples in estimated 3.0235 s (15k iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/65536: Analyzing
+reconstruct_m_shards/rs-gf8-v1/16+4/65536
+                        time:   [107.77 µs 107.81 µs 107.85 µs]
+                        thrpt:  [9.0547 GiB/s 9.0581 GiB/s 9.0616 GiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/262144
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/262144: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 5.7s, enable flat sampling, or reduce sample count to 50.
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/262144: Collecting 100 samples in estimated 5.6936 s (5050 iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/262144: Analyzing
+reconstruct_m_shards/rs-gf8-v1/16+4/262144
+                        time:   [709.43 µs 709.95 µs 710.47 µs]
+                        thrpt:  [5.4981 GiB/s 5.5022 GiB/s 5.5062 GiB/s]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) low mild
+  1 (1.00%) high mild
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/1048576
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/1048576: Collecting 100 samples in estimated 3.3913 s (400 iterations)
+Benchmarking reconstruct_m_shards/rs-gf8-v1/16+4/1048576: Analyzing
+reconstruct_m_shards/rs-gf8-v1/16+4/1048576
+                        time:   [6.5656 ms 6.5727 ms 6.5817 ms]
+                        thrpt:  [2.3740 GiB/s 2.3773 GiB/s 2.3798 GiB/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/65536
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/65536: Collecting 100 samples in estimated 3.8918 s (15k iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/65536: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/4+2/65536
+                        time:   [245.24 µs 245.34 µs 245.45 µs]
+                        thrpt:  [1018.5 MiB/s 1019.0 MiB/s 1019.4 MiB/s]
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/262144
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/262144: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 3.8s, enable flat sampling, or reduce sample count to 60.
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/262144: Collecting 100 samples in estimated 3.8009 s (5050 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/262144: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/4+2/262144
+                        time:   [640.28 µs 642.43 µs 644.99 µs]
+                        thrpt:  [1.5141 GiB/s 1.5201 GiB/s 1.5252 GiB/s]
+Found 15 outliers among 100 measurements (15.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  10 (10.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/1048576
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/1048576: Collecting 100 samples in estimated 3.0695 s (500 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/4+2/1048576: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/4+2/1048576
+                        time:   [5.5861 ms 5.5919 ms 5.5984 ms]
+                        thrpt:  [714.49 MiB/s 715.33 MiB/s 716.06 MiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/65536
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/65536: Collecting 100 samples in estimated 3.8332 s (10k iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/65536: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/6+3/65536
+                        time:   [365.39 µs 365.59 µs 365.85 µs]
+                        thrpt:  [1.0010 GiB/s 1.0017 GiB/s 1.0022 GiB/s]
+Found 14 outliers among 100 measurements (14.00%)
+  3 (3.00%) low severe
+  2 (2.00%) low mild
+  7 (7.00%) high mild
+  2 (2.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/262144
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/262144: Collecting 100 samples in estimated 3.1716 s (1400 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/262144: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/6+3/262144
+                        time:   [1.9296 ms 1.9335 ms 1.9389 ms]
+                        thrpt:  [773.63 MiB/s 775.78 MiB/s 777.35 MiB/s]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/1048576
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/1048576: Collecting 100 samples in estimated 3.9781 s (300 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/6+3/1048576: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/6+3/1048576
+                        time:   [12.327 ms 12.355 ms 12.396 ms]
+                        thrpt:  [484.04 MiB/s 485.65 MiB/s 486.72 MiB/s]
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/65536
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/65536: Collecting 100 samples in estimated 4.0696 s (10k iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/65536: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/8+3/65536
+                        time:   [372.39 µs 373.20 µs 374.28 µs]
+                        thrpt:  [1.3046 GiB/s 1.3083 GiB/s 1.3112 GiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/262144
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/262144: Collecting 100 samples in estimated 3.0592 s (1400 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/262144: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/8+3/262144
+                        time:   [1.8991 ms 1.9066 ms 1.9188 ms]
+                        thrpt:  [1.0179 GiB/s 1.0244 GiB/s 1.0285 GiB/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/1048576
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/1048576: Collecting 100 samples in estimated 4.0650 s (300 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+3/1048576: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/8+3/1048576
+                        time:   [12.528 ms 12.572 ms 12.627 ms]
+                        thrpt:  [633.55 MiB/s 636.32 MiB/s 638.57 MiB/s]
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/65536
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/65536: Collecting 100 samples in estimated 4.2549 s (10k iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/65536: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/8+4/65536
+                        time:   [393.58 µs 394.17 µs 395.07 µs]
+                        thrpt:  [1.2359 GiB/s 1.2387 GiB/s 1.2406 GiB/s]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low severe
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/262144
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/262144: Collecting 100 samples in estimated 3.1984 s (1400 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/262144: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/8+4/262144
+                        time:   [2.0041 ms 2.0128 ms 2.0244 ms]
+                        thrpt:  [987.95 MiB/s 993.66 MiB/s 997.97 MiB/s]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) high mild
+  7 (7.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/1048576
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/1048576: Collecting 100 samples in estimated 4.1369 s (300 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/8+4/1048576: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/8+4/1048576
+                        time:   [12.737 ms 12.761 ms 12.793 ms]
+                        thrpt:  [625.37 MiB/s 626.89 MiB/s 628.07 MiB/s]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/65536
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/65536: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/65536: Collecting 100 samples in estimated 4.8485 s (10k iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/65536: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/12+4/65536
+                        time:   [430.24 µs 430.90 µs 432.03 µs]
+                        thrpt:  [1.6953 GiB/s 1.6998 GiB/s 1.7023 GiB/s]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/262144
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/262144: Collecting 100 samples in estimated 3.2365 s (1200 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/262144: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/12+4/262144
+                        time:   [2.2848 ms 2.2986 ms 2.3161 ms]
+                        thrpt:  [1.2649 GiB/s 1.2746 GiB/s 1.2822 GiB/s]
+Found 11 outliers among 100 measurements (11.00%)
+  3 (3.00%) high mild
+  8 (8.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/1048576
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/1048576: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/1048576: Collecting 100 samples in estimated 4.8822 s (200 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/12+4/1048576: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/12+4/1048576
+                        time:   [20.760 ms 20.868 ms 20.991 ms]
+                        thrpt:  [571.67 MiB/s 575.04 MiB/s 578.04 MiB/s]
+Found 15 outliers among 100 measurements (15.00%)
+  3 (3.00%) high mild
+  12 (12.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/65536
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/65536: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 4.3s, enable flat sampling, or reduce sample count to 50.
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/65536: Collecting 100 samples in estimated 4.2800 s (5050 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/65536: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/16+4/65536
+                        time:   [752.89 µs 754.60 µs 756.66 µs]
+                        thrpt:  [1.2906 GiB/s 1.2941 GiB/s 1.2971 GiB/s]
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) high mild
+  7 (7.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/262144
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/262144: Warming up for 1.0000 s
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/262144: Collecting 100 samples in estimated 3.4530 s (500 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/262144: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/16+4/262144
+                        time:   [6.3947 ms 6.4014 ms 6.4085 ms]
+                        thrpt:  [624.17 MiB/s 624.87 MiB/s 625.51 MiB/s]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/1048576
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/1048576: Warming up for 1.0000 s
+
+Warning: Unable to complete 100 samples in 3.0s. You may wish to increase target time to 4.1s, or reduce sample count to 70.
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/1048576: Collecting 100 samples in estimated 4.0752 s (100 iterations)
+Benchmarking reconstruct_m_shards/rs-leopard-gf16-v1/16+4/1048576: Analyzing
+reconstruct_m_shards/rs-leopard-gf16-v1/16+4/1048576
+                        time:   [38.841 ms 38.872 ms 38.904 ms]
+                        thrpt:  [411.27 MiB/s 411.61 MiB/s 411.94 MiB/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+

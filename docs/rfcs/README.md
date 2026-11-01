@@ -29,7 +29,7 @@ acceptance criteria are testable.
 | [RFC-006](RFC-006-multi-tier-storage.md) | Multi-Tier Storage | 002, 003, 004, 008 | draft (Phase 2 implementation, §11) | DD-6, DD-11, DD-12, Phase 2 cache and tiering tests, ADR-0009 |
 | RFC-007 | S3 Gateway Compatibility | 001, 003 | planned | Phase 0 `s3s` spike; compatibility matrix |
 | [RFC-008](RFC-008-failure-recovery-and-garbage-collection.md) | Failure Recovery and Garbage Collection | 003, 004, 005 | draft | DD-7, DD-8, Phase 1 hardening tests |
-| RFC-009 | Performance Architecture | 004, 005, 007 | planned | Phase 0 measurements |
+| [RFC-009](RFC-009-performance-architecture.md) | Performance Architecture | 004, 005, 006 | draft (Phase 2.1 measurements, §6–§8) | Phase 0 transfer and EC benchmarks; Phase 2.1 three-host matrix (`benchmarks/linux/`) |
 | RFC-010 | Testing and Verification | 001–008 | planned | testkit design |
 | [RFC-011](RFC-011-controller.md) | Controller | 003, 004, 008 | draft | Phase 1.2 controller process and failover tests |
 | RFC-013 | Operations and Observability | 001, 006, 008, 011 | planned | metrics registry, admin API |

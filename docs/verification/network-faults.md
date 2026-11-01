@@ -68,6 +68,45 @@ Invariants checked in every run, in addition to the table:
 - Object generation isolation: the cache serves no stale generation
   (overwrite during impairment: later GETs return the new bytes).
 
+## Results (namespace pair, 2026-11-01)
+
+Host A of the Phase 2.1 environment (RFC-009 §5), `deploy/dev/netns-faults.sh
+setup ec` (cache protection `ec 2+1`), arca-lake at commit `f96c60c` (8 MiB
+HTTP/2 windows). Objects 8 MiB (16 MiB in F8), concurrency 4; `s3load`
+JSON lines, gateway and controller metrics, and `admin status` snapshots
+are in `benchmarks/linux/results/faults/<scenario>/`. Node RPC timeout
+10 s; pending-generation lease 20 s; GC grace 3 s; controller lease 4 s,
+health probe 2 s, unhealthy after 6 s, auto repair on.
+
+| # | Scenario | Observed | Against the plan |
+| --- | --- | --- | --- |
+| — | baseline | PUT 12 × 8 MiB in 0.37 s, GET 0.21 s, verify clean | reference |
+| F1 | loss 2 % | PUT 1.24 s, GET 1.0 s / 0.6 s, zero errors, verify clean | as planned |
+| F1 | loss 10 % | every PUT failed after the 10 s node timeout (`Timeout expired` on a shard write, reported as 503 with the reason); nothing visible afterwards (verify: 12 missing, 0 mismatches) | explicit timeouts only, as allowed; but *no* PUT completed: at 10 % loss the 4 MiB shard streams stall on retransmission timeouts far beyond 10 s. The timeout is per RPC, not per byte |
+| F2 | delay 50 ms ± 10 ms jitter | 6 of 12 PUTs failed on shard-write timeouts; GET of the 6 existing objects clean | **not as planned** (zero errors expected). `netem` jitter reorders packets; TCP then collapses on the 4 MiB streams. The same delay without jitter (F2′) passes |
+| F2′ | delay 50 ms, no jitter | PUT 7.2 s (13 MiB/s), GET 4.8 s / 4.4 s, zero errors, verify clean | as planned for F2; throughput bounded by RTT as expected |
+| F3 | bandwidth 100 Mbit/s | PUT 4 × 8 MiB in 4.2 s (7.7 MiB/s ≈ 64 Mbit/s of 100 with EC overhead 1.5×), GET 2.8 s then 1.7 s on the second pass (local cache shards), zero errors | as planned |
+| F4 | connection reset (`ss -K` on the sockets to `d0`, twice during 2 GET passes over 96 objects) | sockets were destroyed (recorded in `sockets.txt`: new ephemeral ports after each kill), **zero client errors**: the interrupted shard reads were treated as missing and the chunks were decoded from the other two shards; the gateway reconnected for the next request | better than planned: the degraded read path (RFC-004 §5.6) absorbs a mid-stream reset on one node; a reset during a PUT was not exercised |
+| F5 | partition 10 s during 160 PUTs (concurrency 2) | the PUT stream paused for the partition and continued: 158 succeeded, 2 failed (the two in flight when the 10 s outage met the 10 s RPC timeout); verify 158 correct, 2 missing, 0 mismatches; GETs afterwards clean; the failed PUTs' pending generations were collected after the lease | partly as planned: requests started during the partition were *delayed*, not failed, because the outage did not exceed the RPC timeout; atomic visibility held |
+| F6 | durable node `d2` killed and restarted during 40 GET passes; cache node `c2` the same | GET: zero errors in every pass (durable reads decoded from `d0`,`d1`; cache hits degraded or fell back); PUT while `d2` was down: 2 of 2 failed explicitly (`m_ack = m`); after restart PUT succeeded; verify clean, the two failed keys absent | as planned (a first run had the PUT succeed because the kill had not landed before the PUT; the scenario now records the namespace's listeners after the kill) |
+| F7 | controller `SIGKILL` and restart during 96 PUTs | zero errors; the new controller acquired leadership (two acquisitions in the controller log); GETs clean | as planned |
+| F8 | 3 s partition in the middle of 48 × 16 MiB PUTs and of 3 GET passes | PUTs: zero errors, the pass stretched from ~2 s to 7 s (stalled, then completed); verify clean; GET pass 1 stretched to 4.7 s, zero errors | as planned for visibility and integrity; the outage was shorter than the RPC timeout so no request failed |
+| GC | overwrite of 12 objects under 30 ms delay, then GC | old generations and their cache copies collected (controller `gc_collected_total` advanced), new bytes verified | as planned |
+| Repair | `d2` killed for good, spare `d3` registered, 2 % loss during the rebuild | auto repair replaced member 3 with `d3` at epoch 2, reconstructed 280 chunks, verified complete (`repairs_completed_total` 1) in about 35 s; verify clean | as planned |
+
+Findings carried into the design documents:
+
+- The per-RPC node timeout is the wrong unit for multi-MiB shard
+  transfers over impaired links (F1 10 %, F2): a progress-based timeout,
+  or smaller frames with per-frame deadlines, would turn these failures
+  into slow successes. Recorded as R-47 and an RFC-009 §9 item.
+- Jitter (reordering) matters more than delay for the shard streams.
+- Partitions shorter than the RPC timeout are invisible to clients except
+  as latency; longer ones fail only the in-flight requests. Nothing
+  partial becomes visible in either case (F5, F8).
+- A mid-stream reset on one node during a GET is absorbed by the degraded
+  read (F4).
+
 ## What is not covered
 
 - Impairment on a physical NIC between two hosts (needs a change to an

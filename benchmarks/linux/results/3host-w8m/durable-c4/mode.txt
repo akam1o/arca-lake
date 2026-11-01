@@ -1,0 +1,1 @@
+mode=durable chunk_bytes=4194304 cache_capacity=0 hosts=3
