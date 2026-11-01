@@ -176,11 +176,18 @@ pinned entries. Evicting an entry: delete the placement and index entry
 and subtract usage in one transaction, then delete the copy on the node
 (a failed delete leaves an orphan for reconciliation).
 
+Admission is refused only when a copy would exceed `capacityBytes`;
+eviction starts when usage exceeds the high watermark and stops at the
+low watermark, so under a read-through workload usage oscillates between
+the two and LRU turnover happens. (Phase 2 refused admissions at the high
+watermark, which left eviction nothing to do and froze the cache content;
+corrected in Phase 2.1 after the three-host measurements.)
+
 **Pinning and capacity.** Pinned entries are never evicted. If pinned
 bytes exceed the low watermark, eviction cannot reach its target and the
 tier reports `cache_over_watermark`; admissions are rejected while usage
-is above the high watermark (misses are still served from durable data),
-and the condition is exposed as a metric. Pinning never fails a read.
+is at capacity (misses are still served from durable data), and the
+condition is exposed as a metric. Pinning never fails a read.
 
 ### 5.5 Prefetch and pinning
 

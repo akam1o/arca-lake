@@ -62,7 +62,8 @@ impl CacheTierConfig {
 }
 
 impl CacheTierConfig {
-    /// Usage above which admissions are rejected and eviction runs.
+    /// Usage above which eviction runs (admissions are refused only at
+    /// `capacity_bytes`).
     #[must_use]
     pub fn high_bytes(&self) -> u64 {
         fraction(self.capacity_bytes, self.high_watermark)
@@ -130,8 +131,10 @@ pub enum PopulateOutcome {
 /// Write the whole chunk `index` of `generation` to `group` (one raw copy,
 /// `r` replicas, or `k + m` shards according to the group's scheme), then
 /// record the placement if the generation is still committed and the tier
-/// is within its high watermark (RFC-006 §5.3, §5.9). A copy that cannot
-/// be written completely is deleted and never recorded.
+/// stays within its capacity (RFC-006 §5.3, §5.9); eviction brings usage
+/// from the high watermark back to the low one, so admissions continue
+/// between the watermarks and LRU turnover happens. A copy that cannot be
+/// written completely is deleted and never recorded.
 ///
 /// # Errors
 ///
@@ -171,7 +174,7 @@ pub async fn populate<S: KvStore>(
         last_access_ms: now_ms,
         created_ms: now_ms,
     };
-    match meta_cache::insert(meta, generation, index, &placement, cfg.high_bytes()).await? {
+    match meta_cache::insert(meta, generation, index, &placement, cfg.capacity_bytes).await? {
         meta_cache::InsertOutcome::Inserted => Ok(PopulateOutcome::Inserted),
         meta_cache::InsertOutcome::AlreadyPresent => Ok(PopulateOutcome::AlreadyPresent),
         meta_cache::InsertOutcome::GenerationGone => {
