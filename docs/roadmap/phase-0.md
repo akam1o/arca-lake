@@ -9,13 +9,13 @@ before Phase 1 commits to a design. It produces no user-facing product.
 | --- | --- | --- |
 | 0.1 skeleton and CI | done | fmt, clippy, test, doc, cargo-deny, gitleaks CLI, DCO, link check |
 | 0.2 EC evaluation | done (first pass) | `arca-lake-ec`; [laptop report](../../benchmarks/reports/2026-11-01-ec-backends.md); ISA-L and server-hardware run outstanding |
-| 0.3 storage engine prototype | first iteration | `arca-lake-storage`: format v1, durable put/delete, range reads, recovery, scrub, crash tests, I/O benchmark. Outstanding: group commit, `O_DIRECT`, io_uring backend (Linux), process-kill crash test in CI, `fio` comparison |
-| 0.4 protocol and transfer | not started | |
+| 0.3 storage engine prototype | done (first version) | `arca-lake-storage`: format v1, group commit (default), compaction with fault-injection hook, order-independent index rebuild, SIGKILL crash test, interrupted-compaction tests, concurrent-read-during-compaction test, golden v1 segment, [group-commit report](../../benchmarks/reports/2026-11-01-storage-group-commit.md). Outstanding: `O_DIRECT`, io_uring backend (Linux), `fio` comparison, power-loss test on hardware, ENOSPC test |
+| 0.4 protocol and transfer | done (loopback) | `arca-lake-protocol` (storage node API v1, vendored protoc), `benchmarks/transfer` (gRPC vs raw framed TCP, TLS, backpressure, CPU and RSS), [report](../../benchmarks/reports/2026-11-01-transfer-grpc-vs-raw.md) recommending gRPC with connection fan-out. Outstanding: confirmation on a real network between two hosts |
 | 0.5 metadata spike | backend done, measurements outstanding | `arca-lake-metadata`: KV abstraction with FoundationDB semantics, layout v1, write-protocol recipes, concurrency tests; FoundationDB backend (`fdb` feature) passing the protocol tests against a real single-process cluster in a container (`deploy/dev/fdb-test.sh`) and in CI. Outstanding: publishable latency/listing/hot-spot measurements on a described environment |
 | 0.6 S3 spike | functional part done | `arca-lake-gateway` on `s3s` with an in-memory backend; AWS CLI smoke test passes (SigV4, `s3 cp` with default checksums, range GET, metadata, `If-None-Match: *`, delimiter listing, CLI pagination, wrong-secret rejection). Outstanding: second SDK, overhead measurements (TLS, hashing), `s3s` findings for OD-06 |
 | 0.7 single-node harness | not started | |
 | 0.8 multi-node functional test | not started | |
-| 0.9 RFCs and ADRs | ADR-0001..0005 done | RFC-001/002 drafts outstanding |
+| 0.9 RFCs and ADRs | ADR-0001..0005 done; RFC-001/002/003/005 drafted | RFC-004 and the remaining RFCs outstanding; ADRs for OD-05..OD-10 await measurements |
 
 ## Scope
 

@@ -44,11 +44,15 @@ more than raw overhead.
 ### tonic / gRPC
 
 *Verified*: tonic 0.14.9 (MIT). gRPC gives typed, versioned, streaming RPC
-with TLS and is appropriate for control traffic and probably for shard
-transfer. *Hypothesis*: protobuf framing overhead on multi-megabyte shard
-streams is acceptable; Phase 0 compares against raw length-prefixed TCP with
-the same TLS stack so that we only build a custom data protocol if the
-measured difference matters.
+with TLS and is appropriate for control traffic and for shard transfer.
+*Measured* (loopback, laptop, relative; [report](../../benchmarks/reports/2026-11-01-transfer-grpc-vs-raw.md)):
+with TLS on, gRPC with one connection per stream is within about 20% of a
+raw length-prefixed TCP protocol in throughput, at roughly 1.5× the CPU per
+byte and somewhat more memory (HTTP/2 windows). Flow control works end to
+end for both. The raw protocol's first version deadlocked under TLS because
+of a missing flush at message boundaries, which gRPC handles internally.
+Recommendation: gRPC for all internal RPC including shard transfer, with
+several HTTP/2 connections per peer (OD-08).
 
 ### rustls
 

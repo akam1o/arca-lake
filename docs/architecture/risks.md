@@ -52,6 +52,7 @@ update this list with what it learned.
 | R-26 | Non-public information leaks into the public repository | High | Policy document; PR checklist; secret scanning; benchmark report template requiring public environment description; reviewers explicitly check |
 | R-27 | Claims of S3 compatibility outrun verification | Medium | Compatibility matrix maintained from test results only; `s3-tests` and SDK suites in CI |
 | R-28 | Multi-node benchmarks require infrastructure that may not be publicly describable | Medium | Use cloud instance types that can be named; otherwise publish only functional results and label performance as "not measured" |
+| R-29 | A hand-written data protocol accumulates subtle transport bugs that mature RPC stacks already handle (observed in Phase 0: a missing `flush()` at message boundaries deadlocked raw TLS connections randomly under concurrency while plaintext worked) | Medium | Prefer gRPC unless measurements show a material difference (OD-08); if a raw protocol is adopted, require flush-at-boundary and timeout rules in the protocol spec and fuzz/soak tests over TLS |
 
 ## Review cadence
 

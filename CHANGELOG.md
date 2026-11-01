@@ -44,3 +44,9 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   deterministic writer process, interrupted-compaction tests at every step,
   concurrent-read-during-compaction test, golden v1 segment for format
   compatibility, concurrent-writer benchmark (Phase 0 task 0.3).
+- `arca-lake-protocol`: storage node API v1 (`PutShard` client streaming,
+  `GetShard` server streaming) compiled with a vendored `protoc`.
+- `benchmarks/transfer`: shard transfer measurement tool comparing tonic
+  gRPC and raw framed TCP, with and without TLS, with backpressure, CPU, and
+  RSS accounting, plus a driver script and summarizer (Phase 0 task 0.4).
+- RFC-001, RFC-002, RFC-003, RFC-005 drafts; storage group-commit report.
