@@ -658,6 +658,22 @@ impl Store {
             .collect()
     }
 
+    /// Live shards of `group_id` after `after`, in key order, with their
+    /// payload lengths; at most `limit` (paging for the node API).
+    #[must_use]
+    pub fn entries_in_group_after(
+        &self,
+        group_id: u64,
+        after: Option<ShardKey>,
+        limit: usize,
+    ) -> Vec<(ShardKey, u32)> {
+        self.index
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries_in_group_after(group_id, after, limit)
+            .collect()
+    }
+
     /// All live keys.
     #[must_use]
     pub fn keys(&self) -> Vec<ShardKey> {

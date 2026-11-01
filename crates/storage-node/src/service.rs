@@ -109,6 +109,24 @@ impl StorageNodeService {
         })
     }
 
+    fn pb_key(k: &ShardKey) -> pb::ShardKey {
+        pb::ShardKey {
+            group_id: k.group_id,
+            chunk_id: Bytes::copy_from_slice(&k.chunk_id),
+            shard_index: u32::from(k.shard_index),
+        }
+    }
+
+    /// Page size: the request's, clamped; 0 selects the default.
+    fn page_limit(requested: u32) -> usize {
+        const DEFAULT: usize = 1024;
+        const MAX: usize = 16_384;
+        match usize::try_from(requested).unwrap_or(MAX) {
+            0 => DEFAULT,
+            n => n.min(MAX),
+        }
+    }
+
     fn storage_status(e: StorageError) -> tonic::Status {
         match e {
             StorageError::NotFound => tonic::Status::not_found("shard not found"),
@@ -250,17 +268,70 @@ impl StorageNode for StorageNodeService {
     ) -> Result<tonic::Response<pb::ListShardsResponse>, tonic::Status> {
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
-        let keys = self
+        let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
+        let limit = Self::page_limit(req.limit);
+        let page = self
             .store
-            .keys_in_group(req.group_id)
+            .entries_in_group_after(req.group_id, after, limit);
+        let more = page.len() == limit;
+        let next = more
+            .then(|| page.last().map(|(k, _)| Self::pb_key(k)))
+            .flatten();
+        let entries = page
             .into_iter()
-            .map(|k| pb::ShardKey {
-                group_id: k.group_id,
-                chunk_id: Bytes::copy_from_slice(&k.chunk_id),
-                shard_index: u32::from(k.shard_index),
+            .map(|(k, len)| pb::ShardEntry {
+                key: Some(Self::pb_key(&k)),
+                payload_len: u64::from(len),
             })
             .collect();
-        Ok(tonic::Response::new(pb::ListShardsResponse { keys }))
+        Ok(tonic::Response::new(pb::ListShardsResponse {
+            entries,
+            next,
+            more,
+        }))
+    }
+
+    async fn verify_shards(
+        &self,
+        request: tonic::Request<pb::VerifyShardsRequest>,
+    ) -> Result<tonic::Response<pb::VerifyShardsResponse>, tonic::Status> {
+        let req = request.into_inner();
+        Self::check_version(req.protocol_version)?;
+        let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
+        let limit = Self::page_limit(req.limit);
+        let page = self
+            .store
+            .entries_in_group_after(req.group_id, after, limit);
+        let more = page.len() == limit;
+        let next = more
+            .then(|| page.last().map(|(k, _)| Self::pb_key(k)))
+            .flatten();
+        let store = Arc::clone(&self.store);
+        let verified = tokio::task::spawn_blocking(move || {
+            page.into_iter()
+                .map(|(key, len)| match store.get(&key, None) {
+                    Ok(data) => pb::ShardVerification {
+                        key: Some(Self::pb_key(&key)),
+                        payload_len: data.len() as u64,
+                        crc32c: crc32c_of(&data),
+                        ok: true,
+                    },
+                    Err(_) => pb::ShardVerification {
+                        key: Some(Self::pb_key(&key)),
+                        payload_len: u64::from(len),
+                        crc32c: 0,
+                        ok: false,
+                    },
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        Ok(tonic::Response::new(pb::VerifyShardsResponse {
+            shards: verified,
+            next,
+            more,
+        }))
     }
 
     async fn update_group_epoch(

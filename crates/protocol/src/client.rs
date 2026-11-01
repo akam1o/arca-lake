@@ -32,7 +32,46 @@ pub struct ShardRef {
     pub shard_index: u16,
 }
 
+/// One page of a shard listing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShardPage {
+    /// `(shard, payload length)` in key order.
+    pub entries: Vec<(ShardRef, u64)>,
+    /// Cursor for the next page, if any.
+    pub next: Option<ShardRef>,
+}
+
+/// One verified shard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShardVerification {
+    /// Shard.
+    pub shard: ShardRef,
+    /// Payload length.
+    pub payload_len: u64,
+    /// CRC-32C of the payload when `ok`.
+    pub crc32c: u32,
+    /// Whether the stored bytes verified.
+    pub ok: bool,
+}
+
+/// One page of shard verifications.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VerifyPage {
+    /// Verifications in key order.
+    pub shards: Vec<ShardVerification>,
+    /// Cursor for the next page, if any.
+    pub next: Option<ShardRef>,
+}
+
 impl ShardRef {
+    fn from_pb(k: &pb::ShardKey) -> Option<Self> {
+        Some(Self {
+            group_id: k.group_id,
+            chunk_id: k.chunk_id.as_ref().try_into().ok()?,
+            shard_index: u16::try_from(k.shard_index).ok()?,
+        })
+    }
+
     fn pb(&self) -> pb::ShardKey {
         pb::ShardKey {
             group_id: self.group_id,
@@ -53,6 +92,8 @@ pub enum Rpc {
     DeleteShard,
     /// `ListShards`.
     ListShards,
+    /// `VerifyShards`.
+    VerifyShards,
     /// `UpdateGroupEpoch`.
     UpdateEpoch,
     /// `Health`.
@@ -345,16 +386,19 @@ impl NodeClients {
         .await
     }
 
-    /// All shards of a group on the node.
+    /// One page of a group's shards after `after` (key order), with payload
+    /// lengths. `limit == 0` selects the node's default page size.
     ///
     /// # Errors
     ///
     /// RPC errors.
-    pub async fn list_shards(
+    pub async fn list_shards_page(
         &self,
         addr: &str,
         group_id: u64,
-    ) -> Result<Vec<ShardRef>, tonic::Status> {
+        after: Option<ShardRef>,
+        limit: u32,
+    ) -> Result<ShardPage, tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::ListShards,
@@ -366,19 +410,95 @@ impl NodeClients {
             let req = pb::ListShardsRequest {
                 protocol_version: pb::PROTOCOL_VERSION,
                 group_id,
+                after: after.map(|s| s.pb()),
+                limit,
             };
             let resp = client.list_shards(req).await?.into_inner();
-            Ok(resp
-                .keys
-                .into_iter()
-                .filter_map(|k| {
-                    Some(ShardRef {
-                        group_id: k.group_id,
-                        chunk_id: k.chunk_id.as_ref().try_into().ok()?,
-                        shard_index: u16::try_from(k.shard_index).ok()?,
+            Ok(ShardPage {
+                entries: resp
+                    .entries
+                    .into_iter()
+                    .filter_map(|e| Some((ShardRef::from_pb(&e.key?)?, e.payload_len)))
+                    .collect(),
+                next: resp
+                    .next
+                    .as_ref()
+                    .and_then(ShardRef::from_pb)
+                    .filter(|_| resp.more),
+            })
+        })
+        .await
+    }
+
+    /// Every shard of a group on the node (walks all pages).
+    ///
+    /// # Errors
+    ///
+    /// RPC errors.
+    pub async fn list_shards(
+        &self,
+        addr: &str,
+        group_id: u64,
+    ) -> Result<Vec<ShardRef>, tonic::Status> {
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.list_shards_page(addr, group_id, after, 0).await?;
+            out.extend(page.entries.into_iter().map(|(k, _)| k));
+            match page.next {
+                Some(n) => after = Some(n),
+                None => return Ok(out),
+            }
+        }
+    }
+
+    /// One page of shard verifications (the node reads and checks each
+    /// shard's block checksums).
+    ///
+    /// # Errors
+    ///
+    /// RPC errors.
+    pub async fn verify_shards_page(
+        &self,
+        addr: &str,
+        group_id: u64,
+        after: Option<ShardRef>,
+        limit: u32,
+    ) -> Result<VerifyPage, tonic::Status> {
+        let ctx = RpcContext {
+            addr,
+            rpc: Rpc::VerifyShards,
+            shard: None,
+            group_id: Some(group_id),
+        };
+        self.with_faults(ctx, || async {
+            let mut client = self.client(addr)?;
+            let req = pb::VerifyShardsRequest {
+                protocol_version: pb::PROTOCOL_VERSION,
+                group_id,
+                after: after.map(|s| s.pb()),
+                limit,
+            };
+            let resp = client.verify_shards(req).await?.into_inner();
+            Ok(VerifyPage {
+                shards: resp
+                    .shards
+                    .into_iter()
+                    .filter_map(|v| {
+                        Some(ShardVerification {
+                            shard: ShardRef::from_pb(&v.key?)?,
+                            payload_len: v.payload_len,
+                            crc32c: v.crc32c,
+                            ok: v.ok,
+                        })
                     })
-                })
-                .collect())
+                    .collect(),
+                next: resp
+                    .next
+                    .as_ref()
+                    .and_then(ShardRef::from_pb)
+                    .filter(|_| resp.more),
+            })
         })
         .await
     }

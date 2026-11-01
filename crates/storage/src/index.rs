@@ -161,6 +161,29 @@ impl MemIndex {
             .map(|(k, _)| *k)
     }
 
+    /// Live entries in `group_id` strictly after `after` (or from the start
+    /// of the group), in key order, at most `limit`.
+    pub fn entries_in_group_after(
+        &self,
+        group_id: u64,
+        after: Option<ShardKey>,
+        limit: usize,
+    ) -> impl Iterator<Item = (ShardKey, u32)> + '_ {
+        let start = match after {
+            Some(k) => Bound::Excluded(k),
+            None => Bound::Included(ShardKey {
+                group_id,
+                chunk_id: [0; 16],
+                shard_index: 0,
+            }),
+        };
+        self.map
+            .range((start, Bound::Unbounded))
+            .take_while(move |(k, _)| k.group_id == group_id)
+            .map(|(k, loc)| (*k, loc.payload_len))
+            .take(limit)
+    }
+
     /// All live entries.
     pub fn iter(&self) -> impl Iterator<Item = (&ShardKey, &Location)> + '_ {
         self.map.iter()

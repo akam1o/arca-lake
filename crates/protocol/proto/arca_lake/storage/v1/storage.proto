@@ -58,13 +58,55 @@ message DeleteShardRequest {
 
 message DeleteShardResponse {}
 
+// Paged listing. Entries are returned in key order (chunk_id, shard_index)
+// strictly after `after` when `after` is set. Each page is a snapshot of the
+// node's index at the time of the call: a shard written after a page was
+// served and sorting before the cursor is not seen by this walk, and a shard
+// deleted meanwhile may still be listed. Walkers must tolerate both
+// (RFC-008 §6.5).
 message ListShardsRequest {
   uint32 protocol_version = 1;
   uint64 group_id = 2;
+  ShardKey after = 3;
+  // 0 means the node's default page size.
+  uint32 limit = 4;
+}
+
+message ShardEntry {
+  ShardKey key = 1;
+  uint64 payload_len = 2;
 }
 
 message ListShardsResponse {
-  repeated ShardKey keys = 1;
+  reserved 1;
+  repeated ShardEntry entries = 2;
+  // Set when more entries may follow; pass it as `after`.
+  ShardKey next = 3;
+  bool more = 4;
+}
+
+// Read and verify shards (block checksums) in key order after `after`.
+message VerifyShardsRequest {
+  uint32 protocol_version = 1;
+  uint64 group_id = 2;
+  ShardKey after = 3;
+  uint32 limit = 4;
+}
+
+message ShardVerification {
+  ShardKey key = 1;
+  uint64 payload_len = 2;
+  // CRC-32C of the payload; meaningful only when `ok`.
+  uint32 crc32c = 3;
+  // False when the stored bytes failed verification (the node has
+  // quarantined the shard, so later reads report it missing).
+  bool ok = 4;
+}
+
+message VerifyShardsResponse {
+  repeated ShardVerification shards = 1;
+  ShardKey next = 2;
+  bool more = 3;
 }
 
 message UpdateGroupEpochRequest {
@@ -91,6 +133,7 @@ service StorageNode {
   rpc GetShard(GetShardRequest) returns (stream GetShardResponse);
   rpc DeleteShard(DeleteShardRequest) returns (DeleteShardResponse);
   rpc ListShards(ListShardsRequest) returns (ListShardsResponse);
+  rpc VerifyShards(VerifyShardsRequest) returns (VerifyShardsResponse);
   rpc UpdateGroupEpoch(UpdateGroupEpochRequest) returns (UpdateGroupEpochResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
 }

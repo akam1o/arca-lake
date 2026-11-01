@@ -548,6 +548,13 @@ impl pb::storage_node_server::StorageNode for GrpcServer {
         Err(tonic::Status::unimplemented("benchmark server"))
     }
 
+    async fn verify_shards(
+        &self,
+        _request: tonic::Request<pb::VerifyShardsRequest>,
+    ) -> Result<tonic::Response<pb::VerifyShardsResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("benchmark server"))
+    }
+
     async fn update_group_epoch(
         &self,
         _request: tonic::Request<pb::UpdateGroupEpochRequest>,
