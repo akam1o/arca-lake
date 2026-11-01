@@ -153,14 +153,17 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     `RpcStats` counters, `StallStream` / `SlowStream` fault actions;
     frames handed to the transport one at a time.
   - `arca-lake-storage-node`: `PutShard` streams whose client sends no
-    frame for `stream_progress_timeout` are aborted.
+    frame for `stream_progress_timeout` are aborted; `TCP_NODELAY` is set
+    on every accepted connection (tonic ignores `tcp_nodelay` for a
+    caller-supplied listener, so accepted sockets had Nagle's algorithm
+    and a ~40 ms stall on small frames after unacknowledged data).
   - `arca-lake-metadata`: `Txn::atomic_add` and `Txn::get_snapshot`
     (FoundationDB atomic ADD and snapshot reads; in-memory equivalents);
     cache usage kept by atomic addition with a snapshot capacity check
     (R-42); `object::renew_lease` and `append_chunks_renewing`.
   - `arca-lake-gateway`: bounded parallel chunk fetch with ordered
-    delivery (`read_parallelism`); lease renewal while an upload
-    progresses; hit accounting (lookup / served / degraded hits,
+    delivery (`read_parallelism`); pending-generation lease renewal
+    while the client's bytes arrive and while a chunk's shards upload; hit accounting (lookup / served / degraded hits,
     fallbacks by cause, admission rejections by cause, population
     failures by cause); RPC counters exported with the cache counters.
   - `arca-lake` CLI: `--node-timeout-secs`, `--node-progress-timeout-secs`,

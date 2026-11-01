@@ -421,6 +421,46 @@ cell: gRPC and raw framed TCP, with and without TLS, 1 / 2 / 4
 connections, 1 / 4 / 8 streams, 64 KiB / 256 KiB / 1 MiB frames, GET and
 PUT; client and server CPU seconds from the bench's own accounting.
 
+Two corrections came out of the first pass of this matrix and apply to
+the storage node as much as to the bench: the bench's gRPC server had
+been left on tonic's default 64 KiB stream window while the client used
+the storage node's 8 MiB / 32 MiB windows (PUT cells were measuring a
+stack the gateway does not use), and tonic does not apply `tcp_nodelay`
+to a caller-supplied listener, so every accepted socket of the storage
+node and of the bench server kept Nagle's algorithm. Nagle plus delayed
+ACK stalls a small frame that follows unacknowledged data (gRPC
+trailers, HTTP/2 window updates) for about 40 ms; the first pass showed
+it as a p99 of 42 ms in every gRPC cell against under 1 ms for raw TCP,
+whose accepted sockets the bench had always set to no-delay. The
+matrix below was taken with both corrections.
+
+Before/after the no-delay fix, bench server and client in the two
+namespaces of the fault harness on one host (veth pair, round trip in
+the tens of microseconds, so every delayed ACK shows; 1 MiB shards and
+frames, one connection, 6 s per cell; `results/nagle`):
+
+| Transport | Op | Streams | Server sockets | MiB/s | p50 ms | p99 ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| gRPC | GET | 1 | Nagle (before) | 29 | 41.9 | 43.3 |
+| gRPC | GET | 1 | no-delay (after) | 622 | 1.7 | 2.8 |
+| gRPC | GET | 4 | Nagle | 750 | 2.8 | 43.8 |
+| gRPC | GET | 4 | no-delay | 1250 | 2.8 | 8.1 |
+| gRPC | PUT | 1 | Nagle | 947 | 0.8 | 1.4 |
+| gRPC | PUT | 1 | no-delay | 1258 | 0.8 | 1.0 |
+| gRPC | PUT | 4 | Nagle | 1316 | 2.8 | 7.4 |
+| gRPC | PUT | 4 | no-delay | 1437 | 2.7 | 4.6 |
+| raw TCP | GET | 1 | no-delay | 3474 | 0.2 | 1.3 |
+| raw TCP | PUT | 4 | no-delay | 4215 | 0.9 | 2.0 |
+
+On that link every single-stream GET paid the 40 ms delayed-ACK timer
+(the trailers frame after 1 MiB of unacknowledged data); between two
+hosts only about 1 % of RPCs did, which is what the first matrix pass
+showed as a 42 ms p99. Every two-host measurement before this fix
+(Phase 2.1 and the Phase 2.2 runs in §6.9–§6.10) was taken with Nagle on
+the storage node's accepted sockets; the repeated comparison in §6.12
+and the disk-bound runs in §6.13 were re-taken with the fix, and the
+before/after of the whole system is given there.
+
 <!-- TRANSPORT-RESULTS -->
 
 ### 6.12 Phase 2.2: repeated cache protection comparison
