@@ -136,6 +136,7 @@ dependencies = [
  "arca-lake-placement",
  "arca-lake-protocol",
  "arca-lake-storage",
+ "arca-lake-tiering",
  "bytes",
  "futures",
  "thiserror",
@@ -165,6 +166,7 @@ dependencies = [
  "arca-lake-placement",
  "arca-lake-protocol",
  "arca-lake-storage",
+ "arca-lake-tiering",
  "async-trait",
  "bytes",
  "futures",
@@ -252,6 +254,7 @@ dependencies = [
  "arca-lake-protocol",
  "arca-lake-storage",
  "arca-lake-storage-node",
+ "arca-lake-tiering",
  "bytes",
  "futures",
  "http",
@@ -266,6 +269,17 @@ dependencies = [
 [[package]]
 name = "arca-lake-tiering"
 version = "0.0.0"
+dependencies = [
+ "arca-lake-common",
+ "arca-lake-ec",
+ "arca-lake-metadata",
+ "arca-lake-protocol",
+ "arca-lake-storage",
+ "bytes",
+ "futures",
+ "thiserror",
+ "tonic",
+]
 
 [[package]]
 name = "arca-lake-transfer-bench"

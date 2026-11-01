@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use arca_lake_common::chunk_id;
-use arca_lake_ec::{ErasureCoder, StripeLayout};
 use arca_lake_metadata::ops::object::{self, CommitInfo, CommitOutcome, Precondition};
 use arca_lake_metadata::records::{ChunkRecord, DurablePlacement, GenId, GroupRecord};
 use arca_lake_metadata::{KvError, KvStore, MetaError};
@@ -301,9 +300,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 profile.parity_shards,
             )
         };
-        let coder = self.coder(&scheme, k, m)?;
-        let layout = StripeLayout::new(chunk.len(), usize::from(k), coder.shard_alignment());
-        let shards = encode_chunk(coder.as_ref(), &layout, &chunk)?;
+        let coder = self
+            .coders
+            .get(&scheme, k, m)
+            .map_err(|e| s3_error!(InternalError, "{e}"))?;
+        let (_, shards) =
+            arca_lake_tiering::durable::encode_chunk(coder.as_ref(), usize::from(k), &chunk)
+                .map_err(|e| s3_error!(InternalError, "{e}"))?;
         let cid = chunk_id(&generation, index);
         let crc = arca_lake_storage::format::crc32c(&chunk);
 
@@ -468,23 +471,6 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
 enum WriteError {
     StaleEpoch,
     Failed(String),
-}
-
-fn encode_chunk(
-    coder: &dyn ErasureCoder,
-    layout: &StripeLayout,
-    chunk: &[u8],
-) -> Result<Vec<Bytes>, S3Error> {
-    let data = layout.split(chunk);
-    let refs: Vec<&[u8]> = data.iter().map(Vec::as_slice).collect();
-    let mut parity = vec![vec![0u8; layout.shard_len()]; coder.params().parity];
-    {
-        let mut pr: Vec<&mut [u8]> = parity.iter_mut().map(Vec::as_mut_slice).collect();
-        coder
-            .encode(&refs, &mut pr)
-            .map_err(|e| s3_error!(InternalError, "encode: {e}"))?;
-    }
-    Ok(data.into_iter().chain(parity).map(Bytes::from).collect())
 }
 
 fn hex(bytes: &[u8]) -> String {

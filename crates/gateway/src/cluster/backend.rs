@@ -5,12 +5,13 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arca_lake_common::EcProfile;
-use arca_lake_ec::{CodeParams, ErasureCoder, SchemeId};
 use arca_lake_metadata::ops::object::Precondition;
 use arca_lake_metadata::ops::{bucket, list, object};
-use arca_lake_metadata::records::Versioning;
+use arca_lake_metadata::records::{GenId, Versioning};
 use arca_lake_metadata::{KvStore, MetaError};
 use arca_lake_protocol::client::NodeClients;
+use arca_lake_tiering::cache::CacheTierConfig;
+use arca_lake_tiering::durable::Coders;
 use s3s::dto::{
     Bucket, CommonPrefix, CreateBucketInput, CreateBucketOutput, DeleteBucketInput,
     DeleteBucketOutput, DeleteObjectInput, DeleteObjectOutput, ETag, GetObjectInput,
@@ -37,6 +38,8 @@ pub struct ClusterConfig {
     pub shard_frame_bytes: usize,
     /// Per-RPC timeout to storage nodes.
     pub node_timeout: Duration,
+    /// Read-through cache tier (RFC-006); `None` disables caching.
+    pub cache: Option<CacheTierConfig>,
 }
 
 /// Fault-injection points in the write path (tests only).
@@ -56,9 +59,6 @@ pub enum FaultPoint {
     DieBeforeCommit,
 }
 
-/// Coders keyed by `(scheme, k, m)`.
-type CoderCache = HashMap<(String, u16, u16), Arc<dyn ErasureCoder>>;
-
 /// The distributed backend. Cloning shares all state (the `s3s` service
 /// takes ownership of its backend, while tests and tooling keep a handle
 /// for fault injection and map refresh).
@@ -67,8 +67,146 @@ pub struct ClusterBackend<S> {
     pub(super) clients: NodeClients,
     pub(super) map: Arc<RwLock<Arc<ClusterMap>>>,
     pub(super) cfg: Arc<ClusterConfig>,
-    coders: Arc<Mutex<CoderCache>>,
+    pub(super) coders: Arc<Coders>,
     fault: Arc<Mutex<Option<FaultPoint>>>,
+    pub(super) cache_stats: Arc<CacheStats>,
+    pub(super) cache_state: Arc<CacheState>,
+}
+
+/// Counters of the read-through cache (per gateway process).
+#[derive(Debug, Default)]
+pub struct CacheStats {
+    /// Chunks served from a validated cache copy.
+    pub hits: std::sync::atomic::AtomicU64,
+    /// Chunks with no cache record (served from durable placement).
+    pub misses: std::sync::atomic::AtomicU64,
+    /// Chunks whose cache record existed but whose copy could not be used.
+    pub fallbacks: std::sync::atomic::AtomicU64,
+    /// Cache records removed after a failed hit.
+    pub invalidations: std::sync::atomic::AtomicU64,
+    /// Successful asynchronous populations.
+    pub populated: std::sync::atomic::AtomicU64,
+    /// Populations that failed (node or metadata error).
+    pub population_failures: std::sync::atomic::AtomicU64,
+    /// Populations skipped because one was already in flight here.
+    pub populations_deduplicated: std::sync::atomic::AtomicU64,
+    /// Chunks not admitted (size, miss threshold, capacity, generation gone).
+    pub admissions_rejected: std::sync::atomic::AtomicU64,
+}
+
+impl CacheStats {
+    fn snapshot(&self) -> CacheStatsSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        CacheStatsSnapshot {
+            hits: self.hits.load(Relaxed),
+            misses: self.misses.load(Relaxed),
+            fallbacks: self.fallbacks.load(Relaxed),
+            invalidations: self.invalidations.load(Relaxed),
+            populated: self.populated.load(Relaxed),
+            population_failures: self.population_failures.load(Relaxed),
+            populations_deduplicated: self.populations_deduplicated.load(Relaxed),
+            admissions_rejected: self.admissions_rejected.load(Relaxed),
+        }
+    }
+}
+
+/// A copy of [`CacheStats`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheStatsSnapshot {
+    /// See [`CacheStats::hits`].
+    pub hits: u64,
+    /// See [`CacheStats::misses`].
+    pub misses: u64,
+    /// See [`CacheStats::fallbacks`].
+    pub fallbacks: u64,
+    /// See [`CacheStats::invalidations`].
+    pub invalidations: u64,
+    /// See [`CacheStats::populated`].
+    pub populated: u64,
+    /// See [`CacheStats::population_failures`].
+    pub population_failures: u64,
+    /// See [`CacheStats::populations_deduplicated`].
+    pub populations_deduplicated: u64,
+    /// See [`CacheStats::admissions_rejected`].
+    pub admissions_rejected: u64,
+}
+
+/// Per-gateway in-memory state of the cache: in-flight populations
+/// (stampede dedupe), miss counts for admission, recency-touch and
+/// access-record coalescing. Hints only; correctness never depends on it.
+#[derive(Debug, Default)]
+pub struct CacheState {
+    populating: Mutex<std::collections::HashSet<(GenId, u32)>>,
+    misses: Mutex<HashMap<(GenId, u32), u32>>,
+    touched: Mutex<HashMap<(GenId, u32), u64>>,
+    access: Mutex<HashMap<GenId, (u64, u64)>>,
+}
+
+/// Minimum interval between recency-index writes for one cached chunk.
+const TOUCH_INTERVAL_MS: u64 = 10_000;
+/// Minimum interval between access-record writes for one generation.
+const ACCESS_INTERVAL_MS: u64 = 1_000;
+const STATE_CAP: usize = 100_000;
+
+impl CacheState {
+    pub(super) fn begin_populate(&self, g: GenId, i: u32) -> bool {
+        self.populating
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((g, i))
+    }
+
+    pub(super) fn end_populate(&self, g: GenId, i: u32) {
+        self.populating
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&(g, i));
+    }
+
+    /// Whether the chunk has missed often enough to be admitted.
+    pub(super) fn admit(&self, g: GenId, i: u32, after: u32) -> bool {
+        if after <= 1 {
+            return true;
+        }
+        let mut m = self.misses.lock().unwrap_or_else(PoisonError::into_inner);
+        if m.len() > STATE_CAP {
+            m.clear();
+        }
+        let n = m.entry((g, i)).or_insert(0);
+        *n = n.saturating_add(1);
+        *n >= after
+    }
+
+    pub(super) fn should_touch(&self, g: GenId, i: u32, now: u64) -> bool {
+        let mut t = self.touched.lock().unwrap_or_else(PoisonError::into_inner);
+        if t.len() > STATE_CAP {
+            t.clear();
+        }
+        match t.get(&(g, i)) {
+            Some(last) if now.saturating_sub(*last) < TOUCH_INTERVAL_MS => false,
+            _ => {
+                t.insert((g, i), now);
+                true
+            }
+        }
+    }
+
+    /// Count a read; returns the reads to flush when the interval passed.
+    pub(super) fn flush_access(&self, g: GenId, now: u64) -> Option<u64> {
+        let mut a = self.access.lock().unwrap_or_else(PoisonError::into_inner);
+        if a.len() > STATE_CAP {
+            a.clear();
+        }
+        let e = a.entry(g).or_insert((0, 0));
+        e.1 += 1;
+        if now.saturating_sub(e.0) >= ACCESS_INTERVAL_MS {
+            let reads = e.1;
+            *e = (now, 0);
+            Some(reads)
+        } else {
+            None
+        }
+    }
 }
 
 impl<S> Clone for ClusterBackend<S> {
@@ -80,6 +218,8 @@ impl<S> Clone for ClusterBackend<S> {
             cfg: Arc::clone(&self.cfg),
             coders: Arc::clone(&self.coders),
             fault: Arc::clone(&self.fault),
+            cache_stats: Arc::clone(&self.cache_stats),
+            cache_state: Arc::clone(&self.cache_state),
         }
     }
 }
@@ -118,8 +258,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             clients: NodeClients::new(cfg.node_timeout),
             map: Arc::new(RwLock::new(Arc::new(map))),
             cfg: Arc::new(cfg),
-            coders: Arc::new(Mutex::new(HashMap::new())),
+            coders: Arc::new(Coders::default()),
             fault: Arc::new(Mutex::new(None)),
+            cache_stats: Arc::new(CacheStats::default()),
+            cache_state: Arc::new(CacheState::default()),
         })
     }
 
@@ -178,33 +320,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }
     }
 
-    pub(super) fn coder(
-        &self,
-        scheme: &str,
-        k: u16,
-        m: u16,
-    ) -> Result<Arc<dyn ErasureCoder>, s3s::S3Error> {
-        let key = (scheme.to_string(), k, m);
-        if let Some(c) = self
-            .coders
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&key)
-        {
-            return Ok(Arc::clone(c));
-        }
-        let id = SchemeId::parse(scheme)
-            .ok_or_else(|| s3_error!(InternalError, "unknown EC scheme {scheme}"))?;
-        let params = CodeParams::new(usize::from(k), usize::from(m))
-            .map_err(|e| s3_error!(InternalError, "bad EC params: {e}"))?;
-        let coder: Arc<dyn ErasureCoder> = Arc::from(
-            arca_lake_ec::new_coder(id, params).map_err(|e| s3_error!(InternalError, "{e}"))?,
-        );
-        self.coders
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(key, Arc::clone(&coder));
-        Ok(coder)
+    /// Cache counters of this gateway.
+    #[must_use]
+    pub fn cache_stats(&self) -> CacheStatsSnapshot {
+        self.cache_stats.snapshot()
     }
 }
 

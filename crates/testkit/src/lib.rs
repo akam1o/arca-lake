@@ -8,6 +8,7 @@
 pub mod fdb;
 pub mod s3;
 pub mod suite;
+pub mod suite_cache;
 pub mod suite_faults;
 
 use std::net::SocketAddr;
@@ -27,6 +28,7 @@ use arca_lake_metadata::records::{GroupMember, GroupRecord};
 use arca_lake_protocol::client::NodeClients;
 use arca_lake_storage::{ShardKey, Store, StoreConfig, SyncPolicy};
 use arca_lake_storage_node::{NodeConfig, NodeHandle};
+use arca_lake_tiering::cache::CacheTierConfig;
 
 /// A storage node slot: directory, address, and the running handle if any.
 pub struct TestNode {
@@ -57,6 +59,8 @@ pub struct TestCluster<S: KvStore + 'static = MemKv> {
     pub clients: NodeClients,
     /// EC profile in use.
     pub profile: EcProfile,
+    /// Number of durable nodes (the first `durable_nodes` entries of `nodes`).
+    pub durable_nodes: usize,
     /// `ListShards`/`VerifyShards` page size used by GC and repair helpers
     /// (0 = node default).
     pub page_size: u32,
@@ -76,6 +80,31 @@ pub struct ClusterOptions {
     pub groups: usize,
     /// Pending-generation lease.
     pub lease: Duration,
+    /// Extra nodes with device class `nvme` forming cache groups of tier
+    /// `fast` (RFC-006); 0 disables the cache.
+    pub cache_nodes: usize,
+    /// Cache tier configuration given to the gateway (defaults when
+    /// `cache_nodes > 0` and this is `None`).
+    pub cache: Option<CacheTierConfig>,
+}
+
+/// The cache tier name used by test clusters.
+pub const CACHE_TIER: &str = "fast";
+
+impl ClusterOptions {
+    /// Default cache tier configuration for tests: unlimited capacity,
+    /// admit everything on the first miss.
+    #[must_use]
+    pub fn default_cache() -> CacheTierConfig {
+        CacheTierConfig {
+            tier: CACHE_TIER.into(),
+            capacity_bytes: 0,
+            high_watermark: 0.9,
+            low_watermark: 0.7,
+            max_cacheable_bytes: 0,
+            admit_after_misses: 0,
+        }
+    }
 }
 
 impl ClusterOptions {
@@ -99,6 +128,8 @@ impl ClusterOptions {
             },
             groups: 2,
             lease: Duration::from_secs(60),
+            cache_nodes: 0,
+            cache: None,
         }
     }
 }
@@ -145,6 +176,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
     /// # Panics
     ///
     /// On any setup failure (tests).
+    #[allow(clippy::too_many_lines)]
     pub async fn start_with(meta: Arc<S>, opts: ClusterOptions) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let clients = NodeClients::new(Duration::from_secs(5));
@@ -162,6 +194,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 vec![
                     ("host".into(), format!("host{i}")),
                     ("rack".into(), format!("rack{}", i % 2)),
+                    ("device_class".into(), "hdd".into()),
                 ],
                 vec![0],
                 1,
@@ -178,6 +211,46 @@ impl<S: KvStore + 'static> TestCluster<S> {
         groups::create_groups(meta.as_ref(), &opts.profile, "default", opts.groups)
             .await
             .unwrap();
+        // Cache nodes: device class nvme, one cache group each.
+        for j in 0..opts.cache_nodes {
+            let i = opts.nodes + j;
+            let dir = tmp.path().join(format!("node{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
+            cfg.store = node_store_config(&dir);
+            let handle = arca_lake_storage_node::serve(cfg).await.unwrap();
+            let addr = handle.local_addr;
+            let record = cluster::register_node(
+                meta.as_ref(),
+                &addr.to_string(),
+                vec![
+                    ("host".into(), format!("cache{j}")),
+                    ("device_class".into(), "nvme".into()),
+                ],
+                vec![0],
+                1,
+            )
+            .await
+            .unwrap();
+            nodes.push(TestNode {
+                id: record.id,
+                dir,
+                addr,
+                handle: Some(handle),
+            });
+        }
+        let cache = if opts.cache_nodes > 0 {
+            groups::create_cache_groups(meta.as_ref(), CACHE_TIER, "nvme")
+                .await
+                .unwrap();
+            Some(
+                opts.cache
+                    .clone()
+                    .unwrap_or_else(ClusterOptions::default_cache),
+            )
+        } else {
+            None
+        };
 
         let backend = ClusterBackend::new(
             Arc::clone(&meta),
@@ -188,6 +261,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 chunk_batch: 16,
                 shard_frame_bytes: 256 << 10,
                 node_timeout: Duration::from_secs(5),
+                cache,
             },
         )
         .await
@@ -215,6 +289,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             credentials,
             clients,
             profile: opts.profile,
+            durable_nodes: opts.nodes,
             page_size: 0,
             repair_options: repair::RepairOptions::default(),
             tmp,
@@ -483,10 +558,86 @@ impl<S: KvStore + 'static> TestCluster<S> {
             .expect("object exists")
     }
 
-    /// Total shards stored on all running nodes across all groups.
+    /// Indexes of the cache nodes.
+    #[must_use]
+    pub fn cache_node_indexes(&self) -> Vec<usize> {
+        (self.durable_nodes..self.nodes.len()).collect()
+    }
+
+    /// Cache placements of the current version of `bucket/key`.
+    ///
+    /// # Panics
+    ///
+    /// If the object does not exist.
+    pub async fn cache_placements(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Vec<(u32, arca_lake_metadata::records::CachePlacement)> {
+        self.manifest(bucket, key).await.cache
+    }
+
+    /// Wait until `n` chunks of `bucket/key` are recorded as cached, or panic
+    /// after `timeout`.
+    ///
+    /// # Panics
+    ///
+    /// On timeout.
+    pub async fn wait_cached(&self, bucket: &str, key: &str, n: usize, timeout: Duration) {
+        let start = std::time::Instant::now();
+        loop {
+            if self.cache_placements(bucket, key).await.len() >= n {
+                return;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "{bucket}/{key}: fewer than {n} cached chunks after {timeout:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Reconcile every running cache node (orphan copies).
+    ///
+    /// # Panics
+    ///
+    /// On errors.
+    pub async fn reconcile_cache(&self) -> usize {
+        let mut deleted = 0;
+        for g in self.groups().await {
+            if g.scheme != arca_lake_tiering::cache::CACHE_SCHEME {
+                continue;
+            }
+            for n in &self.nodes {
+                if n.handle.is_none() || g.members.first().map(|m| m.node_id) != Some(n.id) {
+                    continue;
+                }
+                deleted += gc::reconcile_node(
+                    self.meta.as_ref(),
+                    &self.clients,
+                    n.id,
+                    &n.addr.to_string(),
+                    &g,
+                    now_ms(),
+                    0,
+                    self.page_size,
+                )
+                .await
+                .unwrap()
+                .deleted();
+            }
+        }
+        deleted
+    }
+
+    /// Total shards stored on all running nodes across all durable groups
+    /// (cache copies are not counted).
     pub async fn total_shards(&self) -> usize {
         let mut n = 0;
         for g in self.groups().await {
+            if g.scheme == arca_lake_tiering::cache::CACHE_SCHEME {
+                continue;
+            }
             for (i, node) in self.nodes.iter().enumerate() {
                 if node.handle.is_some() {
                     n += self.shard_count(i, g.id);

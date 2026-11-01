@@ -21,6 +21,7 @@ arca-lake-metadata.workspace = true
 arca-lake-protocol.workspace = true
 arca-lake-storage.workspace = true
 arca-lake-storage-node.workspace = true
+arca-lake-tiering.workspace = true
 s3s.workspace = true
 http.workspace = true
 tonic = { workspace = true, features = ["codegen", "channel", "transport"] }
@@ -41,6 +42,10 @@ required-features = ["fdb"]
 
 [[test]]
 name = "fdb_failover"
+required-features = ["fdb"]
+
+[[test]]
+name = "cache_fdb"
 required-features = ["fdb"]
 
 [lints]

@@ -288,6 +288,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 chunk_batch: 64,
                 shard_frame_bytes: 256 << 10,
                 node_timeout: Duration::from_secs(10),
+                cache: None,
             },
         )
         .await

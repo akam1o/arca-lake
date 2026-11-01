@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use arca_lake_common::{split_chunk_id, uuid_v7_unix_ms};
 use arca_lake_metadata::ops::{cluster, gc, object};
 use arca_lake_metadata::records::{
-    ChunkRecord, CurrentPointer, GenId, GenState, GenerationHeader, GroupRecord, GroupState,
-    NodeRecord, VersionRecord, decode,
+    CachePlacement, ChunkRecord, CurrentPointer, GenId, GenState, GenerationHeader, GroupRecord,
+    GroupState, NodeRecord, VersionRecord, decode,
 };
 use arca_lake_metadata::{KvStore, MetaError, Txn, keys, transact};
 use arca_lake_protocol::client::{NodeClients, ShardRef};
@@ -103,8 +103,8 @@ pub async fn run_once<S: KvStore>(
         .collect();
 
     for generation in gc::collectable(meta, now_ms, grace_ms, limit).await? {
-        let chunks = match verify_unreferenced(meta, &generation).await {
-            Ok(Some(chunks)) => chunks,
+        let (chunks, cached) = match verify_unreferenced(meta, &generation).await {
+            Ok(Some(found)) => found,
             Ok(None) => {
                 report.skipped_referenced += 1;
                 continue;
@@ -115,7 +115,13 @@ pub async fn run_once<S: KvStore>(
             }
             Err(e) => return Err(e.into()),
         };
-        match delete_shards(clients, &nodes, &groups, &chunks).await {
+        let deleted = match delete_shards(clients, &nodes, &groups, &chunks).await {
+            Ok(n) => delete_cache_copies(clients, &nodes, &groups, &generation, &cached)
+                .await
+                .map(|c| n + c),
+            Err(e) => Err(e),
+        };
+        match deleted {
             Ok(n) => {
                 report.shards_deleted += n;
                 match gc::finish(meta, &generation).await {
@@ -148,15 +154,17 @@ fn is_deferrable(e: &MetaError) -> bool {
 /// A retiring generation can never become referenced again (no recipe moves
 /// a generation out of `Retiring`), so the check does not need to be in the
 /// same transaction as the deletions that follow.
+type Unreferenced = (Vec<ChunkRecord>, Vec<(u32, CachePlacement)>);
+
 async fn verify_unreferenced<S: KvStore>(
     meta: &S,
     generation: &GenId,
-) -> Result<Option<Vec<ChunkRecord>>, MetaError> {
+) -> Result<Option<Unreferenced>, MetaError> {
     transact(meta, *generation, |tx, generation| {
         Box::pin(async move {
             let Some(header) = tx.get(&keys::gen_header(generation)).await? else {
                 // Already finished (idempotent re-run): nothing to delete.
-                return Ok(Some(Vec::new()));
+                return Ok(Some((Vec::new(), Vec::new())));
             };
             let header: GenerationHeader = decode(&header)?;
             if !matches!(header.state, GenState::Retiring { .. }) {
@@ -191,10 +199,52 @@ async fn verify_unreferenced<S: KvStore>(
             {
                 out.push(decode::<ChunkRecord>(&v)?);
             }
-            Ok(Some(out))
+            let cached = arca_lake_metadata::ops::cache::placements_in_tx(tx, generation).await?;
+            Ok(Some((out, cached)))
         })
     })
     .await
+}
+
+/// Delete the cache copies of a retiring generation (RFC-006 §5.7).
+async fn delete_cache_copies(
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+    groups: &HashMap<u64, GroupRecord>,
+    generation: &GenId,
+    cached: &[(u32, CachePlacement)],
+) -> Result<usize, ControlError> {
+    let mut deleted = 0;
+    for (index, p) in cached {
+        let Some(group) = groups.get(&p.group_id) else {
+            continue;
+        };
+        let Some(member) = group.members.first() else {
+            continue;
+        };
+        let Some(node) = nodes.get(&member.node_id) else {
+            continue;
+        };
+        let shard = ShardRef {
+            group_id: group.id,
+            chunk_id: arca_lake_common::chunk_id(generation, *index),
+            shard_index: 0,
+        };
+        match clients
+            .delete_shard(&node.address, shard, group.epoch)
+            .await
+        {
+            Ok(()) => deleted += 1,
+            Err(s) if s.code() == tonic::Code::NotFound => deleted += 1,
+            Err(status) => {
+                return Err(ControlError::Node {
+                    addr: node.address.clone(),
+                    status,
+                });
+            }
+        }
+    }
+    Ok(deleted)
 }
 
 /// Delete every shard of `chunks` on the current members of their groups.
@@ -273,6 +323,19 @@ pub async fn reconcile_node<S: KvStore>(
     min_age_ms: u64,
     page_size: u32,
 ) -> Result<ReconcileReport, ControlError> {
+    if group.scheme == arca_lake_tiering::cache::CACHE_SCHEME {
+        // Cache copies are accounted for by cache placements, not chunk
+        // records (RFC-006 §5.6).
+        let r =
+            arca_lake_tiering::cache::reconcile_node(meta, clients, node_addr, group, page_size)
+                .await
+                .map_err(tier_err)?;
+        return Ok(ReconcileReport {
+            orphans_deleted: r.orphans_deleted,
+            kept_referenced: r.kept,
+            ..ReconcileReport::default()
+        });
+    }
     let mut report = ReconcileReport::default();
     let mut after = None;
     loop {
@@ -383,4 +446,12 @@ pub async fn generation_exists<S: KvStore>(
     generation: &GenId,
 ) -> Result<bool, ControlError> {
     Ok(object::get_generation(meta, generation).await.is_ok())
+}
+
+fn tier_err(e: arca_lake_tiering::TierError) -> ControlError {
+    match e {
+        arca_lake_tiering::TierError::Meta(m) => ControlError::Meta(m),
+        arca_lake_tiering::TierError::Node { addr, status } => ControlError::Node { addr, status },
+        other => ControlError::Other(other.to_string()),
+    }
 }

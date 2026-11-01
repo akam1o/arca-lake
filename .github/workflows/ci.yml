@@ -88,7 +88,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
-          cargo test -p arca-lake-testkit --features fdb --test e2e_fdb --test faults_fdb -- --nocapture --test-threads=1
+          cargo test -p arca-lake-testkit --features fdb --test e2e_fdb --test faults_fdb --test cache_fdb -- --nocapture --test-threads=1
 
   fdb-failover:
     name: FoundationDB failover (3 processes)

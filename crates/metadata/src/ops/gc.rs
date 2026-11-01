@@ -124,7 +124,27 @@ pub async fn finish<S: KvStore>(store: &S, generation: &GenId) -> Result<()> {
                     "retiring",
                 ));
             };
+            // Cache placements live in the generation's subspace; their
+            // recency entries and usage are outside it.
+            for (index, p) in crate::ops::cache::placements_in_tx(tx, generation).await? {
+                tx.clear(&keys::cache_recency(
+                    &p.tier,
+                    p.last_access_ms,
+                    generation,
+                    index,
+                ));
+                let cur = tx
+                    .get(&keys::cache_usage(&p.tier))
+                    .await?
+                    .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+                    .map_or(0, u64::from_le_bytes);
+                tx.set(
+                    &keys::cache_usage(&p.tier),
+                    &cur.saturating_sub(p.bytes).to_le_bytes(),
+                );
+            }
             tx.clear(&keys::retired(since_ms, generation));
+            tx.clear(&keys::access(generation));
             tx.clear_range(&keys::gen_range(generation));
             Ok(())
         })
@@ -265,6 +285,39 @@ pub async fn chunk_record_in_group<S: KvStore>(
                 }
             }
             Ok(None)
+        })
+    })
+    .await
+}
+
+/// Whether a cache placement of a live generation with `prefix` names
+/// chunk `index` in cache group `group_id` (cache reconciliation,
+/// RFC-006 §5.6).
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn cache_placement_in_group<S: KvStore>(
+    store: &S,
+    prefix: &[u8; 12],
+    index: u32,
+    group_id: u64,
+) -> Result<bool> {
+    transact(store, (*prefix, index, group_id), |tx, env| {
+        Box::pin(async move {
+            let (prefix, index, group_id) = *env;
+            for (generation, header) in generations_with_prefix(tx, &prefix).await? {
+                if !is_live(header.as_ref()) {
+                    continue;
+                }
+                if let Some(v) = tx.get(&keys::cache_placement(&generation, index)).await? {
+                    let p: crate::records::CachePlacement = decode(&v)?;
+                    if p.group_id == group_id {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
         })
     })
     .await

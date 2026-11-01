@@ -61,6 +61,10 @@ pub struct ControllerConfig {
     pub node_timeout: Duration,
     /// Metrics and health endpoint; `None` disables it.
     pub http_listen: Option<SocketAddr>,
+    /// Cache tiers to evict (RFC-006 §5.4).
+    pub cache_tiers: Vec<arca_lake_tiering::cache::CacheTierConfig>,
+    /// Interval between eviction passes.
+    pub evict_interval: Duration,
 }
 
 impl ControllerConfig {
@@ -83,6 +87,8 @@ impl ControllerConfig {
             page_size: 0,
             node_timeout: Duration::from_secs(5),
             http_listen: None,
+            cache_tiers: Vec::new(),
+            evict_interval: Duration::from_secs(10),
         }
     }
 }
@@ -302,6 +308,25 @@ fn start_leader_tasks<S: KvStore + 'static>(
             },
         )),
         tokio::spawn(scheduler(
+            "evict",
+            cfg.evict_interval,
+            stop.clone(),
+            Arc::clone(metrics),
+            {
+                let metrics = Arc::clone(metrics);
+                let meta = Arc::clone(meta);
+                let clients = clients.clone();
+                let cfg = cfg.clone();
+                move || {
+                    let meta = Arc::clone(&meta);
+                    let clients = clients.clone();
+                    let cfg = cfg.clone();
+                    let metrics = Arc::clone(&metrics);
+                    async move { evict_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
+                }
+            },
+        )),
+        tokio::spawn(scheduler(
             "repair",
             cfg.repair_interval,
             stop,
@@ -479,6 +504,11 @@ async fn repair_pass<S: KvStore>(
         verify_all_members: false,
     };
     for g in &all_groups {
+        if g.scheme == arca_lake_tiering::cache::CACHE_SCHEME {
+            // Cache groups hold discardable copies; a dead cache member is
+            // handled by reads falling back and by reconciliation.
+            continue;
+        }
         match g.state {
             GroupState::Repairing => {
                 let Some(cursor) = g.repair_cursor else {
@@ -589,5 +619,52 @@ async fn run_repair<S: KvStore>(
             .fetch_add(1, Ordering::Relaxed);
     }
     info!(group = group_id, index, ?report, "repair pass");
+    Ok(())
+}
+
+/// LRU eviction of every configured cache tier (RFC-006 §5.4).
+async fn evict_pass<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    cfg: &ControllerConfig,
+    metrics: &Metrics,
+) -> Result<(), ControlError> {
+    if cfg.cache_tiers.is_empty() {
+        return Ok(());
+    }
+    let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .map(|n| (n.id, n))
+        .collect();
+    let groups: HashMap<u64, GroupRecord> = cluster::list_groups(meta)
+        .await?
+        .into_iter()
+        .map(|g| (g.id, g))
+        .collect();
+    let addr_of_group = |group_id: u64| {
+        groups
+            .get(&group_id)
+            .and_then(|g| g.members.first())
+            .and_then(|m| nodes.get(&m.node_id))
+            .map(|n| n.address.clone())
+    };
+    for tier in &cfg.cache_tiers {
+        let r = arca_lake_tiering::cache::evict_tier(meta, clients, tier, &addr_of_group)
+            .await
+            .map_err(|e| ControlError::Other(e.to_string()))?;
+        metrics
+            .cache_evicted_total
+            .fetch_add(r.evicted as u64, Ordering::Relaxed);
+        metrics
+            .cache_usage_bytes
+            .store(r.usage_after, Ordering::Relaxed);
+        metrics
+            .cache_over_watermark
+            .store(r.over_watermark, Ordering::Relaxed);
+        if r.evicted > 0 || r.over_watermark {
+            info!(tier = %tier.tier, ?r, "evict pass");
+        }
+    }
     Ok(())
 }

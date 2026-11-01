@@ -9,6 +9,15 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+arca-lake-common.workspace = true
+arca-lake-ec.workspace = true
+arca-lake-metadata.workspace = true
+arca-lake-protocol.workspace = true
+arca-lake-storage.workspace = true
+bytes.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tonic = { workspace = true, features = ["codegen", "channel", "transport"] }
 
 [lints]
 workspace = true

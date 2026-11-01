@@ -382,6 +382,9 @@ pub struct Manifest {
     pub header: GenerationHeader,
     /// Chunk records in index order.
     pub chunks: Vec<(u32, ChunkRecord)>,
+    /// Cache placements of the same generation, read in the same
+    /// transaction, in index order (RFC-006 §5.3).
+    pub cache: Vec<(u32, crate::records::CachePlacement)>,
 }
 
 /// Read the manifest of the current version.
@@ -416,10 +419,12 @@ pub async fn read_manifest<S: KvStore>(
                     .ok_or_else(|| MetaError::Codec("unexpected key in chunk range".into()))?;
                 out.push((index, crate::records::decode::<ChunkRecord>(&v)?));
             }
+            let cache = crate::ops::cache::placements_in_tx(tx, &pointer.generation).await?;
             Ok(Some(Manifest {
                 pointer,
                 header,
                 chunks: out,
+                cache,
             }))
         })
     })
@@ -599,4 +604,117 @@ fn retire<X: Txn>(
     write(tx, &keys::gen_header(generation), &retiring)?;
     tx.set(&keys::retired(now_ms, generation), &[]);
     Ok(())
+}
+
+/// Switch the durable placement of chunk `index` of `generation` to
+/// `new_record`, only if the generation is committed and the record still
+/// has `expected` as its placement (RFC-006 §5.8 step 4). Returns whether
+/// the switch happened.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn switch_placement<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    index: u32,
+    expected: &crate::records::DurablePlacement,
+    new_record: &ChunkRecord,
+) -> Result<bool> {
+    transact(
+        store,
+        (*generation, index, *expected, new_record),
+        |tx, env| {
+            Box::pin(async move {
+                let (generation, index, expected, new_record) = *env;
+                let header = match generation_header(tx, &generation).await {
+                    Ok(h) => h,
+                    Err(MetaError::NoSuchGeneration) => return Ok(false),
+                    Err(e) => return Err(e),
+                };
+                if header.state != GenState::Committed {
+                    return Ok(false);
+                }
+                let Some(current) =
+                    read::<ChunkRecord, _>(tx, &keys::gen_chunk(&generation, index)).await?
+                else {
+                    return Ok(false);
+                };
+                if current.placement != expected || current.chunk_id != new_record.chunk_id {
+                    return Ok(false);
+                }
+                write(tx, &keys::gen_chunk(&generation, index), new_record)?;
+                Ok(true)
+            })
+        },
+    )
+    .await
+}
+
+/// Access record of a generation for automatic tiering (RFC-006 §5.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct AccessRecord {
+    /// Last read, Unix milliseconds.
+    pub last_ms: u64,
+    /// Reads counted since the record was created or reset.
+    pub count: u64,
+}
+
+/// Record a read of `generation` (callers coalesce; one write per call).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn record_access<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    now_ms: u64,
+    reads: u64,
+) -> Result<()> {
+    transact(store, (*generation, now_ms, reads), |tx, env| {
+        Box::pin(async move {
+            let (generation, now_ms, reads) = *env;
+            let mut rec: AccessRecord = read(tx, &keys::access(&generation))
+                .await?
+                .unwrap_or_default();
+            rec.last_ms = rec.last_ms.max(now_ms);
+            rec.count = rec.count.saturating_add(reads);
+            write(tx, &keys::access(&generation), &rec)
+        })
+    })
+    .await
+}
+
+/// The access record of a generation.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn access_of<S: KvStore>(store: &S, generation: &GenId) -> Result<Option<AccessRecord>> {
+    transact(store, *generation, |tx, generation| {
+        Box::pin(async move { read(tx, &keys::access(generation)).await })
+    })
+    .await
+}
+
+/// Reset the access count of a generation (after a tiering decision).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn reset_access<S: KvStore>(store: &S, generation: &GenId, now_ms: u64) -> Result<()> {
+    transact(store, (*generation, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (generation, now_ms) = *env;
+            write(
+                tx,
+                &keys::access(&generation),
+                &AccessRecord {
+                    last_ms: now_ms,
+                    count: 0,
+                },
+            )
+        })
+    })
+    .await
 }

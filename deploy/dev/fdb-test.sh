@@ -89,5 +89,6 @@ docker run --rm \
     # been seen to exhaust the memory of a small container runtime.
     cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1 "$@"
     cargo test -p arca-lake-testkit --features fdb --test e2e_fdb -- --nocapture --test-threads=1 "$@"
-    exec cargo test -p arca-lake-testkit --features fdb --test faults_fdb -- --nocapture --test-threads=1 "$@"
+    cargo test -p arca-lake-testkit --features fdb --test faults_fdb -- --nocapture --test-threads=1 "$@"
+    exec cargo test -p arca-lake-testkit --features fdb --test cache_fdb -- --nocapture --test-threads=1 "$@"
   ' -- "$@"

@@ -198,6 +198,26 @@ pub struct ChunkRecord {
     pub placement: DurablePlacement,
 }
 
+/// A discardable cache copy of a chunk on a cache tier (RFC-006 §5.2).
+/// Never consulted for durability or visibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachePlacement {
+    /// Cache tier name.
+    pub tier: String,
+    /// Cache group (scheme `cache-v1`, one member holding the whole chunk).
+    pub group_id: u64,
+    /// Group epoch at write time.
+    pub epoch: u64,
+    /// Bytes of the copy (the chunk length).
+    pub bytes: u64,
+    /// Pinned entries are never evicted.
+    pub pinned: bool,
+    /// Last hit or population time, Unix milliseconds (recency index key).
+    pub last_access_ms: u64,
+    /// Population time, Unix milliseconds.
+    pub created_ms: u64,
+}
+
 /// A registered storage node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeRecord {

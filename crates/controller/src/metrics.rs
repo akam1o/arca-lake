@@ -39,6 +39,12 @@ pub struct Metrics {
     pub nodes_unhealthy: AtomicU64,
     /// Nodes known at the last health pass.
     pub nodes_total: AtomicU64,
+    /// Cache entries evicted.
+    pub cache_evicted_total: AtomicU64,
+    /// Cache usage (bytes) after the last eviction pass (last tier).
+    pub cache_usage_bytes: AtomicU64,
+    /// Whether the last eviction pass could not reach the low watermark.
+    pub cache_over_watermark: AtomicBool,
 }
 
 impl Metrics {
@@ -98,6 +104,18 @@ impl Metrics {
         out += &g(
             "arca_controller_nodes_total",
             self.nodes_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_cache_evicted_total",
+            self.cache_evicted_total.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_cache_usage_bytes",
+            self.cache_usage_bytes.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_cache_over_watermark",
+            u64::from(self.cache_over_watermark.load(Ordering::Relaxed)),
         );
         out
     }

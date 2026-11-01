@@ -134,6 +134,75 @@ pub fn gen_chunks_subrange(generation: &GenId, indices: std::ops::Range<u32>) ->
     )
 }
 
+/// Cache placement of chunk `index` of a generation (inside the
+/// generation's subspace, so it is cleared with the generation).
+#[must_use]
+pub fn cache_placement(generation: &GenId, index: u32) -> Key {
+    pack(&(
+        ROOT,
+        "g",
+        Bytes::from(&generation[..]),
+        "x",
+        u64::from(index),
+    ))
+}
+
+/// All cache placements of a generation, in index order.
+#[must_use]
+pub fn cache_placements_range(generation: &GenId) -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "g", Bytes::from(&generation[..]), "x")))
+}
+
+/// Chunk index from a cache-placement key, if it is one.
+#[must_use]
+pub fn cache_index_from(key: &[u8]) -> Option<u32> {
+    let (_, _, _, tag, index): (String, String, Bytes<'_>, String, u64) = unpack(key).ok()?;
+    (tag == "x").then(|| u32::try_from(index).ok()).flatten()
+}
+
+/// Recency index entry of a cached chunk on `tier`.
+#[must_use]
+pub fn cache_recency(tier: &str, last_access_ms: u64, generation: &GenId, index: u32) -> Key {
+    pack(&(
+        ROOT,
+        "cidx",
+        tier,
+        last_access_ms,
+        Bytes::from(&generation[..]),
+        u64::from(index),
+    ))
+}
+
+/// Recency entries of `tier` with `last_access_ms >= from_ms`, oldest first.
+#[must_use]
+pub fn cache_recency_range_from(tier: &str, from_ms: u64) -> KeyRange {
+    let full = KeyRange::prefix(&pack(&(ROOT, "cidx", tier)));
+    KeyRange::new(pack(&(ROOT, "cidx", tier, from_ms)), full.end)
+}
+
+/// `(generation, index)` from a recency key, if it is one.
+#[must_use]
+pub fn cache_recency_from(key: &[u8]) -> Option<(GenId, u32)> {
+    let (_, _, _, _, generation, index): (String, String, String, u64, Bytes<'_>, u64) =
+        unpack(key).ok()?;
+    Some((
+        <[u8; 16]>::try_from(generation.as_ref()).ok()?,
+        u32::try_from(index).ok()?,
+    ))
+}
+
+/// Bytes cached on `tier` (little-endian u64).
+#[must_use]
+pub fn cache_usage(tier: &str) -> Key {
+    pack(&(ROOT, "cusage", tier))
+}
+
+/// Access record of a generation for automatic tiering.
+#[must_use]
+pub fn access(generation: &GenId) -> Key {
+    pack(&(ROOT, "acc", Bytes::from(&generation[..])))
+}
+
 /// Every key belonging to a generation.
 #[must_use]
 pub fn gen_range(generation: &GenId) -> KeyRange {

@@ -7,6 +7,7 @@
 //! never read the clock themselves.
 
 pub mod bucket;
+pub mod cache;
 pub mod cluster;
 pub mod gc;
 pub mod leader;

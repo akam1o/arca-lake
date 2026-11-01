@@ -96,3 +96,61 @@ pub async fn create_groups<S: KvStore>(
     }
     Ok(created)
 }
+
+/// Create one cache group (scheme `cache-v1`, one member) per device of
+/// every node whose `device_class` label equals `device_class`, tagged with
+/// `tier`. Nodes that already have a cache group on this tier are skipped.
+///
+/// # Errors
+///
+/// Metadata errors.
+pub async fn create_cache_groups<S: KvStore>(
+    meta: &S,
+    tier: &str,
+    device_class: &str,
+) -> Result<Vec<GroupRecord>, ControlError> {
+    let nodes = cluster::list_nodes(meta).await?;
+    let existing = cluster::list_groups(meta).await?;
+    let mut created = Vec::new();
+    for n in nodes {
+        let class = n
+            .labels
+            .iter()
+            .find(|(k, _)| k == "device_class")
+            .map(|(_, v)| v.as_str());
+        if class != Some(device_class) {
+            continue;
+        }
+        for &d in &n.devices {
+            let member = GroupMember {
+                node_id: n.id,
+                device_id: d,
+            };
+            if existing.iter().any(|g| {
+                g.scheme == arca_lake_tiering::cache::CACHE_SCHEME
+                    && g.tier == tier
+                    && g.members.first() == Some(&member)
+            }) {
+                continue;
+            }
+            let g = cluster::create_group(
+                meta,
+                GroupRecord {
+                    id: 0,
+                    profile: "cache".into(),
+                    tier: tier.to_string(),
+                    scheme: arca_lake_tiering::cache::CACHE_SCHEME.into(),
+                    data_shards: 1,
+                    parity_shards: 0,
+                    members: vec![member],
+                    epoch: 0,
+                    state: GroupState::Active,
+                    repair_cursor: None,
+                },
+            )
+            .await?;
+            created.push(g);
+        }
+    }
+    Ok(created)
+}
