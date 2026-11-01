@@ -53,7 +53,7 @@ fn cache_copies<S: KvStore + 'static>(
         .map(|i| {
             groups
                 .iter()
-                .filter(|g| g.scheme == arca_lake_tiering::cache::CACHE_SCHEME)
+                .filter(|g| g.is_cache())
                 .map(|g| c.shard_count(i, g.id))
                 .sum::<usize>()
         })
@@ -411,14 +411,8 @@ pub async fn eviction_respects_watermarks_lru_and_pins<S: KvStore + 'static>(
         ..ClusterOptions::default_cache()
     };
     let map = c.backend.map();
-    let addr_of_group = |group_id: u64| {
-        map.groups
-            .get(&group_id)
-            .and_then(|g| g.members.first())
-            .and_then(|m| map.node_addr(m.node_id))
-            .map(str::to_string)
-    };
-    let r = evict_tier(c.meta.as_ref(), &c.clients, &cfg, &addr_of_group)
+    let addr_of = |node_id: u64| map.node_addr(node_id).map(str::to_string);
+    let r = evict_tier(c.meta.as_ref(), &c.clients, &cfg, &map.groups, &addr_of)
         .await
         .unwrap();
     assert_eq!(r.evicted, 4, "{r:?}");
@@ -460,7 +454,8 @@ pub async fn eviction_respects_watermarks_lru_and_pins<S: KvStore + 'static>(
             low_watermark: 0.0,
             ..cfg.clone()
         },
-        &addr_of_group,
+        &map.groups,
+        &addr_of,
     )
     .await
     .unwrap();
@@ -477,7 +472,8 @@ pub async fn eviction_respects_watermarks_lru_and_pins<S: KvStore + 'static>(
             low_watermark: 0.0,
             ..cfg
         },
-        &addr_of_group,
+        &map.groups,
+        &addr_of,
     )
     .await
     .unwrap();
@@ -605,11 +601,7 @@ pub async fn crash_states_are_recovered_idempotently<S: KvStore + 'static>(start
     c.wait_cached(BUCKET, "o", 2, Duration::from_secs(10)).await;
     let generation = c.manifest(BUCKET, "o").await.pointer.generation;
     let groups = c.groups().await;
-    let cache_group = groups
-        .iter()
-        .find(|g| g.scheme == arca_lake_tiering::cache::CACHE_SCHEME)
-        .unwrap()
-        .clone();
+    let cache_group = groups.iter().find(|g| g.is_cache()).unwrap().clone();
     let cache_node = c.node_index(&cache_group.members[0]).unwrap();
     let addr = c.nodes[cache_node].addr.to_string();
 
@@ -750,7 +742,7 @@ pub async fn cache_survives_durable_repair_gc_and_fenced_cache_epoch<S: KvStore 
     .await
     .unwrap();
     for g in c.groups().await {
-        if g.scheme == arca_lake_tiering::cache::CACHE_SCHEME {
+        if g.is_cache() {
             let n = c.node_index(&g.members[0]).unwrap();
             c.clients
                 .update_epoch(&c.nodes[n].addr.to_string(), g.id, g.epoch + 1)

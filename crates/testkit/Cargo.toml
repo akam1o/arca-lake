@@ -48,5 +48,9 @@ required-features = ["fdb"]
 name = "cache_fdb"
 required-features = ["fdb"]
 
+[[test]]
+name = "cache_ec_fdb"
+required-features = ["fdb"]
+
 [lints]
 workspace = true

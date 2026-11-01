@@ -235,6 +235,9 @@ struct ControllerArgs {
     /// Tiering pass interval in seconds.
     #[arg(long, default_value_t = 300)]
     tiering_interval_secs: u64,
+    /// Chunks a cache-group repair may reconstruct per pass (0 = unlimited).
+    #[arg(long, default_value_t = 256)]
+    cache_repair_chunks_per_pass: usize,
 }
 
 #[derive(Debug, clap::Args)]
@@ -274,8 +277,8 @@ enum AdminCommand {
         #[command(flatten)]
         profile: ProfileArgs,
     },
-    /// Create one cache group per device of every node of a device class
-    /// (RFC-006 §5.1).
+    /// Create cache groups for a cache tier from the nodes of a device
+    /// class (RFC-006 §5.1, §5.9).
     CreateCacheGroups {
         /// Cache tier name.
         #[arg(long)]
@@ -283,6 +286,28 @@ enum AdminCommand {
         /// `device_class` label of the nodes to use.
         #[arg(long)]
         device_class: String,
+        /// Protection mode: `none` (one copy per device), `replication`
+        /// (`--replicas` copies), or `ec` (`--data-shards` + `--parity-shards`).
+        #[arg(long, default_value = "none", value_parser = ["none", "replication", "ec"])]
+        protection: String,
+        /// Copies for `replication`.
+        #[arg(long, default_value_t = 2)]
+        replicas: u16,
+        /// `k` for `ec`.
+        #[arg(long, default_value_t = 2)]
+        data_shards: u16,
+        /// `m` for `ec`.
+        #[arg(long, default_value_t = 1)]
+        parity_shards: u16,
+        /// EC scheme for `ec`.
+        #[arg(long, default_value = "rs-gf8-v1")]
+        scheme: String,
+        /// Groups to create for `replication` and `ec`.
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+        /// Topology label whose values must differ between members.
+        #[arg(long, default_value = "host")]
+        failure_domain: String,
     },
     /// Print nodes, groups, and the leader record.
     Status,
@@ -454,6 +479,7 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
         });
     }
     cfg.tiering_interval = Duration::from_secs(args.tiering_interval_secs);
+    cfg.cache_repair_chunks_per_pass = args.cache_repair_chunks_per_pass;
     let handle = match arca_lake_controller::process::spawn(meta, cfg).await {
         Ok(h) => h,
         Err(e) => return fail(format!("cannot start the controller: {e}")),
@@ -542,11 +568,34 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 Err(e) => fail(e),
             }
         }
-        AdminCommand::CreateCacheGroups { tier, device_class } => {
+        AdminCommand::CreateCacheGroups {
+            tier,
+            device_class,
+            protection,
+            replicas,
+            data_shards,
+            parity_shards,
+            scheme,
+            count,
+            failure_domain,
+        } => {
+            use arca_lake_controller::groups::CacheProtection;
+            let protection = match protection.as_str() {
+                "replication" => CacheProtection::Replication { replicas },
+                "ec" => CacheProtection::ErasureCoding {
+                    scheme,
+                    data_shards,
+                    parity_shards,
+                },
+                _ => CacheProtection::None,
+            };
             match arca_lake_controller::groups::create_cache_groups(
                 meta.as_ref(),
                 &tier,
                 &device_class,
+                &protection,
+                &failure_domain,
+                count,
             )
             .await
             {

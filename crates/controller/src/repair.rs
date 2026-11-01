@@ -54,6 +54,10 @@ pub struct RepairOptions {
     /// Verify every member's shards (not only the replacement's) before
     /// declaring the group complete. Reads all data of the group.
     pub verify_all_members: bool,
+    /// Reconstruct at most this many chunks per call (0 = unlimited); when
+    /// the budget is spent the cursor is persisted, the completeness check
+    /// is skipped, and the group stays `Repairing` (RFC-006 §5.9).
+    pub max_chunks: usize,
 }
 
 /// Result of a repair.
@@ -67,6 +71,8 @@ pub struct RepairReport {
     pub skipped: usize,
     /// Whether this run continued an interrupted repair.
     pub resumed: bool,
+    /// Whether this run stopped because `max_chunks` was reached.
+    pub budget_exhausted: bool,
     /// Whether the group is `Active` again.
     pub complete: bool,
     /// What the completeness check found.
@@ -231,6 +237,9 @@ pub async fn replace_member_with<S: KvStore>(
     let mut report =
         reconstruct_member(meta, clients, &nodes, &group, index, opts, &mut hook).await?;
     report.resumed = resumed;
+    if report.budget_exhausted {
+        return Ok(report);
+    }
     hook(RepairStep::Reconstructed).await?;
 
     let completeness = check_completeness(clients, &nodes, &group, index, opts).await?;
@@ -447,6 +456,10 @@ async fn reconstruct_member<S: KvStore>(
             chunk_id: cid,
         })
         .await?;
+        if opts.max_chunks > 0 && report.reconstructed >= opts.max_chunks {
+            report.budget_exhausted = true;
+            return Ok(report);
+        }
     }
     if walker.unavailable().contains(&index) {
         return Err(ControlError::Other(format!(
@@ -502,6 +515,35 @@ async fn reconstruct_one<S: KvStore>(
         }
     }
     let (prefix, chunk_index) = split_chunk_id(&cid);
+    if group.is_cache() {
+        // A cache shard is worth rebuilding only while a live generation's
+        // cache placement names this group; otherwise it is an orphan that
+        // reconciliation deletes. An unreadable cached chunk is dropped
+        // (the record is removed; the next read refills it): cache repair
+        // never fails on data that the durable tier still has.
+        if !gc::cache_placement_in_group(meta, &prefix, chunk_index, group.id).await? {
+            return Ok(None);
+        }
+        if have < k {
+            if let Some(generation) = gc::live_generation_with_prefix(meta, &prefix).await? {
+                arca_lake_metadata::ops::cache::remove(meta, &generation, chunk_index).await?;
+            }
+            return Ok(None);
+        }
+        coder
+            .reconstruct(&mut shards)
+            .map_err(|e| ControlError::Other(format!("reconstruct: {e}")))?;
+        if let Some(record) = gc::chunk_record_of(meta, &prefix, chunk_index).await?
+            && !joined_matches(&shards, k, coder, record.len, record.crc32c)
+        {
+            return Err(ControlError::Corrupt(format!(
+                "cached chunk {} reconstructed from {} shards does not match its record",
+                hex(&cid),
+                have
+            )));
+        }
+        return Ok(Some(Bytes::from(shards[index].take().unwrap_or_default())));
+    }
     if have < k {
         if !gc::generation_is_live(meta, &prefix).await? {
             return Ok(None);
@@ -536,17 +578,7 @@ async fn reconstruct_one<S: KvStore>(
                 group.parity_shards
             )));
         }
-        let layout = StripeLayout::new(
-            usize::try_from(record.len).unwrap_or(0),
-            k,
-            coder.shard_alignment(),
-        );
-        let data: Vec<&[u8]> = shards[..k]
-            .iter()
-            .map(|s| s.as_deref().unwrap_or(&[]))
-            .collect();
-        let joined = layout.join(&data);
-        if arca_lake_storage::format::crc32c(&joined) != record.crc32c {
+        if !joined_matches(&shards, k, coder, record.len, record.crc32c) {
             return Err(ControlError::Corrupt(format!(
                 "chunk {} reconstructed from {} shards does not match its recorded checksum",
                 hex(&cid),
@@ -555,6 +587,27 @@ async fn reconstruct_one<S: KvStore>(
         }
     }
     Ok(Some(Bytes::from(shards[index].take().unwrap_or_default())))
+}
+
+/// Whether the joined data shards have the recorded length and CRC.
+fn joined_matches(
+    shards: &[Option<Vec<u8>>],
+    k: usize,
+    coder: &dyn ErasureCoder,
+    len: u32,
+    crc32c: u32,
+) -> bool {
+    let layout = StripeLayout::new(
+        usize::try_from(len).unwrap_or(0),
+        k,
+        coder.shard_alignment(),
+    );
+    let data: Vec<&[u8]> = shards[..k]
+        .iter()
+        .map(|s| s.as_deref().unwrap_or(&[]))
+        .collect();
+    let joined = layout.join(&data);
+    arca_lake_storage::format::crc32c(&joined) == crc32c
 }
 
 /// Completeness check: walk every member's listing (same chunk IDs, same

@@ -112,6 +112,7 @@ async fn corrupt_source_shard_is_not_propagated_and_blocks_full_verification() {
     c.repair_options = RepairOptions {
         page_size: 0,
         verify_all_members: true,
+        max_chunks: 0,
     };
     let objects = seed(&c, 2).await;
     let group = c.groups().await.remove(0);

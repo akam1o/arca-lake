@@ -1,12 +1,13 @@
-//! Read path (RFC-004 §5.6, RFC-006 §5.3): manifest → per chunk, cache hit
-//! (validated) or durable read with asynchronous cache population → stream.
+//! Read path (RFC-004 §5.6, RFC-006 §5.3, §5.9): manifest → per chunk, a
+//! validated cache hit (possibly degraded, then repaired asynchronously) or
+//! a durable read with asynchronous cache population → stream.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::ops::object::{self, Manifest};
-use arca_lake_metadata::records::{CachePlacement, ChunkRecord, GenId};
+use arca_lake_metadata::records::{CachePlacement, ChunkRecord, GenId, GroupRecord};
 use arca_lake_tiering::TierError;
 use arca_lake_tiering::cache::{self as tcache, CacheTierConfig};
 use bytes::Bytes;
@@ -15,6 +16,10 @@ use s3s::{S3Error, S3Response, S3Result, s3_error};
 
 use super::backend::{ClusterBackend, meta_err, now_ms};
 use super::map::ClusterMap;
+
+fn addr_of(map: &ClusterMap) -> impl Fn(u64) -> Option<String> + Sync + '_ {
+    move |node_id| map.node_addr(node_id).map(str::to_string)
+}
 
 impl<S: KvStore + 'static> ClusterBackend<S> {
     pub(super) async fn read_object(
@@ -116,7 +121,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// otherwise from the durable placement (then possibly populated).
     pub(super) async fn read_chunk_bytes(
         &self,
-        map: &ClusterMap,
+        map: &Arc<ClusterMap>,
         generation: GenId,
         index: u32,
         chunk: &ChunkRecord,
@@ -156,48 +161,74 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .coders
             .get(&chunk.scheme, chunk.data_shards, chunk.parity_shards)
             .map_err(|e| s3_error!(InternalError, "{e}"))?;
-        let addr_of = |node_id: u64| map.node_addr(node_id).map(str::to_string);
-        arca_lake_tiering::durable::read_chunk(&self.clients, group, &addr_of, chunk, coder.as_ref())
-            .await
-            .map_err(|e| match e {
-                TierError::Unreadable { have, need } => s3_error!(
-                    InternalError,
-                    "chunk unreadable: only {have} of {need} required shards available (data integrity error)"
-                ),
-                other => s3_error!(InternalError, "{other}"),
-            })
+        arca_lake_tiering::durable::read_chunk(
+            &self.clients,
+            group,
+            &addr_of(map),
+            chunk,
+            coder.as_ref(),
+        )
+        .await
+        .map_err(|e| match e {
+            TierError::Unreadable { have, need } => s3_error!(
+                InternalError,
+                "chunk unreadable: only {have} of {need} required shards available (data integrity error)"
+            ),
+            other => s3_error!(InternalError, "{other}"),
+        })
     }
 
-    /// A cache hit, or `None` after invalidating a copy that could not be
-    /// read or did not match its record.
+    /// A cache hit (clean or degraded), or `None` after invalidating a copy
+    /// that could not be read or did not match its record.
     async fn try_cache_hit(
         &self,
-        map: &ClusterMap,
+        map: &Arc<ClusterMap>,
         generation: GenId,
         index: u32,
         chunk: &ChunkRecord,
         p: &CachePlacement,
     ) -> Option<Bytes> {
-        let addr = map
-            .groups
-            .get(&p.group_id)
-            .and_then(|g| g.members.first())
-            .and_then(|m| map.node_addr(m.node_id))
-            .map(str::to_string);
-        let Some(addr) = addr else {
-            self.invalidate_cache(None, generation, index);
+        let Some(group) = map.groups.get(&p.group_id) else {
+            self.invalidate_cache(Arc::clone(map), None, generation, index);
             return None;
         };
-        if let Ok(bytes) =
-            tcache::read_cached(&self.clients, &addr, p, &generation, index, chunk).await
-        {
-            return Some(bytes);
+        let Ok(r) = tcache::read_cached(
+            &self.clients,
+            &self.coders,
+            group,
+            &addr_of(map),
+            &generation,
+            index,
+            chunk,
+        )
+        .await
+        else {
+            self.invalidate_cache(Arc::clone(map), Some(group.clone()), generation, index);
+            return None;
+        };
+        if !r.missing.is_empty() {
+            self.cache_stats
+                .degraded_hits
+                .fetch_add(1, Ordering::Relaxed);
+            self.repair_cache_shards(
+                Arc::clone(map),
+                group.clone(),
+                generation,
+                index,
+                r.bytes.clone(),
+                r.missing,
+            );
         }
-        self.invalidate_cache(Some(addr), generation, index);
-        None
+        Some(r.bytes)
     }
 
-    fn invalidate_cache(&self, addr: Option<String>, generation: GenId, index: u32) {
+    fn invalidate_cache(
+        &self,
+        map: Arc<ClusterMap>,
+        group: Option<GroupRecord>,
+        generation: GenId,
+        index: u32,
+    ) {
         self.cache_stats
             .invalidations
             .fetch_add(1, Ordering::Relaxed);
@@ -206,11 +237,62 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             let _ = tcache::invalidate(
                 backend.meta.as_ref(),
                 &backend.clients,
-                addr.as_deref(),
+                group.as_ref(),
+                &addr_of(&map),
                 &generation,
                 index,
             )
             .await;
+        });
+    }
+
+    /// Read-triggered cache repair after a degraded hit (RFC-006 §5.9):
+    /// rewrite the missing shards, bounded by a per-gateway concurrency
+    /// limit; when no permit is free the repair is skipped (the next
+    /// degraded hit retries).
+    fn repair_cache_shards(
+        &self,
+        map: Arc<ClusterMap>,
+        group: GroupRecord,
+        generation: GenId,
+        index: u32,
+        bytes: Bytes,
+        missing: Vec<usize>,
+    ) {
+        let Ok(permit) = Arc::clone(&self.cache_state.repair_permits).try_acquire_owned() else {
+            self.cache_stats
+                .shard_repairs_skipped
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let backend = self.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let r = tcache::repair_shards(
+                &backend.clients,
+                &backend.coders,
+                &group,
+                &addr_of(&map),
+                &generation,
+                index,
+                &bytes,
+                &missing,
+            )
+            .await;
+            match r {
+                Ok(n) => {
+                    backend
+                        .cache_stats
+                        .shards_repaired
+                        .fetch_add(n as u64, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    backend
+                        .cache_stats
+                        .shard_repair_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
         });
     }
 
@@ -237,7 +319,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// critical path; failures only count, RFC-006 §5.3).
     fn maybe_populate(
         &self,
-        map: &ClusterMap,
+        map: &Arc<ClusterMap>,
         generation: GenId,
         index: u32,
         chunk: &ChunkRecord,
@@ -263,14 +345,6 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         else {
             return;
         };
-        let Some(addr) = group
-            .members
-            .first()
-            .and_then(|m| map.node_addr(m.node_id))
-            .map(str::to_string)
-        else {
-            return;
-        };
         if !self.cache_state.begin_populate(generation, index) {
             self.cache_stats
                 .populations_deduplicated
@@ -279,13 +353,15 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }
         let backend = self.clone();
         let cfg = cfg.clone();
+        let map = Arc::clone(map);
         tokio::spawn(async move {
             let r = tcache::populate(
                 backend.meta.as_ref(),
                 &backend.clients,
+                &backend.coders,
                 &cfg,
                 &group,
-                &addr,
+                &addr_of(&map),
                 &generation,
                 index,
                 bytes,
@@ -363,19 +439,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                     cfg.tier
                 ));
             };
-            let addr = group
-                .members
-                .first()
-                .and_then(|m| map.node_addr(m.node_id))
-                .ok_or_else(|| {
-                    s3_error!(InternalError, "cache group {} has no member", group.id)
-                })?;
             match tcache::populate(
                 self.meta.as_ref(),
                 &self.clients,
+                &self.coders,
                 &cfg,
                 group,
-                addr,
+                &addr_of(&map),
                 &generation,
                 *index,
                 bytes,
@@ -447,16 +517,15 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .clone()
             .ok_or_else(|| s3_error!(InternalError, "no cache tier configured"))?;
         let map = self.map_up_to_date().await.map_err(meta_err)?;
-        let addr_of_group = |group_id: u64| {
-            map.groups
-                .get(&group_id)
-                .and_then(|g| g.members.first())
-                .and_then(|m| map.node_addr(m.node_id))
-                .map(str::to_string)
-        };
-        tcache::evict_tier(self.meta.as_ref(), &self.clients, &cfg, &addr_of_group)
-            .await
-            .map_err(|e| s3_error!(InternalError, "{e}"))
+        tcache::evict_tier(
+            self.meta.as_ref(),
+            &self.clients,
+            &cfg,
+            &map.groups,
+            &addr_of(&map),
+        )
+        .await
+        .map_err(|e| s3_error!(InternalError, "{e}"))
     }
 
     /// The cache tier configuration, if any.

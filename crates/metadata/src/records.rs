@@ -208,7 +208,9 @@ pub struct CachePlacement {
     pub group_id: u64,
     /// Group epoch at write time.
     pub epoch: u64,
-    /// Bytes of the copy (the chunk length).
+    /// Bytes stored on the tier for this copy: the chunk length for an
+    /// unprotected cache group, the sum of all shards for a replicated or
+    /// coded one (RFC-006 §5.9). Counted in the tier usage.
     pub bytes: u64,
     /// Pinned entries are never evicted.
     pub pinned: bool,
@@ -267,6 +269,15 @@ pub struct RepairCursor {
     pub chunk_id: [u8; 16],
 }
 
+/// What a group's shards mean (RFC-006 §5.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupRole {
+    /// Durable placement: the only basis for durability.
+    Durable,
+    /// Discardable cache copies, whatever the scheme.
+    Cache,
+}
+
 /// A stripe group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupRecord {
@@ -290,6 +301,16 @@ pub struct GroupRecord {
     pub state: GroupState,
     /// Repair progress, if a repair is in progress.
     pub repair_cursor: Option<RepairCursor>,
+    /// Durable or cache.
+    pub role: GroupRole,
+}
+
+impl GroupRecord {
+    /// Whether this group holds discardable cache copies.
+    #[must_use]
+    pub fn is_cache(&self) -> bool {
+        self.role == GroupRole::Cache
+    }
 }
 
 #[cfg(test)]

@@ -1,11 +1,15 @@
-//! Read-through cache operations (RFC-006 §5.3–5.7).
+//! Read-through cache operations (RFC-006 §5.3–5.7, §5.9).
 //!
-//! A cache group has scheme [`CACHE_SCHEME`] and one member that holds the
-//! whole chunk as shard 0. The cache placement record is the only thing
-//! that makes a copy visible to readers; copies without a record are
-//! orphans and are removed by [`reconcile_node`]; records without a copy
-//! are removed by [`invalidate`] when a reader finds them wrong.
+//! A cache group is any group with role `Cache`. Its scheme decides how a
+//! copy is stored: [`CACHE_SCHEME`] is one raw copy on one member (shard
+//! 0); any other scheme is a replicated or erasure-coded copy written and
+//! read through the same coder as durable groups. The cache placement
+//! record is the only thing that makes a copy visible to readers; copies
+//! without a record are orphans and are removed by [`reconcile_node`];
+//! records without a copy are removed by [`invalidate`] when a reader finds
+//! them wrong.
 
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -18,8 +22,10 @@ use arca_lake_protocol::client::{NodeClients, ShardRef};
 use bytes::Bytes;
 
 use crate::TierError;
+use crate::durable::{AddrOf, Coders, encode_chunk, read_coded, write_coded};
 
-/// Scheme identifier of cache groups: one member, whole chunk as shard 0.
+/// Scheme identifier of unprotected cache groups: one member, the whole
+/// chunk as shard 0, no coder.
 pub const CACHE_SCHEME: &str = "cache-v1";
 
 /// Configuration of one cache tier as the gateway and controller see it.
@@ -66,7 +72,13 @@ fn fraction(bytes: u64, f: f64) -> u64 {
     ((bytes as f64) * f.clamp(0.0, 1.0)).round() as u64
 }
 
-/// Choose the cache group for a chunk: active `cache-v1` groups of `tier`,
+/// Whether `group` stores raw single copies (no coder).
+#[must_use]
+pub fn is_raw(group: &GroupRecord) -> bool {
+    group.scheme == CACHE_SCHEME
+}
+
+/// Choose the cache group for a chunk: active cache groups of `tier`,
 /// spread by a hash of the chunk ID so that the choice is stable across
 /// gateways (duplicate populations then write the same bytes to the same
 /// place).
@@ -76,7 +88,7 @@ pub fn choose_group<'a>(
     cid: &[u8; 16],
 ) -> Option<&'a GroupRecord> {
     let mut candidates: Vec<&GroupRecord> = groups
-        .filter(|g| g.scheme == CACHE_SCHEME && g.tier == tier && g.state == GroupState::Active)
+        .filter(|g| g.is_cache() && g.tier == tier && g.state == GroupState::Active)
         .collect();
     if candidates.is_empty() {
         return None;
@@ -100,53 +112,46 @@ pub enum PopulateOutcome {
     Rejected(&'static str),
 }
 
-/// Write `bytes` (the whole chunk `index` of `generation`) to the cache
-/// member of `group`, then record the placement if the generation is still
-/// committed and the tier is within its high watermark (RFC-006 §5.3).
+/// Write the whole chunk `index` of `generation` to `group` (one raw copy,
+/// `r` replicas, or `k + m` shards according to the group's scheme), then
+/// record the placement if the generation is still committed and the tier
+/// is within its high watermark (RFC-006 §5.3, §5.9). A copy that cannot
+/// be written completely is deleted and never recorded.
 ///
 /// # Errors
 ///
-/// Node errors on the write, metadata errors, or a CRC mismatch reported
-/// by the node (the copy is then deleted).
+/// Node errors on any write, metadata errors, or a CRC mismatch reported
+/// by a node.
 #[allow(clippy::too_many_arguments)]
 pub async fn populate<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
+    coders: &Coders,
     cfg: &CacheTierConfig,
     group: &GroupRecord,
-    node_addr: &str,
+    addr_of: AddrOf<'_>,
     generation: &GenId,
     index: u32,
     bytes: Bytes,
     now_ms: u64,
 ) -> Result<PopulateOutcome, TierError> {
     let cid = chunk_id(generation, index);
-    let shard = ShardRef {
-        group_id: group.id,
-        chunk_id: cid,
-        shard_index: 0,
+    let stored = if is_raw(group) {
+        let len = bytes.len() as u64;
+        write_coded(clients, group, addr_of, cid, &[bytes], None).await?;
+        len
+    } else {
+        let coder = coders.for_group(group)?;
+        let (_, shards) = encode_chunk(coder.as_ref(), usize::from(group.data_shards), &bytes)?;
+        let stored = shards.iter().map(|s| s.len() as u64).sum();
+        write_coded(clients, group, addr_of, cid, &shards, None).await?;
+        stored
     };
-    let expected = arca_lake_storage::format::crc32c(&bytes);
-    let len = bytes.len() as u64;
-    let resp = clients
-        .put_shard(node_addr, shard, group.epoch, bytes, 256 << 10)
-        .await
-        .map_err(|status| TierError::Node {
-            addr: node_addr.to_string(),
-            status,
-        })?;
-    if resp.crc32c != expected {
-        let _ = clients.delete_shard(node_addr, shard, group.epoch).await;
-        return Err(TierError::Corrupt(format!(
-            "cache node {node_addr} stored crc {:08x}, expected {expected:08x}",
-            resp.crc32c
-        )));
-    }
     let placement = CachePlacement {
         tier: cfg.tier.clone(),
         group_id: group.id,
         epoch: group.epoch,
-        bytes: len,
+        bytes: stored,
         pinned: false,
         last_access_ms: now_ms,
         created_ms: now_ms,
@@ -155,54 +160,124 @@ pub async fn populate<S: KvStore>(
         meta_cache::InsertOutcome::Inserted => Ok(PopulateOutcome::Inserted),
         meta_cache::InsertOutcome::AlreadyPresent => Ok(PopulateOutcome::AlreadyPresent),
         meta_cache::InsertOutcome::GenerationGone => {
-            let _ = clients.delete_shard(node_addr, shard, group.epoch).await;
+            crate::durable::delete_shards(clients, group, addr_of, cid, group.epoch).await;
             Ok(PopulateOutcome::Rejected("generation gone"))
         }
         meta_cache::InsertOutcome::OverCapacity => {
-            let _ = clients.delete_shard(node_addr, shard, group.epoch).await;
+            crate::durable::delete_shards(clients, group, addr_of, cid, group.epoch).await;
             Ok(PopulateOutcome::Rejected("over capacity"))
         }
     }
 }
 
-/// Read a cached chunk and verify it against the chunk record (length and
-/// CRC-32C). Any mismatch is an error; the caller falls back to the
-/// durable read and invalidates.
+/// A chunk served from the cache.
+#[derive(Debug, Clone)]
+pub struct CachedRead {
+    /// The chunk, validated against its record.
+    pub bytes: Bytes,
+    /// Member indexes whose shard was missing or unusable (a *degraded*
+    /// hit when non-empty; the caller may rewrite them with
+    /// [`repair_shards`]).
+    pub missing: Vec<usize>,
+}
+
+/// Read a cached chunk from `group` and verify it against the chunk record
+/// (length and CRC-32C). Any mismatch is an error; the caller falls back to
+/// the durable read and invalidates.
 ///
 /// # Errors
 ///
-/// Node errors, [`TierError::Corrupt`].
+/// Node errors, [`TierError::Unreadable`], [`TierError::Corrupt`].
 pub async fn read_cached(
     clients: &NodeClients,
-    node_addr: &str,
-    placement: &CachePlacement,
+    coders: &Coders,
+    group: &GroupRecord,
+    addr_of: AddrOf<'_>,
     generation: &GenId,
     index: u32,
     chunk: &ChunkRecord,
-) -> Result<Bytes, TierError> {
-    let shard = ShardRef {
-        group_id: placement.group_id,
-        chunk_id: chunk_id(generation, index),
-        shard_index: 0,
-    };
-    let bytes = clients
-        .get_shard(node_addr, shard, 0, 0)
-        .await
-        .map_err(|status| TierError::Node {
-            addr: node_addr.to_string(),
-            status,
-        })?;
-    if bytes.len() != usize::try_from(chunk.len).unwrap_or(usize::MAX)
-        || arca_lake_storage::format::crc32c(&bytes) != chunk.crc32c
-    {
-        return Err(TierError::Corrupt(format!(
-            "cached chunk {index} does not match its record"
-        )));
+) -> Result<CachedRead, TierError> {
+    let cid = chunk_id(generation, index);
+    if is_raw(group) {
+        let member = group
+            .members
+            .first()
+            .ok_or_else(|| TierError::Other(format!("cache group {} has no member", group.id)))?;
+        let addr = addr_of(member.node_id)
+            .ok_or_else(|| TierError::Other(format!("unknown node {}", member.node_id)))?;
+        let shard = ShardRef {
+            group_id: group.id,
+            chunk_id: cid,
+            shard_index: 0,
+        };
+        let bytes = clients
+            .get_shard(&addr, shard, 0, 0)
+            .await
+            .map_err(|status| TierError::Node { addr, status })?;
+        if bytes.len() != usize::try_from(chunk.len).unwrap_or(usize::MAX)
+            || arca_lake_storage::format::crc32c(&bytes) != chunk.crc32c
+        {
+            return Err(TierError::Corrupt(format!(
+                "cached chunk {index} does not match its record"
+            )));
+        }
+        return Ok(CachedRead {
+            bytes,
+            missing: Vec::new(),
+        });
     }
-    Ok(bytes)
+    let coder = coders.for_group(group)?;
+    let r = read_coded(
+        clients,
+        group,
+        addr_of,
+        cid,
+        u64::from(chunk.len),
+        chunk.crc32c,
+        coder.as_ref(),
+    )
+    .await?;
+    Ok(CachedRead {
+        bytes: r.bytes,
+        missing: r.missing,
+    })
 }
 
-/// Remove a cache placement and (best effort) its copy. Idempotent.
+/// Rewrite the shards `missing` of a cached chunk from its bytes (after a
+/// degraded hit): re-encode and write only those members with the group's
+/// epoch. Returns how many shards were written.
+///
+/// # Errors
+///
+/// Encoder or node errors (nothing is recorded; the next degraded hit
+/// retries).
+#[allow(clippy::too_many_arguments)]
+pub async fn repair_shards(
+    clients: &NodeClients,
+    coders: &Coders,
+    group: &GroupRecord,
+    addr_of: AddrOf<'_>,
+    generation: &GenId,
+    index: u32,
+    bytes: &Bytes,
+    missing: &[usize],
+) -> Result<usize, TierError> {
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    let cid = chunk_id(generation, index);
+    let shards = if is_raw(group) {
+        vec![bytes.clone()]
+    } else {
+        let coder = coders.for_group(group)?;
+        encode_chunk(coder.as_ref(), usize::from(group.data_shards), bytes)?.1
+    };
+    let written = write_coded(clients, group, addr_of, cid, &shards, Some(missing)).await?;
+    Ok(written.len())
+}
+
+/// Remove a cache placement and (best effort) its shards on every member
+/// of `group`. Idempotent.
 ///
 /// # Errors
 ///
@@ -210,20 +285,17 @@ pub async fn read_cached(
 pub async fn invalidate<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
-    node_addr: Option<&str>,
+    group: Option<&GroupRecord>,
+    addr_of: AddrOf<'_>,
     generation: &GenId,
     index: u32,
 ) -> Result<bool, TierError> {
     let Some(p) = meta_cache::remove(meta, generation, index).await? else {
         return Ok(false);
     };
-    if let Some(addr) = node_addr {
-        let shard = ShardRef {
-            group_id: p.group_id,
-            chunk_id: chunk_id(generation, index),
-            shard_index: 0,
-        };
-        let _ = clients.delete_shard(addr, shard, p.epoch).await;
+    if let Some(g) = group.filter(|g| g.id == p.group_id) {
+        crate::durable::delete_shards(clients, g, addr_of, chunk_id(generation, index), p.epoch)
+            .await;
     }
     Ok(true)
 }
@@ -239,6 +311,8 @@ pub struct EvictReport {
     pub evicted: usize,
     /// Pinned entries that were skipped.
     pub skipped_pinned: usize,
+    /// Shard deletes that failed (orphans for reconciliation).
+    pub delete_failures: usize,
     /// Usage is still above the low watermark (pinned entries or node
     /// errors prevented reaching it).
     pub over_watermark: bool,
@@ -246,17 +320,20 @@ pub struct EvictReport {
 
 /// LRU eviction of `tier` down to its low watermark when usage exceeds the
 /// high watermark (RFC-006 §5.4). Pinned entries are never evicted. Each
-/// eviction removes the record first, then deletes the copy with the
-/// placement's epoch (a failed delete leaves an orphan for reconciliation).
+/// eviction removes the record first, then deletes the shards on every
+/// member with the placement's epoch (a failed delete leaves an orphan for
+/// reconciliation).
 ///
 /// # Errors
 ///
 /// Metadata errors.
+#[allow(clippy::implicit_hasher)]
 pub async fn evict_tier<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
     cfg: &CacheTierConfig,
-    addr_of_group: &(dyn Fn(u64) -> Option<String> + Sync),
+    groups: &HashMap<u64, GroupRecord>,
+    addr_of: AddrOf<'_>,
 ) -> Result<EvictReport, TierError> {
     let mut report = EvictReport {
         usage_before: meta_cache::usage(meta, &cfg.tier).await?,
@@ -288,13 +365,18 @@ pub async fn evict_tier<S: KvStore>(
             if let Some(removed) = meta_cache::remove(meta, generation, *index).await? {
                 report.evicted += 1;
                 report.usage_after = report.usage_after.saturating_sub(removed.bytes);
-                if let Some(addr) = addr_of_group(removed.group_id) {
-                    let shard = ShardRef {
-                        group_id: removed.group_id,
-                        chunk_id: chunk_id(generation, *index),
-                        shard_index: 0,
-                    };
-                    let _ = clients.delete_shard(&addr, shard, removed.epoch).await;
+                match groups.get(&removed.group_id) {
+                    Some(g) => {
+                        report.delete_failures += crate::durable::delete_shards(
+                            clients,
+                            g,
+                            addr_of,
+                            chunk_id(generation, *index),
+                            removed.epoch,
+                        )
+                        .await;
+                    }
+                    None => report.delete_failures += 1,
                 }
             }
         }
@@ -316,9 +398,9 @@ pub struct CacheReconcileReport {
     pub kept: usize,
 }
 
-/// Delete copies on a cache node that no placement of a live generation
+/// Delete shards on a cache member that no placement of a live generation
 /// names (RFC-006 §5.6): crashed populations, failed inserts, lost
-/// metadata. Idempotent; paged.
+/// metadata, failed evictions. Idempotent; paged; runs per member.
 ///
 /// # Errors
 ///

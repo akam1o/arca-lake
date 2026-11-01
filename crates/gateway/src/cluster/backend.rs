@@ -92,6 +92,14 @@ pub struct CacheStats {
     pub populations_deduplicated: std::sync::atomic::AtomicU64,
     /// Chunks not admitted (size, miss threshold, capacity, generation gone).
     pub admissions_rejected: std::sync::atomic::AtomicU64,
+    /// Hits served with at least one shard missing (RFC-006 §5.9).
+    pub degraded_hits: std::sync::atomic::AtomicU64,
+    /// Cache shards rewritten after degraded hits.
+    pub shards_repaired: std::sync::atomic::AtomicU64,
+    /// Read-triggered cache repairs that failed.
+    pub shard_repair_failures: std::sync::atomic::AtomicU64,
+    /// Read-triggered cache repairs skipped for lack of a permit.
+    pub shard_repairs_skipped: std::sync::atomic::AtomicU64,
 }
 
 impl CacheStats {
@@ -106,6 +114,10 @@ impl CacheStats {
             population_failures: self.population_failures.load(Relaxed),
             populations_deduplicated: self.populations_deduplicated.load(Relaxed),
             admissions_rejected: self.admissions_rejected.load(Relaxed),
+            degraded_hits: self.degraded_hits.load(Relaxed),
+            shards_repaired: self.shards_repaired.load(Relaxed),
+            shard_repair_failures: self.shard_repair_failures.load(Relaxed),
+            shard_repairs_skipped: self.shard_repairs_skipped.load(Relaxed),
         }
     }
 }
@@ -129,17 +141,42 @@ pub struct CacheStatsSnapshot {
     pub populations_deduplicated: u64,
     /// See [`CacheStats::admissions_rejected`].
     pub admissions_rejected: u64,
+    /// See [`CacheStats::degraded_hits`].
+    pub degraded_hits: u64,
+    /// See [`CacheStats::shards_repaired`].
+    pub shards_repaired: u64,
+    /// See [`CacheStats::shard_repair_failures`].
+    pub shard_repair_failures: u64,
+    /// See [`CacheStats::shard_repairs_skipped`].
+    pub shard_repairs_skipped: u64,
 }
 
 /// Per-gateway in-memory state of the cache: in-flight populations
 /// (stampede dedupe), miss counts for admission, recency-touch and
 /// access-record coalescing. Hints only; correctness never depends on it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CacheState {
     populating: Mutex<std::collections::HashSet<(GenId, u32)>>,
     misses: Mutex<HashMap<(GenId, u32), u32>>,
     touched: Mutex<HashMap<(GenId, u32), u64>>,
     access: Mutex<HashMap<GenId, (u64, u64)>>,
+    /// Concurrency limit of read-triggered cache repairs (RFC-006 §5.9).
+    pub(super) repair_permits: Arc<tokio::sync::Semaphore>,
+}
+
+/// Read-triggered cache repairs in flight at once, per gateway.
+const CACHE_REPAIR_PERMITS: usize = 2;
+
+impl Default for CacheState {
+    fn default() -> Self {
+        Self {
+            populating: Mutex::default(),
+            misses: Mutex::default(),
+            touched: Mutex::default(),
+            access: Mutex::default(),
+            repair_permits: Arc::new(tokio::sync::Semaphore::new(CACHE_REPAIR_PERMITS)),
+        }
+    }
 }
 
 /// Minimum interval between recency-index writes for one cached chunk.

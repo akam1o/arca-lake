@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use arca_lake_common::EcProfile;
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::ops::cluster;
-use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord};
+use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupRole, GroupState, NodeRecord};
 use arca_lake_placement::{Device, GroupSpec, choose_group_members};
 
 use crate::ControlError;
@@ -124,6 +124,7 @@ async fn create_groups_from<S: KvStore>(
                 epoch: 0,
                 state: GroupState::Active,
                 repair_cursor: None,
+                role: GroupRole::Durable,
             };
             let g = cluster::create_group(meta, group).await?;
             existing.push(g.clone());
@@ -133,60 +134,145 @@ async fn create_groups_from<S: KvStore>(
     Ok(created)
 }
 
-/// Create one cache group (scheme `cache-v1`, one member) per device of
-/// every node whose `device_class` label equals `device_class`, tagged with
-/// `tier`. Nodes that already have a cache group on this tier are skipped.
+/// Cache protection mode of a cache tier (RFC-006 §5.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheProtection {
+    /// One raw copy per chunk on one device (scheme `cache-v1`).
+    None,
+    /// `replicas` byte-identical copies across the failure domain
+    /// (scheme `replication-v1`, `1 + (replicas - 1)`).
+    Replication {
+        /// Total copies (≥ 2).
+        replicas: u16,
+    },
+    /// Erasure coding with any `ErasureCoder` scheme.
+    ErasureCoding {
+        /// Scheme identifier (`rs-gf8-v1`, `rs-leopard-gf16-v1`).
+        scheme: String,
+        /// `k`.
+        data_shards: u16,
+        /// `m`.
+        parity_shards: u16,
+    },
+}
+
+impl CacheProtection {
+    /// `(scheme, k, m)` of groups in this mode.
+    ///
+    /// # Errors
+    ///
+    /// Invalid parameters (`replicas < 2`, `k == 0`, `m == 0`, unknown
+    /// scheme).
+    pub fn spec(&self) -> Result<(String, u16, u16), ControlError> {
+        match self {
+            Self::None => Ok((arca_lake_tiering::cache::CACHE_SCHEME.into(), 1, 0)),
+            Self::Replication { replicas } => {
+                if *replicas < 2 {
+                    return Err(ControlError::Other(
+                        "cache replication needs at least 2 copies".into(),
+                    ));
+                }
+                Ok(("replication-v1".into(), 1, replicas - 1))
+            }
+            Self::ErasureCoding {
+                scheme,
+                data_shards,
+                parity_shards,
+            } => {
+                if arca_lake_ec::SchemeId::parse(scheme).is_none() {
+                    return Err(ControlError::Other(format!("unknown EC scheme {scheme}")));
+                }
+                if *data_shards == 0 || *parity_shards == 0 {
+                    return Err(ControlError::Other(
+                        "cache erasure coding needs k >= 1 and m >= 1".into(),
+                    ));
+                }
+                Ok((scheme.clone(), *data_shards, *parity_shards))
+            }
+        }
+    }
+}
+
+/// Create cache groups of `tier` from the devices of every node whose
+/// `device_class` label equals `device_class` (RFC-006 §5.1, §5.9).
+///
+/// - `CacheProtection::None`: one single-member group per device that has
+///   none yet on this tier (`count` is ignored).
+/// - Replication and erasure coding: `count` groups of `k + m` members
+///   chosen across `failure_domain`.
 ///
 /// # Errors
 ///
-/// Metadata errors.
+/// Invalid protection parameters, placement, or metadata errors.
 pub async fn create_cache_groups<S: KvStore>(
     meta: &S,
     tier: &str,
     device_class: &str,
+    protection: &CacheProtection,
+    failure_domain: &str,
+    count: usize,
 ) -> Result<Vec<GroupRecord>, ControlError> {
-    let nodes = cluster::list_nodes(meta).await?;
-    let existing = cluster::list_groups(meta).await?;
+    let (scheme, k, m) = protection.spec()?;
+    let nodes: Vec<NodeRecord> = cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .filter(|n| {
+            n.labels
+                .iter()
+                .any(|(key, v)| key == "device_class" && v == device_class)
+        })
+        .collect();
+    let mut existing = cluster::list_groups(meta).await?;
     let mut created = Vec::new();
-    for n in nodes {
-        let class = n
-            .labels
-            .iter()
-            .find(|(k, _)| k == "device_class")
-            .map(|(_, v)| v.as_str());
-        if class != Some(device_class) {
-            continue;
-        }
-        for &d in &n.devices {
-            let member = GroupMember {
-                node_id: n.id,
-                device_id: d,
-            };
-            if existing.iter().any(|g| {
-                g.scheme == arca_lake_tiering::cache::CACHE_SCHEME
-                    && g.tier == tier
-                    && g.members.first() == Some(&member)
-            }) {
-                continue;
+    let record = |members: Vec<GroupMember>| GroupRecord {
+        id: 0,
+        profile: "cache".into(),
+        tier: tier.to_string(),
+        scheme: scheme.clone(),
+        data_shards: k,
+        parity_shards: m,
+        members,
+        epoch: 0,
+        state: GroupState::Active,
+        repair_cursor: None,
+        role: GroupRole::Cache,
+    };
+    if *protection == CacheProtection::None {
+        for n in &nodes {
+            for &d in &n.devices {
+                let member = GroupMember {
+                    node_id: n.id,
+                    device_id: d,
+                };
+                if existing
+                    .iter()
+                    .any(|g| g.is_cache() && g.tier == tier && g.members.first() == Some(&member))
+                {
+                    continue;
+                }
+                let g = cluster::create_group(meta, record(vec![member])).await?;
+                existing.push(g.clone());
+                created.push(g);
             }
-            let g = cluster::create_group(
-                meta,
-                GroupRecord {
-                    id: 0,
-                    profile: "cache".into(),
-                    tier: tier.to_string(),
-                    scheme: arca_lake_tiering::cache::CACHE_SCHEME.into(),
-                    data_shards: 1,
-                    parity_shards: 0,
-                    members: vec![member],
-                    epoch: 0,
-                    state: GroupState::Active,
-                    repair_cursor: None,
-                },
-            )
-            .await?;
-            created.push(g);
         }
+        return Ok(created);
+    }
+    for _ in 0..count {
+        let devices = devices_of(&nodes, &existing);
+        let spec = GroupSpec {
+            total_shards: usize::from(k + m),
+            failure_domain: failure_domain.to_string(),
+        };
+        let members = choose_group_members(&devices, &spec, &BTreeSet::new())?
+            .into_iter()
+            .map(|m| GroupMember {
+                node_id: m.node_id,
+                device_id: m.device_id,
+            })
+            .collect();
+        let g = cluster::create_group(meta, record(members)).await?;
+        existing.push(g.clone());
+        created.push(g);
     }
     Ok(created)
 }

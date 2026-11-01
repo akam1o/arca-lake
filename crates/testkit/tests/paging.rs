@@ -26,6 +26,7 @@ async fn cluster() -> TestCluster {
     c.repair_options = RepairOptions {
         page_size: 7,
         verify_all_members: false,
+        max_chunks: 0,
     };
     c
 }

@@ -219,28 +219,27 @@ async fn delete_cache_copies(
         let Some(group) = groups.get(&p.group_id) else {
             continue;
         };
-        let Some(member) = group.members.first() else {
-            continue;
-        };
-        let Some(node) = nodes.get(&member.node_id) else {
-            continue;
-        };
-        let shard = ShardRef {
-            group_id: group.id,
-            chunk_id: arca_lake_common::chunk_id(generation, *index),
-            shard_index: 0,
-        };
-        match clients
-            .delete_shard(&node.address, shard, group.epoch)
-            .await
-        {
-            Ok(()) => deleted += 1,
-            Err(s) if s.code() == tonic::Code::NotFound => deleted += 1,
-            Err(status) => {
-                return Err(ControlError::Node {
-                    addr: node.address.clone(),
-                    status,
-                });
+        for (i, member) in group.members.iter().enumerate() {
+            let Some(node) = nodes.get(&member.node_id) else {
+                continue;
+            };
+            let shard = ShardRef {
+                group_id: group.id,
+                chunk_id: arca_lake_common::chunk_id(generation, *index),
+                shard_index: u16::try_from(i).unwrap_or(0),
+            };
+            match clients
+                .delete_shard(&node.address, shard, group.epoch)
+                .await
+            {
+                Ok(()) => deleted += 1,
+                Err(s) if s.code() == tonic::Code::NotFound => deleted += 1,
+                Err(status) => {
+                    return Err(ControlError::Node {
+                        addr: node.address.clone(),
+                        status,
+                    });
+                }
             }
         }
     }
@@ -323,7 +322,7 @@ pub async fn reconcile_node<S: KvStore>(
     min_age_ms: u64,
     page_size: u32,
 ) -> Result<ReconcileReport, ControlError> {
-    if group.scheme == arca_lake_tiering::cache::CACHE_SCHEME {
+    if group.is_cache() {
         // Cache copies are accounted for by cache placements, not chunk
         // records (RFC-006 §5.6).
         let r =

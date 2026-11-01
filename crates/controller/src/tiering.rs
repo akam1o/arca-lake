@@ -120,7 +120,7 @@ pub async fn run_once<S: KvStore>(
             let Some(target_group) = groups.values().find(|g| {
                 g.tier == policy.tiers[target_index]
                     && g.state == GroupState::Active
-                    && g.scheme != arca_lake_tiering::cache::CACHE_SCHEME
+                    && !g.is_cache()
             }) else {
                 continue;
             };

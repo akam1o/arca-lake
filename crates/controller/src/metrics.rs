@@ -49,6 +49,12 @@ pub struct Metrics {
     pub chunks_promoted_total: AtomicU64,
     /// Chunks demoted to a lower durable tier.
     pub chunks_demoted_total: AtomicU64,
+    /// Cache-group repairs started (RFC-006 §5.9).
+    pub cache_repairs_started_total: AtomicU64,
+    /// Cache-group repairs completed.
+    pub cache_repairs_completed_total: AtomicU64,
+    /// Cache shards reconstructed by the controller.
+    pub cache_chunks_reconstructed_total: AtomicU64,
 }
 
 impl Metrics {
@@ -128,6 +134,19 @@ impl Metrics {
         out += &c(
             "arca_controller_chunks_demoted_total",
             self.chunks_demoted_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_cache_repairs_started_total",
+            self.cache_repairs_started_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_cache_repairs_completed_total",
+            self.cache_repairs_completed_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_cache_chunks_reconstructed_total",
+            self.cache_chunks_reconstructed_total
+                .load(Ordering::Relaxed),
         );
         out
     }

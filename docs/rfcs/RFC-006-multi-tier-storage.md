@@ -247,6 +247,86 @@ placement between durable tiers.
   reconciliation deletes. The chunk is readable throughout from whichever
   placement the record names.
 
+### 5.9 Cache protection (Phase 2.1)
+
+A cache tier chooses one *protection mode* for its groups. The mode is
+configuration per tier; nothing in the read path depends on it beyond the
+group record, which already carries scheme, `k`, `m`, and members.
+
+| Mode | Group | Scheme | Shards per chunk |
+| --- | --- | --- | --- |
+| `none` | one member per device | `cache-v1` (raw copy, no coder) | 1 |
+| `replication` (`r` copies) | `r` members across the failure domain | `replication-v1` | `1 + (r-1)` |
+| `ec` (`k+m`) | `k+m` members across the failure domain | any `ErasureCoder` scheme (`rs-gf8-v1`, `rs-leopard-gf16-v1`) | `k + m` |
+
+The same `ErasureCoder`, `StripeLayout`, and shard RPCs are used for
+durable groups and coded cache groups (`durable::read_coded`,
+`durable::write_coded`). Group records carry a `role` (`durable` or
+`cache`), so the controller, GC, reconciliation and repair never confuse
+the two whatever the scheme. **Cache protection is not durability**: a
+cache group's redundancy only decides how often a hit survives a cache
+fault before falling back; the durable placement is still the only basis
+for T3, and nothing in commit, GC verification, or durable repair reads a
+cache group.
+
+Comparison (per chunk of `L` bytes; `R` the hit ratio; "fallback" means a
+durable read of `k_d` shards plus decode):
+
+| Criterion | `none` | `replication r` | `ec k+m` |
+| --- | --- | --- | --- |
+| Capacity efficiency | `L` | `r·L` | `L·(k+m)/k` |
+| Read amplification (hit) | 1 shard, `L` bytes | 1 shard, `L` bytes (any copy) | `k` shards, `L` bytes total (+ parity on loss) |
+| Write amplification (population) | `L`, 1 RPC | `r·L`, `r` RPCs | `L·(k+m)/k`, `k+m` RPCs |
+| Encode / decode CPU | none | memcpy | encode on population; decode only on degraded hits |
+| Network transfer (hit) | `L` from one node | `L` from one node | `L` from `k` nodes in parallel (lower per-node load, more connections) |
+| Hit latency | one RPC | one RPC | max of `k` parallel RPCs (tail of `k`) |
+| Degraded read | impossible: fallback | any surviving copy | any `k` of `k+m`; fewer → fallback |
+| Cache repair | none needed (refill by read-through) | copy from a survivor | reconstruct from `k` survivors |
+| Eviction | 1 delete | `r` deletes | `k+m` deletes (any failure leaves an orphan for reconciliation) |
+| Population | 1 write, record | `r` writes, all acknowledged, record | `k+m` writes, all acknowledged, record; a partial write is deleted and never recorded |
+| Failure-domain awareness | none (a device loss loses its copies) | members in distinct domains | members in distinct domains |
+| Complexity | lowest | low | moderate (shared with durable path) |
+
+Choice and reasons:
+
+- `none` is the default. A cache miss costs one durable read; for a cache
+  whose purpose is latency, paying `r×` or `(k+m)/k×` capacity to avoid
+  that read after a *rare* cache fault is usually not worth it, and
+  population already competes with reads for the cache device.
+- `replication` suits small cache tiers with few devices where hit latency
+  matters more than capacity and a device loss would otherwise empty the
+  cache; `r = 2` is the sensible maximum.
+- `ec` suits large cache tiers on many devices where capacity is the
+  constraint and the parallel `k`-shard read is itself a throughput
+  benefit; it also keeps a hot working set hot across a device loss. Its
+  costs are CPU per population and the tail latency of `k` RPCs; a
+  mis-sized `k` turns every hit into a fan-out. Measurements are in
+  RFC-009.
+
+Failure behaviour (all modes): a hit is served only if the assembled
+chunk's length and CRC-32C match the chunk record; a degraded hit (some
+shards missing or corrupt but `≥ k` readable) is served and the missing
+shards are rewritten asynchronously by the gateway (read-triggered cache
+repair, bounded by a per-gateway concurrency limit); an unreadable copy
+(`< k` shards) is a fallback to the durable read plus invalidation, as in
+§5.3. A population that cannot write every shard deletes what it wrote and
+records nothing. Eviction and GC delete every member's shard; a failed
+delete becomes an orphan for cache reconciliation, which runs per member.
+A membership change bumps the cache group's epoch exactly as for durable
+groups: stale populations are rejected by the node; existing placements
+stay valid because readers do not pass an epoch.
+
+Cache repair in the controller is **subordinate to durable repair**: a
+cache group with an unhealthy member is rebuilt (replace member, fence,
+reconstruct from `k` survivors, verified completion, same state machine as
+RFC-008 §7) only in a repair pass in which no durable group is `Repairing`
+or needs a replacement, and each pass reconstructs at most
+`cache_repair_chunks_per_pass` chunks before persisting its cursor and
+yielding. Chunks of a cache group are validated against the chunk record
+of a live generation whose cache placement names the group; a cache shard
+with no such placement is skipped (reconciliation deletes it). Losing a
+cache repair entirely costs hit ratio, never data.
+
 ## 6. Alternatives considered
 
 - Cache index only on the node (no metadata): rejected because hit/miss

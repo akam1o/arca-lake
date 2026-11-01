@@ -322,3 +322,54 @@ pub async fn cache_placement_in_group<S: KvStore>(
     })
     .await
 }
+
+/// The chunk record of chunk `index` of the live generation with `prefix`,
+/// whatever its durable group (cache repair validates cache shards against
+/// it, RFC-006 §5.9).
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn chunk_record_of<S: KvStore>(
+    store: &S,
+    prefix: &[u8; 12],
+    index: u32,
+) -> Result<Option<ChunkRecord>> {
+    transact(store, (*prefix, index), |tx, env| {
+        Box::pin(async move {
+            let (prefix, index) = *env;
+            for (generation, header) in generations_with_prefix(tx, &prefix).await? {
+                if !is_live(header.as_ref()) {
+                    continue;
+                }
+                if let Some(v) = tx.get(&keys::gen_chunk(&generation, index)).await? {
+                    return Ok(Some(decode::<ChunkRecord>(&v)?));
+                }
+            }
+            Ok(None)
+        })
+    })
+    .await
+}
+
+/// The live generation with `prefix`, if any.
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn live_generation_with_prefix<S: KvStore>(
+    store: &S,
+    prefix: &[u8; 12],
+) -> Result<Option<GenId>> {
+    transact(store, *prefix, |tx, prefix| {
+        Box::pin(async move {
+            for (generation, header) in generations_with_prefix(tx, prefix).await? {
+                if is_live(header.as_ref()) {
+                    return Ok(Some(generation));
+                }
+            }
+            Ok(None)
+        })
+    })
+    .await
+}

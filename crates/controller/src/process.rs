@@ -69,6 +69,9 @@ pub struct ControllerConfig {
     pub tiering: Option<crate::tiering::TieringPolicy>,
     /// Interval between tiering passes.
     pub tiering_interval: Duration,
+    /// Chunks a cache-group repair may reconstruct per pass before yielding
+    /// (RFC-006 §5.9); 0 = unlimited.
+    pub cache_repair_chunks_per_pass: usize,
 }
 
 impl ControllerConfig {
@@ -95,6 +98,7 @@ impl ControllerConfig {
             evict_interval: Duration::from_secs(10),
             tiering: None,
             tiering_interval: Duration::from_mins(5),
+            cache_repair_chunks_per_pass: 256,
         }
     }
 }
@@ -528,50 +532,124 @@ async fn repair_pass<S: KvStore>(
     let opts = RepairOptions {
         page_size: cfg.page_size,
         verify_all_members: false,
+        max_chunks: 0,
     };
-    for g in &all_groups {
-        if g.scheme == arca_lake_tiering::cache::CACHE_SCHEME {
-            // Cache groups hold discardable copies; a dead cache member is
-            // handled by reads falling back and by reconciliation.
-            continue;
-        }
-        match g.state {
-            GroupState::Repairing => {
-                let Some(cursor) = g.repair_cursor else {
-                    warn!(
-                        group = g.id,
-                        "repairing without a cursor; needs an operator"
-                    );
-                    continue;
-                };
-                let index = usize::from(cursor.member);
-                let Some(&member) = g.members.get(index) else {
-                    continue;
-                };
-                run_repair(meta, clients, g.id, index, member, &opts, metrics).await?;
-            }
-            GroupState::Active if cfg.auto_repair => {
-                let Some(index) = g.members.iter().position(|m| !healthy(m.node_id)) else {
-                    continue;
-                };
-                let replacement =
-                    choose_for(&nodes, &all_groups, g, index, &cfg.failure_domain, &healthy)?;
-                let Some(replacement) = replacement else {
-                    warn!(group = g.id, index, "no healthy replacement available");
-                    continue;
-                };
-                info!(
-                    group = g.id,
-                    index,
-                    node = replacement.node_id,
-                    "auto repair"
-                );
-                run_repair(meta, clients, g.id, index, replacement, &opts, metrics).await?;
-            }
-            _ => {}
+    // Durable groups first; cache groups only when no durable group needed
+    // attention in this pass, and with a per-pass budget (RFC-006 §5.9).
+    let mut durable_busy = false;
+    for g in all_groups.iter().filter(|g| !g.is_cache()) {
+        if repair_one(
+            meta,
+            clients,
+            cfg,
+            metrics,
+            &nodes,
+            &all_groups,
+            g,
+            &opts,
+            &healthy,
+        )
+        .await?
+        {
+            durable_busy = true;
         }
     }
+    if durable_busy {
+        return Ok(());
+    }
+    let cache_opts = RepairOptions {
+        max_chunks: cfg.cache_repair_chunks_per_pass,
+        ..opts
+    };
+    for g in all_groups.iter().filter(|g| g.is_cache()) {
+        repair_one(
+            meta,
+            clients,
+            cfg,
+            metrics,
+            &nodes,
+            &all_groups,
+            g,
+            &cache_opts,
+            &healthy,
+        )
+        .await?;
+    }
     Ok(())
+}
+
+/// Resume or start the repair of one group when needed. Returns whether a
+/// repair ran (or was needed and could not start).
+#[allow(clippy::too_many_arguments)]
+async fn repair_one<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    cfg: &ControllerConfig,
+    metrics: &Metrics,
+    nodes: &HashMap<u64, NodeRecord>,
+    all_groups: &[GroupRecord],
+    g: &GroupRecord,
+    opts: &RepairOptions,
+    healthy: &impl Fn(u64) -> bool,
+) -> Result<bool, ControlError> {
+    match g.state {
+        GroupState::Repairing => {
+            let Some(cursor) = g.repair_cursor else {
+                warn!(
+                    group = g.id,
+                    "repairing without a cursor; needs an operator"
+                );
+                return Ok(true);
+            };
+            let index = usize::from(cursor.member);
+            let Some(&member) = g.members.get(index) else {
+                return Ok(true);
+            };
+            run_repair(
+                meta,
+                clients,
+                g.id,
+                index,
+                member,
+                opts,
+                metrics,
+                g.is_cache(),
+            )
+            .await?;
+            Ok(true)
+        }
+        GroupState::Active if cfg.auto_repair => {
+            let Some(index) = g.members.iter().position(|m| !healthy(m.node_id)) else {
+                return Ok(false);
+            };
+            let replacement =
+                choose_for(nodes, all_groups, g, index, &cfg.failure_domain, healthy)?;
+            let Some(replacement) = replacement else {
+                warn!(group = g.id, index, "no healthy replacement available");
+                return Ok(true);
+            };
+            info!(
+                group = g.id,
+                index,
+                node = replacement.node_id,
+                cache = g.is_cache(),
+                "auto repair"
+            );
+            run_repair(
+                meta,
+                clients,
+                g.id,
+                index,
+                replacement,
+                opts,
+                metrics,
+                g.is_cache(),
+            )
+            .await?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn choose_for(
@@ -614,6 +692,7 @@ fn choose_for(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_repair<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -622,10 +701,22 @@ async fn run_repair<S: KvStore>(
     replacement: GroupMember,
     opts: &RepairOptions,
     metrics: &Metrics,
+    cache: bool,
 ) -> Result<(), ControlError> {
-    metrics
-        .repairs_started_total
-        .fetch_add(1, Ordering::Relaxed);
+    let (started, reconstructed, completed) = if cache {
+        (
+            &metrics.cache_repairs_started_total,
+            &metrics.cache_chunks_reconstructed_total,
+            &metrics.cache_repairs_completed_total,
+        )
+    } else {
+        (
+            &metrics.repairs_started_total,
+            &metrics.chunks_reconstructed_total,
+            &metrics.repairs_completed_total,
+        )
+    };
+    started.fetch_add(1, Ordering::Relaxed);
     let report = repair::replace_member_with(
         meta,
         clients,
@@ -636,15 +727,11 @@ async fn run_repair<S: KvStore>(
         async |_| Ok(()),
     )
     .await?;
-    metrics
-        .chunks_reconstructed_total
-        .fetch_add(report.reconstructed as u64, Ordering::Relaxed);
+    reconstructed.fetch_add(report.reconstructed as u64, Ordering::Relaxed);
     if report.complete {
-        metrics
-            .repairs_completed_total
-            .fetch_add(1, Ordering::Relaxed);
+        completed.fetch_add(1, Ordering::Relaxed);
     }
-    info!(group = group_id, index, ?report, "repair pass");
+    info!(group = group_id, index, cache, ?report, "repair pass");
     Ok(())
 }
 
@@ -668,15 +755,9 @@ async fn evict_pass<S: KvStore>(
         .into_iter()
         .map(|g| (g.id, g))
         .collect();
-    let addr_of_group = |group_id: u64| {
-        groups
-            .get(&group_id)
-            .and_then(|g| g.members.first())
-            .and_then(|m| nodes.get(&m.node_id))
-            .map(|n| n.address.clone())
-    };
+    let addr_of = |node_id: u64| nodes.get(&node_id).map(|n| n.address.clone());
     for tier in &cfg.cache_tiers {
-        let r = arca_lake_tiering::cache::evict_tier(meta, clients, tier, &addr_of_group)
+        let r = arca_lake_tiering::cache::evict_tier(meta, clients, tier, &groups, &addr_of)
             .await
             .map_err(|e| ControlError::Other(e.to_string()))?;
         metrics

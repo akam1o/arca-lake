@@ -9,6 +9,7 @@ pub mod fdb;
 pub mod s3;
 pub mod suite;
 pub mod suite_cache;
+pub mod suite_cache_ec;
 pub mod suite_faults;
 
 use std::net::SocketAddr;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arca_lake_common::{EcProfile, SmallObjectPolicy};
+use arca_lake_controller::groups::CacheProtection;
 use arca_lake_controller::{gc, groups, repair};
 use arca_lake_gateway::cluster::{ClusterBackend, ClusterConfig};
 use arca_lake_gateway::{GatewayConfig, ServerHandle, serve};
@@ -86,6 +88,10 @@ pub struct ClusterOptions {
     /// Cache tier configuration given to the gateway (defaults when
     /// `cache_nodes > 0` and this is `None`).
     pub cache: Option<CacheTierConfig>,
+    /// Protection mode of the cache groups (RFC-006 §5.9).
+    pub cache_protection: CacheProtection,
+    /// Cache groups to create for replicated or coded protection.
+    pub cache_groups: usize,
 }
 
 /// The cache tier name used by test clusters.
@@ -130,6 +136,8 @@ impl ClusterOptions {
             lease: Duration::from_secs(60),
             cache_nodes: 0,
             cache: None,
+            cache_protection: CacheProtection::None,
+            cache_groups: 1,
         }
     }
 }
@@ -240,9 +248,16 @@ impl<S: KvStore + 'static> TestCluster<S> {
             });
         }
         let cache = if opts.cache_nodes > 0 {
-            groups::create_cache_groups(meta.as_ref(), CACHE_TIER, "nvme")
-                .await
-                .unwrap();
+            groups::create_cache_groups(
+                meta.as_ref(),
+                CACHE_TIER,
+                "nvme",
+                &opts.cache_protection,
+                "host",
+                opts.cache_groups,
+            )
+            .await
+            .unwrap();
             Some(
                 opts.cache
                     .clone()
@@ -558,6 +573,42 @@ impl<S: KvStore + 'static> TestCluster<S> {
             .expect("object exists")
     }
 
+    /// Add a cache node (device class `nvme`, its own host label) and
+    /// register it. It joins no group until a cache repair or group
+    /// creation names it.
+    ///
+    /// # Panics
+    ///
+    /// On errors.
+    pub async fn add_cache_node(&mut self) -> usize {
+        let i = self.nodes.len();
+        let dir = self.tmp.path().join(format!("node{i}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
+        cfg.store = node_store_config(&dir);
+        let handle = arca_lake_storage_node::serve(cfg).await.unwrap();
+        let addr = handle.local_addr;
+        let record = cluster::register_node(
+            self.meta.as_ref(),
+            &addr.to_string(),
+            vec![
+                ("host".into(), format!("cache{i}")),
+                ("device_class".into(), "nvme".into()),
+            ],
+            vec![0],
+            1,
+        )
+        .await
+        .unwrap();
+        self.nodes.push(TestNode {
+            id: record.id,
+            dir,
+            addr,
+            handle: Some(handle),
+        });
+        i
+    }
+
     /// Indexes of the cache nodes.
     #[must_use]
     pub fn cache_node_indexes(&self) -> Vec<usize> {
@@ -605,11 +656,11 @@ impl<S: KvStore + 'static> TestCluster<S> {
     pub async fn reconcile_cache(&self) -> usize {
         let mut deleted = 0;
         for g in self.groups().await {
-            if g.scheme != arca_lake_tiering::cache::CACHE_SCHEME {
+            if !g.is_cache() {
                 continue;
             }
             for n in &self.nodes {
-                if n.handle.is_none() || g.members.first().map(|m| m.node_id) != Some(n.id) {
+                if n.handle.is_none() || !g.members.iter().any(|m| m.node_id == n.id) {
                     continue;
                 }
                 deleted += gc::reconcile_node(
@@ -635,7 +686,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
     pub async fn total_shards(&self) -> usize {
         let mut n = 0;
         for g in self.groups().await {
-            if g.scheme == arca_lake_tiering::cache::CACHE_SCHEME {
+            if g.is_cache() {
                 continue;
             }
             for (i, node) in self.nodes.iter().enumerate() {
