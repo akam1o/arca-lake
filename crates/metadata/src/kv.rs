@@ -7,6 +7,7 @@
 //! byte strings ordered lexicographically. Backends enforce [`Limits`].
 
 use std::future::Future;
+use std::pin::Pin;
 
 use crate::MetaError;
 
@@ -175,7 +176,17 @@ pub trait Txn: Send {
 /// Maximum attempts for [`transact`].
 pub const MAX_ATTEMPTS: usize = 32;
 
+/// The future a transaction body returns: boxed so that the recipe futures
+/// are provably `Send` when awaited inside `async_trait` methods (gateway),
+/// which async closures with higher-ranked lifetimes cannot guarantee today.
+pub type TxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, MetaError>> + Send + 'a>>;
+
 /// Run `body` in a transaction, retrying on [`KvError::Conflict`].
+///
+/// `env` is the body's environment, passed back by reference on every
+/// attempt with the same lifetime as the transaction, so that the boxed
+/// future may borrow from it (a closure capturing references would need
+/// them to be `'static` because of the higher-ranked lifetime).
 ///
 /// `body` must be idempotent with respect to its side effects outside the
 /// transaction (it may run several times). Returning any error other than a
@@ -185,14 +196,15 @@ pub const MAX_ATTEMPTS: usize = 32;
 ///
 /// Returns the body's error, a backend error, or
 /// [`MetaError::TooManyRetries`] after [`MAX_ATTEMPTS`] conflicts.
-pub async fn transact<S, T, F>(store: &S, mut body: F) -> Result<T, MetaError>
+pub async fn transact<S, D, T, F>(store: &S, env: D, mut body: F) -> Result<T, MetaError>
 where
     S: KvStore,
-    F: AsyncFnMut(&mut S::Tx) -> Result<T, MetaError>,
+    D: Send + Sync,
+    F: for<'a> FnMut(&'a mut S::Tx, &'a D) -> TxFuture<'a, T>,
 {
     for _ in 0..MAX_ATTEMPTS {
         let mut tx = store.begin().await?;
-        match body(&mut tx).await {
+        match body(&mut tx, &env).await {
             Ok(value) => match tx.commit().await {
                 Ok(_) => return Ok(value),
                 Err(KvError::Conflict) => {}

@@ -49,27 +49,34 @@ pub async fn begin_put<S: KvStore>(
     validate_key(key)?;
     let generation = new_gen_id();
     let lease_until_ms = now_ms + lease_ms;
-    transact(store, async |tx| {
-        let b = bucket_by_name(tx, bucket).await?;
-        let header = GenerationHeader {
-            state: GenState::Pending { lease_until_ms },
-            bucket_id: b.id,
-            key: key.to_string(),
-            size: 0,
-            etag: String::new(),
-            content_type: None,
-            user_metadata: Vec::new(),
-            chunk_count: 0,
-            created_ms: now_ms,
-        };
-        write(tx, &keys::gen_header(&generation), &header)?;
-        tx.set(&keys::pending(lease_until_ms, &generation), &[]);
-        Ok(PendingGeneration {
-            generation,
-            bucket_id: b.id,
-            lease_until_ms,
-        })
-    })
+    transact(
+        store,
+        (bucket, key, now_ms, lease_until_ms, generation),
+        |tx, env| {
+            Box::pin(async move {
+                let (bucket, key, now_ms, lease_until_ms, generation) = *env;
+                let b = bucket_by_name(tx, bucket).await?;
+                let header = GenerationHeader {
+                    state: GenState::Pending { lease_until_ms },
+                    bucket_id: b.id,
+                    key: key.to_string(),
+                    size: 0,
+                    etag: String::new(),
+                    content_type: None,
+                    user_metadata: Vec::new(),
+                    chunk_count: 0,
+                    created_ms: now_ms,
+                };
+                write(tx, &keys::gen_header(&generation), &header)?;
+                tx.set(&keys::pending(lease_until_ms, &generation), &[]);
+                Ok(PendingGeneration {
+                    generation,
+                    bucket_id: b.id,
+                    lease_until_ms,
+                })
+            })
+        },
+    )
     .await
 }
 
@@ -97,22 +104,12 @@ pub async fn append_chunks<S: KvStore>(
     let budget = store.limits().max_transaction_bytes / 4;
     let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut batch_bytes = 0;
-    let flush = async |batch: &[(Vec<u8>, Vec<u8>)]| -> Result<()> {
-        transact(store, async |tx| {
-            require_pending(tx, generation, now_ms).await?;
-            for (k, v) in batch {
-                tx.set(k, v);
-            }
-            Ok(())
-        })
-        .await
-    };
     for (index, chunk) in chunks {
         let k = keys::gen_chunk(generation, *index);
         let v = encode(chunk)?;
         let bytes = 3 * k.len() + v.len() + PER_MUTATION_OVERHEAD;
         if batch_bytes + bytes > budget && !batch.is_empty() {
-            flush(&batch).await?;
+            flush_batch(store, generation, now_ms, &batch).await?;
             batch.clear();
             batch_bytes = 0;
         }
@@ -120,9 +117,28 @@ pub async fn append_chunks<S: KvStore>(
         batch.push((k, v));
     }
     if !batch.is_empty() {
-        flush(&batch).await?;
+        flush_batch(store, generation, now_ms, &batch).await?;
     }
     Ok(())
+}
+
+async fn flush_batch<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    now_ms: u64,
+    batch: &[(Vec<u8>, Vec<u8>)],
+) -> Result<()> {
+    transact(store, (*generation, now_ms, batch), |tx, env| {
+        Box::pin(async move {
+            let (generation, now_ms, batch) = *env;
+            require_pending(tx, &generation, now_ms).await?;
+            for (k, v) in batch {
+                tx.set(k, v);
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 /// Attributes fixed at commit.
@@ -175,63 +191,70 @@ pub async fn commit_put<S: KvStore>(
 ) -> Result<Committed> {
     // Chosen once so that retries of the same commit publish the same ID.
     let fresh_version_id = new_version_id();
-    transact(store, async |tx| {
-        let header = require_pending(tx, generation, now_ms).await?;
-        let bucket = bucket_by_id(tx, header.bucket_id).await?;
-        let current = current_pointer(tx, bucket.id, &header.key).await?;
+    transact(
+        store,
+        (*generation, info, pre, now_ms, fresh_version_id.as_str()),
+        |tx, env| {
+            Box::pin(async move {
+                let (generation, info, pre, now_ms, fresh_version_id) = *env;
+                let header = require_pending(tx, &generation, now_ms).await?;
+                let bucket = bucket_by_id(tx, header.bucket_id).await?;
+                let current = current_pointer(tx, bucket.id, &header.key).await?;
 
-        check_preconditions(tx, pre, current.as_ref()).await?;
+                check_preconditions(tx, pre, current.as_ref()).await?;
 
-        let version_id = if bucket.versioning == Versioning::Enabled {
-            fresh_version_id.clone()
-        } else {
-            NULL_VERSION_ID.to_string()
-        };
-        let ordinal = current.as_ref().map_or(0, |c| c.next_ordinal);
+                let version_id = if bucket.versioning == Versioning::Enabled {
+                    fresh_version_id.to_string()
+                } else {
+                    NULL_VERSION_ID.to_string()
+                };
+                let ordinal = current.as_ref().map_or(0, |c| c.next_ordinal);
 
-        let committed = GenerationHeader {
-            state: GenState::Committed,
-            size: info.size,
-            etag: info.etag.clone(),
-            content_type: info.content_type.clone(),
-            user_metadata: info.user_metadata.clone(),
-            chunk_count: info.chunk_count,
-            ..header.clone()
-        };
-        write(tx, &keys::gen_header(generation), &committed)?;
-        if let GenState::Pending { lease_until_ms } = header.state {
-            tx.clear(&keys::pending(lease_until_ms, generation));
-        }
+                let committed = GenerationHeader {
+                    state: GenState::Committed,
+                    size: info.size,
+                    etag: info.etag.clone(),
+                    content_type: info.content_type.clone(),
+                    user_metadata: info.user_metadata.clone(),
+                    chunk_count: info.chunk_count,
+                    ..header.clone()
+                };
+                write(tx, &keys::gen_header(&generation), &committed)?;
+                if let GenState::Pending { lease_until_ms } = header.state {
+                    tx.clear(&keys::pending(lease_until_ms, &generation));
+                }
 
-        let pointer = CurrentPointer {
-            generation: *generation,
-            version_id: version_id.clone(),
-            delete_marker: false,
-            next_ordinal: ordinal + 1,
-            size: info.size,
-            etag: info.etag.clone(),
-            last_modified_ms: now_ms,
-        };
-        write(tx, &keys::object_current(bucket.id, &header.key), &pointer)?;
-        if bucket.versioning == Versioning::Enabled {
-            let record = VersionRecord {
-                generation: *generation,
-                version_id: version_id.clone(),
-                delete_marker: false,
-                committed_ms: now_ms,
-                size: info.size,
-                etag: info.etag.clone(),
-            };
-            write(tx, &keys::version(bucket.id, &header.key, ordinal), &record)?;
-        }
+                let pointer = CurrentPointer {
+                    generation,
+                    version_id: version_id.clone(),
+                    delete_marker: false,
+                    next_ordinal: ordinal + 1,
+                    size: info.size,
+                    etag: info.etag.clone(),
+                    last_modified_ms: now_ms,
+                };
+                write(tx, &keys::object_current(bucket.id, &header.key), &pointer)?;
+                if bucket.versioning == Versioning::Enabled {
+                    let record = VersionRecord {
+                        generation,
+                        version_id: version_id.clone(),
+                        delete_marker: false,
+                        committed_ms: now_ms,
+                        size: info.size,
+                        etag: info.etag.clone(),
+                    };
+                    write(tx, &keys::version(bucket.id, &header.key, ordinal), &record)?;
+                }
 
-        let retired = retire_displaced(tx, current.as_ref(), now_ms).await?;
-        Ok(Committed {
-            generation: *generation,
-            version_id,
-            retired,
-        })
-    })
+                let retired = retire_displaced(tx, current.as_ref(), now_ms).await?;
+                Ok(Committed {
+                    generation,
+                    version_id,
+                    retired,
+                })
+            })
+        },
+    )
     .await
 }
 
@@ -242,16 +265,19 @@ pub async fn commit_put<S: KvStore>(
 /// [`MetaError::NoSuchGeneration`]; aborting a non-pending generation is a
 /// [`MetaError::WrongGenerationState`] error.
 pub async fn abort_put<S: KvStore>(store: &S, generation: &GenId, now_ms: u64) -> Result<()> {
-    transact(store, async |tx| {
-        let header = generation_header(tx, generation).await?;
-        let GenState::Pending { lease_until_ms } = header.state else {
-            return Err(MetaError::WrongGenerationState(
-                header.state.name(),
-                "pending",
-            ));
-        };
-        tx.clear(&keys::pending(lease_until_ms, generation));
-        retire(tx, generation, &header, now_ms)
+    transact(store, (*generation, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (generation, now_ms) = *env;
+            let header = generation_header(tx, &generation).await?;
+            let GenState::Pending { lease_until_ms } = header.state else {
+                return Err(MetaError::WrongGenerationState(
+                    header.state.name(),
+                    "pending",
+                ));
+            };
+            tx.clear(&keys::pending(lease_until_ms, &generation));
+            retire(tx, &generation, &header, now_ms)
+        })
     })
     .await
 }
@@ -276,16 +302,19 @@ pub async fn head_object<S: KvStore>(
     bucket: &str,
     key: &str,
 ) -> Result<Option<ObjectInfo>> {
-    transact(store, async |tx| {
-        let b = bucket_by_name(tx, bucket).await?;
-        let Some(pointer) = current_pointer(tx, b.id, key).await? else {
-            return Ok(None);
-        };
-        if pointer.delete_marker {
-            return Ok(None);
-        }
-        let header = generation_header(tx, &pointer.generation).await?;
-        Ok(Some(ObjectInfo { pointer, header }))
+    transact(store, (bucket, key), |tx, env| {
+        Box::pin(async move {
+            let (bucket, key) = *env;
+            let b = bucket_by_name(tx, bucket).await?;
+            let Some(pointer) = current_pointer(tx, b.id, key).await? else {
+                return Ok(None);
+            };
+            if pointer.delete_marker {
+                return Ok(None);
+            }
+            let header = generation_header(tx, &pointer.generation).await?;
+            Ok(Some(ObjectInfo { pointer, header }))
+        })
     })
     .await
 }
@@ -313,30 +342,33 @@ pub async fn read_manifest<S: KvStore>(
     key: &str,
     chunks: Option<Range<u32>>,
 ) -> Result<Option<Manifest>> {
-    transact(store, async |tx| {
-        let b = bucket_by_name(tx, bucket).await?;
-        let Some(pointer) = current_pointer(tx, b.id, key).await? else {
-            return Ok(None);
-        };
-        if pointer.delete_marker {
-            return Ok(None);
-        }
-        let header = generation_header(tx, &pointer.generation).await?;
-        let range = match &chunks {
-            Some(r) => keys::gen_chunks_subrange(&pointer.generation, r.clone()),
-            None => keys::gen_chunks_range(&pointer.generation),
-        };
-        let mut out = Vec::new();
-        for (k, v) in tx.get_range(&range, usize::MAX, false).await? {
-            let index = keys::chunk_index_from(&k)
-                .ok_or_else(|| MetaError::Codec("unexpected key in chunk range".into()))?;
-            out.push((index, crate::records::decode::<ChunkRecord>(&v)?));
-        }
-        Ok(Some(Manifest {
-            pointer,
-            header,
-            chunks: out,
-        }))
+    transact(store, (bucket, key, &chunks), |tx, env| {
+        Box::pin(async move {
+            let (bucket, key, chunks) = *env;
+            let b = bucket_by_name(tx, bucket).await?;
+            let Some(pointer) = current_pointer(tx, b.id, key).await? else {
+                return Ok(None);
+            };
+            if pointer.delete_marker {
+                return Ok(None);
+            }
+            let header = generation_header(tx, &pointer.generation).await?;
+            let range = match chunks {
+                Some(r) => keys::gen_chunks_subrange(&pointer.generation, r.clone()),
+                None => keys::gen_chunks_range(&pointer.generation),
+            };
+            let mut out = Vec::new();
+            for (k, v) in tx.get_range(&range, usize::MAX, false).await? {
+                let index = keys::chunk_index_from(&k)
+                    .ok_or_else(|| MetaError::Codec("unexpected key in chunk range".into()))?;
+                out.push((index, crate::records::decode::<ChunkRecord>(&v)?));
+            }
+            Ok(Some(Manifest {
+                pointer,
+                header,
+                chunks: out,
+            }))
+        })
     })
     .await
 }
@@ -362,54 +394,61 @@ pub async fn delete_object<S: KvStore>(
     now_ms: u64,
 ) -> Result<Deleted> {
     let fresh_version_id = new_version_id();
-    transact(store, async |tx| {
-        let b = bucket_by_name(tx, bucket).await?;
-        let current = current_pointer(tx, b.id, key).await?;
-        match b.versioning {
-            Versioning::Disabled => {
-                let retired = retire_displaced(tx, current.as_ref(), now_ms).await?;
-                tx.clear(&keys::object_current(b.id, key));
-                Ok(Deleted {
-                    delete_marker_version: None,
-                    retired,
-                })
-            }
-            Versioning::Enabled | Versioning::Suspended => {
-                let version_id = if b.versioning == Versioning::Enabled {
-                    fresh_version_id.clone()
-                } else {
-                    NULL_VERSION_ID.to_string()
-                };
-                let ordinal = current.as_ref().map_or(0, |c| c.next_ordinal);
-                let marker = CurrentPointer {
-                    generation: [0; 16],
-                    version_id: version_id.clone(),
-                    delete_marker: true,
-                    next_ordinal: ordinal + 1,
-                    size: 0,
-                    etag: String::new(),
-                    last_modified_ms: now_ms,
-                };
-                write(tx, &keys::object_current(b.id, key), &marker)?;
-                if b.versioning == Versioning::Enabled {
-                    let record = VersionRecord {
-                        generation: [0; 16],
-                        version_id: version_id.clone(),
-                        delete_marker: true,
-                        committed_ms: now_ms,
-                        size: 0,
-                        etag: String::new(),
-                    };
-                    write(tx, &keys::version(b.id, key, ordinal), &record)?;
+    transact(
+        store,
+        (bucket, key, now_ms, fresh_version_id.as_str()),
+        |tx, env| {
+            Box::pin(async move {
+                let (bucket, key, now_ms, fresh_version_id) = *env;
+                let b = bucket_by_name(tx, bucket).await?;
+                let current = current_pointer(tx, b.id, key).await?;
+                match b.versioning {
+                    Versioning::Disabled => {
+                        let retired = retire_displaced(tx, current.as_ref(), now_ms).await?;
+                        tx.clear(&keys::object_current(b.id, key));
+                        Ok(Deleted {
+                            delete_marker_version: None,
+                            retired,
+                        })
+                    }
+                    Versioning::Enabled | Versioning::Suspended => {
+                        let version_id = if b.versioning == Versioning::Enabled {
+                            fresh_version_id.to_string()
+                        } else {
+                            NULL_VERSION_ID.to_string()
+                        };
+                        let ordinal = current.as_ref().map_or(0, |c| c.next_ordinal);
+                        let marker = CurrentPointer {
+                            generation: [0; 16],
+                            version_id: version_id.clone(),
+                            delete_marker: true,
+                            next_ordinal: ordinal + 1,
+                            size: 0,
+                            etag: String::new(),
+                            last_modified_ms: now_ms,
+                        };
+                        write(tx, &keys::object_current(b.id, key), &marker)?;
+                        if b.versioning == Versioning::Enabled {
+                            let record = VersionRecord {
+                                generation: [0; 16],
+                                version_id: version_id.clone(),
+                                delete_marker: true,
+                                committed_ms: now_ms,
+                                size: 0,
+                                etag: String::new(),
+                            };
+                            write(tx, &keys::version(b.id, key, ordinal), &record)?;
+                        }
+                        let retired = retire_displaced(tx, current.as_ref(), now_ms).await?;
+                        Ok(Deleted {
+                            delete_marker_version: Some(version_id),
+                            retired,
+                        })
+                    }
                 }
-                let retired = retire_displaced(tx, current.as_ref(), now_ms).await?;
-                Ok(Deleted {
-                    delete_marker_version: Some(version_id),
-                    retired,
-                })
-            }
-        }
-    })
+            })
+        },
+    )
     .await
 }
 
@@ -419,7 +458,10 @@ pub async fn delete_object<S: KvStore>(
 ///
 /// [`MetaError::NoSuchGeneration`].
 pub async fn get_generation<S: KvStore>(store: &S, generation: &GenId) -> Result<GenerationHeader> {
-    transact(store, async |tx| generation_header(tx, generation).await).await
+    transact(store, *generation, |tx, generation| {
+        Box::pin(async move { generation_header(tx, generation).await })
+    })
+    .await
 }
 
 // ---- helpers -------------------------------------------------------------

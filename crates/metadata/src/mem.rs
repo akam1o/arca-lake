@@ -436,13 +436,15 @@ mod tests {
         run(async {
             // Two concurrent increments must both apply.
             let inc = async || {
-                transact(&kv, async |tx| {
-                    let n = tx
-                        .get(b"n")
-                        .await?
-                        .map_or(0u64, |v| u64::from_le_bytes(v.try_into().unwrap()));
-                    tx.set(b"n", &(n + 1).to_le_bytes());
-                    Ok(())
+                transact(&kv, (), |tx, ()| {
+                    Box::pin(async move {
+                        let n = tx
+                            .get(b"n")
+                            .await?
+                            .map_or(0u64, |v| u64::from_le_bytes(v.try_into().unwrap()));
+                        tx.set(b"n", &(n + 1).to_le_bytes());
+                        Ok(())
+                    })
                 })
                 .await
             };

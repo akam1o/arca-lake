@@ -35,12 +35,14 @@ async fn next_id<X: Txn>(tx: &mut X, counter: &[u8]) -> Result<u64> {
 ///
 /// Backend errors.
 pub async fn map_version<S: KvStore>(store: &S) -> Result<u64> {
-    transact(store, async |tx| {
-        Ok(tx
-            .get(&keys::map_version())
-            .await?
-            .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok())
-            .map_or(0, u64::from_le_bytes))
+    transact(store, (), |tx, ()| {
+        Box::pin(async move {
+            Ok(tx
+                .get(&keys::map_version())
+                .await?
+                .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok())
+                .map_or(0, u64::from_le_bytes))
+        })
     })
     .await
 }
@@ -58,30 +60,33 @@ pub async fn register_node<S: KvStore>(
     devices: Vec<u32>,
     now_ms: u64,
 ) -> Result<NodeRecord> {
-    transact(store, async |tx| {
-        let existing = tx
-            .get_range(&KeyRange::prefix(&keys::nodes_prefix()), usize::MAX, false)
-            .await?
-            .into_iter()
-            .map(|(_, v)| decode::<NodeRecord>(&v))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .find(|n| n.address == address);
-        let id = match &existing {
-            Some(n) => n.id,
-            None => next_id(tx, &keys::node_counter()).await?,
-        };
-        let record = NodeRecord {
-            id,
-            address: address.to_string(),
-            labels: labels.clone(),
-            devices: devices.clone(),
-            registered_ms: existing.as_ref().map_or(now_ms, |n| n.registered_ms),
-            last_seen_ms: now_ms,
-        };
-        write(tx, &keys::node(id), &record)?;
-        bump_map_version(tx).await?;
-        Ok(record)
+    transact(store, (address, labels, devices, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (address, labels, devices, now_ms) = env;
+            let existing = tx
+                .get_range(&KeyRange::prefix(&keys::nodes_prefix()), usize::MAX, false)
+                .await?
+                .into_iter()
+                .map(|(_, v)| decode::<NodeRecord>(&v))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .find(|n| n.address == *address);
+            let id = match &existing {
+                Some(n) => n.id,
+                None => next_id(tx, &keys::node_counter()).await?,
+            };
+            let record = NodeRecord {
+                id,
+                address: (*address).to_string(),
+                labels: labels.clone(),
+                devices: devices.clone(),
+                registered_ms: existing.as_ref().map_or(*now_ms, |n| n.registered_ms),
+                last_seen_ms: *now_ms,
+            };
+            write(tx, &keys::node(id), &record)?;
+            bump_map_version(tx).await?;
+            Ok(record)
+        })
     })
     .await
 }
@@ -92,12 +97,14 @@ pub async fn register_node<S: KvStore>(
 ///
 /// Backend errors.
 pub async fn list_nodes<S: KvStore>(store: &S) -> Result<Vec<NodeRecord>> {
-    transact(store, async |tx| {
-        tx.get_range(&KeyRange::prefix(&keys::nodes_prefix()), usize::MAX, false)
-            .await?
-            .into_iter()
-            .map(|(_, v)| decode::<NodeRecord>(&v))
-            .collect()
+    transact(store, (), |tx, ()| {
+        Box::pin(async move {
+            tx.get_range(&KeyRange::prefix(&keys::nodes_prefix()), usize::MAX, false)
+                .await?
+                .into_iter()
+                .map(|(_, v)| decode::<NodeRecord>(&v))
+                .collect()
+        })
     })
     .await
 }
@@ -108,13 +115,16 @@ pub async fn list_nodes<S: KvStore>(store: &S) -> Result<Vec<NodeRecord>> {
 /// # Errors
 ///
 /// Backend errors.
-pub async fn create_group<S: KvStore>(store: &S, mut group: GroupRecord) -> Result<GroupRecord> {
-    transact(store, async |tx| {
-        group.id = next_id(tx, &keys::group_counter()).await?;
-        group.epoch = 1;
-        write(tx, &keys::group(group.id), &group)?;
-        bump_map_version(tx).await?;
-        Ok(group.clone())
+pub async fn create_group<S: KvStore>(store: &S, group: GroupRecord) -> Result<GroupRecord> {
+    transact(store, group, |tx, group| {
+        Box::pin(async move {
+            let mut g = group.clone();
+            g.id = next_id(tx, &keys::group_counter()).await?;
+            g.epoch = 1;
+            write(tx, &keys::group(g.id), &g)?;
+            bump_map_version(tx).await?;
+            Ok(g)
+        })
     })
     .await
 }
@@ -125,12 +135,14 @@ pub async fn create_group<S: KvStore>(store: &S, mut group: GroupRecord) -> Resu
 ///
 /// Backend errors.
 pub async fn list_groups<S: KvStore>(store: &S) -> Result<Vec<GroupRecord>> {
-    transact(store, async |tx| {
-        tx.get_range(&KeyRange::prefix(&keys::groups_prefix()), usize::MAX, false)
-            .await?
-            .into_iter()
-            .map(|(_, v)| decode::<GroupRecord>(&v))
-            .collect()
+    transact(store, (), |tx, ()| {
+        Box::pin(async move {
+            tx.get_range(&KeyRange::prefix(&keys::groups_prefix()), usize::MAX, false)
+                .await?
+                .into_iter()
+                .map(|(_, v)| decode::<GroupRecord>(&v))
+                .collect()
+        })
     })
     .await
 }
@@ -141,10 +153,12 @@ pub async fn list_groups<S: KvStore>(store: &S) -> Result<Vec<GroupRecord>> {
 ///
 /// [`MetaError::NoSuchGroup`].
 pub async fn get_group<S: KvStore>(store: &S, id: u64) -> Result<GroupRecord> {
-    transact(store, async |tx| {
-        read(tx, &keys::group(id))
-            .await?
-            .ok_or(MetaError::NoSuchGroup(id))
+    transact(store, id, |tx, id| {
+        Box::pin(async move {
+            read(tx, &keys::group(*id))
+                .await?
+                .ok_or(MetaError::NoSuchGroup(*id))
+        })
     })
     .await
 }
@@ -156,20 +170,22 @@ pub async fn get_group<S: KvStore>(store: &S, id: u64) -> Result<GroupRecord> {
 /// # Errors
 ///
 /// [`MetaError::NoSuchGroup`].
-pub async fn update_group<S: KvStore>(
-    store: &S,
-    id: u64,
-    change: impl Fn(&mut GroupRecord) -> bool,
-) -> Result<GroupRecord> {
-    transact(store, async |tx| {
-        let mut group: GroupRecord = read(tx, &keys::group(id))
-            .await?
-            .ok_or(MetaError::NoSuchGroup(id))?;
-        if change(&mut group) {
-            write(tx, &keys::group(id), &group)?;
-            bump_map_version(tx).await?;
-        }
-        Ok(group)
+pub async fn update_group<S: KvStore, F>(store: &S, id: u64, change: F) -> Result<GroupRecord>
+where
+    F: Fn(&mut GroupRecord) -> bool + Send + Sync,
+{
+    transact(store, (id, change), |tx, env| {
+        Box::pin(async move {
+            let (id, change) = env;
+            let mut group: GroupRecord = read(tx, &keys::group(*id))
+                .await?
+                .ok_or(MetaError::NoSuchGroup(*id))?;
+            if change(&mut group) {
+                write(tx, &keys::group(*id), &group)?;
+                bump_map_version(tx).await?;
+            }
+            Ok(group)
+        })
     })
     .await
 }

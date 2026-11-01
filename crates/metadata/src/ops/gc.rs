@@ -28,10 +28,13 @@ pub async fn expire_pending<S: KvStore>(
     now_ms: u64,
     limit: usize,
 ) -> Result<Vec<GenId>> {
-    let candidates = transact(store, async |tx| {
-        tx.get_range(&keys::pending_expired_range(now_ms), limit, false)
-            .await
-            .map_err(Into::into)
+    let candidates = transact(store, (now_ms, limit), |tx, env| {
+        Box::pin(async move {
+            let (now_ms, limit) = *env;
+            tx.get_range(&keys::pending_expired_range(now_ms), limit, false)
+                .await
+                .map_err(Into::into)
+        })
     })
     .await?;
     let mut retired = Vec::new();
@@ -39,27 +42,30 @@ pub async fn expire_pending<S: KvStore>(
         let Some(generation) = keys::gen_from_index_key(&k) else {
             continue;
         };
-        let did = transact(store, async |tx| {
-            // The index entry may already be gone (committed or aborted).
-            if tx.get(&k).await?.is_none() {
-                return Ok(false);
-            }
-            let header = generation_header(tx, &generation).await?;
-            let GenState::Pending { lease_until_ms } = header.state else {
-                tx.clear(&k);
-                return Ok(false);
-            };
-            if lease_until_ms > now_ms {
-                return Ok(false);
-            }
-            tx.clear(&k);
-            let retiring = GenerationHeader {
-                state: GenState::Retiring { since_ms: now_ms },
-                ..header
-            };
-            write(tx, &keys::gen_header(&generation), &retiring)?;
-            tx.set(&keys::retired(now_ms, &generation), &[]);
-            Ok(true)
+        let did = transact(store, (k, generation, now_ms), |tx, env| {
+            Box::pin(async move {
+                let (k, generation, now_ms) = env;
+                // The index entry may already be gone (committed or aborted).
+                if tx.get(k).await?.is_none() {
+                    return Ok(false);
+                }
+                let header = generation_header(tx, generation).await?;
+                let GenState::Pending { lease_until_ms } = header.state else {
+                    tx.clear(k);
+                    return Ok(false);
+                };
+                if lease_until_ms > *now_ms {
+                    return Ok(false);
+                }
+                tx.clear(k);
+                let retiring = GenerationHeader {
+                    state: GenState::Retiring { since_ms: *now_ms },
+                    ..header
+                };
+                write(tx, &keys::gen_header(generation), &retiring)?;
+                tx.set(&keys::retired(*now_ms, generation), &[]);
+                Ok(true)
+            })
         })
         .await?;
         if did {
@@ -82,10 +88,13 @@ pub async fn collectable<S: KvStore>(
     limit: usize,
 ) -> Result<Vec<GenId>> {
     let cutoff = now_ms.saturating_sub(grace_ms);
-    let entries = transact(store, async |tx| {
-        tx.get_range(&keys::retired_until_range(cutoff), limit, false)
-            .await
-            .map_err(Into::into)
+    let entries = transact(store, (cutoff, limit), |tx, env| {
+        Box::pin(async move {
+            let (cutoff, limit) = *env;
+            tx.get_range(&keys::retired_until_range(cutoff), limit, false)
+                .await
+                .map_err(Into::into)
+        })
     })
     .await?;
     Ok(entries
@@ -102,21 +111,23 @@ pub async fn collectable<S: KvStore>(
 /// [`MetaError::WrongGenerationState`] if the generation is not retiring
 /// (a committed generation is never removed by GC).
 pub async fn finish<S: KvStore>(store: &S, generation: &GenId) -> Result<()> {
-    transact(store, async |tx| {
-        let header = match generation_header(tx, generation).await {
-            Ok(h) => h,
-            Err(MetaError::NoSuchGeneration) => return Ok(()), // idempotent
-            Err(e) => return Err(e),
-        };
-        let GenState::Retiring { since_ms } = header.state else {
-            return Err(MetaError::WrongGenerationState(
-                header.state.name(),
-                "retiring",
-            ));
-        };
-        tx.clear(&keys::retired(since_ms, generation));
-        tx.clear_range(&keys::gen_range(generation));
-        Ok(())
+    transact(store, *generation, |tx, generation| {
+        Box::pin(async move {
+            let header = match generation_header(tx, generation).await {
+                Ok(h) => h,
+                Err(MetaError::NoSuchGeneration) => return Ok(()), // idempotent
+                Err(e) => return Err(e),
+            };
+            let GenState::Retiring { since_ms } = header.state else {
+                return Err(MetaError::WrongGenerationState(
+                    header.state.name(),
+                    "retiring",
+                ));
+            };
+            tx.clear(&keys::retired(since_ms, generation));
+            tx.clear_range(&keys::gen_range(generation));
+            Ok(())
+        })
     })
     .await
 }

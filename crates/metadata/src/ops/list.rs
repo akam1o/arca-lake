@@ -75,7 +75,10 @@ pub async fn list_objects<S: KvStore>(
     if req.max_keys == 0 {
         return Err(MetaError::InvalidArgument("max_keys must be >= 1".into()));
     }
-    let b = transact(store, async |tx| bucket_by_name(tx, bucket).await).await?;
+    let b = transact(store, bucket, |tx, bucket| {
+        Box::pin(async move { bucket_by_name(tx, bucket).await })
+    })
+    .await?;
     let full = keys::object_prefix_range(b.id, &req.prefix);
     let mut begin = full.begin.clone();
     if let Some(after) = &req.start_after {
@@ -91,8 +94,8 @@ pub async fn list_objects<S: KvStore>(
     let mut resume: Key = begin.clone();
     'outer: while begin < full.end {
         let range = KeyRange::new(begin.clone(), full.end.clone());
-        let page = transact(store, async |tx| {
-            tx.get_range(&range, PAGE, false).await.map_err(Into::into)
+        let page = transact(store, range, |tx, range| {
+            Box::pin(async move { tx.get_range(range, PAGE, false).await.map_err(Into::into) })
         })
         .await?;
         if page.is_empty() {
