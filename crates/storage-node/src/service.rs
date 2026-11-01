@@ -423,12 +423,23 @@ pub async fn serve(
     let local_addr = listener.local_addr()?;
     let (tx, rx) = oneshot::channel::<()>();
     let svc = StorageNodeServer::from_arc(Arc::clone(&service)).max_decoding_message_size(64 << 20);
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    // tonic applies `tcp_nodelay` only to listeners it binds itself; with a
+    // caller-supplied listener every accepted socket keeps Nagle's algorithm,
+    // and Nagle plus delayed ACK stalls each small frame that follows
+    // unacknowledged data (trailers, window updates) for ~40 ms (RFC-009
+    // §6.11). Set it per accepted connection.
+    let incoming = tokio_stream::StreamExt::map(
+        tokio_stream::wrappers::TcpListenerStream::new(listener),
+        |conn| {
+            conn.inspect(|sock| {
+                let _ = sock.set_nodelay(true);
+            })
+        },
+    );
     let task = tokio::spawn(async move {
         let _ = tonic::transport::Server::builder()
             .initial_stream_window_size(Some(arca_lake_protocol::client::STREAM_WINDOW))
             .initial_connection_window_size(Some(arca_lake_protocol::client::CONNECTION_WINDOW))
-            .tcp_nodelay(true)
             .add_service(svc)
             .serve_with_incoming_shutdown(incoming, async move {
                 let _ = rx.await;

@@ -342,15 +342,22 @@ async fn run_server(a: ServerArgs) {
             // node, so that the matrix measures the stack the gateway uses.
             let mut builder = Server::builder()
                 .initial_stream_window_size(Some(arca_lake_protocol::client::STREAM_WINDOW))
-                .initial_connection_window_size(Some(arca_lake_protocol::client::CONNECTION_WINDOW))
-                .tcp_nodelay(true);
+                .initial_connection_window_size(Some(
+                    arca_lake_protocol::client::CONNECTION_WINDOW,
+                ));
             if a.tls {
                 let identity = Identity::from_pem(cert_pem.as_bytes(), key_pem.as_bytes());
                 builder = builder
                     .tls_config(ServerTlsConfig::new().identity(identity))
                     .unwrap();
             }
-            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            // As in the storage node: tonic does not apply `tcp_nodelay` to a
+            // caller-supplied listener, so set it per accepted socket.
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener).map(|conn| {
+                conn.inspect(|sock| {
+                    let _ = sock.set_nodelay(true);
+                })
+            });
             let serve = builder
                 .add_service(svc)
                 .serve_with_incoming_shutdown(incoming, deadline);
