@@ -22,12 +22,17 @@ allow = [
     "CC0-1.0",
     "Unicode-3.0",
     "Zlib",
+    # Boost Software License 1.0 (not to be confused with the Business Source
+    # License, BUSL-1.1): permissive, OSI approved. Used by xxhash-rust via s3s.
+    "BSL-1.0",
 ]
 confidence-threshold = 0.9
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace members reference each other by path without a version.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
