@@ -1,7 +1,16 @@
 //! Convenience client for the storage node API: lazily connected channels
-//! per address and one method per RPC.
+//! per address, one method per RPC, and an optional fault-injection hook
+//! for tests (timeouts, lost replies, resets, partitions, slow nodes,
+//! delayed acknowledgments, duplicated requests, reordered completion).
+//!
+//! The hook acts at the client call boundary, not on the wire: a "lost
+//! reply" performs the RPC and then reports a failure, a "partition" fails
+//! before sending. It reproduces the observable effects on the protocols
+//! above it; behaviour on a real network (TCP resets mid-stream, HTTP/2
+//! stream errors, kernel buffering) is not covered and needs its own tests.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -11,14 +20,6 @@ use tonic::transport::{Channel, Endpoint};
 
 use crate::storage::v1 as pb;
 use crate::storage::v1::storage_node_client::StorageNodeClient;
-
-/// Shared pool of channels keyed by node address.
-#[derive(Debug, Clone, Default)]
-pub struct NodeClients {
-    channels: Arc<Mutex<HashMap<String, Channel>>>,
-    /// Per-RPC timeout.
-    timeout: Option<Duration>,
-}
 
 /// Shard identity on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,75 @@ impl ShardRef {
     }
 }
 
+/// Which RPC a fault hook is consulted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Rpc {
+    /// `PutShard`.
+    PutShard,
+    /// `GetShard`.
+    GetShard,
+    /// `DeleteShard`.
+    DeleteShard,
+    /// `ListShards`.
+    ListShards,
+    /// `UpdateGroupEpoch`.
+    UpdateEpoch,
+    /// `Health`.
+    Health,
+}
+
+/// What a fault hook sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RpcContext<'a> {
+    /// Node address.
+    pub addr: &'a str,
+    /// RPC.
+    pub rpc: Rpc,
+    /// Shard, for shard RPCs.
+    pub shard: Option<ShardRef>,
+    /// Group, for group RPCs.
+    pub group_id: Option<u64>,
+}
+
+/// What a fault hook asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FaultAction {
+    /// Proceed normally.
+    None,
+    /// Wait before sending (slow node, reordered completion).
+    DelayBefore(Duration),
+    /// Fail without sending (partition, request timeout, connection refused).
+    FailBefore(tonic::Code, String),
+    /// Send and let the node apply the request, then fail (lost reply).
+    FailAfter(tonic::Code, String),
+    /// Send, then wait before returning the reply (delayed acknowledgment).
+    DelayAfter(Duration),
+    /// Send the request twice and return the second reply (duplicate).
+    Duplicate,
+    /// Fail without sending and drop the cached channel (connection reset).
+    Reset,
+}
+
+/// A fault hook.
+pub type FaultHook = Arc<dyn Fn(&RpcContext<'_>) -> FaultAction + Send + Sync>;
+
+/// Shared pool of channels keyed by node address.
+#[derive(Clone, Default)]
+pub struct NodeClients {
+    channels: Arc<Mutex<HashMap<String, Channel>>>,
+    /// Per-RPC timeout.
+    timeout: Option<Duration>,
+    hook: Arc<Mutex<Option<FaultHook>>>,
+}
+
+impl std::fmt::Debug for NodeClients {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeClients")
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
+}
+
 impl NodeClients {
     /// Pool with a per-RPC timeout (connect timeout is a fifth of it).
     #[must_use]
@@ -48,6 +118,57 @@ impl NodeClients {
         Self {
             channels: Arc::default(),
             timeout: Some(timeout),
+            hook: Arc::default(),
+        }
+    }
+
+    /// Install (or remove) the fault hook. Shared by every clone.
+    pub fn set_fault_hook(&self, hook: Option<FaultHook>) {
+        *self.hook.lock().unwrap_or_else(PoisonError::into_inner) = hook;
+    }
+
+    fn action(&self, ctx: &RpcContext<'_>) -> FaultAction {
+        let hook = self
+            .hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        hook.map_or(FaultAction::None, |h| h(ctx))
+    }
+
+    /// Run `call` under the fault hook's decision.
+    async fn with_faults<T, Fut>(
+        &self,
+        ctx: RpcContext<'_>,
+        call: impl Fn() -> Fut,
+    ) -> Result<T, tonic::Status>
+    where
+        Fut: Future<Output = Result<T, tonic::Status>>,
+    {
+        match self.action(&ctx) {
+            FaultAction::None => call().await,
+            FaultAction::DelayBefore(d) => {
+                tokio::time::sleep(d).await;
+                call().await
+            }
+            FaultAction::FailBefore(code, msg) => Err(tonic::Status::new(code, msg)),
+            FaultAction::FailAfter(code, msg) => {
+                let _ = call().await;
+                Err(tonic::Status::new(code, msg))
+            }
+            FaultAction::DelayAfter(d) => {
+                let r = call().await;
+                tokio::time::sleep(d).await;
+                r
+            }
+            FaultAction::Duplicate => {
+                let _ = call().await;
+                call().await
+            }
+            FaultAction::Reset => {
+                self.forget(ctx.addr);
+                Err(tonic::Status::unavailable("connection reset"))
+            }
         }
     }
 
@@ -105,6 +226,26 @@ impl NodeClients {
         data: Bytes,
         frame_bytes: usize,
     ) -> Result<pb::PutShardResponse, tonic::Status> {
+        let ctx = RpcContext {
+            addr,
+            rpc: Rpc::PutShard,
+            shard: Some(shard),
+            group_id: Some(shard.group_id),
+        };
+        self.with_faults(ctx, || {
+            self.put_shard_raw(addr, shard, epoch, data.clone(), frame_bytes)
+        })
+        .await
+    }
+
+    async fn put_shard_raw(
+        &self,
+        addr: &str,
+        shard: ShardRef,
+        epoch: u64,
+        data: Bytes,
+        frame_bytes: usize,
+    ) -> Result<pb::PutShardResponse, tonic::Status> {
         let mut client = self.client(addr)?;
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let header = pb::PutShardRequest {
@@ -150,19 +291,28 @@ impl NodeClients {
         offset: u64,
         len: u64,
     ) -> Result<Bytes, tonic::Status> {
-        let mut client = self.client(addr)?;
-        let req = pb::GetShardRequest {
-            protocol_version: pb::PROTOCOL_VERSION,
-            key: Some(shard.pb()),
-            offset,
-            len,
+        let ctx = RpcContext {
+            addr,
+            rpc: Rpc::GetShard,
+            shard: Some(shard),
+            group_id: Some(shard.group_id),
         };
-        let mut stream = client.get_shard(req).await?.into_inner();
-        let mut out = bytes::BytesMut::new();
-        while let Some(msg) = stream.next().await {
-            out.extend_from_slice(&msg?.data);
-        }
-        Ok(out.freeze())
+        self.with_faults(ctx, || async {
+            let mut client = self.client(addr)?;
+            let req = pb::GetShardRequest {
+                protocol_version: pb::PROTOCOL_VERSION,
+                key: Some(shard.pb()),
+                offset,
+                len,
+            };
+            let mut stream = client.get_shard(req).await?.into_inner();
+            let mut out = bytes::BytesMut::new();
+            while let Some(msg) = stream.next().await {
+                out.extend_from_slice(&msg?.data);
+            }
+            Ok(out.freeze())
+        })
+        .await
     }
 
     /// Delete a shard (idempotent).
@@ -176,14 +326,23 @@ impl NodeClients {
         shard: ShardRef,
         epoch: u64,
     ) -> Result<(), tonic::Status> {
-        let mut client = self.client(addr)?;
-        let req = pb::DeleteShardRequest {
-            protocol_version: pb::PROTOCOL_VERSION,
-            key: Some(shard.pb()),
-            group_epoch: epoch,
+        let ctx = RpcContext {
+            addr,
+            rpc: Rpc::DeleteShard,
+            shard: Some(shard),
+            group_id: Some(shard.group_id),
         };
-        client.delete_shard(req).await?;
-        Ok(())
+        self.with_faults(ctx, || async {
+            let mut client = self.client(addr)?;
+            let req = pb::DeleteShardRequest {
+                protocol_version: pb::PROTOCOL_VERSION,
+                key: Some(shard.pb()),
+                group_epoch: epoch,
+            };
+            client.delete_shard(req).await?;
+            Ok(())
+        })
+        .await
     }
 
     /// All shards of a group on the node.
@@ -196,23 +355,32 @@ impl NodeClients {
         addr: &str,
         group_id: u64,
     ) -> Result<Vec<ShardRef>, tonic::Status> {
-        let mut client = self.client(addr)?;
-        let req = pb::ListShardsRequest {
-            protocol_version: pb::PROTOCOL_VERSION,
-            group_id,
+        let ctx = RpcContext {
+            addr,
+            rpc: Rpc::ListShards,
+            shard: None,
+            group_id: Some(group_id),
         };
-        let resp = client.list_shards(req).await?.into_inner();
-        Ok(resp
-            .keys
-            .into_iter()
-            .filter_map(|k| {
-                Some(ShardRef {
-                    group_id: k.group_id,
-                    chunk_id: k.chunk_id.as_ref().try_into().ok()?,
-                    shard_index: u16::try_from(k.shard_index).ok()?,
+        self.with_faults(ctx, || async {
+            let mut client = self.client(addr)?;
+            let req = pb::ListShardsRequest {
+                protocol_version: pb::PROTOCOL_VERSION,
+                group_id,
+            };
+            let resp = client.list_shards(req).await?.into_inner();
+            Ok(resp
+                .keys
+                .into_iter()
+                .filter_map(|k| {
+                    Some(ShardRef {
+                        group_id: k.group_id,
+                        chunk_id: k.chunk_id.as_ref().try_into().ok()?,
+                        shard_index: u16::try_from(k.shard_index).ok()?,
+                    })
                 })
-            })
-            .collect())
+                .collect())
+        })
+        .await
     }
 
     /// Tell the node the current epoch of a group; returns the enforced epoch.
@@ -226,13 +394,22 @@ impl NodeClients {
         group_id: u64,
         epoch: u64,
     ) -> Result<u64, tonic::Status> {
-        let mut client = self.client(addr)?;
-        let req = pb::UpdateGroupEpochRequest {
-            protocol_version: pb::PROTOCOL_VERSION,
-            group_id,
-            epoch,
+        let ctx = RpcContext {
+            addr,
+            rpc: Rpc::UpdateEpoch,
+            shard: None,
+            group_id: Some(group_id),
         };
-        Ok(client.update_group_epoch(req).await?.into_inner().epoch)
+        self.with_faults(ctx, || async {
+            let mut client = self.client(addr)?;
+            let req = pb::UpdateGroupEpochRequest {
+                protocol_version: pb::PROTOCOL_VERSION,
+                group_id,
+                epoch,
+            };
+            Ok(client.update_group_epoch(req).await?.into_inner().epoch)
+        })
+        .await
     }
 
     /// Node health and capacity.
@@ -241,7 +418,16 @@ impl NodeClients {
     ///
     /// RPC errors.
     pub async fn health(&self, addr: &str) -> Result<pb::HealthResponse, tonic::Status> {
-        let mut client = self.client(addr)?;
-        Ok(client.health(pb::HealthRequest {}).await?.into_inner())
+        let ctx = RpcContext {
+            addr,
+            rpc: Rpc::Health,
+            shard: None,
+            group_id: None,
+        };
+        self.with_faults(ctx, || async {
+            let mut client = self.client(addr)?;
+            Ok(client.health(pb::HealthRequest {}).await?.into_inner())
+        })
+        .await
     }
 }

@@ -244,6 +244,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         if self.take_fault(FaultPoint::BeforeCommit) {
             return Err(s3_error!(InternalError, "injected crash before commit").into());
         }
+        if self.take_fault(FaultPoint::DieBeforeCommit) {
+            return Err(WriteFailure {
+                error: s3_error!(InternalError, "injected gateway death before commit"),
+                abort: false,
+            });
+        }
 
         let etag = hex(md5.finalize().as_ref());
         let info = CommitInfo {
@@ -369,7 +375,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let candidates: Vec<WritableGroup> = map
             .groups
             .values()
-            .filter(|g| g.state == arca_lake_metadata::records::GroupState::Active)
+            .filter(|g| {
+                matches!(
+                    g.state,
+                    arca_lake_metadata::records::GroupState::Active
+                        | arca_lake_metadata::records::GroupState::Repairing
+                )
+            })
             .filter(|g| g.scheme == scheme && g.data_shards == k && g.parity_shards == m)
             .filter(|g| g.tier == self.cfg.tier && !exclude.contains(&g.id))
             .map(|g| WritableGroup {

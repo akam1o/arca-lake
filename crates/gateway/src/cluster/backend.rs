@@ -49,6 +49,11 @@ pub enum FaultPoint {
     BeforeCommit,
     /// Crash after the commit but before the client is answered.
     AfterCommit,
+    /// The gateway process dies before the commit: the error is returned
+    /// without aborting the generation, which stays pending until its lease
+    /// expires (unlike [`FaultPoint::BeforeCommit`], which models a handled
+    /// error).
+    DieBeforeCommit,
 }
 
 /// Coders keyed by `(scheme, k, m)`.
@@ -137,6 +142,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     #[must_use]
     pub fn metadata(&self) -> &Arc<S> {
         &self.meta
+    }
+
+    /// The storage node clients (tests install transport fault hooks here).
+    #[must_use]
+    pub fn node_clients(&self) -> &NodeClients {
+        &self.clients
     }
 
     /// Current map snapshot.

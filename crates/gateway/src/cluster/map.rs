@@ -49,14 +49,17 @@ impl ClusterMap {
         self.nodes.get(&node_id).map(|n| n.address.as_str())
     }
 
-    /// Active groups of a profile and tier.
+    /// Groups of a profile and tier that accept writes (`Active`, and
+    /// `Repairing`: the replacement member receives new shards directly).
     pub fn active_groups<'a>(
         &'a self,
         profile: &'a str,
         tier: &'a str,
     ) -> impl Iterator<Item = &'a GroupRecord> + 'a {
         self.groups.values().filter(move |g| {
-            g.state == GroupState::Active && g.profile == profile && g.tier == tier
+            matches!(g.state, GroupState::Active | GroupState::Repairing)
+                && g.profile == profile
+                && g.tier == tier
         })
     }
 }

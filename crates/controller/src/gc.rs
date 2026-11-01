@@ -4,17 +4,27 @@
 //! 1. Pending generations whose lease expired → retired.
 //! 2. Retired generations past the grace period → shards deleted on their
 //!    members, then metadata removed.
-//! 3. Shards on nodes whose generation no longer exists (crash between
-//!    shard write and manifest append) → deleted once older than
-//!    `lease + grace`, attributed through the generation prefix in the
-//!    chunk ID.
+//! 3. Shards on nodes that no committed, pending, or retiring generation
+//!    accounts for → deleted by reconciliation.
+//!
+//! Time alone never decides a deletion. Before any shard of a generation is
+//! deleted, one transaction re-reads the generation and verifies that it is
+//! `Retiring` and that neither the current pointer nor a version record of
+//! its key references it (RFC-008 invariant I2). Reconciliation deletes a
+//! shard only when no generation with its prefix exists in metadata, or
+//! when the node is no longer a member of the group and the group is not
+//! being repaired; the age threshold is an additional guard, not the
+//! criterion.
 
 use std::collections::HashMap;
 
 use arca_lake_common::{split_chunk_id, uuid_v7_unix_ms};
 use arca_lake_metadata::ops::{cluster, gc, object};
-use arca_lake_metadata::records::{GenId, GroupRecord, NodeRecord};
-use arca_lake_metadata::{KvStore, Txn, keys, transact};
+use arca_lake_metadata::records::{
+    ChunkRecord, CurrentPointer, GenId, GenState, GenerationHeader, GroupRecord, GroupState,
+    NodeRecord, VersionRecord, decode,
+};
+use arca_lake_metadata::{KvStore, MetaError, Txn, keys, transact};
 use arca_lake_protocol::client::{NodeClients, ShardRef};
 
 use crate::ControlError;
@@ -28,17 +38,42 @@ pub struct GcReport {
     pub collected: usize,
     /// Shard deletions issued.
     pub shards_deleted: usize,
-    /// Orphan shards (no generation) deleted by reconciliation.
-    pub orphans_deleted: usize,
-    /// Generations skipped because a member was unreachable (retried later).
+    /// Generations in the retired queue that turned out to be referenced or
+    /// not retiring; left untouched. Any non-zero value is an invariant
+    /// violation worth investigating.
+    pub skipped_referenced: usize,
+    /// Generations skipped because a member was unreachable or a metadata
+    /// outcome was unknown (retried next pass).
     pub deferred: usize,
+}
+
+/// What reconciling one node did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcileReport {
+    /// Shards whose generation has no metadata at all.
+    pub orphans_deleted: usize,
+    /// Shards on a node that is no longer a member of the group.
+    pub former_member_deleted: usize,
+    /// Shards kept because a generation with their prefix exists.
+    pub kept_referenced: usize,
+    /// Shards kept because they are younger than the minimum age.
+    pub kept_young: usize,
+}
+
+impl ReconcileReport {
+    /// Total deletions.
+    #[must_use]
+    pub fn deleted(&self) -> usize {
+        self.orphans_deleted + self.former_member_deleted
+    }
 }
 
 /// One pass of generation-driven GC.
 ///
 /// # Errors
 ///
-/// Metadata errors. Node errors defer the generation instead of failing.
+/// Metadata errors. Node errors and unknown outcomes defer the generation
+/// instead of failing the pass.
 pub async fn run_once<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -68,7 +103,19 @@ pub async fn run_once<S: KvStore>(
         .collect();
 
     for generation in gc::collectable(meta, now_ms, grace_ms, limit).await? {
-        match delete_generation_shards(meta, clients, &nodes, &groups, &generation).await {
+        let chunks = match verify_unreferenced(meta, &generation).await {
+            Ok(Some(chunks)) => chunks,
+            Ok(None) => {
+                report.skipped_referenced += 1;
+                continue;
+            }
+            Err(e) if is_deferrable(&e) => {
+                report.deferred += 1;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        match delete_shards(clients, &nodes, &groups, &chunks).await {
             Ok(n) => {
                 report.shards_deleted += n;
                 match gc::finish(meta, &generation).await {
@@ -78,7 +125,6 @@ pub async fn run_once<S: KvStore>(
                 }
             }
             Err(ControlError::Node { .. }) => report.deferred += 1,
-            Err(ControlError::Meta(e)) if is_deferrable(&e) => report.deferred += 1,
             Err(e) => return Err(e),
         }
     }
@@ -86,39 +132,79 @@ pub async fn run_once<S: KvStore>(
 }
 
 /// Whether a metadata error means "try again next pass" rather than "stop".
-fn is_deferrable(e: &arca_lake_metadata::MetaError) -> bool {
+fn is_deferrable(e: &MetaError) -> bool {
     matches!(
         e,
-        arca_lake_metadata::MetaError::Kv(
+        MetaError::Kv(
             arca_lake_metadata::KvError::CommitUnknown(_) | arca_lake_metadata::KvError::Backend(_)
-        ) | arca_lake_metadata::MetaError::TooManyRetries
+        ) | MetaError::TooManyRetries
     )
 }
 
-/// Delete every shard of a generation's recorded chunks. Returns the number
-/// of delete RPCs that succeeded (NotFound counts as success).
-async fn delete_generation_shards<S: KvStore>(
+/// In one transaction: confirm that `generation` is retiring and that no
+/// current pointer or version record of its key references it, and return
+/// its chunk records. `None` means "do not touch".
+///
+/// A retiring generation can never become referenced again (no recipe moves
+/// a generation out of `Retiring`), so the check does not need to be in the
+/// same transaction as the deletions that follow.
+async fn verify_unreferenced<S: KvStore>(
     meta: &S,
-    clients: &NodeClients,
-    nodes: &HashMap<u64, NodeRecord>,
-    groups: &HashMap<u64, GroupRecord>,
     generation: &GenId,
-) -> Result<usize, ControlError> {
-    let chunks = transact(meta, *generation, |tx, generation| {
+) -> Result<Option<Vec<ChunkRecord>>, MetaError> {
+    transact(meta, *generation, |tx, generation| {
         Box::pin(async move {
+            let Some(header) = tx.get(&keys::gen_header(generation)).await? else {
+                // Already finished (idempotent re-run): nothing to delete.
+                return Ok(Some(Vec::new()));
+            };
+            let header: GenerationHeader = decode(&header)?;
+            if !matches!(header.state, GenState::Retiring { .. }) {
+                return Ok(None);
+            }
+            if let Some(p) = tx
+                .get(&keys::object_current(header.bucket_id, &header.key))
+                .await?
+            {
+                let pointer: CurrentPointer = decode(&p)?;
+                if pointer.generation == *generation {
+                    return Ok(None);
+                }
+            }
+            for (_, v) in tx
+                .get_range(
+                    &keys::versions_range(header.bucket_id, &header.key),
+                    usize::MAX,
+                    false,
+                )
+                .await?
+            {
+                let record: VersionRecord = decode(&v)?;
+                if record.generation == *generation {
+                    return Ok(None);
+                }
+            }
             let mut out = Vec::new();
             for (_, v) in tx
                 .get_range(&keys::gen_chunks_range(generation), usize::MAX, false)
                 .await?
             {
-                out.push(arca_lake_metadata::records::decode::<
-                    arca_lake_metadata::records::ChunkRecord,
-                >(&v)?);
+                out.push(decode::<ChunkRecord>(&v)?);
             }
-            Ok(out)
+            Ok(Some(out))
         })
     })
-    .await?;
+    .await
+}
+
+/// Delete every shard of `chunks` on the current members of their groups.
+/// Returns the number of delete RPCs that succeeded (NotFound counts).
+async fn delete_shards(
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+    groups: &HashMap<u64, GroupRecord>,
+    chunks: &[ChunkRecord],
+) -> Result<usize, ControlError> {
     let mut deleted = 0;
     for chunk in chunks {
         let Some(group) = groups.get(&chunk.placement.group_id) else {
@@ -151,8 +237,22 @@ async fn delete_generation_shards<S: KvStore>(
     Ok(deleted)
 }
 
-/// Reconcile one node's shards of `group` against metadata: delete shards
-/// whose generation does not exist and whose age exceeds `min_age_ms`.
+/// Reconcile one node's shards of `group` against metadata.
+///
+/// A shard is kept when a generation with its prefix is pending, or when a
+/// generation with its prefix has a chunk record for its index placed in
+/// this group. It is deleted when generations exist but none accounts for
+/// it here (a write diverted to another group, or a failed attempt); when
+/// no generation with the prefix exists at all and the shard is at least
+/// `min_age_ms` old by the time encoded in its chunk ID; or when `node_id`
+/// is not a current member of `group` and the group is not being repaired
+/// (a former member's copies are never read).
+///
+/// `min_age_ms` applies only to the no-generation case and must be at
+/// least the pending lease: a shard younger than that may belong to a
+/// generation whose `begin_put` is being retried. It guards against clock
+/// disagreement between the writer that chose the chunk ID and this
+/// controller; it is never the criterion for deletion.
 ///
 /// # Errors
 ///
@@ -160,11 +260,12 @@ async fn delete_generation_shards<S: KvStore>(
 pub async fn reconcile_node<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
+    node_id: u64,
     node_addr: &str,
     group: &GroupRecord,
     now_ms: u64,
     min_age_ms: u64,
-) -> Result<usize, ControlError> {
+) -> Result<ReconcileReport, ControlError> {
     let shards = clients
         .list_shards(node_addr, group.id)
         .await
@@ -172,37 +273,129 @@ pub async fn reconcile_node<S: KvStore>(
             addr: node_addr.to_string(),
             status,
         })?;
-    let mut deleted = 0;
+    let is_member = group.members.iter().any(|m| m.node_id == node_id);
+    let mut report = ReconcileReport::default();
     for shard in shards {
-        let (prefix, _) = split_chunk_id(&shard.chunk_id);
-        let age = now_ms.saturating_sub(uuid_v7_unix_ms(&prefix));
-        if age < min_age_ms {
+        if !is_member {
+            if group.state == GroupState::Repairing {
+                report.kept_referenced += 1;
+                continue;
+            }
+            // Re-read the group: membership may have changed since the
+            // caller loaded it (the node could have been re-added).
+            let current = cluster::get_group(meta, group.id).await?;
+            if current.members.iter().any(|m| m.node_id == node_id)
+                || current.state == GroupState::Repairing
+            {
+                report.kept_referenced += 1;
+                continue;
+            }
+            delete_one(clients, node_addr, shard, current.epoch).await?;
+            report.former_member_deleted += 1;
             continue;
         }
-        let exists = transact(meta, prefix, |tx, prefix| {
-            Box::pin(async move {
-                let found = tx
-                    .get_range(&keys::gen_prefix_range(prefix), 1, false)
+        let (prefix, index) = split_chunk_id(&shard.chunk_id);
+        match classify(meta, &prefix, index, group.id).await? {
+            Attribution::Referenced => {
+                report.kept_referenced += 1;
+                continue;
+            }
+            Attribution::NoGeneration => {
+                let age = now_ms.saturating_sub(uuid_v7_unix_ms(&prefix));
+                if age < min_age_ms {
+                    report.kept_young += 1;
+                    continue;
+                }
+            }
+            Attribution::Unreferenced => {}
+        }
+        delete_one(clients, node_addr, shard, group.epoch).await?;
+        report.orphans_deleted += 1;
+    }
+    Ok(report)
+}
+
+/// What metadata says about a shard.
+enum Attribution {
+    /// A generation with the shard's prefix is pending, or places this
+    /// chunk in this group: keep.
+    Referenced,
+    /// No generation with the prefix exists at all.
+    NoGeneration,
+    /// Generations with the prefix exist, none is pending, and none places
+    /// this chunk in this group (a diverted or failed write): garbage.
+    Unreferenced,
+}
+
+/// One transaction: every generation header with `prefix`, and for each the
+/// chunk record `index`.
+async fn classify<S: KvStore>(
+    meta: &S,
+    prefix: &[u8; 12],
+    index: u32,
+    group_id: u64,
+) -> Result<Attribution, MetaError> {
+    transact(meta, (*prefix, index, group_id), |tx, env| {
+        Box::pin(async move {
+            let (prefix, index, group_id) = *env;
+            let full = keys::gen_prefix_range(&prefix);
+            let mut begin = full.begin.clone();
+            let mut any = false;
+            // Walk generation by generation (the range also covers chunk
+            // records; jump over each generation's subspace).
+            while begin < full.end {
+                let first = tx
+                    .get_range(
+                        &arca_lake_metadata::kv::KeyRange::new(begin.clone(), full.end.clone()),
+                        1,
+                        false,
+                    )
                     .await?;
-                Ok(!found.is_empty())
+                let Some((k, _)) = first.into_iter().next() else {
+                    break;
+                };
+                let Some(generation) = keys::gen_from_gen_key(&k) else {
+                    break;
+                };
+                any = true;
+                if let Some(h) = tx.get(&keys::gen_header(&generation)).await? {
+                    let header: GenerationHeader = decode(&h)?;
+                    if matches!(header.state, GenState::Pending { .. }) {
+                        return Ok(Attribution::Referenced);
+                    }
+                }
+                if let Some(v) = tx.get(&keys::gen_chunk(&generation, index)).await? {
+                    let record: ChunkRecord = decode(&v)?;
+                    if record.placement.group_id == group_id {
+                        return Ok(Attribution::Referenced);
+                    }
+                }
+                begin = keys::gen_range(&generation).end;
+            }
+            Ok(if any {
+                Attribution::Unreferenced
+            } else {
+                Attribution::NoGeneration
             })
         })
-        .await?;
-        if exists {
-            continue;
-        }
-        match clients.delete_shard(node_addr, shard, group.epoch).await {
-            Ok(()) => deleted += 1,
-            Err(s) if s.code() == tonic::Code::NotFound => {}
-            Err(status) => {
-                return Err(ControlError::Node {
-                    addr: node_addr.to_string(),
-                    status,
-                });
-            }
-        }
+    })
+    .await
+}
+
+async fn delete_one(
+    clients: &NodeClients,
+    node_addr: &str,
+    shard: ShardRef,
+    epoch: u64,
+) -> Result<(), ControlError> {
+    match clients.delete_shard(node_addr, shard, epoch).await {
+        Ok(()) => Ok(()),
+        Err(s) if s.code() == tonic::Code::NotFound => Ok(()),
+        Err(status) => Err(ControlError::Node {
+            addr: node_addr.to_string(),
+            status,
+        }),
     }
-    Ok(deleted)
 }
 
 /// Convenience for tests: whether a generation still has metadata.

@@ -394,16 +394,46 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 deleted += gc::reconcile_node(
                     self.meta.as_ref(),
                     &self.clients,
+                    n.id,
                     &n.addr.to_string(),
                     &g,
                     now_ms,
                     min_age_ms,
                 )
                 .await
-                .unwrap();
+                .unwrap()
+                .deleted();
             }
         }
         deleted
+    }
+
+    /// [`TestCluster::repair`] with a hook at every repair step; returns the
+    /// controller's result instead of panicking.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the controller or the hook returns.
+    pub async fn repair_with(
+        &self,
+        group_id: u64,
+        index: usize,
+        new_node: usize,
+        hook: impl AsyncFnMut(repair::RepairStep) -> Result<(), arca_lake_controller::ControlError>,
+    ) -> Result<repair::RepairReport, arca_lake_controller::ControlError> {
+        let member = GroupMember {
+            node_id: self.nodes[new_node].id,
+            device_id: 0,
+        };
+        repair::replace_member_with(
+            self.meta.as_ref(),
+            &self.clients,
+            group_id,
+            index,
+            member,
+            hook,
+        )
+        .await
     }
 
     /// Replace member `index` of `group_id` with node `new_node`.

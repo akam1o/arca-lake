@@ -237,6 +237,16 @@ pub enum GroupState {
     Repairing,
 }
 
+/// Progress of a member repair: the last chunk ID (in sorted order) whose
+/// shard was written to the member being rebuilt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairCursor {
+    /// Member index being rebuilt.
+    pub member: u16,
+    /// Last chunk ID processed.
+    pub chunk_id: [u8; 16],
+}
+
 /// A stripe group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupRecord {
@@ -258,8 +268,8 @@ pub struct GroupRecord {
     pub epoch: u64,
     /// State.
     pub state: GroupState,
-    /// Repair progress: last chunk ID processed, if a repair is in progress.
-    pub repair_cursor: Option<[u8; 16]>,
+    /// Repair progress, if a repair is in progress.
+    pub repair_cursor: Option<RepairCursor>,
 }
 
 #[cfg(test)]

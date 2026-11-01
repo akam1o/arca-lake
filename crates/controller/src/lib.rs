@@ -38,6 +38,19 @@ pub enum ControlError {
         /// Shards required.
         need: usize,
     },
+    /// The group's epoch changed under a running operation (another
+    /// membership change); re-issue the operation against the new record.
+    #[error(
+        "group {group} epoch changed: expected {expected}, found {found} (0 = learned from a node's fence)"
+    )]
+    EpochChanged {
+        /// Group.
+        group: u64,
+        /// Epoch the operation was working with.
+        expected: u64,
+        /// Epoch found afterwards (0 when reported by a node's fence).
+        found: u64,
+    },
     /// Anything else.
     #[error("{0}")]
     Other(String),
