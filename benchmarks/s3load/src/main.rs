@@ -55,6 +55,14 @@ struct Args {
     /// GET only the first `range_bytes` bytes of each object (0 = whole).
     #[arg(long, default_value_t = 0)]
     range_bytes: u64,
+    /// Key order within a pass: `sequential` or `random` (a fixed
+    /// permutation derived from `--seed` and the pass number).
+    #[arg(long, default_value = "sequential", value_parser = ["sequential", "random"])]
+    order: String,
+    /// First object index of the key space (lets several runs share one
+    /// bucket without overlapping keys).
+    #[arg(long, default_value_t = 0)]
+    first: u64,
     /// Verify GET bodies against the deterministic pattern (costs CPU).
     #[arg(long)]
     verify: bool,
@@ -84,6 +92,7 @@ struct Summary {
     concurrency: usize,
     range_bytes: u64,
     verify: bool,
+    order: String,
     duration_s: f64,
     ops: u64,
     bytes: u64,
@@ -214,9 +223,32 @@ async fn one_request(
     Ok(())
 }
 
+/// Key order of one pass: identity, or a permutation of `0..objects`
+/// from a seeded xorshift shuffle (reproducible across runs).
+fn order_of(args: &Args, pass: u32) -> Arc<Vec<u64>> {
+    let mut keys: Vec<u64> = (args.first..args.first + args.objects).collect();
+    if args.order == "random" {
+        let mut x = args
+            .seed
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(u64::from(pass))
+            | 1;
+        for i in (1..keys.len()).rev() {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            let j = usize::try_from(x.wrapping_mul(0x2545_F491_4F6C_DD1D) % (i as u64 + 1))
+                .unwrap_or(0);
+            keys.swap(i, j);
+        }
+    }
+    Arc::new(keys)
+}
+
 async fn run_pass(client: &HttpClient, args: &Arc<Args>, pass: u32) -> Summary {
     let counters = Arc::new(Counters::default());
     let next = Arc::new(AtomicU64::new(0));
+    let keys = order_of(args, pass);
     let started = Instant::now();
     let mut tasks = Vec::new();
     for _ in 0..args.concurrency {
@@ -224,12 +256,14 @@ async fn run_pass(client: &HttpClient, args: &Arc<Args>, pass: u32) -> Summary {
         let args = Arc::clone(args);
         let counters = Arc::clone(&counters);
         let next = Arc::clone(&next);
+        let keys = Arc::clone(&keys);
         tasks.push(tokio::spawn(async move {
             loop {
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                if index >= args.objects {
+                let slot =
+                    usize::try_from(next.fetch_add(1, Ordering::Relaxed)).unwrap_or(usize::MAX);
+                let Some(&index) = keys.get(slot) else {
                     return;
-                }
+                };
                 if let Err(e) = one_request(&client, &args, index, &counters).await {
                     counters.errors.fetch_add(1, Ordering::Relaxed);
                     eprintln!("error: {e}");
@@ -256,6 +290,7 @@ async fn run_pass(client: &HttpClient, args: &Arc<Args>, pass: u32) -> Summary {
         concurrency: args.concurrency,
         range_bytes: args.range_bytes,
         verify: args.verify,
+        order: args.order.clone(),
         duration_s: secs,
         ops,
         bytes,
