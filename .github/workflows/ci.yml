@@ -111,20 +111,29 @@ jobs:
       - name: start a three-process FoundationDB cluster (host network)
         run: |
           set -euo pipefail
-          docker run -d --name arca-fdb --network host -e FDB_PUBLIC_IP=127.0.0.1 \
+          # Host network; the processes advertise the host's own address
+          # (as the single-process job does), not loopback.
+          docker run -d --name arca-fdb --network host \
             -v "$PWD/deploy/dev/fdb-multi-entrypoint.sh:/entry.sh:ro" \
             --entrypoint bash "foundationdb/foundationdb:${FDB_VERSION}" /entry.sh
-          sleep 5
+          sleep 8
           docker logs arca-fdb
-          fdbcli() { timeout 90 docker exec arca-fdb fdbcli --timeout 30 --exec "$1"; }
+          for i in 1 2 3; do
+            echo "--- process $i: $(docker exec arca-fdb fdbproc status $i)"
+            docker exec arca-fdb cat /var/fdb/logs/proc-$i.out || true
+          done
+          IP="$(docker exec arca-fdb hostname -i | awk '{print $1}')"
+          echo "fdb address: $IP"
+          fdbcli() { timeout 60 docker exec arca-fdb fdbcli --timeout 20 --exec "$1"; }
           fdbcli "configure new double memory" || true
           sleep 3
-          fdbcli "coordinators 127.0.0.1:4500 127.0.0.1:4501 127.0.0.1:4502" || true
-          for _ in $(seq 1 90); do
+          fdbcli "coordinators ${IP}:4500 ${IP}:4501 ${IP}:4502" || true
+          for _ in $(seq 1 12); do
             fdbcli "status minimal" 2>/dev/null | grep -q "is available" && break
-            sleep 1
+            sleep 2
           done
-          fdbcli "status minimal"
+          fdbcli "status minimal" | tee /tmp/status.txt
+          grep -q "is available" /tmp/status.txt || { echo "cluster not available"; fdbcli "status details" || true; docker logs arca-fdb; exit 1; }
           fdbcli "status details" | head -40
           docker exec arca-fdb cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
           cat /tmp/fdb.cluster
