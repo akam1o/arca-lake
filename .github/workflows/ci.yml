@@ -90,6 +90,55 @@ jobs:
           cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
           cargo test -p arca-lake-testkit --features fdb --test e2e_fdb --test faults_fdb -- --nocapture --test-threads=1
 
+  fdb-failover:
+    name: FoundationDB failover (3 processes)
+    runs-on: ubuntu-latest
+    env:
+      FDB_VERSION: 7.3.77
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+      - name: install FoundationDB client library
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/fdb-clients.deb \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          sudo apt-get install -y /tmp/fdb-clients.deb
+      - name: start a three-process FoundationDB cluster (host network)
+        run: |
+          set -euo pipefail
+          docker run -d --name arca-fdb-1 --network host -e FDB_NETWORKING_MODE=host -e FDB_PORT=4500 \
+            "foundationdb/foundationdb:${FDB_VERSION}"
+          sleep 2
+          for i in 2 3; do
+            docker run -d --name "arca-fdb-$i" --network host -e FDB_NETWORKING_MODE=host \
+              -e FDB_PORT=$((4499 + i)) -e FDB_COORDINATOR=127.0.0.1 -e FDB_COORDINATOR_PORT=4500 \
+              "foundationdb/foundationdb:${FDB_VERSION}"
+          done
+          for _ in $(seq 1 30); do
+            docker exec arca-fdb-1 fdbcli --exec "status minimal" 2>/dev/null | grep -q "available" && break
+            sleep 1
+          done
+          docker exec arca-fdb-1 fdbcli --exec "configure new double memory" || true
+          sleep 3
+          docker exec arca-fdb-1 fdbcli --exec "coordinators 127.0.0.1:4500 127.0.0.1:4501 127.0.0.1:4502" || true
+          for _ in $(seq 1 90); do
+            docker exec arca-fdb-1 fdbcli --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+            sleep 1
+          done
+          docker exec arca-fdb-1 fdbcli --exec "status minimal"
+          docker exec arca-fdb-1 cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
+      - name: run the failover test
+        env:
+          ARCA_FDB_TESTS: "1"
+          ARCA_FDB_FAILOVER: "1"
+          ARCA_CHAOS_DOCKER: "1"
+          ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
+        run: cargo test -p arca-lake-testkit --features fdb --test fdb_failover -- --nocapture --test-threads=1
+
   deny:
     name: licenses and advisories
     runs-on: ubuntu-latest
