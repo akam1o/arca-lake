@@ -19,6 +19,10 @@ after installing `foundationdb-clients` into it:
 cargo test -p arca-lake-metadata --features fdb --test fdb
 ```
 
+The script then runs the testkit suites that have a FoundationDB
+instantiation (`e2e_fdb`, `faults_fdb`, `cache_fdb`), each with
+`--test-threads=1`.
+
 Cargo caches, the Linux target directory, and the downloaded client package
 are kept in named Docker volumes so that repeated runs are fast. No image is
 built, because some Docker-compatible runtimes handle `docker build` poorly;

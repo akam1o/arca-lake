@@ -1,6 +1,6 @@
 # RFC-006: Multi-Tier Storage
 
-- Status: draft
+- Status: draft (Phase 2 implementation, §11)
 - Authors: arca-lake maintainers
 - Created: 2026-11-01
 - Depends on: RFC-002, RFC-003, RFC-004, RFC-008
@@ -296,13 +296,29 @@ Measurements belong to RFC-009.
 - Write-through as default for small objects.
 - Recency-index write coalescing interval.
 
-## 11. Acceptance criteria
+## 11. Acceptance criteria and Phase 2 status
 
-Phase 2 tests (`crates/testkit/tests/cache*.rs`, `tiering.rs`, FoundationDB
-instantiation): hit/miss/partial hit/range GET; concurrent GETs and
-stampede dedupe; population failure does not fail the GET; cache node
-failure and corruption fall back; stale generation never served after an
-overwrite; eviction to watermark with pinned entries kept; prefetch and
-pin; crash states of §5.6 recovered idempotently; migration
-copy-verify-switch-retire with crashes before and after the switch; cache
-concurrent with GC and repair.
+Phase 2 tests: `crates/testkit/tests/cache.rs` (in-memory) and
+`cache_fdb.rs` (FoundationDB, CI job `fdb` and `deploy/dev/fdb-test.sh`),
+`tiering.rs`, and `crates/metadata/tests/cache_model.rs`. Decisions are
+recorded in ADR-0009; the roadmap page is `docs/roadmap/phase-2.md`.
+
+| Requirement / criterion | Status | Evidence |
+| --- | --- | --- |
+| T1, T2 tiers as configuration, device class separate from role | verified | `create_groups_for_class`, `create_cache_groups`; `tiering.rs` builds a second durable tier from relabelled nodes; CLI `--tier`, `--device-class`, `create-cache-groups` |
+| T3 cache deletion changes no version; durable placement untouched by caching | verified | `miss_then_hit_serves_from_cache` (durable shard count unchanged), `crash_states_are_recovered_idempotently` (c), model test C4 |
+| T4 generation-keyed cache; stale generation never served | verified | `overwrite_never_serves_a_stale_generation` |
+| T5 any cache failure degrades to a durable read | verified | `population_failure_never_fails_the_get`, `cache_node_failure_falls_back_and_invalidates`, `corrupt_cache_copy_falls_back_and_is_invalidated`, fenced epoch case |
+| Hit, miss, partial hit, range GET, concurrent GET, stampede | verified | `miss_then_hit_…`, `partial_hits_and_range_gets`, `concurrent_gets_populate_each_chunk_once` |
+| Admission (size, miss threshold, capacity) | verified | `admission_rejects_over_capacity_and_large_chunks` |
+| LRU eviction, watermarks, pins, `over_watermark` | verified | `eviction_respects_watermarks_lru_and_pins` |
+| Prefetch, pin, unpin | verified | `prefetch_and_pin_populate_synchronously` |
+| T6 crash states of §5.6 recovered idempotently; total cache metadata loss | verified | `crash_states_are_recovered_idempotently` (a)–(c) |
+| T7 migration copy → verify → switch → retire; source kept until the switch | verified | `tiering.rs`: switch, crash before, crash after, refused switch |
+| T8 cache with GC, repair, reconciliation, epoch change | verified (single-pass interleavings) | `cache_survives_durable_repair_gc_and_fenced_cache_epoch`, `overwrite_…` (GC); sustained concurrent load not run |
+| Record invariants C1–C4 | verified (model) | `cache_model.rs` |
+| FoundationDB instantiation | verified | `cache_fdb.rs` 12/12 in CI and in the local container runner |
+| Write-through population | not implemented | §5.3, Phase 2.1 option |
+| Per-bucket tier policies | not implemented | §10 |
+| Performance (§9) | not measured | hypotheses only; RFC-009 |
+| Real network faults during cache use | not verified | Phase 1.2 carry-over; R-35, R-40 remain High |

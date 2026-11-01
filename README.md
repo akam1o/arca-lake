@@ -5,9 +5,10 @@ distributed object store with native multi-tier storage management and
 configurable erasure coding. It is written in Rust and is part of the
 `arca` family of infrastructure software.
 
-> **Status: design phase / Phase 0.** No usable release exists yet. The
-> repository contains the architecture review, design decisions, accepted
-> ADRs, the Phase 0 plan, and a workspace skeleton with crate stubs. See
+> **Status: pre-release, Phase 2 first iteration.** No usable release
+> exists yet. The repository contains the architecture review, design
+> decisions, accepted ADRs, the RFC drafts, the phase roadmaps with their
+> verified and unverified items, and the workspace. See
 > [`docs/`](docs/README.md).
 
 ## Goals
@@ -48,6 +49,9 @@ configurable erasure coding. It is written in Rust and is part of the
 | [Open decisions](docs/architecture/open-decisions.md) | Items that still need a decision |
 | [RFC index](docs/rfcs/README.md) | RFC plan and dependency graph |
 | [Phase 0 plan](docs/roadmap/phase-0.md) | Architecture and performance proof of concept |
+| [Phase 1](docs/roadmap/phase-1.md) | Single-cluster durable object store and reliability hardening |
+| [Phase 1.2](docs/roadmap/phase-1-2.md) | Distributed operations and failover |
+| [Phase 2](docs/roadmap/phase-2.md) | Native multi-tier storage: cache tiers, read-through cache, automatic tiering |
 
 ## Contributing and policy
 

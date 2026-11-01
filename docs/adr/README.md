@@ -12,3 +12,4 @@ Short, immutable records of decisions. Use [the template](0000-template.md).
 | [0006](0006-phase-1-integration-decisions.md) | Phase 1 integration decisions: gRPC for internal RPC, postcard records, no persisted index, `m_ack = m` | accepted |
 | [0007](0007-commit-resolution-and-gc-safety.md) | Commit resolution, reference-checked garbage collection, and repair completion | accepted |
 | [0008](0008-leader-election-and-deletion-epochs.md) | Leader election on the metadata store, deletion epochs, verified repair completion | accepted |
+| [0009](0009-multi-tier-storage-decisions.md) | Multi-tier storage: cache placements, admission and eviction, migration | accepted |

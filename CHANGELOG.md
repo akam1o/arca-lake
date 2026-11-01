@@ -121,3 +121,28 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     `deploy/dev/fdb-failover.sh`, CI job `fdb-failover`.
   - RFC-011 Controller draft; RFC-003 §5.9–5.10; RFC-004 §5.13; RFC-008
     §6.4–6.7, §7; ADR-0008.
+- Phase 2 native multi-tier storage (first iteration):
+  - `arca-lake-metadata`: `CachePlacement` records in the generation
+    subspace, per-tier recency index and usage counter, access records,
+    `ops::cache` recipes, `read_manifest` returning cache placements,
+    `switch_placement`, `list_generations`, `read_manifest_of`,
+    `cache_placement_in_group`; model test `cache_model.rs` (C1–C4).
+  - `arca-lake-tiering`: cache groups (`cache-v1`), population with a
+    committed-generation and capacity check, validated cached reads,
+    invalidation, LRU eviction with watermarks and pins, cache
+    reconciliation; durable chunk read/encode; `migrate_chunk`
+    (copy, verify, conditional switch, retire) with fault points.
+  - `arca-lake-gateway`: read-through cache on the read path with
+    per-chunk fallback, asynchronous deduplicated population, admission
+    control, coalesced recency and access records; `prefetch`, `pin`,
+    `unpin`, `evict`, `cache_stats`.
+  - `arca-lake-controller`: cache groups per device class, durable groups
+    per device class, GC of cache copies, cache-group reconciliation,
+    eviction scheduler, automatic tiering policy and scheduler, metrics.
+  - `arca-lake` CLI: `--cache-*` options for gateway and controller,
+    `--tiering-tier` policy options, `admin create-cache-groups`,
+    `create-groups --tier --device-class`.
+  - Tests: `cache.rs` and `cache_fdb.rs` (12 cases each, FoundationDB in
+    CI and `deploy/dev/fdb-test.sh`), `tiering.rs` (5).
+  - RFC-006 Multi-Tier Storage draft with Phase 2 status; ADR-0009;
+    Phase 2 roadmap page; risks R-41–R-45.
