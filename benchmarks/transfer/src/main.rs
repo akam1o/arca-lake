@@ -532,6 +532,35 @@ impl pb::storage_node_server::StorageNode for GrpcServer {
         });
         Ok(tonic::Response::new(ReceiverStream::new(rx)))
     }
+
+    // The remaining RPCs are not part of the transfer measurement.
+    async fn delete_shard(
+        &self,
+        _request: tonic::Request<pb::DeleteShardRequest>,
+    ) -> Result<tonic::Response<pb::DeleteShardResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("benchmark server"))
+    }
+
+    async fn list_shards(
+        &self,
+        _request: tonic::Request<pb::ListShardsRequest>,
+    ) -> Result<tonic::Response<pb::ListShardsResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("benchmark server"))
+    }
+
+    async fn update_group_epoch(
+        &self,
+        _request: tonic::Request<pb::UpdateGroupEpochRequest>,
+    ) -> Result<tonic::Response<pb::UpdateGroupEpochResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("benchmark server"))
+    }
+
+    async fn health(
+        &self,
+        _request: tonic::Request<pb::HealthRequest>,
+    ) -> Result<tonic::Response<pb::HealthResponse>, tonic::Status> {
+        Ok(tonic::Response::new(pb::HealthResponse::default()))
+    }
 }
 
 // ---------------------------------------------------------------- client

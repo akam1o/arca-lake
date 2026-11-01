@@ -172,6 +172,74 @@ pub fn retired_until_range(cutoff_ms: u64) -> KeyRange {
     KeyRange::new(pack(&(ROOT, "gc")), pack(&(ROOT, "gc", cutoff_ms + 1)))
 }
 
+/// Node record.
+#[must_use]
+pub fn node(node_id: u64) -> Key {
+    pack(&(ROOT, "node", node_id))
+}
+
+/// Prefix of all node records.
+#[must_use]
+pub fn nodes_prefix() -> Key {
+    pack(&(ROOT, "node"))
+}
+
+/// Node ID allocator.
+#[must_use]
+pub fn node_counter() -> Key {
+    pack(&(ROOT, "ctr", "node"))
+}
+
+/// Stripe group record.
+#[must_use]
+pub fn group(group_id: u64) -> Key {
+    pack(&(ROOT, "grp", group_id))
+}
+
+/// Prefix of all group records.
+#[must_use]
+pub fn groups_prefix() -> Key {
+    pack(&(ROOT, "grp"))
+}
+
+/// Group ID allocator.
+#[must_use]
+pub fn group_counter() -> Key {
+    pack(&(ROOT, "ctr", "group"))
+}
+
+/// Cluster-map version, bumped on any node or group change.
+#[must_use]
+pub fn map_version() -> Key {
+    pack(&(ROOT, "map", "version"))
+}
+
+/// All generation headers whose ID starts with `prefix` (the first 12
+/// bytes of a chunk ID, RFC-004 §5.1).
+#[must_use]
+pub fn gen_prefix_range(prefix: &[u8; 12]) -> KeyRange {
+    // The tuple encoding of a byte string is positional (0x00 is escaped as
+    // 0x00 0xFF), so the encoding of a prefix is a prefix of the encoding,
+    // once the terminator is removed.
+    let mut begin = pack(&(ROOT, "g", Bytes::from(&prefix[..])));
+    begin.pop();
+    let end = strinc(&begin);
+    KeyRange::new(begin, end)
+}
+
+/// Generation ID from a generation key (`("al","g",gen,...)`), if it is one.
+#[must_use]
+pub fn gen_from_gen_key(key: &[u8]) -> Option<GenId> {
+    unpack::<(String, String, Bytes<'_>, String)>(key)
+        .ok()
+        .and_then(|t| <[u8; 16]>::try_from(t.2.as_ref()).ok())
+        .or_else(|| {
+            unpack::<(String, String, Bytes<'_>, String, u64)>(key)
+                .ok()
+                .and_then(|t| <[u8; 16]>::try_from(t.2.as_ref()).ok())
+        })
+}
+
 /// Generation ID from a pending or retired index key.
 #[must_use]
 pub fn gen_from_index_key(key: &[u8]) -> Option<GenId> {
@@ -217,6 +285,23 @@ mod tests {
                 && sub.contains(&gen_chunk(&g, 4))
                 && !sub.contains(&gen_chunk(&g, 5))
         );
+    }
+
+    #[test]
+    fn gen_prefix_range_covers_generations_with_that_prefix() {
+        let mut g = [0u8; 16];
+        g[..12].copy_from_slice(&[0, 1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11]); // includes a 0x00 inside
+        g[12..].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let mut p = [0u8; 12];
+        p.copy_from_slice(&g[..12]);
+        let r = gen_prefix_range(&p);
+        assert!(r.contains(&gen_header(&g)));
+        assert!(r.contains(&gen_chunk(&g, 3)));
+        let mut other = g;
+        other[11] ^= 1;
+        assert!(!r.contains(&gen_header(&other)));
+        assert_eq!(gen_from_gen_key(&gen_header(&g)), Some(g));
+        assert_eq!(gen_from_gen_key(&gen_chunk(&g, 9)), Some(g));
     }
 
     #[test]

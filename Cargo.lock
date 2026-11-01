@@ -114,6 +114,11 @@ dependencies = [
 [[package]]
 name = "arca-lake-common"
 version = "0.0.0"
+dependencies = [
+ "serde",
+ "thiserror",
+ "uuid",
+]
 
 [[package]]
 name = "arca-lake-controller"
@@ -161,6 +166,10 @@ dependencies = [
 [[package]]
 name = "arca-lake-placement"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+ "thiserror",
+]
 
 [[package]]
 name = "arca-lake-protocol"
@@ -190,6 +199,16 @@ dependencies = [
 [[package]]
 name = "arca-lake-storage-node"
 version = "0.0.0"
+dependencies = [
+ "arca-lake-protocol",
+ "arca-lake-storage",
+ "bytes",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+]
 
 [[package]]
 name = "arca-lake-testkit"

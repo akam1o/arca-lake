@@ -198,6 +198,70 @@ pub struct ChunkRecord {
     pub placement: DurablePlacement,
 }
 
+/// A registered storage node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeRecord {
+    /// Node ID.
+    pub id: u64,
+    /// gRPC address (`host:port`).
+    pub address: String,
+    /// Topology labels (`host`, `rack`, ...).
+    pub labels: Vec<(String, String)>,
+    /// Device IDs served by the node.
+    pub devices: Vec<u32>,
+    /// First registration, Unix milliseconds.
+    pub registered_ms: u64,
+    /// Last registration or heartbeat, Unix milliseconds.
+    pub last_seen_ms: u64,
+}
+
+/// One member of a stripe group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GroupMember {
+    /// Node.
+    pub node_id: u64,
+    /// Device within the node.
+    pub device_id: u32,
+}
+
+/// Stripe group state (RFC-004 §5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupState {
+    /// Accepts new chunks.
+    Active,
+    /// No new chunks; existing chunks readable (draining).
+    Sealed,
+    /// A member is unhealthy; reads decode; writes avoid the group.
+    Degraded,
+    /// A member was replaced and is being reconstructed.
+    Repairing,
+}
+
+/// A stripe group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupRecord {
+    /// Group ID (assigned on creation).
+    pub id: u64,
+    /// EC profile name.
+    pub profile: String,
+    /// Tier name.
+    pub tier: String,
+    /// Scheme identifier.
+    pub scheme: String,
+    /// `k`.
+    pub data_shards: u16,
+    /// `m`.
+    pub parity_shards: u16,
+    /// Members in shard order (`k + m`).
+    pub members: Vec<GroupMember>,
+    /// Placement epoch (assigned 1 on creation; bumped on membership change).
+    pub epoch: u64,
+    /// State.
+    pub state: GroupState,
+    /// Repair progress: last chunk ID processed, if a repair is in progress.
+    pub repair_cursor: Option<[u8; 16]>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

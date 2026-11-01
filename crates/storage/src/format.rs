@@ -165,6 +165,12 @@ pub fn validate_geometry(record_alignment: u32, block_size: u32) -> Result<()> {
     Ok(())
 }
 
+/// CRC-32C of `data`, the checksum used throughout the format.
+#[must_use]
+pub fn crc32c(data: &[u8]) -> u32 {
+    crc32c::crc32c(data)
+}
+
 /// Round `n` up to a multiple of `align` (which must be non-zero).
 #[must_use]
 pub const fn round_up(n: u64, align: u64) -> u64 {

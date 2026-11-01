@@ -1,4 +1,12 @@
-//! Storage node service wrapping the arca-lake storage engine
+//! Storage node: the gRPC service around one device's storage engine.
 //!
-//! This crate is a Phase 0 stub. See `docs/architecture/repository-layout.md`
-//! for its responsibilities and dependency rules.
+//! The node knows nothing about objects. It stores shards keyed by
+//! `(group, chunk_id, shard_index)`, persists the highest placement epoch it
+//! has been told per stripe group, and rejects writes and deletes carrying
+//! an older epoch (fencing, RFC-004 §5.4). Every acknowledgment means the
+//! storage engine has made the record durable.
+
+mod epochs;
+mod service;
+
+pub use service::{NodeConfig, NodeHandle, StorageNodeService, serve};

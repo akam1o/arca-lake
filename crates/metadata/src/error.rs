@@ -26,6 +26,9 @@ pub enum MetaError {
     /// The generation does not exist.
     #[error("no such generation")]
     NoSuchGeneration,
+    /// The stripe group does not exist.
+    #[error("no such stripe group {0}")]
+    NoSuchGroup(u64),
     /// The generation is not in the state the operation requires.
     #[error("generation is {0}, operation requires {1}")]
     WrongGenerationState(&'static str, &'static str),

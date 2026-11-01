@@ -1,9 +1,10 @@
 // arca-lake storage node API, protocol version 1.
 //
-// Phase 0: the subset needed for transfer measurements and the first
-// gateway <-> storage node integration. Every request carries
-// `protocol_version` so that a node can refuse messages from a future
-// incompatible version explicitly.
+// Every request carries `protocol_version` so that a node can refuse
+// messages from a future incompatible version explicitly. Write-side
+// requests carry the stripe group epoch; a node that has been told a
+// higher epoch for the group rejects them with FAILED_PRECONDITION and the
+// message "epoch rejected" (fencing, RFC-004 §5.4). All RPCs are idempotent.
 
 syntax = "proto3";
 
@@ -12,15 +13,14 @@ package arca_lake.storage.v1;
 // Identity of a shard on a device.
 message ShardKey {
   uint64 group_id = 1;
-  bytes chunk_id = 2;   // 16 bytes
+  bytes chunk_id = 2;   // 16 bytes: generation prefix (12) + chunk index (4, big endian)
   uint32 shard_index = 3;
 }
 
 message PutShardHeader {
   uint32 protocol_version = 1;
   ShardKey key = 2;
-  // Placement epoch of the stripe group at write time; the node rejects
-  // stale epochs (fencing).
+  // Placement epoch of the stripe group at write time.
   uint64 group_epoch = 3;
   uint64 payload_len = 4;
 }
@@ -42,6 +42,7 @@ message GetShardRequest {
   uint32 protocol_version = 1;
   ShardKey key = 2;
   uint64 offset = 3;
+  // 0 means "to the end of the shard".
   uint64 len = 4;
 }
 
@@ -49,7 +50,47 @@ message GetShardResponse {
   bytes data = 1;
 }
 
+message DeleteShardRequest {
+  uint32 protocol_version = 1;
+  ShardKey key = 2;
+  uint64 group_epoch = 3;
+}
+
+message DeleteShardResponse {}
+
+message ListShardsRequest {
+  uint32 protocol_version = 1;
+  uint64 group_id = 2;
+}
+
+message ListShardsResponse {
+  repeated ShardKey keys = 1;
+}
+
+message UpdateGroupEpochRequest {
+  uint32 protocol_version = 1;
+  uint64 group_id = 2;
+  uint64 epoch = 3;
+}
+
+message UpdateGroupEpochResponse {
+  // The epoch the node now enforces (max of known and requested).
+  uint64 epoch = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  uint64 live_shards = 1;
+  uint64 live_bytes = 2;
+  uint64 segment_bytes = 3;
+}
+
 service StorageNode {
   rpc PutShard(stream PutShardRequest) returns (PutShardResponse);
   rpc GetShard(GetShardRequest) returns (stream GetShardResponse);
+  rpc DeleteShard(DeleteShardRequest) returns (DeleteShardResponse);
+  rpc ListShards(ListShardsRequest) returns (ListShardsResponse);
+  rpc UpdateGroupEpoch(UpdateGroupEpochRequest) returns (UpdateGroupEpochResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
 }
