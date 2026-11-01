@@ -193,7 +193,12 @@ and subtract usage in one transaction, then delete the copy on the node
 Admission is refused only when a copy would exceed `capacityBytes`;
 eviction starts when usage exceeds the high watermark and stops at the
 low watermark, so under a read-through workload usage oscillates between
-the two and LRU turnover happens. (Phase 2 refused admissions at the high
+the two and LRU turnover happens. The capacity check reads the tier's
+usage as a *snapshot* and the usage is updated by an atomic addition
+(Phase 2.2, R-42): concurrent populations do not conflict on the
+counter, at the price that up to `max_populations_in_flight` copies per
+gateway may be admitted past the limit before the counter reflects them;
+eviction reclaims the overshoot, which is bounded by that many chunks. (Phase 2 refused admissions at the high
 watermark, which left eviction nothing to do and froze the cache content;
 corrected in Phase 2.1 after the three-host measurements.)
 

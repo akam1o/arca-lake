@@ -487,12 +487,17 @@ pub async fn admission_rejects_over_capacity_and_large_chunks<S: KvStore + 'stat
     start: impl Starter<S>,
 ) {
     let c = start(ClusterOptions {
+        // One population at a time: the capacity check is a snapshot read
+        // (RFC-006 §5.4), so up to `max_populations_in_flight` copies may
+        // be admitted past the limit; serializing them makes the refusal
+        // deterministic here.
         cache: Some(CacheTierConfig {
             capacity_bytes: 3 * CHUNK,
             high_watermark: 1.0,
             low_watermark: 0.5,
             max_cacheable_bytes: 0,
             admit_after_misses: 2,
+            max_populations_in_flight: 1,
             ..ClusterOptions::default_cache()
         }),
         ..options()
@@ -513,8 +518,13 @@ pub async fn admission_rejects_over_capacity_and_large_chunks<S: KvStore + 'stat
     s3::get(&c.backend, BUCKET, "o").await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(c.cache_placements(BUCKET, "o").await.len(), 0);
-    s3::get(&c.backend, BUCKET, "o").await.unwrap();
-    c.wait_cached(BUCKET, "o", 2, Duration::from_secs(10)).await;
+    // With one population in flight a GET populates at most one chunk
+    // (the other miss is skipped), so read until both are cached.
+    wait_until("o cached", Duration::from_secs(10), async || {
+        s3::get(&c.backend, BUCKET, "o").await.unwrap();
+        c.cache_placements(BUCKET, "o").await.len() >= 2
+    })
+    .await;
 
     // A second object would exceed the capacity: rejected, GET still fine.
     let big = payload(2, 21);
@@ -527,10 +537,8 @@ pub async fn admission_rejects_over_capacity_and_large_chunks<S: KvStore + 'stat
     )
     .await
     .unwrap();
-    for _ in 0..2 {
-        assert_eq!(s3::get(&c.backend, BUCKET, "big").await.unwrap().0, big);
-    }
     wait_until("rejections", Duration::from_secs(10), async || {
+        assert_eq!(s3::get(&c.backend, BUCKET, "big").await.unwrap().0, big);
         c.backend.cache_stats().admissions_rejected >= 1
     })
     .await;
