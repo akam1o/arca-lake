@@ -338,7 +338,12 @@ async fn run_server(a: ServerArgs) {
                 shared: shared.clone(),
             })
             .max_decoding_message_size(64 << 20);
-            let mut builder = Server::builder();
+            // The same HTTP/2 windows and socket options as the storage
+            // node, so that the matrix measures the stack the gateway uses.
+            let mut builder = Server::builder()
+                .initial_stream_window_size(Some(arca_lake_protocol::client::STREAM_WINDOW))
+                .initial_connection_window_size(Some(arca_lake_protocol::client::CONNECTION_WINDOW))
+                .tcp_nodelay(true);
             if a.tls {
                 let identity = Identity::from_pem(cert_pem.as_bytes(), key_pem.as_bytes());
                 builder = builder
@@ -591,8 +596,10 @@ async fn run_client(a: ClientArgs) {
                 let mut ep = Channel::from_shared(format!("{scheme}://{}", a.addr))
                     .unwrap()
                     .tcp_nodelay(true)
-                    .initial_stream_window_size(Some(8 << 20))
-                    .initial_connection_window_size(Some(32 << 20));
+                    .initial_stream_window_size(Some(arca_lake_protocol::client::STREAM_WINDOW))
+                    .initial_connection_window_size(Some(
+                        arca_lake_protocol::client::CONNECTION_WINDOW,
+                    ));
                 if let Some(ca) = &ca {
                     ep = ep
                         .tls_config(

@@ -27,7 +27,7 @@ def main():
         parts = label.split("-")
         transport, tls, conns, conc, frame, op = parts[0], parts[1][3:], parts[2][4:], parts[3][4:], parts[4][5:], parts[5]
         print(f"| {transport} | {tls} | {conns} | {conc} | {int(frame) // 1024} KiB | {op} | {c['throughput_mib_s']:.0f} | {c['latency_p50_ms']:.2f} | {c['latency_p99_ms']:.2f} | "
-              f"{c.get('cpu_percent', 0):.0f} | {per_gib(c)} | {s.get('cpu_percent', 0) if s else 'n/a'} | {per_gib(s)} |")
+              f"{c.get('cpu_percent', 0):.0f} | {per_gib(c)} | {f"{s.get('cpu_percent', 0):.0f}" if s else 'n/a'} | {per_gib(s)} |")
 
 
 if __name__ == "__main__":
