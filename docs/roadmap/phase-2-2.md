@@ -21,7 +21,29 @@ ADR-0011; numbers: RFC-009 §6–§8.
 
 ## Results
 
-<!-- PHASE-2-2-RESULTS -->
+Numbers are in RFC-009; the summaries here are the decisions they support.
+
+- **R-47 (§6.8)**: the shipped policy (progress timeout 10 s, deadline
+  10 s + bytes / 256 KiB/s, 3 attempts, lease renewal while the upload
+  progresses) takes PUT success at 10 % loss from 4/12 to 12/12, a node
+  stopped for 20 s from 46/48 to 48/48, and 50 ms ± 10 ms jitter from
+  9/12 to 12/12, with 0 mismatches in every verify pass. A 5 s progress
+  timeout was measured and rejected (TCP's retransmission backoff at 10 %
+  loss exceeds it); a deadline without a rate term was measured and
+  rejected (fails every transfer on a slow link).
+- **Hit-ratio analysis (§6.9)**: every lookup hit was a served hit on a
+  healthy cluster (no degraded hits, no fallbacks of any cause). The hit
+  ratio differences between protection modes are the populated fraction,
+  which is population bandwidth under the in-flight bound (1× / 1.5× / 2×
+  bytes for none / ec 2+1 / replication 2). Raising the bound to 32
+  exposed the R-42 hot key (9–45 failed populations per pass), now fixed
+  with an atomic usage counter and a snapshot capacity check.
+- **Parallel chunk fetch (§6.10)**: at concurrency 1 the warm durable GET
+  gains 21 % (p95 halves) and the 100 %-hit GET 87 %; at concurrency 4
+  the gateway host is CPU-bound either way. Gateway RSS grows by about
+  one chunk.
+
+<!-- PHASE-2-2-RESULTS-2 -->
 
 ## Not verified
 

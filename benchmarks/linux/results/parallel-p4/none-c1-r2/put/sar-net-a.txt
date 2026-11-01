@@ -1,0 +1,53 @@
+Linux 7.0.0-38-generic (<host>) 	11/01/26 	_x86_64_	(4 CPU)
+
+19:15:17        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:18           lo     26.00     26.00      7.98      7.98      0.00      0.00      0.00      0.00
+19:15:18         eth0   1721.00    702.00  69820.11     60.33      0.00      0.00      0.00      0.00
+
+19:15:18        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:19           lo    145.00    145.00     38.66     38.66      0.00      0.00      0.00      0.00
+19:15:19         eth0   2989.00   1305.00 123206.34    109.89      0.00      0.00      0.00      0.00
+
+19:15:19        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:20           lo     26.00     26.00      7.98      7.98      0.00      0.00      0.00      0.00
+19:15:20         eth0   2744.00   1155.00 123193.64    101.16      0.00      0.00      0.00      0.00
+
+19:15:20        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:21           lo     46.00     46.00     13.25     13.25      0.00      0.00      0.00      0.00
+19:15:21         eth0   2829.00   1213.00 121834.69    102.05      0.00      0.00      0.00      0.00
+
+19:15:21        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:22           lo     34.00     34.00      9.75      9.75      0.00      0.00      0.00      0.00
+19:15:22         eth0   2973.00   1233.00 124562.15    105.02      0.00      0.00      0.00      0.00
+
+19:15:22        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:23           lo     46.00     46.00     13.25     13.25      0.00      0.00      0.00      0.00
+19:15:23         eth0   3090.00   1240.00 123208.17    103.83      0.00      0.00      0.00      0.00
+
+19:15:23        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:24           lo     90.00     90.00     22.79     22.79      0.00      0.00      0.00      0.00
+19:15:24         eth0   3189.00   1529.00 123220.76    124.31      0.00      0.00      0.00      0.00
+
+19:15:24        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:25           lo     52.00     52.00     14.92     14.92      0.00      0.00      0.00      0.00
+19:15:25         eth0   2979.00   1393.00 123200.99    113.68      0.00      0.00      0.00      0.00
+
+19:15:25        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:26           lo     27.00     27.00      8.03      8.03      0.00      0.00      0.00      0.00
+19:15:26         eth0   2979.00   1407.00 119106.95    115.81      0.00      0.00      0.00      0.00
+
+19:15:26        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:27           lo     46.00     46.00     13.25     13.25      0.00      0.00      0.00      0.00
+19:15:27         eth0   3232.00   1596.00 131415.70    127.52      0.00      0.00      0.00      0.00
+
+19:15:27        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:28           lo     26.00     26.00      7.98      7.98      0.00      0.00      0.00      0.00
+19:15:28         eth0   3034.00   1474.00 123209.71    120.93      0.00      0.00      0.00      0.00
+
+19:15:28        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:29           lo    151.00    151.00     40.18     40.18      0.00      0.00      0.00      0.00
+19:15:29         eth0   2743.00   1522.00 110887.88    120.59      0.00      0.00      0.00      0.00
+
+19:15:29        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+19:15:30           lo     26.00     26.00      7.98      7.98      0.00      0.00      0.00      0.00
+19:15:30         eth0   3321.00   1728.00 119123.87    134.84      0.00      0.00      0.00      0.00

@@ -146,6 +146,43 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     CI and `deploy/dev/fdb-test.sh`), `tiering.rs` (5).
   - RFC-006 Multi-Tier Storage draft with Phase 2 status; ADR-0009;
     Phase 2 roadmap page; risks R-41–R-45.
+- Phase 2.2 performance and resilience optimization:
+  - `arca-lake-protocol`: `RpcPolicy` for node RPCs (progress timeout for
+    stalled shard streams, absolute deadline `base + bytes / min_rate`,
+    bounded retries with backoff for transport errors, unary timeout),
+    `RpcStats` counters, `StallStream` / `SlowStream` fault actions;
+    frames handed to the transport one at a time.
+  - `arca-lake-storage-node`: `PutShard` streams whose client sends no
+    frame for `stream_progress_timeout` are aborted.
+  - `arca-lake-metadata`: `Txn::atomic_add` and `Txn::get_snapshot`
+    (FoundationDB atomic ADD and snapshot reads; in-memory equivalents);
+    cache usage kept by atomic addition with a snapshot capacity check
+    (R-42); `object::renew_lease` and `append_chunks_renewing`.
+  - `arca-lake-gateway`: bounded parallel chunk fetch with ordered
+    delivery (`read_parallelism`); lease renewal while an upload
+    progresses; hit accounting (lookup / served / degraded hits,
+    fallbacks by cause, admission rejections by cause, population
+    failures by cause); RPC counters exported with the cache counters.
+  - `arca-lake` CLI: `--node-timeout-secs`, `--node-progress-timeout-secs`,
+    `--node-min-rate-kib`, `--node-max-attempts`, `--read-parallelism`.
+  - Tests: `transport.rs` (retry after reset commits once, stalled stream
+    detected and retried while a slow one is not, absolute deadline,
+    repair stops after exhausted retries, slow upload renews its lease),
+    `parallel_read.rs` (parallelism 1/4/16 equivalence with cached,
+    uncached and degraded chunks, error behind prefetched chunks, dropped
+    body, retried populations under resets); every suite runs with
+    parallel reads; storage sigkill harness waits for the first ack.
+  - Measurement tooling: `repeat.sh` + `aggregate.py` (repetitions,
+    shuffled order, warm-up, median / min / max / sd), `transport-matrix.sh`
+    + `summarize_transport.py`, `diskbound.sh`, `summarize_hits.py`,
+    `summarize_faults.py`, `netns-faults.sh r47` (ten conditions against
+    a gateway policy; netem queue limit, two-way slow-node shaping),
+    `s3load --order random --first`, `two-host.sh` `GW_EXTRA_ARGS`,
+    `S3LOAD_EXTRA`, `SKIP_PUT`, `MIXED_PUT_OBJECTS`.
+  - RFC-009 §6.8–§6.13 (R-47 policy matrix, hit-ratio analysis, parallel
+    fetch, transport matrix, repeated comparison, disk-bound); RFC-006
+    §5.3 hit accounting and §5.4 snapshot capacity check; ADR-0011;
+    Phase 2.2 roadmap page.
 - Phase 2.1 cache protection and Linux validation:
   - `arca-lake-metadata`: `GroupRecord.role` (durable or cache),
     `chunk_record_of`, `live_generation_with_prefix`.

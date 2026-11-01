@@ -243,7 +243,92 @@ partition, a node rate-limited to 8 Mbit/s, a node stopped with
 p50 / p95 / p99, verify pass (missing / mismatches), and the gateway's
 RPC counters (stalled, deadline exceeded, retries, exhausted).
 
-<!-- R47-RESULTS -->
+Policies compared (all with the 8 MiB HTTP/2 windows; `old` reproduces
+the former behaviour exactly: one attempt, one 10 s bound):
+
+| Policy | Attempts | Progress timeout | Absolute deadline |
+| --- | --- | --- | --- |
+| old | 1 | 10 s (equivalent to the single bound) | 10 s |
+| new | 3 | 5 s | 10 s + bytes / 1 MiB/s |
+| newb | 3 | 10 s | 10 s |
+| newc | 3 | 10 s | 10 s + bytes / 256 KiB/s |
+| final | 3 | 10 s | 10 s + bytes / 256 KiB/s, **plus lease renewal while the upload progresses** (the shipped defaults, ADR-0011) |
+
+PUT success and the gateway's RPC counters per scenario
+(`summarize_faults.py results/r47/<policy>`; 12 objects × 8 MiB at
+concurrency 4 unless stated; "verify" = correct / missing / mismatched
+after the fault was removed):
+
+| Scenario | old | new | newb | newc | final |
+| --- | --- | --- | --- | --- | --- |
+| loss 0 % | 12/12, 134 MiB/s | 12/12, 244 MiB/s | 12/12, 162 MiB/s | 12/12, 100 MiB/s | 12/12, 158 MiB/s |
+| loss 2 % | 12/12, 69 MiB/s, p99 0.7 s | 12/12, 47 MiB/s, p99 0.8 s | 12/12, 72 MiB/s | 12/12, 45 MiB/s | 12/12, 68 MiB/s, p99 0.6 s |
+| loss 5 % | 12/12, 20 MiB/s, p99 2.2 s | 12/12, 14 MiB/s, p99 3.1 s | 12/12, 9 MiB/s | 12/12, 10 MiB/s, p99 4.9 s | 12/12, 10 MiB/s, p99 5.2 s |
+| loss 10 % | **4/12**, 41 deadline timeouts | **7/12**, 106 stalls, 102 retries, 5 exhausted | **4/12**, 95 deadline timeouts, 12 exhausted | **5/12**, 26 stalls, 27 retries, **0 exhausted**; the 7 failures were lease expiry and metadata timeouts (see below) | **12/12**, p50 27 s, p99 43 s, 61 stalls, 56 retries, 5 exhausted (all cache populations, abandoned) |
+| delay 50 ms, no jitter | 12/12, 5.7 MiB/s, p95 12 s | 12/12, 5.5 MiB/s, 8 stalls retried | 12/12, 9.8 MiB/s, 7 deadline retries | 12/12, 5.1 MiB/s, no timeouts | 12/12, 5.1 MiB/s, no timeouts |
+| delay 50 ms ± 10 ms jitter | 9/12 (3 deadline timeouts) | 12/12, 4 stalls retried | 12/12 | 12/12, no timeouts | 12/12, 4.7 MiB/s, no timeouts |
+| socket resets (96 objects) | 96/96 | 96/96, 1 retry | 96/96, 5 retries | 96/96, 8 retries | 96/96, 5 retries |
+| 10 s partition (160 objects, concurrency 2) | 157/160 | 158/160 | 158/160 | 157/160 | 159/160 (one metadata transaction timeout) |
+| node rate-limited to 8 Mbit/s both ways (4 objects) | 4/4, 1.8 MiB/s, p50 8.8 s, no timeouts | same | same | same | same |
+| node SIGSTOPped 20 s (48 objects, concurrency 2) | 46/48 (2 deadline) | 45/48 (6 stalls, 2 exhausted) | 46/48 | 46/48 (2 stalls, 2 retries) | **48/48** (2 stalls, 2 retries; p99 20 s) |
+
+Every verify pass in every run: 0 mismatches; every failed PUT left no
+object (atomic visibility and durable acknowledgment unchanged).
+
+What the counters show:
+
+- **The per-RPC timeout was the failure mode on lossy and jittery links**
+  (`old`: 41 deadline timeouts at 10 % loss, 3 under jitter), but a
+  *short* progress timeout is not the fix: at 10 % loss TCP's
+  retransmission backoff produces gaps longer than 5 s, so `new`
+  declared 106 stalls and restarted transfers that would have finished;
+  it still did better (7/12) because the retries eventually got through.
+- **A deadline without a rate term is the same cliff moved** (`newb`: 95
+  deadline timeouts, 12 exhausted at 10 % loss).
+- **Progress 10 s with a 256 KiB/s rate term removes shard-stream
+  failures** (`newc`: 0 exhausted at 10 % loss, no timeouts at all under
+  50 ms delay with or without jitter). The PUTs that still failed at
+  10 % loss failed in *metadata*: "generation lease expired", "no such
+  generation" (the pending generation had been expired and collected
+  while the shards were still uploading), and two FoundationDB
+  transaction timeouts across the lossy link. An upload slower than the
+  pending-generation lease (20 s in this harness) lost its generation.
+  That is the `final` change: the gateway renews the lease while chunks
+  keep arriving; a stalled upload still expires.
+- **Slow but progressing streams never time out** in any policy (8 Mbit/s
+  node: 8.8 s per object, 0 timeouts), which was the design goal.
+- **A stopped node is detected by the progress timeout**, and retrying a
+  node that is still stopped burns the attempts: `new` lost one more PUT
+  than `old` on the 20 s stop; `newc` matched `old`. Retries help for
+  transient faults (resets: 1–8 retries, 0 failures), not for a node
+  that stays down; the controller's health pass is the right tool for
+  that.
+- Throughput under loss varies ±40 % between runs of the same policy
+  (single runs; netem's random loss), so the MiB/s columns rank
+  policies only roughly; the success and counter columns are the
+  signal.
+
+Harness corrections made during this phase and now in
+`netns-faults.sh`: netem's default 1000-packet queue overflowed under
+plain 50 ms delay with 8 MiB windows and dropped packets of its own
+(`limit` raised); the slow-node case shaped only the node's egress
+(now both directions).
+
+**The final policy** (`results/r47/final`): 12/12 at 10 % loss, 48/48
+with a node stopped for 20 s, 159/160 across a 10 s partition, 96/96
+under resets, 12/12 under both delay profiles, 4/4 on the 8 Mbit/s node;
+0 mismatches in every verify pass. Two renewal designs were measured on
+the way: renewing once per chunk (between chunk uploads) still lost 5 of
+12 PUTs at 10 % loss, because one 4 MiB chunk's shard uploads with
+retries outlast the 20 s lease (p50 of a whole 8 MiB PUT at 10 % loss is
+27 s); renewing every third of the lease *while* the client's bytes
+arrive and *while* a chunk's shards are being uploaded lost none. The
+5 exhausted RPCs in that cell were cache-tier populations
+(`population_failures_node`), abandoned and retried on a later miss, not
+durable writes. The one failure across the partition was a FoundationDB
+transaction timeout at the gateway, outside the shard path. The 20 s p99
+in the stopped-node case is the progress timeout plus the retry that
+found the node still stopped.
 
 ### 6.9 Phase 2.2: cache hit-ratio analysis
 
@@ -253,7 +338,52 @@ concurrency 4, three GET passes with populations allowed to settle
 between passes, with 8 and with 32 in-flight populations per gateway;
 the counters of RFC-006 §5.3 "Hit accounting" before and after each pass.
 
-<!-- HIT-RESULTS -->
+Counters per pass (384 chunks per pass; `summarize_hits.py
+results/hit-analysis`), 8 in-flight populations:
+
+| Mode | Pass | Lookup hits | Served hits | Degraded | Fallbacks (any cause) | Misses | Populated | Skipped (no permit) | Population failures | Readable hit % |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| none | 1 / 2 / 3 | 0 / 145 / 205 | 0 / 145 / 205 | 0 | 0 | 384 / 239 / 179 | 145 / 60 / 122 | 239 / 179 / 57 | 0 | 0 / 38 / 53 |
+| replication 2 | 1 / 2 / 3 | 0 / 134 / 197 | 0 / 134 / 197 | 0 | 0 | 384 / 250 / 187 | 134 / 63 / 84 | 250 / 187 / 103 | 0 | 0 / 35 / 51 |
+| ec 2+1 | 1 / 2 / 3 | 0 / 144 / 196 | 0 / 144 / 196 | 0 | 0 | 384 / 240 / 188 | 144 / 52 / 104 | 240 / 188 / 84 | 0 | 0 / 38 / 51 |
+
+With 32 in-flight populations:
+
+| Mode | Pass 3 hits | Pass 3 populated | Pass 3 skipped | Population failures (metadata), passes 1 / 2 / 3 | Readable hit % |
+| --- | --- | --- | --- | --- | --- |
+| none | 261 | 114 | 0 | 35 / 45 / 9 | 68 |
+| replication 2 | 234 | 128 | 15 | 16 / 21 / 7 | 61 |
+| ec 2+1 | 223 | 67 | 82 | 29 / 29 / 12 | 58 |
+
+What the counters show:
+
+- **Every lookup hit was a served hit.** Lookup hits equal served hits
+  in all 36 passes; degraded hits and fallbacks of every cause are zero;
+  no admission was refused (unlimited capacity, no size cap, threshold
+  1); no copy was found stale, corrupt or missing. Protection mode does
+  not affect the *readability* of what is cached on a healthy cluster.
+- **The hit ratio is the populated fraction.** Misses in pass *n* are
+  exactly the chunks not yet populated; the only reason a miss did not
+  populate was the in-flight bound (`skipped`). Population throughput is
+  what differs: a population writes 1× (`none`), 1.5× (`ec 2+1`) or 2×
+  (`replication 2`) the chunk bytes to one, three or two members, so
+  with the same bound fewer coded or replicated populations complete per
+  pass. In this two-host layout the gap is small (145 / 134 / 144
+  chunks in pass 1); in the Phase 2.1 three-host run, where the
+  replicated members sat on two different hosts, it was 202 / 87 / 151,
+  which produced the 94 % / 60 % / 48–82 % figures.
+- **Raising the bound trades failures for coverage.** 32 in-flight
+  populations populate more per pass (none: 261 cached after pass 3
+  versus 205) but 9–45 populations per pass fail in the metadata
+  transaction: every insert adds to the one usage key of the tier, and
+  32 concurrent inserts conflict (the R-42 hot key, now observed). Each
+  such failure deletes its copy and is retried on a later miss; no
+  incorrect state results, but the work is wasted. The fix is in §6.14.
+- A fair comparison of protection modes therefore holds *populated
+  bytes* constant, not pass count: at equal populated bytes the modes
+  serve identical hit ratios; `replication 2` needs 2× and `ec 2+1`
+  1.5× the population bandwidth of `none` to reach the same coverage,
+  which is the capacity-efficiency trade RFC-006 §5.9 states.
 
 ### 6.10 Phase 2.2: parallel chunk fetch
 
@@ -261,7 +391,28 @@ Method: same layout as §6.9, durable only and cache `none`, concurrency
 1 and 4, `--read-parallelism 1` versus `4`, three repetitions each in
 shuffled order (`repeat.sh`).
 
-<!-- PARALLEL-RESULTS -->
+Three repetitions each, shuffled order, warm-up pass per setup
+(`results/parallel-p1`, `results/parallel-p4`; medians, min–max in the
+raw tables):
+
+| Configuration | Phase | `read_parallelism 1` MiB/s (p50 / p95 ms) | `read_parallelism 4` MiB/s (p50 / p95 ms) | Change |
+| --- | --- | --- | --- | --- |
+| durable, concurrency 1 | GET warm (pass 3) | 346 (33 / 69) | 417 (29 / 33) | +21 %, p95 −53 % |
+| durable, concurrency 4 | GET warm | 587 (96 / 122) | 561 (93 / 130) | within noise (CPU-bound) |
+| none, concurrency 1 | GET pass 1 (miss) | 278 (45 / 78) | 309 (41 / 47) | +11 % |
+| none, concurrency 1 | GET pass 3 (100 % hits) | 229 (52 / 111) | 428 (26 / 31) | **+87 %, p50 −50 %** |
+| none, concurrency 4 | GET pass 3 | 557 (98 / 129) at 71 % hits | 534 (99 / 142) at 49 % hits | within noise |
+
+Gateway host RSS: 91–103 MiB with parallelism 1, 95–109 MiB with 4
+(about one extra 4 MiB chunk in flight). PUT is unchanged by design; its
+run-to-run spread (sd 14–90 MiB/s) is the dominant noise in these tables.
+
+The cache hit at concurrency 1 now beats the durable read (428 versus
+417 MiB/s, p50 26 versus 29 ms), which reverses the Phase 2.1 finding:
+the hit's single 4 MiB RPC per chunk gained the most from reading the
+next chunks ahead, the durable read (two parallel 2 MiB shard RPCs per
+chunk) gained less, and at concurrency 4 the gateway host is CPU-bound
+either way.
 
 ### 6.11 Phase 2.2: gRPC transport matrix
 

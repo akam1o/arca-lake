@@ -1,0 +1,1 @@
+{"label":"part-get-after","op":"get","pass":1,"objects":4,"size":8388608,"concurrency":2,"range_bytes":0,"verify":true,"order":"sequential","duration_s":0.00157911,"ops":0,"bytes":0,"errors":0,"mismatches":0,"missing":4,"ops_per_s":0.0,"mib_per_s":0.0,"lat_ms_mean":0.0,"lat_ms_p50":0.0,"lat_ms_p90":0.0,"lat_ms_p95":0.0,"lat_ms_p99":0.0,"lat_ms_max":0.0}

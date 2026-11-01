@@ -1,0 +1,15 @@
+before:
+Recv-Q  Send-Q Local Address:Port  Peer Address:Port
+1242849 0          <addr>    <addr>
+Recv-Q  Send-Q Local Address:Port  Peer Address:Port
+1235156 0          <addr>    <addr>
+after:
+Recv-Q Send-Q Local Address:Port  Peer Address:Port
+107238 0          <addr>    <addr>
+before:
+Recv-Q Send-Q Local Address:Port  Peer Address:Port
+0      0          <addr>    <addr>
+Recv-Q  Send-Q Local Address:Port  Peer Address:Port
+2539406 0          <addr>    <addr>
+after:
+Recv-Q Send-Q Local Address:Port Peer Address:Port

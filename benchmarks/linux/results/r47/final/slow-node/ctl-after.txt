@@ -1,0 +1,44 @@
+# TYPE arca_controller_leader gauge
+arca_controller_leader 1
+# TYPE arca_controller_leader_token gauge
+arca_controller_leader_token 1
+# TYPE arca_controller_leader_acquired_total counter
+arca_controller_leader_acquired_total 1
+# TYPE arca_controller_leader_lost_total counter
+arca_controller_leader_lost_total 0
+# TYPE arca_controller_gc_passes_total counter
+arca_controller_gc_passes_total 167
+# TYPE arca_controller_gc_collected_total counter
+arca_controller_gc_collected_total 0
+# TYPE arca_controller_shards_deleted_total counter
+arca_controller_shards_deleted_total 21
+# TYPE arca_controller_gc_skipped_referenced_total counter
+arca_controller_gc_skipped_referenced_total 0
+# TYPE arca_controller_repairs_started_total counter
+arca_controller_repairs_started_total 0
+# TYPE arca_controller_repairs_completed_total counter
+arca_controller_repairs_completed_total 0
+# TYPE arca_controller_chunks_reconstructed_total counter
+arca_controller_chunks_reconstructed_total 0
+# TYPE arca_controller_task_errors_total counter
+arca_controller_task_errors_total 0
+# TYPE arca_controller_nodes_unhealthy gauge
+arca_controller_nodes_unhealthy 0
+# TYPE arca_controller_nodes_total gauge
+arca_controller_nodes_total 6
+# TYPE arca_controller_cache_evicted_total counter
+arca_controller_cache_evicted_total 0
+# TYPE arca_controller_cache_usage_bytes gauge
+arca_controller_cache_usage_bytes 2963275776
+# TYPE arca_controller_cache_over_watermark gauge
+arca_controller_cache_over_watermark 0
+# TYPE arca_controller_chunks_promoted_total counter
+arca_controller_chunks_promoted_total 0
+# TYPE arca_controller_chunks_demoted_total counter
+arca_controller_chunks_demoted_total 0
+# TYPE arca_controller_cache_repairs_started_total counter
+arca_controller_cache_repairs_started_total 0
+# TYPE arca_controller_cache_repairs_completed_total counter
+arca_controller_cache_repairs_completed_total 0
+# TYPE arca_controller_cache_chunks_reconstructed_total counter
+arca_controller_cache_chunks_reconstructed_total 0

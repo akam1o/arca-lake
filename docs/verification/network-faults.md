@@ -107,6 +107,17 @@ Findings carried into the design documents:
 - A mid-stream reset on one node during a GET is absorbed by the degraded
   read (F4).
 
+## Phase 2.2: the R-47 matrix
+
+`netns-faults.sh r47` runs loss 0 / 2 / 5 / 10 %, delay 50 ms with and
+without jitter, socket resets, a 10 s partition, a node rate-limited to
+8 Mbit/s in both directions, and a node stopped with `SIGSTOP` for 20 s,
+against the gateway policy given in `GW_EXTRA_ARGS`. Results and the
+policy comparison are in RFC-009 §6.8; the policy itself is ADR-0011.
+Two corrections to this harness came out of the first runs: netem's
+default queue limit (1000 packets) was overflowing under plain delay and
+is now raised, and the slow-node shaping covers both directions.
+
 ## What is not covered
 
 - Impairment on a physical NIC between two hosts (needs a change to an

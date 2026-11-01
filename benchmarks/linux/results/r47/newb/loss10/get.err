@@ -1,0 +1,17 @@
+error: loss10/00000000: HTTP 404 Not Found
+error: loss10/00000003: HTTP 404 Not Found
+error: loss10/00000001: HTTP 404 Not Found
+error: loss10/00000005: HTTP 404 Not Found
+error: loss10/00000006: HTTP 404 Not Found
+error: loss10/00000008: HTTP 404 Not Found
+error: loss10/00000007: HTTP 404 Not Found
+error: loss10/00000010: HTTP 404 Not Found
+error: error reading a body from connection
+error: loss10/00000000: HTTP 404 Not Found
+error: loss10/00000001: HTTP 404 Not Found
+error: loss10/00000003: HTTP 404 Not Found
+error: loss10/00000006: HTTP 404 Not Found
+error: loss10/00000005: HTTP 404 Not Found
+error: loss10/00000008: HTTP 404 Not Found
+error: loss10/00000007: HTTP 404 Not Found
+error: loss10/00000010: HTTP 404 Not Found
