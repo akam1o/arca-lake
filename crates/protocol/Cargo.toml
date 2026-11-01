@@ -9,6 +9,15 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+tonic = { workspace = true, features = ["codegen", "server", "channel", "transport"] }
+tonic-prost.workspace = true
+prost.workspace = true
+bytes.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+prost-build.workspace = true
+protoc-bin-vendored.workspace = true
 
 [lints]
 workspace = true

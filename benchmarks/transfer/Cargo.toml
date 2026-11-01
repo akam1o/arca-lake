@@ -1,0 +1,31 @@
+[package]
+name = "arca-lake-transfer-bench"
+description = "Shard transfer measurements: gRPC vs raw framed TCP, with and without TLS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "transfer-bench"
+path = "src/main.rs"
+
+[dependencies]
+arca-lake-protocol.workspace = true
+tonic = { workspace = true, features = ["codegen", "server", "channel", "transport", "router", "tls-ring"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time", "io-util", "fs"] }
+tokio-stream.workspace = true
+bytes.workspace = true
+crc32c.workspace = true
+clap.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true
