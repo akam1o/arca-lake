@@ -13,9 +13,9 @@ before Phase 1 commits to a design. It produces no user-facing product.
 | 0.4 protocol and transfer | done (loopback) | `arca-lake-protocol` (storage node API v1, vendored protoc), `benchmarks/transfer` (gRPC vs raw framed TCP, TLS, backpressure, CPU and RSS), [report](../../benchmarks/reports/2026-11-01-transfer-grpc-vs-raw.md) recommending gRPC with connection fan-out. Outstanding: confirmation on a real network between two hosts |
 | 0.5 metadata spike | backend done, measurements outstanding | `arca-lake-metadata`: KV abstraction with FoundationDB semantics, layout v1, write-protocol recipes, concurrency tests; FoundationDB backend (`fdb` feature) passing the protocol tests against a real single-process cluster in a container (`deploy/dev/fdb-test.sh`) and in CI. Outstanding: publishable latency/listing/hot-spot measurements on a described environment |
 | 0.6 S3 spike | functional part done | `arca-lake-gateway` on `s3s` with an in-memory backend; AWS CLI smoke test passes (SigV4, `s3 cp` with default checksums, range GET, metadata, `If-None-Match: *`, delimiter listing, CLI pagination, wrong-secret rejection). Outstanding: second SDK, overhead measurements (TLS, hashing), `s3s` findings for OD-06 |
-| 0.7 single-node harness | not started | |
-| 0.8 multi-node functional test | not started | |
-| 0.9 RFCs and ADRs | ADR-0001..0005 done; RFC-001/002/003/005 drafted | RFC-004 and the remaining RFCs outstanding; ADRs for OD-05..OD-10 await measurements |
+| 0.7 single-node harness | superseded | The Phase 1 in-process cluster harness (`arca-lake-testkit`) chains every component in one process; the single-node benchmark report with CPU breakdown is still outstanding |
+| 0.8 multi-node functional test | functional part done in-process | [Phase 1](phase-1.md) E2E tests run ≥ 3 storage nodes, kill and restart nodes, and verify degraded reads; the container variant and any benchmark are outstanding |
+| 0.9 RFCs and ADRs | ADR-0001..0006 done; RFC-001..005 drafted | RFC-006..009 outstanding; ADRs for OD-05, OD-06, OD-07, OD-09, OD-10 await measurements |
 
 ## Scope
 

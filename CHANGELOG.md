@@ -50,3 +50,30 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   gRPC and raw framed TCP, with and without TLS, with backpressure, CPU, and
   RSS accounting, plus a driver script and summarizer (Phase 0 task 0.4).
 - RFC-001, RFC-002, RFC-003, RFC-005 drafts; storage group-commit report.
+- RFC-004 Erasure Coding and Placement draft (Phase 1).
+- `arca-lake-protocol`: `DeleteShard`, `ListShards`, `UpdateGroupEpoch`,
+  `Health` RPCs with documented epoch-rejection semantics; `NodeClients`
+  convenience client.
+- `arca-lake-metadata`: node and stripe-group records, cluster-map version,
+  generation-prefix ranges for orphan attribution; `transact` takes an
+  explicit environment and boxed `Send` futures.
+- `arca-lake-common`: `EcProfile` with validation and fault-tolerance
+  statement; chunk ID = generation prefix + index.
+- `arca-lake-placement`: failure-domain-aware group member and replacement
+  choice, write-group selection.
+- `arca-lake-storage-node`: gRPC service over the storage engine with
+  persisted per-group epochs and fencing.
+- `arca-lake-gateway`: `ClusterBackend` implementing the distributed write
+  protocol (generation → erasure coding → parallel durable shard writes →
+  batched manifest → atomic commit) and the read protocol (manifest →
+  shards → decode → verify → stream) with small-object replication and
+  fault-injection points.
+- `arca-lake-controller`: stripe-group bootstrap, garbage collection
+  (lease expiry, retired generations, node-driven orphan reconciliation),
+  and member replacement with reconstruction.
+- `arca-lake-testkit`: in-process cluster harness and 18 end-to-end tests
+  covering concurrent and conditional writes, degraded reads, corruption,
+  repair, fencing, crashes around the commit, and orphan GC.
+- `arca-lake-storage`: `index_rebuild` example measuring index rebuild on
+  open; `format::crc32c` helper.
+- ADR-0006 (Phase 1 integration decisions); Phase 1 roadmap page.

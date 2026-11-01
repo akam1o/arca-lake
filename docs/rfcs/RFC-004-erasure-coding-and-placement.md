@@ -343,11 +343,30 @@ epoch. All are idempotent.
 - Whether to store `under_protected` per chunk or per group.
 - Repair prioritization when several groups are degraded.
 
-## 11. Acceptance criteria
+## 11. Acceptance criteria and Phase 1 status
 
-- Phase 1 E2E tests: write and read through ≥ 3 storage nodes with an RS
-  profile; GET with one node stopped; GET with a corrupted shard; repair of
-  a replaced member followed by byte-identical reads; stale-epoch write
-  rejected and retried; orphan shards reclaimed.
-- `--check-config` prints the fault-tolerance statement for every profile
-  and rejects profiles the topology cannot satisfy.
+Implemented in Phase 1 (`arca-lake-gateway::cluster`, `arca-lake-controller`,
+`arca-lake-storage-node`, `arca-lake-placement`) and exercised by
+`crates/testkit/tests/e2e.rs` on an in-process cluster (in-memory metadata
+backend, real storage engines and gRPC):
+
+| Criterion | Status |
+| --- | --- |
+| Write and read through ≥ 3 storage nodes with an RS profile (2+1, multi-chunk objects, range reads) | *Verified* |
+| Small objects placed on `replication-v1` groups; readable with two of three members stopped | *Verified* |
+| GET with one node stopped decodes from `k` shards; with fewer than `k` reachable the request fails explicitly | *Verified* |
+| Corrupt shard reported by the node as `DataLoss`, decoded around; two corrupt shards of a 2+1 chunk fail explicitly | *Verified* |
+| Repair of a replaced member: epoch bump, reconstruction of exactly the missing shards, byte-identical reads with another member down, new writes carry the new epoch, re-run is a no-op | *Verified* |
+| Stale-epoch writes rejected by nodes and by the gateway path until the membership commits | *Verified* |
+| Orphan shards reclaimed: generation-driven (abort, expiry, overwrite, delete) and node-driven reconciliation by generation prefix and age; young orphans kept | *Verified* |
+| `m_ack < m` (under-protected chunks) | Not implemented; `m_ack = m` enforced (OD-17) |
+| Failure-domain-aware group creation | *Verified* at unit level (`arca-lake-placement`); E2E clusters use one device per host |
+| Capacity-weighted group choice | Not implemented (free capacity is not reported yet; groups are rotated) |
+| Health detection, automatic repair triggering, rate limiting | Not implemented; repair and GC are driven explicitly |
+| `ListShards` pagination | Not implemented (whole list per group) |
+| Rebalancing and profile change (migration, RFC-006) | Not implemented |
+| `--check-config` fault-tolerance statement | `EcProfile::fault_tolerance_statement` exists; not wired to a CLI flag |
+
+Behaviour exercised by the E2E tests but outside this RFC's scope is listed
+in RFC-003 (concurrent and conditional PUT, GET during PUT, DELETE during
+GET, crashes around the commit).

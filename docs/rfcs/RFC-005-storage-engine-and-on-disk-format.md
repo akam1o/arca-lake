@@ -186,9 +186,18 @@ server hardware: NVMe flush latency is far lower, so the gap between
 `Always` and `Group` shrinks but remains under high concurrency; `O_DIRECT`
 and io_uring may reduce CPU per byte (to be measured, OD-09).
 
+Index rebuild on open (*Verified* on a laptop with a warm page cache,
+relative only; [report](../../benchmarks/reports/2026-11-01-storage-index-rebuild.md)):
+linear in records and bytes scanned; on the order of 10^6 records per second.
+A persisted index is therefore not needed at Phase 1 scale (ADR-0006).
+*Hypothesis*: with a cold cache on a full large device the scan is bounded
+by sequential read bandwidth; that measurement decides whether and when a
+persisted index is worth a second source of truth.
+
 ## 10. Open questions
 
-- Persisted index for fast open on large devices.
+- Persisted index: decided against for Phase 1 (ADR-0006); revisit with a
+  cold-cache measurement on server hardware.
 - `O_DIRECT` and io_uring backends (OD-09).
 - CRC32C vs CRC64-NVME for blocks (OD-10).
 - Tombstone retirement when `min_seq` tracking is coarse (e.g., long-lived

@@ -170,12 +170,23 @@ store commit versions instead of wall clock is OD-16.
 
 ### 5.7 Record encoding
 
-Records are `postcard` with a leading version byte (prototype). This is
-compact but not schema-evolvable; adding a field means a new record version
-and a decoder for the old one. Decision for Phase 1: keep postcard with
-explicit versioning, or switch to protobuf for self-description at the cost
-of size. Either way every record carries a version and unknown versions are
-explicit errors, never silent defaults.
+Records are `postcard` with a leading version byte. Phase 1 evaluated the
+alternatives and keeps this choice (ADR-0006):
+
+| Criterion | postcard + version byte (**kept**) | protobuf |
+| --- | --- | --- |
+| Size | Minimal: varints, no field tags, no length prefixes for fixed arrays. Matters because chunk records are the bulk of metadata and are charged against FoundationDB's transaction budget (§5.3). | Field tags and length prefixes on every field and nested message; larger per record (not measured in Phase 1). |
+| Schema evolution | Any change is a new record version with an explicit decoder for every older version. Adding a field is never silent. | Unknown fields are skipped and missing fields take defaults, which is exactly what RFC-002 forbids for metadata (an unknown version must be an explicit error). The flexibility would have to be disabled by convention. |
+| Self-description | None; tooling needs the schema of the version it reads. Acceptable: records are read only by arca-lake code, and `arca-lake-cli` ships every decoder. | Readable with generic tooling and `.proto` files. |
+| Cross-language | Rust only (serde). Metadata is internal; the external surfaces are S3 and the gRPC node API, which already uses protobuf. | Yes. |
+| Toolchain | serde derive; no code generation. | protoc (already vendored for the node API); generated structs would need a mapping layer to the record types used by the recipes. |
+
+Rules that make the choice safe: every record starts with a version byte;
+decoders match the version exactly and return `Codec` errors otherwise;
+golden encodings of every record version are kept in tests
+(`records.rs::roundtrip_and_version_check`) so that a change to a struct
+fails CI unless a new version is introduced. The gRPC node API stays
+protobuf because it crosses processes and releases (RFC-004 §5.13).
 
 ## 6. Alternatives considered
 
@@ -222,9 +233,11 @@ explicit errors, never silent defaults.
 
 - OD-05 final confirmation (measurements on a described environment).
 - OD-16 grace-period measurement.
-- Record encoding (§5.7).
 - Whether `append_chunks` should use FoundationDB's `get_approximate_size`
   instead of the static estimate.
+- The Phase 1 end-to-end tests drive the full protocol against the
+  in-memory backend; against FoundationDB only the recipe-level protocol
+  tests run (CI job). A FoundationDB-backed end-to-end run is outstanding.
 
 ## 11. Acceptance criteria
 
