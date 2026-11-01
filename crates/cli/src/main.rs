@@ -75,6 +75,55 @@ impl ProfileArgs {
     }
 }
 
+/// Read-through cache tier (RFC-006). Absent `--cache-tier` disables it.
+#[derive(Debug, clap::Args)]
+struct CacheArgs {
+    /// Name of the cache tier (its cache groups are created with
+    /// `admin create-cache-groups`).
+    #[arg(long = "cache-tier")]
+    tier: Option<String>,
+    /// Capacity of the cache tier in bytes (0 = unlimited, no eviction).
+    #[arg(long = "cache-capacity-bytes", default_value_t = 0)]
+    capacity_bytes: u64,
+    /// Fraction of the capacity above which eviction starts and admissions
+    /// are rejected.
+    #[arg(long = "cache-high-watermark", default_value_t = 0.9)]
+    high_watermark: f64,
+    /// Fraction of the capacity eviction aims for.
+    #[arg(long = "cache-low-watermark", default_value_t = 0.8)]
+    low_watermark: f64,
+    /// Chunks larger than this are never cached (0 = no limit).
+    #[arg(long = "cache-max-chunk-bytes", default_value_t = 0)]
+    max_chunk_bytes: u64,
+    /// Admit a chunk after this many misses observed by one gateway
+    /// (0 or 1 = on the first miss).
+    #[arg(long = "cache-admit-after-misses", default_value_t = 1)]
+    admit_after_misses: u32,
+}
+
+impl CacheArgs {
+    fn config(&self) -> Result<Option<arca_lake_tiering::cache::CacheTierConfig>, String> {
+        let Some(tier) = self.tier.clone() else {
+            return Ok(None);
+        };
+        let ok = |f: f64| (0.0..=1.0).contains(&f);
+        if !ok(self.high_watermark)
+            || !ok(self.low_watermark)
+            || self.low_watermark > self.high_watermark
+        {
+            return Err("cache watermarks must satisfy 0 <= low <= high <= 1".into());
+        }
+        Ok(Some(arca_lake_tiering::cache::CacheTierConfig {
+            tier,
+            capacity_bytes: self.capacity_bytes,
+            high_watermark: self.high_watermark,
+            low_watermark: self.low_watermark,
+            max_cacheable_bytes: self.max_chunk_bytes,
+            admit_after_misses: self.admit_after_misses,
+        }))
+    }
+}
+
 #[derive(Debug, clap::Args)]
 struct GatewayArgs {
     /// Address to listen on.
@@ -104,8 +153,13 @@ struct GatewayArgs {
     /// Pending-generation lease in seconds.
     #[arg(long, default_value_t = 300)]
     lease_secs: u64,
+    /// Durable tier that writes target.
+    #[arg(long, default_value = "default")]
+    tier: String,
     #[command(flatten)]
     profile: ProfileArgs,
+    #[command(flatten)]
+    cache: CacheArgs,
 }
 
 #[derive(Debug, clap::Args)]
@@ -160,6 +214,27 @@ struct ControllerArgs {
     /// Failure domain label for replacement choice.
     #[arg(long, default_value = "host")]
     failure_domain: String,
+    #[command(flatten)]
+    cache: CacheArgs,
+    /// Eviction pass interval in seconds.
+    #[arg(long, default_value_t = 10)]
+    evict_interval_secs: u64,
+    /// Durable tiers from coldest to hottest for automatic promotion and
+    /// demotion (RFC-006 §5.8); fewer than two disables tiering.
+    #[arg(long = "tiering-tier")]
+    tiering_tiers: Vec<String>,
+    /// Promote a generation read at least this many times within the window.
+    #[arg(long, default_value_t = 10)]
+    tiering_promote_reads: u64,
+    /// Promotion window in seconds.
+    #[arg(long, default_value_t = 3_600)]
+    tiering_promote_window_secs: u64,
+    /// Demote a generation not read for this many seconds.
+    #[arg(long, default_value_t = 86_400)]
+    tiering_demote_after_secs: u64,
+    /// Tiering pass interval in seconds.
+    #[arg(long, default_value_t = 300)]
+    tiering_interval_secs: u64,
 }
 
 #[derive(Debug, clap::Args)]
@@ -185,13 +260,29 @@ enum AdminCommand {
         #[arg(long, default_value = "0")]
         devices: Vec<u32>,
     },
-    /// Create stripe groups for the profile.
+    /// Create stripe groups for the profile on a durable tier.
     CreateGroups {
         /// Groups per scheme.
         #[arg(long, default_value_t = 1)]
         count: usize,
+        /// Durable tier name recorded on the groups.
+        #[arg(long, default_value = "default")]
+        tier: String,
+        /// Only use nodes whose `device_class` label equals this value.
+        #[arg(long)]
+        device_class: Option<String>,
         #[command(flatten)]
         profile: ProfileArgs,
+    },
+    /// Create one cache group per device of every node of a device class
+    /// (RFC-006 §5.1).
+    CreateCacheGroups {
+        /// Cache tier name.
+        #[arg(long)]
+        tier: String,
+        /// `device_class` label of the nodes to use.
+        #[arg(long)]
+        device_class: String,
     },
     /// Print nodes, groups, and the leader record.
     Status,
@@ -267,6 +358,10 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
         }
         _ => return fail("provide --access-key/--secret-key or --allow-anonymous"),
     };
+    let cache = match args.cache.config() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
     let cfg = arca_lake_gateway::GatewayConfig {
         listen: args.listen,
         credentials,
@@ -283,12 +378,12 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
             meta,
             arca_lake_gateway::cluster::ClusterConfig {
                 profile: args.profile.profile(),
-                tier: "default".into(),
+                tier: args.tier.clone(),
                 lease: Duration::from_secs(args.lease_secs),
                 chunk_batch: 64,
                 shard_frame_bytes: 256 << 10,
                 node_timeout: Duration::from_secs(10),
-                cache: None,
+                cache,
             },
         )
         .await
@@ -344,6 +439,21 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.health_interval = Duration::from_secs(args.health_interval_secs);
     cfg.failure_domain = args.failure_domain;
     cfg.http_listen = args.http;
+    match args.cache.config() {
+        Ok(Some(c)) => cfg.cache_tiers = vec![c],
+        Ok(None) => {}
+        Err(e) => return fail(e),
+    }
+    cfg.evict_interval = Duration::from_secs(args.evict_interval_secs);
+    if args.tiering_tiers.len() >= 2 {
+        cfg.tiering = Some(arca_lake_controller::tiering::TieringPolicy {
+            tiers: args.tiering_tiers,
+            promote_reads: args.tiering_promote_reads,
+            promote_window: Duration::from_secs(args.tiering_promote_window_secs),
+            demote_after: Duration::from_secs(args.tiering_demote_after_secs),
+        });
+    }
+    cfg.tiering_interval = Duration::from_secs(args.tiering_interval_secs);
     let handle = match arca_lake_controller::process::spawn(meta, cfg).await {
         Ok(h) => h,
         Err(e) => return fail(format!("cannot start the controller: {e}")),
@@ -397,26 +507,51 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 Err(e) => fail(e),
             }
         }
-        AdminCommand::CreateGroups { count, profile } => {
+        AdminCommand::CreateGroups {
+            count,
+            tier,
+            device_class,
+            profile,
+        } => {
             let p = profile.profile();
             if let Err(e) = p.validate() {
                 return fail(e);
             }
             println!("{}", p.fault_tolerance_statement());
-            match arca_lake_controller::groups::create_groups(meta.as_ref(), &p, "default", count)
-                .await
+            let created = match device_class {
+                Some(class) => {
+                    arca_lake_controller::groups::create_groups_for_class(
+                        meta.as_ref(),
+                        &p,
+                        &tier,
+                        &class,
+                        count,
+                    )
+                    .await
+                }
+                None => {
+                    arca_lake_controller::groups::create_groups(meta.as_ref(), &p, &tier, count)
+                        .await
+                }
+            };
+            match created {
+                Ok(groups) => {
+                    print_groups(&groups);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        AdminCommand::CreateCacheGroups { tier, device_class } => {
+            match arca_lake_controller::groups::create_cache_groups(
+                meta.as_ref(),
+                &tier,
+                &device_class,
+            )
+            .await
             {
                 Ok(groups) => {
-                    for g in groups {
-                        println!(
-                            "group {} {} {}+{} members {:?}",
-                            g.id,
-                            g.scheme,
-                            g.data_shards,
-                            g.parity_shards,
-                            g.members.iter().map(|m| m.node_id).collect::<Vec<_>>()
-                        );
-                    }
+                    print_groups(&groups);
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(e),
@@ -436,8 +571,9 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                     }
                     for g in groups {
                         println!(
-                            "group {} {} {}+{} epoch {} {:?} members {:?}",
+                            "group {} tier {} {} {}+{} epoch {} {:?} members {:?}",
                             g.id,
+                            g.tier,
                             g.scheme,
                             g.data_shards,
                             g.parity_shards,
@@ -463,5 +599,19 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 ),
             }
         }
+    }
+}
+
+fn print_groups(groups: &[arca_lake_metadata::records::GroupRecord]) {
+    for g in groups {
+        println!(
+            "group {} tier {} {} {}+{} members {:?}",
+            g.id,
+            g.tier,
+            g.scheme,
+            g.data_shards,
+            g.parity_shards,
+            g.members.iter().map(|m| m.node_id).collect::<Vec<_>>()
+        );
     }
 }
