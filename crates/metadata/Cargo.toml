@@ -24,6 +24,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
+proptest.workspace = true
 
 [[test]]
 name = "fdb"

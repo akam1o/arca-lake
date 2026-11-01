@@ -157,7 +157,10 @@ pub fn pending(lease_until_ms: u64, generation: &GenId) -> Key {
 /// Pending-generation entries whose lease expired at or before `now_ms`.
 #[must_use]
 pub fn pending_expired_range(now_ms: u64) -> KeyRange {
-    KeyRange::new(pack(&(ROOT, "pend")), pack(&(ROOT, "pend", now_ms + 1)))
+    KeyRange::new(
+        pack(&(ROOT, "pend")),
+        pack(&(ROOT, "pend", now_ms.saturating_add(1))),
+    )
 }
 
 /// Retired-generation queue entry.
@@ -169,7 +172,10 @@ pub fn retired(since_ms: u64, generation: &GenId) -> Key {
 /// Retired-generation entries retired at or before `cutoff_ms`.
 #[must_use]
 pub fn retired_until_range(cutoff_ms: u64) -> KeyRange {
-    KeyRange::new(pack(&(ROOT, "gc")), pack(&(ROOT, "gc", cutoff_ms + 1)))
+    KeyRange::new(
+        pack(&(ROOT, "gc")),
+        pack(&(ROOT, "gc", cutoff_ms.saturating_add(1))),
+    )
 }
 
 /// Every arca-lake key (for test setup and teardown).
