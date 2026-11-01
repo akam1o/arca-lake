@@ -123,9 +123,12 @@ start_controller() {
 }
 
 # ---- impairments (veth ends inside the namespaces only) ----
+# netem's default queue holds 1000 packets; with 8 MiB HTTP/2 windows and
+# several streams a 50 ms delay alone overflows it and netem itself drops
+# packets. A large limit keeps the impairment to what the spec says.
 impair() { # <netem spec>, both directions
-  root1 tc qdisc replace dev "$V1" root netem $*
-  root2 tc qdisc replace dev "$V2" root netem $*
+  root1 tc qdisc replace dev "$V1" root netem limit 1000000 $*
+  root2 tc qdisc replace dev "$V2" root netem limit 1000000 $*
 }
 bandwidth() { # <rate>
   root1 tc qdisc replace dev "$V1" root tbf rate "$1" burst 64kb latency 400ms
@@ -141,11 +144,18 @@ clear_impairment() {
 # untouched. `slow_node off` removes it.
 slow_node() { # on <rate> | off
   if [ "$1" = on ]; then
+    # Both directions of d0's traffic: what it sends (sport 9100, on the
+    # namespace-1 end) and what it receives (dport 9100, on the
+    # namespace-2 end).
     root1 tc qdisc replace dev "$V1" root handle 1: prio bands 3 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
     root1 tc qdisc add dev "$V1" parent 1:1 handle 10: tbf rate "$2" burst 32kb latency 400ms
     root1 tc filter add dev "$V1" parent 1: protocol ip prio 1 u32 match ip sport 9100 0xffff flowid 1:1
+    root2 tc qdisc replace dev "$V2" root handle 1: prio bands 3 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    root2 tc qdisc add dev "$V2" parent 1:1 handle 10: tbf rate "$2" burst 32kb latency 400ms
+    root2 tc filter add dev "$V2" parent 1: protocol ip prio 1 u32 match ip dport 9100 0xffff flowid 1:1
   else
     root1 tc qdisc del dev "$V1" root 2>/dev/null || true
+    root2 tc qdisc del dev "$V2" root 2>/dev/null || true
   fi
 }
 stall_node() { # <name> on|off  (SIGSTOP keeps connections open with no progress)

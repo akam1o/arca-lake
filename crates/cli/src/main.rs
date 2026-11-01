@@ -143,9 +143,10 @@ struct NodeRpcArgs {
     /// A shard stream with no frame moving for this long is aborted, s.
     #[arg(long = "node-progress-timeout-secs", default_value_t = 5)]
     node_progress_timeout_secs: u64,
-    /// Minimum transfer rate added to the absolute deadline, MiB/s (0 = none).
-    #[arg(long = "node-min-rate-mib", default_value_t = 1)]
-    node_min_rate_mib: u64,
+    /// Minimum transfer rate that extends the absolute deadline of a shard
+    /// stream, KiB/s (0 = the deadline is the timeout alone).
+    #[arg(long = "node-min-rate-kib", default_value_t = 1024)]
+    node_min_rate_kib: u64,
     /// Attempts per shard RPC on transport errors (1 = no retry).
     #[arg(long = "node-max-attempts", default_value_t = 3)]
     node_max_attempts: u32,
@@ -159,7 +160,7 @@ impl NodeRpcArgs {
             unary_timeout: timeout,
             progress_timeout: Duration::from_secs(self.node_progress_timeout_secs.max(1)),
             base_deadline: timeout,
-            min_rate_bytes_per_s: self.node_min_rate_mib << 20,
+            min_rate_bytes_per_s: self.node_min_rate_kib << 10,
             max_attempts: self.node_max_attempts.max(1),
             backoff: Duration::from_millis(100),
         }

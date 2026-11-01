@@ -26,6 +26,7 @@
 # run options (environment): OBJECTS (32) SIZE (16 MiB) CONC (4) PASSES (3)
 #   RANGE_BYTES (0) OUT (benchmarks/linux/results)
 # setup options (environment): CHUNK_BYTES (4 MiB) CACHE_CAPACITY (0 = unlimited)
+#   CACHE_MAX_POPULATIONS (8) GW_EXTRA_ARGS (extra gateway flags, e.g. --read-parallelism 1)
 set -euo pipefail
 
 : "${HOST_A:?ssh target of host A (user@host)}"
@@ -133,7 +134,7 @@ cmd_setup() {
     cache_args="--cache-tier fast --cache-capacity-bytes $CACHE_CAPACITY --cache-high-watermark 0.9 --cache-low-watermark 0.8 --cache-max-populations ${CACHE_MAX_POPULATIONS:-8}"
   fi
   start sa controller "$BIN controller --cluster-file $CLUSTER_FILE --id ctl-a --http 127.0.0.1:9901 --failure-domain node --evict-interval-secs 2 --gc-interval-secs 10 --gc-grace-secs 30 $cache_args"
-  start sg gateway "$BIN gateway --backend cluster --cluster-file $CLUSTER_FILE --allow-anonymous --listen $ADDR_G:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node $cache_args"
+  start sg gateway "$BIN gateway --backend cluster --cluster-file $CLUSTER_FILE --allow-anonymous --listen $ADDR_G:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node $cache_args ${GW_EXTRA_ARGS:-}"
   sleep 2
   sa "$ADMIN status" | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g'
   echo "mode=$mode chunk_bytes=$CHUNK_BYTES cache_capacity=$CACHE_CAPACITY hosts=$( [ -n "$HOST_C" ] && echo 3 || echo 2 )" > /tmp/arca-two-host.mode
