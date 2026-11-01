@@ -187,6 +187,8 @@ cmd_run() {
   cp /tmp/arca-two-host.mode "$dir/mode.txt" 2>/dev/null || true
   echo "objects=$objects size=$size concurrency=$conc passes=$passes range_bytes=$range" > "$dir/params.txt"
   local ep="http://$ADDR_G:9000"
+  # PREFIX: key prefix for the PUT and GET phases (phases that must not
+  # overwrite another phase's objects use different prefixes);
   # S3LOAD_EXTRA: extra s3load flags for the GET passes (e.g. --order random);
   # SKIP_PUT=1: reuse the objects of a previous run with the same key space;
   # MIXED_PUT_OBJECTS=N: during every GET pass, PUT N objects under another
@@ -194,7 +196,7 @@ cmd_run() {
   local extra="${S3LOAD_EXTRA:-}"
   sg "$S3LOAD --endpoint $ep --bucket bench --op create-bucket" >/dev/null
   if [ "${SKIP_PUT:-0}" != 1 ]; then
-    with_sar "$dir/put" sg "$S3LOAD --endpoint $ep --bucket bench --op put --objects $objects --size $size --concurrency $conc --label $label-put" > "$dir/put.jsonl"
+    with_sar "$dir/put" sg "$S3LOAD --endpoint $ep --bucket bench --op put ${PREFIX:+--prefix $PREFIX} --objects $objects --size $size --concurrency $conc --label $label-put" > "$dir/put.jsonl"
     cat "$dir/put.jsonl"
     sleep 2
   fi
@@ -204,7 +206,7 @@ cmd_run() {
     if [ -n "${MIXED_PUT_OBJECTS:-}" ]; then
       (sg "$S3LOAD --endpoint $ep --bucket bench --op put --prefix mixed$p --objects $MIXED_PUT_OBJECTS --size $size --concurrency $conc --label $label-mixedput$p" > "$dir/mixedput$p.jsonl" 2>/dev/null || true) &
     fi
-    with_sar "$dir/get$p" sg "$S3LOAD --endpoint $ep --bucket bench --op get --objects $objects --size $size --concurrency $conc --range-bytes $range --verify --label $label-get$p $extra" > "$dir/get$p.jsonl"
+    with_sar "$dir/get$p" sg "$S3LOAD --endpoint $ep --bucket bench --op get ${PREFIX:+--prefix $PREFIX} --objects $objects --size $size --concurrency $conc --range-bytes $range --verify --label $label-get$p $extra" > "$dir/get$p.jsonl"
     wait
     cat "$dir/get$p.jsonl"
     [ -f "$dir/mixedput$p.jsonl" ] && cat "$dir/mixedput$p.jsonl"

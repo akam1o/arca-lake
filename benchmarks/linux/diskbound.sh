@@ -37,8 +37,10 @@ mem "$OUT/mem-after-put.txt"
 SKIP_PUT=1 OBJECTS=$LARGE_OBJECTS SIZE=$((16 * MIB)) CONC=4 PASSES=2 S3LOAD_EXTRA="--order random" bash "$TH" run large-random 2>&1 | grep -E '^\{' | cut -c1-110
 mem "$OUT/mem-after-random.txt"
 echo "== small objects: $SMALL_COUNT × 256 KiB, sequential and random"
-OBJECTS=$SMALL_COUNT SIZE=$((256 * 1024)) CONC=8 PASSES=1 bash "$TH" run small-seq 2>&1 | grep -E '^\{' | cut -c1-110
-SKIP_PUT=1 OBJECTS=$SMALL_COUNT SIZE=$((256 * 1024)) CONC=8 PASSES=2 S3LOAD_EXTRA="--order random" bash "$TH" run small-random 2>&1 | grep -E '^\{' | cut -c1-110
+# Under their own prefix: the default key space holds the large objects,
+# which the mixed phase below reads again.
+PREFIX=small OBJECTS=$SMALL_COUNT SIZE=$((256 * 1024)) CONC=8 PASSES=1 bash "$TH" run small-seq 2>&1 | grep -E '^\{' | cut -c1-110
+PREFIX=small SKIP_PUT=1 OBJECTS=$SMALL_COUNT SIZE=$((256 * 1024)) CONC=8 PASSES=2 S3LOAD_EXTRA="--order random" bash "$TH" run small-random 2>&1 | grep -E '^\{' | cut -c1-110
 echo "== concurrent PUT and GET (large, concurrency 4 each)"
 SKIP_PUT=1 OBJECTS=$LARGE_OBJECTS SIZE=$((16 * MIB)) CONC=4 PASSES=1 S3LOAD_EXTRA="--order random" MIXED_PUT_OBJECTS=256 bash "$TH" run mixed 2>&1 | grep -E '^\{' | cut -c1-110
 mem "$OUT/mem-after.txt"
