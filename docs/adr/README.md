@@ -14,3 +14,4 @@ Short, immutable records of decisions. Use [the template](0000-template.md).
 | [0008](0008-leader-election-and-deletion-epochs.md) | Leader election on the metadata store, deletion epochs, verified repair completion | accepted |
 | [0009](0009-multi-tier-storage-decisions.md) | Multi-tier storage: cache placements, admission and eviction, migration | accepted |
 | [0010](0010-cache-protection.md) | Cache protection: group roles, coded cache copies, subordinate cache repair | accepted |
+| [0011](0011-rpc-policy-and-parallel-reads.md) | Progress-based shard stream deadlines, retries, and bounded parallel reads | accepted |

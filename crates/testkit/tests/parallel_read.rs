@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use arca_lake_common::chunk_id;
+use arca_lake_metadata::records::GroupRecord;
 use arca_lake_testkit::s3::{self, PutOptions};
 use arca_lake_testkit::{ClusterOptions, TestCluster, random_bytes};
 use bytes::Bytes;
@@ -177,5 +178,98 @@ async fn dropping_the_body_cancels_the_prefetch_and_later_reads_succeed() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let (got, _) = s3::get(&c.backend, BUCKET, "o").await.unwrap();
     assert_eq!(got, data);
+    c.shutdown().await;
+}
+
+/// Cache populations that hit a transient reset on one member are retried
+/// by the client; each chunk is recorded once, every member holds exactly
+/// one shard per chunk, and the next read is a validated hit.
+#[tokio::test]
+async fn population_retried_after_resets_records_each_chunk_once() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use arca_lake_protocol::client::{FaultAction, Rpc};
+
+    let c = cluster(4).await;
+    let data = payload(6, 4);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let cache_group = c
+        .groups()
+        .await
+        .into_iter()
+        .find(GroupRecord::is_cache)
+        .unwrap();
+    let cache_addr = c.nodes[c.node_index(&cache_group.members[0]).unwrap()]
+        .addr
+        .to_string();
+    // Every first PutShard of a chunk to the cache member is reset once.
+    let seen = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let resets = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&resets);
+    c.backend
+        .node_clients()
+        .set_fault_hook(Some(Arc::new(move |ctx| {
+            if ctx.rpc == Rpc::PutShard
+                && ctx.addr == cache_addr
+                && let Some(shard) = ctx.shard
+                && seen.lock().unwrap().insert(shard.chunk_id)
+            {
+                counter.fetch_add(1, Ordering::SeqCst);
+                return FaultAction::Reset;
+            }
+            FaultAction::None
+        })));
+    // Several concurrent readers: populations are deduplicated per chunk
+    // and retried once each.
+    let mut tasks = Vec::new();
+    for _ in 0..6 {
+        let backend = c.backend.clone();
+        tasks.push(tokio::spawn(async move {
+            s3::get(&backend, BUCKET, "o").await.unwrap().0
+        }));
+    }
+    for t in tasks {
+        assert_eq!(t.await.unwrap(), data);
+    }
+    c.wait_cached(BUCKET, "o", 6, Duration::from_secs(15)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(resets.load(Ordering::SeqCst) >= 1);
+    let stats = c.backend.node_clients().stats();
+    assert!(stats.retries >= 1, "{stats:?}");
+    assert_eq!(stats.exhausted, 0, "{stats:?}");
+    let s = c.backend.cache_stats();
+    assert_eq!(s.population_failures, 0, "{s:?}");
+    assert_eq!(c.cache_placements(BUCKET, "o").await.len(), 6);
+    for g in c.groups().await.into_iter().filter(GroupRecord::is_cache) {
+        for m in &g.members {
+            let n = c.node_index(m).unwrap();
+            let count = c.shard_count(n, g.id);
+            assert!(count <= 6, "no duplicate shards on member: {count}");
+        }
+    }
+    let total: usize = c
+        .groups()
+        .await
+        .into_iter()
+        .filter(GroupRecord::is_cache)
+        .flat_map(|g| g.members.into_iter().map(move |m| (g.id, m)))
+        .map(|(gid, m)| c.shard_count(c.node_index(&m).unwrap(), gid))
+        .sum();
+    assert_eq!(total, 6, "one copy per chunk across the cache tier");
+    c.backend.node_clients().set_fault_hook(None);
+    let before = c.backend.cache_stats();
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    let after = c.backend.cache_stats();
+    assert_eq!(after.hits - before.hits, 6, "{after:?}");
+    assert_eq!(after.fallbacks - before.fallbacks, 0, "{after:?}");
     c.shutdown().await;
 }
