@@ -1,0 +1,29 @@
+Linux 7.0.0-38-generic (<host>) 	11/01/26 	_x86_64_	(4 CPU)
+
+21:41:56        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+21:41:57           lo  16748.00  16748.00 448230.54 448230.54      0.00      0.00      0.00      0.00
+21:41:57         eth0   3088.00   7106.00    260.19 283398.76      0.00      0.00      0.00      0.00
+
+21:41:57        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+21:41:58           lo  22044.00  22044.00 552847.07 552847.07      0.00      0.00      0.00      0.00
+21:41:58         eth0   3916.00   9320.00    323.02 369427.06      0.00      0.00      0.00      0.00
+
+21:41:58        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+21:41:59           lo  21993.00  21993.00 567896.43 567896.43      0.00      0.00      0.00      0.00
+21:41:59         eth0   3565.00   8759.00    301.35 376322.08      0.00      0.00      0.00      0.00
+
+21:41:59        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+21:42:00           lo  12416.00  12416.00 319641.18 319641.18      0.00      0.00      0.00      0.00
+21:42:00         eth0   2310.00   5123.00    193.36 215241.90      0.00      0.00      0.00      0.00
+
+21:42:00        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+21:42:01           lo   7106.00   7106.00 185364.78 185364.78      0.00      0.00      0.00      0.00
+21:42:01         eth0   1316.00   2845.00    108.64 123194.17      0.00      0.00      0.00      0.00
+
+21:42:01        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+21:42:02           lo   9275.00   9275.00 246310.09 246310.09      0.00      0.00      0.00      0.00
+21:42:02         eth0   1244.00   3416.00    110.18 155394.78      0.00      0.00      0.00      0.00
+
+21:42:02        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+21:42:03           lo   2761.00   2761.00  59767.55  59767.55      0.00      0.00      0.00      0.00
+21:42:03         eth0    556.00   1323.00     49.68  54040.93      0.00      0.00      0.00      0.00

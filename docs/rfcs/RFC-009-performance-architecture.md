@@ -461,7 +461,54 @@ the storage node's accepted sockets; the repeated comparison in §6.12
 and the disk-bound runs in §6.13 were re-taken with the fix, and the
 before/after of the whole system is given there.
 
-<!-- TRANSPORT-RESULTS -->
+Full table: `summarize_transport.py results/transport/transport.jsonl`
+(112 cells). Digest, 1 MiB shards, 6 s per cell, one run each:
+
+| Transport | TLS | Op | 1 connection, 1 stream MiB/s | Best cell MiB/s (connections × streams, frame) | Client CPU-s/GiB (median, range) | Server CPU-s/GiB (median, range) | Worst p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| gRPC | no | GET | 969–1164 | 1914 (4 × 8, 64 KiB) | 1.53 (0.65–2.14) | 1.22 (0.80–1.68) | 12.5 ms |
+| gRPC | no | PUT | 1019–1227 | 1907 (4 × 8, 64 KiB) | 1.23 (0.73–1.77) | 1.59 (0.64–2.29) | 16.6 ms |
+| gRPC | yes | GET | 661–681 | 1604 (4 × 8, 64 KiB) | 2.19 (1.29–2.47) | 1.70 (1.21–2.07) | 15.4 ms |
+| gRPC | yes | PUT | 594–648 | 1723 (4 × 8, 64 KiB) | 1.71 (1.28–1.92) | 2.19 (1.30–2.64) | 19.9 ms |
+| raw framed TCP | no | GET | 2314–2561 | 2988 (4 × 8, 64 KiB) | 0.62 (0.18–1.21) | 0.51 (0.23–0.77) | 7.3 ms |
+| raw framed TCP | no | PUT | 1622–1845 | 2921 (1 × 4, 64 KiB) | 0.49 (0.27–0.86) | 0.76 (0.40–1.52) | 9.0 ms |
+| raw framed TCP | yes | GET | 1165–1248 | 2708 (4 × 8, 64 KiB) | 1.17 (0.71–1.59) | 0.94 (0.65–1.16) | 9.6 ms |
+| raw framed TCP | yes | PUT | 759–1189 | 2721 (1 × 8, 64 KiB) | 0.98 (0.64–1.27) | 1.28 (0.76–1.92) | 10.2 ms |
+
+What the matrix shows:
+
+- **With no-delay the gRPC tail is gone**: the worst p99 across all 56
+  gRPC cells is 20 ms (8 streams on 4 connections), against 42–50 ms in
+  almost every cell of the first pass; single-stream PUT went from 381
+  to 1019 MiB/s on the same link.
+- **One stream per connection is the gRPC floor**: 1.0–1.2 GB/s per
+  stream without TLS, 0.6–0.7 GB/s with TLS. Streams and connections
+  scale it to 1.9 GB/s (1.7 GB/s with TLS) at 4 connections × 8 streams,
+  where the client side spends 1.5–2.5 CPU-s per GiB. Frame size
+  (64 KiB versus 1 MiB) changes little once windows are large.
+- **Raw framed TCP moves 2–2.5× the bytes per stream and costs 2–3×
+  less CPU per GiB** than gRPC on the same link (median client CPU 0.6
+  versus 1.5 CPU-s/GiB for GET; 0.5 versus 1.2 for PUT). TLS costs
+  both transports about 0.5–0.7 CPU-s/GiB and halves the single-stream
+  rate; the raw-with-TLS cells sit between gRPC-without-TLS and
+  gRPC-with-TLS.
+- **The gateway's own bound is elsewhere.** A gateway host serving a
+  durable GET at concurrency 4 spends about 3.3 CPU-s per GiB (§6.12);
+  the transport's share of that is at most the 1.2–1.5 CPU-s/GiB the
+  matrix attributes to a gRPC client, and the node side about 1.2. A
+  hybrid data path (raw framed TCP for shard bytes, gRPC for control)
+  would save at most 0.6–1.0 CPU-s/GiB on each side, i.e. 20–30 % of the
+  gateway host's CPU per GiB, at the cost of a second transport with its
+  own framing, TLS, timeouts, fencing and fault tests.
+
+Judgment: not now. The measured upper bound on the gain is 20–30 % of
+CPU per GiB on a path that is first bounded by the gateway's own
+erasure-coding, hashing and copying (§7), and the first pass of this
+matrix found a 40 ms-per-RPC defect in how the existing transport was
+configured, which was worth more than any transport change. The hybrid
+stays listed in §9 with these numbers as its entry condition: it is
+justified only once the gateway's non-transport CPU per GiB has been
+brought below the transport's share.
 
 ### 6.12 Phase 2.2: repeated cache protection comparison
 
@@ -469,7 +516,56 @@ Method: `repeat.sh`, three repetitions in shuffled order with a warm-up
 pass per setup, durable only and the three protection modes at
 concurrency 4; `aggregate.py` statistics.
 
-<!-- REPEAT-RESULTS -->
+Before and after the storage node's no-delay fix (§6.11), three
+repetitions each in shuffled order (`results/repeat-c4-nagle`,
+`results/repeat-c4`; 96 × 16 MiB objects, 4 MiB chunks, 2 hosts):
+
+| Configuration | Phase | Before: MiB/s median (min–max) | After: MiB/s median (min–max) | After: p50 / p95 / p99 ms | After: hit ratio | After: CPU-s/GiB gateway host / node host | After: net GB per GiB, gateway host | Gateway-host RSS MiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| durable only | PUT | 326 (217–329) | 251 (178–338) | 188 / 602 / 648 | n/a | 7.4 / 10.2 | 1.07 | 102 |
+| durable only | GET warm (pass 3) | 592 (589–594) | 574 (574–575) | 97 / 121 / 129 | n/a | 3.5 / 6.0 | 1.06 | 102 |
+| none | PUT | 315 (149–330) | 245 (131–351) | 186 / 598 / 660 | n/a | 7.6 / 10.0 | 1.01 | 133 |
+| none | GET pass 1 (populating) | 429 (423–441) | 420 (412–436) | 128 / 173 / 181 | 0 % | 5.9 / 8.9 | 1.44 | 133 |
+| none | GET pass 3 | 671 (659–675) at 94 % | 655 (641–673) | 79 / 103 / 124 | 97 % | 1.7 / 5.5 | 0.43 | 133 |
+| replication 2 | PUT | 188 (159–193) | 176 (162–246) | 299 / 677 / 798 | n/a | 10.7 / 11.4 | 1.08 | 170 |
+| replication 2 | GET pass 1 | 402 (402–412) | 369 (369–389) | 150 / 201 / 213 | 0 % | 5.9 / 10.5 | 1.40 | 170 |
+| replication 2 | GET pass 3 | 442 (437–451) at 67 % | 465 (455–467) | 117 / 168 / 186 | 80 % | 3.8 / 7.6 | 1.02 | 170 |
+| ec 2+1 | PUT | 251 (209–322) | 347 (206–350) | 182 / 210 / 222 | n/a | 6.2 / 9.2 | 1.08 | 105 |
+| ec 2+1 | GET pass 1 | 419 (418–425) | 427 (397–441) | 131 / 177 / 206 | 0 % | 5.3 / 9.1 | 1.26 | 105 |
+| ec 2+1 | GET pass 3 | 507 (481–528) at 75 % | 497 (482–545) | 109 / 150 / 171 | 76 % | 3.2 / 7.8 | 0.66 | 105 |
+
+What repetition adds to the single runs of Phase 2.1:
+
+- **GET is repeatable to a few percent; PUT is not.** Warm GET medians
+  have a spread of 1–13 % across repetitions (sd 0.6–27 MiB/s), so the
+  ordering durable < replication 2 < ec 2+1 < none on pass 3 is real.
+  PUT spreads by up to 2.7× between repetitions of the same
+  configuration (sd 37–90 MiB/s) with p95 latencies of 0.2–0.8 s: the
+  PUT path has a periodic stall that the single Phase 2.1 runs could not
+  distinguish from configuration effects. Any PUT comparison between
+  configurations needs more repetitions than three, and the stall is a
+  Phase 2.3 item (§9).
+- **At concurrency 4 the no-delay fix changes nothing measurable**
+  (every after-median within the before-range or within a few percent):
+  the ~1 % of RPCs that paid the 40 ms tail were hidden behind the other
+  streams, and the gateway host's CPU is the bound. The fix matters at
+  low concurrency (§6.11, §6.10).
+- **Cost per GiB served from the cache.** With 97 % hits (`none`, pass
+  3) the gateway host spends 1.7 CPU-s and moves 0.43 GB of network per
+  GiB, against 3.5 CPU-s and 1.06 GB for the durable read: a hit halves
+  the gateway's CPU and takes 40 % of the network. Replication 2 at 80 %
+  hits still moves 1.02 GB per GiB (both copies are on the other host's
+  nodes in this two-host layout) and spends 3.8 CPU-s; ec 2+1 at 76 %
+  hits moves 0.66 GB and spends 3.2 CPU-s.
+- **Population cost.** Pass 1 (every chunk a miss that is also
+  populated) costs 5.3–5.9 CPU-s and 1.26–1.44 GB per GiB on the gateway
+  host against 3.5 and 1.06 for the plain durable read: populating adds
+  60–70 % CPU and 20–35 % network to the miss, independent of protection
+  mode, because the gateway writes the copy; the node-host side carries
+  the extra write (8.9–10.5 versus 6.0 CPU-s/GiB).
+- **Memory.** Gateway-host RSS: 102 MiB durable, 105 ec, 133 none,
+  170 replication 2 (the replication writer holds two full copies in
+  flight per population).
 
 ### 6.13 Phase 2.2: disk-bound runs
 
@@ -522,11 +618,39 @@ bars):
   host's CPU (HTTP/1.1 body handling, CRC, erasure coding, four
   processes on four vCPUs) is the bound, not the transport.
 
-*Hypotheses* (not measured): on a disk-bound durable tier a `none` hit
-from an SSD cache would remove the HDD seeks and dominate these results;
-parallel chunk fetch in the gateway would raise single-request
-throughput of all modes by up to the chunk count per object; a dedicated
-gateway host would move the PUT bound from CPU to the network.
+*Phase 2.2 revisions* (three repetitions where stated; §6.8–§6.13):
+
+- **The cache hit is now parallel too, and beats the durable read at
+  low concurrency.** With `read_parallelism 4` the single-request `none`
+  hit overtook the durable read (§6.10); at concurrency 4 the gateway
+  host's CPU still bounds every mode.
+- **The two Phase 2.1 "transport floor" conclusions were half right.**
+  The gateway is CPU-bound, but the transport it was measured on had a
+  40 ms Nagle/delayed-ACK stall on about 1 % of RPCs (every RPC on a
+  low-latency link), fixed in Phase 2.2 (§6.11). Measured against the
+  corrected stack, gRPC per stream reaches 1.0–1.2 GB/s and raw framed
+  TCP 2.3–2.6 GB/s at 2–3× less CPU per GiB; a hybrid data path could
+  save at most 20–30 % of the gateway host's CPU per GiB and is deferred
+  behind the gateway's own CPU work (§6.11, §9).
+- **Hit ratio is population bandwidth, not readability.** Every lookup
+  hit was served; the modes differ only in how many populations complete
+  under the in-flight bound (§6.9). A hit costs the gateway host half the
+  CPU and 40 % of the network of a durable read (§6.12); a populating
+  miss costs 60–70 % more CPU than a plain miss.
+- **PUT varies 2.7× between repetitions of one configuration** with p95
+  latencies of 0.2–0.8 s (§6.12); GET varies by a few percent. Single-run
+  PUT comparisons in §6.3–§6.4 should be read with that spread; the
+  stall itself is unexplained (R-48).
+- **Resilience.** The shard-stream policy of ADR-0011 takes PUT success
+  at 10 % loss from 4/12 to 12/12 and under a 20 s node stop from 46/48
+  to 48/48, with slow-but-progressing links never timing out and every
+  verify pass clean (§6.8).
+
+<!-- INTERP-DISK -->
+
+*Hypotheses* (not measured): a dedicated gateway host would move the PUT
+bound from CPU to the network; on hosts whose durable tier is HDD-bound
+the cache's latency benefit would be larger than measured here.
 
 ## 8. Verified and not verified
 
@@ -539,30 +663,52 @@ gateway host would move the PUT bound from CPU to the network.
 | Chunk size 1 MiB versus 4 MiB | measured | §6.3, §6.4 |
 | Raw TCP, raw framed, gRPC, TLS floors between two hosts | measured | §6.1 |
 | Erasure coding encode/reconstruct cost on the test CPU (e.g. `rs-gf8-v1` 4+2, 1 MiB shards: encode 7.1 GiB/s, one-shard reconstruction 9.4 GiB/s of data; a 4 MiB chunk of the 2+1 profile costs well under 1 ms either way) | measured (criterion, `arca-lake-ec`, host B) | `benchmarks/linux/results/ec-bench-linux.md` (raw `.txt` beside it) |
-| Memory | snapshot per run | §6.6 |
-| Disk-bound behaviour | not measured (page cache) | §4 |
-| Variance across runs | not measured (single run per configuration) | §4 |
+| Memory | snapshot per run; gateway RSS per configuration and parallelism | §6.6, §6.10, §6.12 |
+| Shard-stream policy under loss 0/2/5/10 %, delay with and without jitter, resets, partition, slow node, stopped node (PUT success, throughput, percentiles, timeout and retry counters, verify) | measured, five policies, one run per cell | §6.8, `results/r47/` |
+| Hit accounting (lookup / served / degraded / fallback by cause, admission rejections by cause, population failures by cause) | measured, three modes × two population bounds | §6.9, `results/hit-analysis/` |
+| Parallel chunk fetch 1 versus 4 | measured, three repetitions | §6.10, `results/parallel-p1/`, `results/parallel-p4/` |
+| gRPC versus raw framed TCP × TLS × connections × streams × frame size, with client and server CPU | measured, one run per cell, corrected server configuration | §6.11, `results/transport/` (first pass: `results/transport-nagle/`) |
+| Effect of `TCP_NODELAY` on accepted storage-node sockets | measured before/after on a veth link and between hosts | §6.11, `results/nagle/` |
+| Variance across runs | measured: three repetitions, shuffled order, warm-up separated (GET 1–13 %, PUT up to 2.7×) | §6.12, `results/repeat-c4/` |
+<!-- VERIFIED-DISK -->
 | Multi-gateway scaling, more than one FoundationDB process | not measured | §3 |
 | Any number on other hardware | not claimed | — |
 
-## 9. Proposed optimizations (hypotheses, not measured)
+## 9. Proposed optimizations
 
-- Parallel chunk fetch in the gateway read path (chunks of one object are
-  currently read one after the other; a hit pass is bounded by one RPC
-  per chunk in sequence).
-- Population write batching and a per-node population queue (the permit
-  count is a global bound today).
-- Raw framed transport for shard transfer (ADR-0006 chose gRPC; §6.1
-  shows the gap on this environment).
-- Sharded cache usage counters (R-42).
-- A progress-based (per frame) deadline for shard streams instead of the
-  per-RPC timeout, so that impaired links (10 % loss, reordering) produce
-  slow transfers rather than timeouts (fault run F1/F2, R-47).
+Done in Phase 2.2 (measured above): parallel chunk fetch (§6.10), the
+progress-based shard-stream policy with retries and lease renewal
+(§6.8, ADR-0011), an atomic cache usage counter instead of the hot
+read-modify-write key (§6.9, R-42), and `TCP_NODELAY` on accepted
+storage-node sockets (§6.11).
+
+Still hypotheses (not measured):
+
+- **The PUT stall** (§6.12): PUT throughput varies up to 2.7× between
+  repetitions with p95 latencies of 0.2–0.8 s in every configuration,
+  including durable-only. Candidates: the per-chunk metadata commit
+  batching, FoundationDB commit latency spikes on the shared host,
+  storage-node fsync grouping. First step is a PUT with per-phase
+  timing exported as counters (R-48).
+- **Population write batching and a per-node population queue** (the
+  permit count is a global bound today; §6.9 shows the bound, not the
+  node, limiting coverage).
+- **Raw framed transport for shard bytes** (ADR-0006 chose gRPC). Entry
+  condition from §6.11: at most 20–30 % of the gateway host's CPU per
+  GiB is at stake, so it is justified only after the gateway's own
+  erasure-coding, hashing and copying CPU per GiB has been brought
+  below the transport's share (about 1.2–1.5 CPU-s/GiB).
+- **Reduce gateway CPU per GiB on GET** (3.3–3.5 CPU-s/GiB durable at
+  concurrency 4): avoid the copy between the shard frames and the HTTP
+  body, and hash while decoding.
 
 ## 10. Open questions
 
 - Which workloads justify replication or EC cache protection given the
-  measured population cost (§7).
-- Whether hit latency improves enough with parallel chunk fetch to
-  justify the cache on networks where the durable read is already
-  parallel.
+  measured population cost (§6.12: populating costs 60–70 % more
+  gateway CPU than a plain miss; a hit saves half of it).
+- Answered for this environment: with parallel chunk fetch the cache
+  hit beats the durable read at low concurrency (§6.10), so the cache
+  pays in latency as well as in durable-tier CPU and network once warm.
+- Whether the PUT stall (R-48) is in the metadata commit path or in the
+  storage node.

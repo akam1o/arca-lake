@@ -43,7 +43,20 @@ Numbers are in RFC-009; the summaries here are the decisions they support.
   the gateway host is CPU-bound either way. Gateway RSS grows by about
   one chunk.
 
-<!-- PHASE-2-2-RESULTS-2 -->
+- **gRPC versus raw TCP (§6.11)**: the first matrix pass found a
+  40 ms Nagle/delayed-ACK stall on the storage node's accepted sockets
+  (tonic ignores `tcp_nodelay` for a caller-supplied listener), fixed.
+  Against the corrected stack gRPC reaches 1.0–1.2 GB/s per stream and
+  raw framed TCP 2.3–2.6 GB/s at 2–3× less CPU per GiB; a hybrid data
+  path would save at most 20–30 % of the gateway host's CPU per GiB and
+  is deferred with that as its entry condition.
+- **Repeated comparison (§6.12)**: GET is repeatable to 1–13 %, so the
+  pass-3 ordering durable < replication 2 < ec 2+1 < none is real; PUT
+  varies up to 2.7× between repetitions (R-48). A cache hit costs the
+  gateway half the CPU and 40 % of the network of a durable read;
+  populating costs 60–70 % more CPU than a plain miss.
+
+<!-- PHASE-2-2-RESULTS-3 -->
 
 ## Not verified
 
