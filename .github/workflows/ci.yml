@@ -111,39 +111,22 @@ jobs:
       - name: start a three-process FoundationDB cluster (host network)
         run: |
           set -euo pipefail
-          docker run -d --name arca-fdb-1 --network host -e FDB_NETWORKING_MODE=host -e FDB_PORT=4500 \
-            "foundationdb/foundationdb:${FDB_VERSION}"
-          sleep 2
-          for i in 2 3; do
-            docker run -d --name "arca-fdb-$i" --network host -e FDB_NETWORKING_MODE=host \
-              -e FDB_PORT=$((4499 + i)) -e FDB_COORDINATOR=127.0.0.1 -e FDB_COORDINATOR_PORT=4500 \
-              "foundationdb/foundationdb:${FDB_VERSION}"
-          done
-          for _ in $(seq 1 30); do
-            docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "available" && break
-            sleep 1
-          done
-          # All three processes must have joined before the database is
-          # configured; otherwise fail here with the container logs.
-          for _ in $(seq 1 60); do
-            n=$(docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status json" 2>/dev/null | jq '.cluster.processes | length' 2>/dev/null || echo 0)
-            [ "${n:-0}" -ge 3 ] && break
-            sleep 2
-          done
-          if [ "${n:-0}" -lt 3 ]; then
-            echo "only ${n:-0} FoundationDB processes joined"; for i in 1 2 3; do docker logs "arca-fdb-$i" | tail -20; done; exit 1
-          fi
-          docker exec arca-fdb-1 fdbcli --timeout 30 --exec "configure new double memory" || true
+          docker run -d --name arca-fdb --network host -e FDB_PUBLIC_IP=127.0.0.1 \
+            -v "$PWD/deploy/dev/fdb-multi-entrypoint.sh:/entry.sh:ro" \
+            --entrypoint bash "foundationdb/foundationdb:${FDB_VERSION}" /entry.sh
+          sleep 5
+          docker logs arca-fdb
+          fdbcli() { timeout 90 docker exec arca-fdb fdbcli --timeout 30 --exec "$1"; }
+          fdbcli "configure new double memory" || true
           sleep 3
-          docker exec arca-fdb-1 fdbcli --timeout 30 --exec "coordinators 127.0.0.1:4500 127.0.0.1:4501 127.0.0.1:4502" || true
+          fdbcli "coordinators 127.0.0.1:4500 127.0.0.1:4501 127.0.0.1:4502" || true
           for _ in $(seq 1 90); do
-            docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+            fdbcli "status minimal" 2>/dev/null | grep -q "is available" && break
             sleep 1
           done
-          docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal"
-          docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status details"
-          docker ps --format '{{.Names}} {{.Status}}'
-          docker exec arca-fdb-1 cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
+          fdbcli "status minimal"
+          fdbcli "status details" | head -40
+          docker exec arca-fdb cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
           cat /tmp/fdb.cluster
       - name: run the failover test
         env:

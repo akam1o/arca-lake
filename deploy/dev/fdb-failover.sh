@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# Run the FoundationDB failover test against a three-process cluster in
-# containers (`crates/testkit/tests/fdb_failover.rs`).
+# Run the FoundationDB failover test against a three-process cluster
+# (`crates/testkit/tests/fdb_failover.rs`).
 #
-# Three fdbserver containers (arca-fdb-1..3) form one cluster configured
-# `double` with three coordinators. The Rust test runs in a container
-# without a docker socket, so it asks this script to kill and restart
-# processes through marker files in a shared directory (ARCA_CHAOS_DIR).
+# One container (arca-fdb) runs three fdbserver processes through
+# fdb-multi-entrypoint.sh; the cluster is configured `double` with three
+# coordinators. The Rust test runs in a second container without a docker
+# socket, so it asks this script to kill and restart processes through
+# marker files in a shared directory (ARCA_CHAOS_DIR); the script forwards
+# them to `docker exec arca-fdb fdbproc kill|start N`.
 #
 # Usage: deploy/dev/fdb-failover.sh
 # Environment:
 #   FDB_VERSION   FoundationDB version (default 7.3.77)
 #   RUST_IMAGE    Rust image (default rust:1.99-bookworm)
-#   KEEP_FDB=1    leave the server containers running afterwards
+#   KEEP_FDB=1    leave the FoundationDB container running afterwards
 
 set -euo pipefail
 
@@ -19,56 +21,37 @@ FDB_VERSION="${FDB_VERSION:-7.3.77}"
 RUST_IMAGE="${RUST_IMAGE:-rust:1.99-bookworm}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CHAOS_DIR="$(mktemp -d)"
+FDB=arca-fdb
 TEST_CONTAINER=arca-fdb-failover-test
 
 cleanup() {
   docker rm -f "$TEST_CONTAINER" >/dev/null 2>&1 || true
   if [[ -z "${KEEP_FDB:-}" ]]; then
-    for i in 1 2 3; do docker rm -f "arca-fdb-$i" >/dev/null 2>&1 || true; done
+    docker rm -f "$FDB" >/dev/null 2>&1 || true
   fi
   rm -rf "$CHAOS_DIR"
 }
 trap cleanup EXIT
 
-# The container's own view of its address works on every Docker-compatible
-# runtime (`docker inspect` templates differ between them).
-ip_of() { docker exec "$1" hostname -i | awk '{print $1}'; }
+fdbcli() { timeout 90 docker exec "$FDB" fdbcli --timeout 30 --exec "$1"; }
 
-echo "==> starting FoundationDB processes ($FDB_VERSION)"
-for i in 1 2 3; do docker rm -f "arca-fdb-$i" >/dev/null 2>&1 || true; done
-docker run -d --name arca-fdb-1 -e FDB_NETWORKING_MODE=container \
-  "foundationdb/foundationdb:${FDB_VERSION}" >/dev/null
-sleep 2
-COORD_IP="$(ip_of arca-fdb-1)"
-for i in 2 3; do
-  docker run -d --name "arca-fdb-$i" -e FDB_NETWORKING_MODE=container \
-    -e FDB_COORDINATOR="$COORD_IP" -e FDB_COORDINATOR_PORT=4500 \
-    "foundationdb/foundationdb:${FDB_VERSION}" >/dev/null
-done
-for _ in $(seq 1 30); do
-  docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "available" && break
-  sleep 1
-done
-for _ in $(seq 1 60); do
-  n=$(docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status json" 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["cluster"]["processes"]))' 2>/dev/null || echo 0)
-  [[ "${n:-0}" -ge 3 ]] && break
-  sleep 2
-done
-if [[ "${n:-0}" -lt 3 ]]; then
-  echo "only ${n:-0} FoundationDB processes joined" >&2
-  for i in 1 2 3; do docker logs "arca-fdb-$i" 2>&1 | tail -20; done
-  exit 1
-fi
-docker exec arca-fdb-1 fdbcli --timeout 30 --exec "configure new double memory" >/dev/null 2>&1 || true
+echo "==> starting a three-process FoundationDB cluster ($FDB_VERSION)"
+docker rm -f "$FDB" >/dev/null 2>&1 || true
+docker run -d --name "$FDB" \
+  -v "$REPO/deploy/dev/fdb-multi-entrypoint.sh:/entry.sh:ro" \
+  --entrypoint bash "foundationdb/foundationdb:${FDB_VERSION}" /entry.sh >/dev/null
+sleep 5
+IP="$(docker exec "$FDB" hostname -i | awk '{print $1}')"
+fdbcli "configure new double memory" || true
 sleep 3
-docker exec arca-fdb-1 fdbcli --timeout 30 --exec \
-  "coordinators ${COORD_IP}:4500 $(ip_of arca-fdb-2):4500 $(ip_of arca-fdb-3):4500" || true
+fdbcli "coordinators ${IP}:4500 ${IP}:4501 ${IP}:4502" || true
 for _ in $(seq 1 90); do
-  docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+  fdbcli "status minimal" 2>/dev/null | grep -q "is available" && break
   sleep 1
 done
-docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal"
-CLUSTER_FILE_CONTENTS="$(docker exec arca-fdb-1 cat /var/fdb/fdb.cluster)"
+fdbcli "status minimal"
+fdbcli "status details" | head -40
+CLUSTER_FILE_CONTENTS="$(docker exec "$FDB" cat /var/fdb/fdb.cluster)"
 echo "    cluster: $CLUSTER_FILE_CONTENTS"
 
 echo "==> running the failover test in $RUST_IMAGE (chaos dir $CHAOS_DIR)"
@@ -109,8 +92,7 @@ while docker inspect -f '{{.State.Running}}' "$TEST_CONTAINER" 2>/dev/null | gre
     echo "==> chaos: $action"
     read -r verb n <<<"$action"
     case "$verb" in
-      kill) docker kill "arca-fdb-$n" >/dev/null ;;
-      start) docker start "arca-fdb-$n" >/dev/null ;;
+      kill|start) timeout 60 docker exec "$FDB" fdbproc "$verb" "$n" || echo "chaos action failed: $action" >&2 ;;
       *) echo "unknown chaos action: $action" >&2 ;;
     esac
     : > "$CHAOS_DIR/ack-$next"

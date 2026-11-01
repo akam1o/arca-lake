@@ -4,8 +4,9 @@
 //! cluster file, and a chaos driver that can kill and restart the
 //! FoundationDB processes `arca-fdb-1..3`:
 //!
-//! - `ARCA_CHAOS_DOCKER=1`: the test runs `docker kill|start arca-fdb-N`
-//!   itself (CI, test on the host).
+//! - `ARCA_CHAOS_DOCKER=1`: the test runs `docker exec arca-fdb fdbproc
+//!   kill|start N` itself (CI, test on the host; the container runs
+//!   `deploy/dev/fdb-multi-entrypoint.sh`).
 //! - `ARCA_CHAOS_DIR=<dir>`: the test writes `req-N` files and waits for
 //!   `ack-N` (local, test inside a container without a docker socket;
 //!   `deploy/dev/fdb-failover.sh` answers them).
@@ -59,11 +60,14 @@ impl Chaos {
             let verb = parts.next().unwrap();
             let n = parts.next().unwrap();
             let status = tokio::process::Command::new("docker")
-                .args([verb, &format!("arca-fdb-{n}")])
+                .args(["exec", "arca-fdb", "fdbproc", verb, n])
                 .status()
                 .await
                 .expect("docker");
-            assert!(status.success(), "docker {verb} arca-fdb-{n} failed");
+            assert!(
+                status.success(),
+                "docker exec arca-fdb fdbproc {verb} {n} failed"
+            );
             return;
         }
         let dir = self.dir.as_ref().unwrap();
