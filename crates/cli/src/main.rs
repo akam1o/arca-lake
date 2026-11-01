@@ -160,6 +160,10 @@ struct GatewayArgs {
     profile: ProfileArgs,
     #[command(flatten)]
     cache: CacheArgs,
+    /// Serve gateway cache counters as Prometheus text on this address
+    /// (`GET /metrics`); cluster backend only.
+    #[arg(long)]
+    metrics_listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -309,6 +313,12 @@ enum AdminCommand {
         #[arg(long, default_value = "host")]
         failure_domain: String,
     },
+    /// Print the bytes recorded as cached on a tier (JSON).
+    CacheUsage {
+        /// Cache tier name.
+        #[arg(long)]
+        tier: String,
+    },
     /// Print nodes, groups, and the leader record.
     Status,
 }
@@ -399,6 +409,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
             Ok(m) => m,
             Err(e) => return fail(e),
         };
+        let metrics_listen = args.metrics_listen;
         let backend = match arca_lake_gateway::cluster::ClusterBackend::new(
             meta,
             arca_lake_gateway::cluster::ClusterConfig {
@@ -416,6 +427,17 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
             Ok(b) => b,
             Err(e) => return fail(format!("cannot start the cluster backend: {e}")),
         };
+        if let Some(addr) = metrics_listen {
+            let listener = match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => l,
+                Err(e) => return fail(format!("cannot bind metrics endpoint {addr}: {e}")),
+            };
+            tracing::info!(%addr, "gateway metrics endpoint");
+            let stats_backend = backend.clone();
+            tokio::spawn(serve_gateway_metrics(listener, move || {
+                render_cache_stats(&stats_backend.cache_stats())
+            }));
+        }
         arca_lake_gateway::serve(cfg, backend).await
     } else {
         arca_lake_gateway::serve(cfg, arca_lake_gateway::memory::MemoryBackend::new()).await
@@ -606,6 +628,15 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 Err(e) => fail(e),
             }
         }
+        AdminCommand::CacheUsage { tier } => {
+            match arca_lake_metadata::ops::cache::usage(meta.as_ref(), &tier).await {
+                Ok(bytes) => {
+                    println!("{{\"tier\":\"{tier}\",\"usage_bytes\":{bytes}}}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
         AdminCommand::Status => {
             let nodes = arca_lake_metadata::ops::cluster::list_nodes(meta.as_ref()).await;
             let groups = arca_lake_metadata::ops::cluster::list_groups(meta.as_ref()).await;
@@ -662,5 +693,72 @@ fn print_groups(groups: &[arca_lake_metadata::records::GroupRecord]) {
             g.parity_shards,
             g.members.iter().map(|m| m.node_id).collect::<Vec<_>>()
         );
+    }
+}
+
+fn render_cache_stats(s: &arca_lake_gateway::cluster::CacheStatsSnapshot) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (name, value) in [
+        ("arca_gateway_cache_hits_total", s.hits),
+        ("arca_gateway_cache_misses_total", s.misses),
+        ("arca_gateway_cache_fallbacks_total", s.fallbacks),
+        ("arca_gateway_cache_invalidations_total", s.invalidations),
+        ("arca_gateway_cache_populated_total", s.populated),
+        (
+            "arca_gateway_cache_population_failures_total",
+            s.population_failures,
+        ),
+        (
+            "arca_gateway_cache_populations_deduplicated_total",
+            s.populations_deduplicated,
+        ),
+        (
+            "arca_gateway_cache_admissions_rejected_total",
+            s.admissions_rejected,
+        ),
+        ("arca_gateway_cache_degraded_hits_total", s.degraded_hits),
+        (
+            "arca_gateway_cache_shards_repaired_total",
+            s.shards_repaired,
+        ),
+        (
+            "arca_gateway_cache_shard_repair_failures_total",
+            s.shard_repair_failures,
+        ),
+        (
+            "arca_gateway_cache_shard_repairs_skipped_total",
+            s.shard_repairs_skipped,
+        ),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
+    }
+    out
+}
+
+/// Minimal HTTP/1.1 responder: every request gets `200 text/plain` with the
+/// rendered metrics (no routing beyond that; one request per connection).
+async fn serve_gateway_metrics(
+    listener: tokio::net::TcpListener,
+    render: impl Fn() -> String + Send + Sync + 'static,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let render = Arc::new(render);
+    loop {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let render = Arc::clone(&render);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let body = render();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain; version=0.0.4\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
     }
 }

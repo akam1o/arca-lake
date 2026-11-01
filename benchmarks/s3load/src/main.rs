@@ -1,0 +1,325 @@
+//! `s3load`: a small S3 load generator for arca-lake measurements.
+//!
+//! Talks plain HTTP/1.1 to a gateway started with `--allow-anonymous`,
+//! drives PUT or GET with a fixed concurrency over a numbered key space, and
+//! prints one JSON line per pass with throughput and latency percentiles.
+//! Object contents are a deterministic pattern of `(seed, index)`, so a GET
+//! pass can verify every body (`--verify`) without any state from the PUT
+//! pass. Several GET passes over the same keys (`--passes`) separate the
+//! first-touch (cache miss) pass from later (cache hit) passes.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+use bytes::Bytes;
+use clap::{Parser, ValueEnum};
+use http_body_util::{BodyExt, Full};
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
+use tokio::sync::Mutex;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Op {
+    /// `PUT /{bucket}`.
+    CreateBucket,
+    /// PUT every object once.
+    Put,
+    /// GET every object `--passes` times.
+    Get,
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "s3load", about = "S3 PUT/GET load generator")]
+struct Args {
+    /// Gateway endpoint, e.g. `http://127.0.0.1:9000`.
+    #[arg(long)]
+    endpoint: String,
+    #[arg(long, default_value = "bench")]
+    bucket: String,
+    #[arg(long, value_enum)]
+    op: Op,
+    /// Number of objects (keys `{prefix}/{index:08}`).
+    #[arg(long, default_value_t = 64)]
+    objects: u64,
+    /// Object size in bytes.
+    #[arg(long, default_value_t = 4 << 20)]
+    size: u64,
+    /// Concurrent requests.
+    #[arg(long, default_value_t = 8)]
+    concurrency: usize,
+    /// GET passes over the key space (pass 1 is the first touch).
+    #[arg(long, default_value_t = 1)]
+    passes: u32,
+    /// GET only the first `range_bytes` bytes of each object (0 = whole).
+    #[arg(long, default_value_t = 0)]
+    range_bytes: u64,
+    /// Verify GET bodies against the deterministic pattern (costs CPU).
+    #[arg(long)]
+    verify: bool,
+    #[arg(long, default_value = "obj")]
+    prefix: String,
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+    /// Label copied into every output line.
+    #[arg(long, default_value = "")]
+    label: String,
+    /// Worker threads.
+    #[arg(long, default_value_t = 4)]
+    threads: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct Summary {
+    label: String,
+    op: String,
+    pass: u32,
+    objects: u64,
+    size: u64,
+    concurrency: usize,
+    range_bytes: u64,
+    verify: bool,
+    duration_s: f64,
+    ops: u64,
+    bytes: u64,
+    errors: u64,
+    mismatches: u64,
+    ops_per_s: f64,
+    mib_per_s: f64,
+    lat_ms_mean: f64,
+    lat_ms_p50: f64,
+    lat_ms_p90: f64,
+    lat_ms_p99: f64,
+    lat_ms_max: f64,
+}
+
+type HttpClient = Client<HttpConnector, Full<Bytes>>;
+
+/// Deterministic body: xorshift64* stream seeded by `(seed, index)`.
+fn body_of(seed: u64, index: u64, size: u64) -> Bytes {
+    let mut x = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(index)
+        .wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        | 1;
+    let n = usize::try_from(size).unwrap_or(0);
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        let word = x.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes();
+        let take = (n - out.len()).min(8);
+        out.extend_from_slice(&word[..take]);
+    }
+    Bytes::from(out)
+}
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+#[derive(Default)]
+struct Counters {
+    ops: AtomicU64,
+    bytes: AtomicU64,
+    errors: AtomicU64,
+    mismatches: AtomicU64,
+    latencies: Mutex<Vec<f64>>,
+}
+
+async fn one_request(
+    client: &HttpClient,
+    args: &Args,
+    index: u64,
+    counters: &Counters,
+) -> Result<(), String> {
+    let key = format!("{}/{index:08}", args.prefix);
+    let uri = format!("{}/{}/{}", args.endpoint, args.bucket, key);
+    let started = Instant::now();
+    let (status, got_bytes, body) = match args.op {
+        Op::Put => {
+            let body = body_of(args.seed, index, args.size);
+            let len = body.len();
+            let req = http::Request::builder()
+                .method("PUT")
+                .uri(&uri)
+                .header("content-length", len)
+                .body(Full::new(body))
+                .map_err(|e| e.to_string())?;
+            let resp = client.request(req).await.map_err(|e| e.to_string())?;
+            let status = resp.status();
+            let _ = resp.into_body().collect().await;
+            (status, len as u64, None)
+        }
+        Op::Get => {
+            let mut b = http::Request::builder().method("GET").uri(&uri);
+            if args.range_bytes > 0 {
+                b = b.header("range", format!("bytes=0-{}", args.range_bytes - 1));
+            }
+            let req = b.body(Full::new(Bytes::new())).map_err(|e| e.to_string())?;
+            let resp = client.request(req).await.map_err(|e| e.to_string())?;
+            let status = resp.status();
+            let body = resp
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| e.to_string())?
+                .to_bytes();
+            (status, body.len() as u64, Some(body))
+        }
+        Op::CreateBucket => unreachable!(),
+    };
+    let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+    if !status.is_success() {
+        return Err(format!("{key}: HTTP {status}"));
+    }
+    if args.verify
+        && let Some(body) = body
+    {
+        let expected = body_of(args.seed, index, args.size);
+        let want = if args.range_bytes > 0 {
+            expected.slice(..usize::try_from(args.range_bytes).unwrap_or(0))
+        } else {
+            expected
+        };
+        if body != want {
+            counters.mismatches.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    counters.ops.fetch_add(1, Ordering::Relaxed);
+    counters.bytes.fetch_add(got_bytes, Ordering::Relaxed);
+    counters.latencies.lock().await.push(elapsed);
+    Ok(())
+}
+
+async fn run_pass(client: &HttpClient, args: &Arc<Args>, pass: u32) -> Summary {
+    let counters = Arc::new(Counters::default());
+    let next = Arc::new(AtomicU64::new(0));
+    let started = Instant::now();
+    let mut tasks = Vec::new();
+    for _ in 0..args.concurrency {
+        let client = client.clone();
+        let args = Arc::clone(args);
+        let counters = Arc::clone(&counters);
+        let next = Arc::clone(&next);
+        tasks.push(tokio::spawn(async move {
+            loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                if index >= args.objects {
+                    return;
+                }
+                if let Err(e) = one_request(&client, &args, index, &counters).await {
+                    counters.errors.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("error: {e}");
+                }
+            }
+        }));
+    }
+    for t in tasks {
+        let _ = t.await;
+    }
+    let duration = started.elapsed();
+    let mut lats = counters.latencies.lock().await.clone();
+    lats.sort_by(f64::total_cmp);
+    let ops = counters.ops.load(Ordering::Relaxed);
+    let bytes = counters.bytes.load(Ordering::Relaxed);
+    let secs = duration.as_secs_f64().max(1e-9);
+    #[allow(clippy::cast_precision_loss)]
+    Summary {
+        label: args.label.clone(),
+        op: format!("{:?}", args.op).to_lowercase(),
+        pass,
+        objects: args.objects,
+        size: args.size,
+        concurrency: args.concurrency,
+        range_bytes: args.range_bytes,
+        verify: args.verify,
+        duration_s: secs,
+        ops,
+        bytes,
+        errors: counters.errors.load(Ordering::Relaxed),
+        mismatches: counters.mismatches.load(Ordering::Relaxed),
+        ops_per_s: ops as f64 / secs,
+        mib_per_s: bytes as f64 / (1024.0 * 1024.0) / secs,
+        lat_ms_mean: if lats.is_empty() {
+            0.0
+        } else {
+            lats.iter().sum::<f64>() / lats.len() as f64
+        },
+        lat_ms_p50: percentile(&lats, 0.50),
+        lat_ms_p90: percentile(&lats, 0.90),
+        lat_ms_p99: percentile(&lats, 0.99),
+        lat_ms_max: lats.last().copied().unwrap_or(0.0),
+    }
+}
+
+async fn create_bucket(client: &HttpClient, args: &Args) -> Result<(), String> {
+    let req = http::Request::builder()
+        .method("PUT")
+        .uri(format!("{}/{}", args.endpoint, args.bucket))
+        .header("content-length", 0)
+        .body(Full::new(Bytes::new()))
+        .map_err(|e| e.to_string())?;
+    let resp = client.request(req).await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if status.is_success() || status.as_u16() == 409 {
+        Ok(())
+    } else {
+        Err(format!("create bucket: HTTP {status}"))
+    }
+}
+
+fn main() {
+    let args = Arc::new(Args::parse());
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(args.threads.max(1))
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let code = rt.block_on(async {
+        let client: HttpClient = Client::builder(TokioExecutor::new())
+            .pool_max_idle_per_host(args.concurrency.max(1))
+            .build_http();
+        match args.op {
+            Op::CreateBucket => match create_bucket(&client, &args).await {
+                Ok(()) => {
+                    println!(
+                        "{{\"op\":\"create_bucket\",\"bucket\":\"{}\"}}",
+                        args.bucket
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            },
+            Op::Put | Op::Get => {
+                let passes = if args.op == Op::Put {
+                    1
+                } else {
+                    args.passes.max(1)
+                };
+                let mut failed = false;
+                for pass in 1..=passes {
+                    let s = run_pass(&client, &args, pass).await;
+                    failed |= s.errors > 0 || s.mismatches > 0;
+                    println!("{}", serde_json::to_string(&s).expect("summary serializes"));
+                }
+                i32::from(failed)
+            }
+        }
+    });
+    std::process::exit(code);
+}
