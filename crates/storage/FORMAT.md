@@ -78,9 +78,15 @@ Fixed header:
 | 40 | 8 | sequence number (monotonic per device) |
 | 48 | 12 | reserved, zero |
 
-The shard key is `(group ID, chunk ID, shard index)`. A later record for the
-same key supersedes an earlier one (retries are idempotent). A tombstone has
+The shard key is `(group ID, chunk ID, shard index)`. For every key, the
+record with the **highest sequence number** wins, whether it is a data
+record or a tombstone; segment order and duplicates do not matter. Retries
+are therefore idempotent, and records copied forward by compaction (which
+keep their sequence numbers) cannot change the outcome. A tombstone has
 `payload_len = 0` and marks the key deleted.
+
+Sequence numbers are unique and increasing per device; the next sequence
+after recovery is one more than the highest sequence found in any segment.
 
 Each payload block of `block_size` bytes (the last block may be shorter) has
 its own CRC so that a byte-range read verifies only the blocks it touches.
@@ -99,5 +105,36 @@ its own CRC so that a byte-range read verifies only the blocks it touches.
   tail from a crash and truncated. Otherwise it is reported as corruption;
   the valid prefix stays readable and the rest is excluded from the index.
 - The index is not persisted in version 1; it is rebuilt by scanning.
-- Nothing is ever modified in place. Space reclamation (compaction) is out
-  of scope for the prototype.
+  During the rebuild, the highest tombstone sequence per key is remembered
+  so that a data record scanned after a newer tombstone stays dead.
+- Nothing is ever modified in place.
+
+## Durability policies
+
+- `Always`: `fdatasync` under the writer lock after every record.
+- `Group` (default): records are appended under the writer lock; the caller
+  then waits for a sync that covers its record. The first waiter performs
+  one `fdatasync` on behalf of every record appended so far. Both policies
+  acknowledge only durable records. When the active segment rolls over, it
+  is synced before the new segment is created.
+- `Never`: tests and measurements only.
+
+## Compaction
+
+Compaction rewrites a sealed segment `S` into a new segment `N`:
+
+1. Scan `S`. Copy each data record that the index still maps to its
+   location in `S`. Copy each tombstone whose sequence is greater than the
+   smallest sequence present in any *other* segment (an older record for
+   its key may still exist there); drop the rest.
+2. `fdatasync` `N` and the directory.
+3. Retarget the index entries of the copied records from `S` to `N`
+   (compare-and-set: an entry that changed meanwhile is left alone).
+4. Unlink `S` and sync the directory.
+
+A crash at any point leaves a consistent store: before step 4 both copies
+exist and are identical, and the index rule above is order independent, so
+the rebuild yields the same state; after step 4 only `N` exists. Re-running
+compaction on `S` completes an interrupted run. Reads that already hold the
+file of `S` finish on the unlinked file (POSIX semantics); new reads go
+through the index.

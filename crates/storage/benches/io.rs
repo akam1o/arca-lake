@@ -1,8 +1,9 @@
 //! Storage engine I/O micro-benchmarks.
 //!
 //! Measures the engine's own overhead on top of the file system: append
-//! throughput per record size with and without `fdatasync`, and random
-//! range-read throughput including checksum verification.
+//! throughput per record size for each durability policy, the effect of
+//! group commit under concurrent writers, and random range-read throughput
+//! including checksum verification.
 //!
 //! The device under test is whatever backs `ARCA_STORAGE_BENCH_DIR`
 //! (default: the system temp directory). Compare against `fio` on the same
@@ -11,6 +12,8 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use arca_lake_storage::{ShardKey, Store, StoreConfig, SyncPolicy};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -51,7 +54,7 @@ fn open(sync: SyncPolicy) -> (tempfile::TempDir, Store) {
 fn bench_append(c: &mut Criterion) {
     let mut g = c.benchmark_group("append");
     g.sample_size(20);
-    for sync in [SyncPolicy::Always, SyncPolicy::Never] {
+    for sync in [SyncPolicy::Always, SyncPolicy::Group, SyncPolicy::Never] {
         for len in record_sizes() {
             let (_dir, store) = open(sync);
             let payload = vec![0xA5u8; len];
@@ -63,6 +66,54 @@ fn bench_append(c: &mut Criterion) {
                     i += 1;
                 });
             });
+        }
+    }
+    g.finish();
+}
+
+/// Concurrent writers: total throughput of `threads` writers each appending
+/// records of `len` bytes, per durability policy. This is where group commit
+/// is expected to matter.
+fn bench_append_concurrent(c: &mut Criterion) {
+    let mut g = c.benchmark_group("append_concurrent");
+    g.sample_size(10);
+    let len = 64 << 10;
+    for sync in [SyncPolicy::Always, SyncPolicy::Group] {
+        for threads in [1usize, 4, 16] {
+            let (_dir, store) = open(sync);
+            let store = Arc::new(store);
+            g.throughput(Throughput::Bytes((len * threads) as u64));
+            g.bench_with_input(
+                BenchmarkId::new(format!("{sync:?}"), threads),
+                &threads,
+                |b, &threads| {
+                    b.iter_custom(|iters| {
+                        let payload = Arc::new(vec![0x5Au8; len]);
+                        let start = Instant::now();
+                        let handles: Vec<_> = (0..threads)
+                            .map(|t| {
+                                let store = Arc::clone(&store);
+                                let payload = Arc::clone(&payload);
+                                std::thread::spawn(move || {
+                                    for i in 0..iters {
+                                        store
+                                            .put(key(i * threads as u64 + t as u64), &payload)
+                                            .unwrap();
+                                    }
+                                })
+                            })
+                            .collect();
+                        for h in handles {
+                            h.join().unwrap();
+                        }
+                        // Report per-"iteration" time where one iteration is
+                        // one record from each thread.
+                        let elapsed = start.elapsed();
+                        Duration::from_nanos((elapsed.as_nanos() / u128::from(iters.max(1))) as u64)
+                            * iters as u32
+                    });
+                },
+            );
         }
     }
     g.finish();
@@ -94,5 +145,5 @@ fn bench_read(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_append, bench_read);
+criterion_group!(benches, bench_append, bench_append_concurrent, bench_read);
 criterion_main!(benches);

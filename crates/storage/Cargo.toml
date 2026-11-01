@@ -21,6 +21,14 @@ criterion.workspace = true
 [lib]
 bench = false
 
+# Workload process for the SIGKILL crash test (tests/sigkill.rs).
+[[bin]]
+name = "crash_writer"
+path = "src/bin/crash_writer.rs"
+bench = false
+test = false
+doc = false
+
 [[bench]]
 name = "io"
 harness = false

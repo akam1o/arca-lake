@@ -37,3 +37,10 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   ranges, HeadObject, DeleteObject, ListObjectsV2), server wiring on
   hyper, and an AWS CLI smoke test; `arca-lake gateway` subcommand
   (Phase 0 task 0.6, functional part).
+- `arca-lake-storage`: group commit (`SyncPolicy::Group`, now the default),
+  compaction with a fault-injection hook, order-independent index rebuild
+  (highest sequence wins across data records and tombstones), per-segment
+  live accounting and compaction candidates, SIGKILL crash test with a
+  deterministic writer process, interrupted-compaction tests at every step,
+  concurrent-read-during-compaction test, golden v1 segment for format
+  compatibility, concurrent-writer benchmark (Phase 0 task 0.3).

@@ -19,4 +19,7 @@ mod store;
 pub use error::StorageError;
 pub use format::ShardKey;
 pub use index::Location;
-pub use store::{OpenReport, ScrubReport, Store, StoreConfig, StoreStats, SyncPolicy};
+pub use store::{
+    CompactionReport, CompactionStep, OpenReport, ScrubReport, SegmentStats, Store, StoreConfig,
+    StoreStats, SyncPolicy,
+};
