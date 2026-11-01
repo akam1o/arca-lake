@@ -13,6 +13,9 @@ name = "arca-lake"
 path = "src/main.rs"
 
 [dependencies]
+arca-lake-gateway.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 
 [lints]
 workspace = true

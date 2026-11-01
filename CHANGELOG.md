@@ -32,3 +32,8 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 - `arca-lake-metadata` `fdb` feature: FoundationDB backend, protocol tests
   against a real cluster, containerized runner (`deploy/dev/fdb-test.sh`)
   and a CI job.
+- `arca-lake-gateway`: S3 protocol layer spike on `s3s` with an in-memory
+  backend (buckets, PutObject with conditional headers, GetObject with
+  ranges, HeadObject, DeleteObject, ListObjectsV2), server wiring on
+  hyper, and an AWS CLI smoke test; `arca-lake gateway` subcommand
+  (Phase 0 task 0.6, functional part).
