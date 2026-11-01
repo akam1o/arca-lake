@@ -36,7 +36,8 @@ pub fn devices_of(nodes: &[NodeRecord], groups: &[GroupRecord]) -> Vec<Device> {
 
 /// Create `count` groups for `profile` on `tier` (plus, if the profile has a
 /// small-object policy, `count` replication groups), choosing members across
-/// the profile's failure domain. Returns the created groups.
+/// the profile's failure domain from every registered node. Returns the
+/// created groups.
 ///
 /// # Errors
 ///
@@ -48,6 +49,41 @@ pub async fn create_groups<S: KvStore>(
     count: usize,
 ) -> Result<Vec<GroupRecord>, ControlError> {
     let nodes = cluster::list_nodes(meta).await?;
+    create_groups_from(meta, profile, tier, count, nodes).await
+}
+
+/// [`create_groups`] restricted to nodes whose `device_class` label equals
+/// `device_class` (one durable tier per device class, RFC-006 §5.1).
+///
+/// # Errors
+///
+/// Placement or metadata errors.
+pub async fn create_groups_for_class<S: KvStore>(
+    meta: &S,
+    profile: &EcProfile,
+    tier: &str,
+    device_class: &str,
+    count: usize,
+) -> Result<Vec<GroupRecord>, ControlError> {
+    let nodes = cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .filter(|n| {
+            n.labels
+                .iter()
+                .any(|(k, v)| k == "device_class" && v == device_class)
+        })
+        .collect();
+    create_groups_from(meta, profile, tier, count, nodes).await
+}
+
+async fn create_groups_from<S: KvStore>(
+    meta: &S,
+    profile: &EcProfile,
+    tier: &str,
+    count: usize,
+    nodes: Vec<NodeRecord>,
+) -> Result<Vec<GroupRecord>, ControlError> {
     let mut existing = cluster::list_groups(meta).await?;
     let mut created = Vec::new();
 

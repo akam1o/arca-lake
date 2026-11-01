@@ -718,3 +718,79 @@ pub async fn reset_access<S: KvStore>(store: &S, generation: &GenId, now_ms: u64
     })
     .await
 }
+
+/// Generations in ID order after `after`, with their headers, at most
+/// `limit` (one transaction; jumps over each generation's subspace).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn list_generations<S: KvStore>(
+    store: &S,
+    after: Option<GenId>,
+    limit: usize,
+) -> Result<Vec<(GenId, GenerationHeader)>> {
+    transact(store, (after, limit), |tx, env| {
+        Box::pin(async move {
+            let (after, limit) = *env;
+            let full = keys::all_generations_range();
+            let mut begin = match after {
+                Some(g) => keys::gen_range(&g).end,
+                None => full.begin.clone(),
+            };
+            let mut out = Vec::new();
+            while out.len() < limit && begin < full.end {
+                let first = tx
+                    .get_range(
+                        &crate::kv::KeyRange::new(begin.clone(), full.end.clone()),
+                        1,
+                        false,
+                    )
+                    .await?;
+                let Some((k, _)) = first.into_iter().next() else {
+                    break;
+                };
+                let Some(generation) = keys::gen_from_gen_key(&k) else {
+                    break;
+                };
+                if let Some(h) =
+                    read::<GenerationHeader, _>(tx, &keys::gen_header(&generation)).await?
+                {
+                    out.push((generation, h));
+                }
+                begin = keys::gen_range(&generation).end;
+            }
+            Ok(out)
+        })
+    })
+    .await
+}
+
+/// Chunk records of a generation by ID (any state), in index order.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn read_manifest_of<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+) -> Result<Option<Vec<(u32, ChunkRecord)>>> {
+    transact(store, *generation, |tx, generation| {
+        Box::pin(async move {
+            if tx.get(&keys::gen_header(generation)).await?.is_none() {
+                return Ok(None);
+            }
+            let mut out = Vec::new();
+            for (k, v) in tx
+                .get_range(&keys::gen_chunks_range(generation), usize::MAX, false)
+                .await?
+            {
+                let index = keys::chunk_index_from(&k)
+                    .ok_or_else(|| MetaError::Codec("unexpected key in chunk range".into()))?;
+                out.push((index, crate::records::decode::<ChunkRecord>(&v)?));
+            }
+            Ok(Some(out))
+        })
+    })
+    .await
+}

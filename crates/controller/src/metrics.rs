@@ -45,6 +45,10 @@ pub struct Metrics {
     pub cache_usage_bytes: AtomicU64,
     /// Whether the last eviction pass could not reach the low watermark.
     pub cache_over_watermark: AtomicBool,
+    /// Chunks promoted to a higher durable tier.
+    pub chunks_promoted_total: AtomicU64,
+    /// Chunks demoted to a lower durable tier.
+    pub chunks_demoted_total: AtomicU64,
 }
 
 impl Metrics {
@@ -116,6 +120,14 @@ impl Metrics {
         out += &g(
             "arca_controller_cache_over_watermark",
             u64::from(self.cache_over_watermark.load(Ordering::Relaxed)),
+        );
+        out += &c(
+            "arca_controller_chunks_promoted_total",
+            self.chunks_promoted_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_chunks_demoted_total",
+            self.chunks_demoted_total.load(Ordering::Relaxed),
         );
         out
     }

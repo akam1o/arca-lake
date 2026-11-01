@@ -65,6 +65,10 @@ pub struct ControllerConfig {
     pub cache_tiers: Vec<arca_lake_tiering::cache::CacheTierConfig>,
     /// Interval between eviction passes.
     pub evict_interval: Duration,
+    /// Automatic promotion/demotion policy (RFC-006 §5.8); `None` disables.
+    pub tiering: Option<crate::tiering::TieringPolicy>,
+    /// Interval between tiering passes.
+    pub tiering_interval: Duration,
 }
 
 impl ControllerConfig {
@@ -89,6 +93,8 @@ impl ControllerConfig {
             http_listen: None,
             cache_tiers: Vec::new(),
             evict_interval: Duration::from_secs(10),
+            tiering: None,
+            tiering_interval: Duration::from_mins(5),
         }
     }
 }
@@ -242,6 +248,7 @@ async fn run<S: KvStore + 'static>(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn start_leader_tasks<S: KvStore + 'static>(
     meta: &Arc<FencedKv<S>>,
     cfg: &ControllerConfig,
@@ -323,6 +330,25 @@ fn start_leader_tasks<S: KvStore + 'static>(
                     let cfg = cfg.clone();
                     let metrics = Arc::clone(&metrics);
                     async move { evict_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
+                }
+            },
+        )),
+        tokio::spawn(scheduler(
+            "tiering",
+            cfg.tiering_interval,
+            stop.clone(),
+            Arc::clone(metrics),
+            {
+                let metrics = Arc::clone(metrics);
+                let meta = Arc::clone(meta);
+                let clients = clients.clone();
+                let cfg = cfg.clone();
+                move || {
+                    let meta = Arc::clone(&meta);
+                    let clients = clients.clone();
+                    let cfg = cfg.clone();
+                    let metrics = Arc::clone(&metrics);
+                    async move { tiering_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
                 }
             },
         )),
@@ -665,6 +691,29 @@ async fn evict_pass<S: KvStore>(
         if r.evicted > 0 || r.over_watermark {
             info!(tier = %tier.tier, ?r, "evict pass");
         }
+    }
+    Ok(())
+}
+
+/// Automatic tiering pass (RFC-006 §5.8).
+async fn tiering_pass<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    cfg: &ControllerConfig,
+    metrics: &Metrics,
+) -> Result<(), ControlError> {
+    let Some(policy) = cfg.tiering.as_ref() else {
+        return Ok(());
+    };
+    let r = crate::tiering::run_once(meta, clients, policy, now_ms()).await?;
+    metrics
+        .chunks_promoted_total
+        .fetch_add(r.promoted_chunks as u64, Ordering::Relaxed);
+    metrics
+        .chunks_demoted_total
+        .fetch_add(r.demoted_chunks as u64, Ordering::Relaxed);
+    if r.promoted_chunks + r.demoted_chunks > 0 {
+        info!(?r, "tiering pass");
     }
     Ok(())
 }

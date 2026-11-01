@@ -10,6 +10,7 @@ pub mod groups;
 pub mod metrics;
 pub mod process;
 pub mod repair;
+pub mod tiering;
 pub mod walk;
 
 /// Errors from control-plane operations.

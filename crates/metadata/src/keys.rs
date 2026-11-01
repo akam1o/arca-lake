@@ -203,6 +203,12 @@ pub fn access(generation: &GenId) -> Key {
     pack(&(ROOT, "acc", Bytes::from(&generation[..])))
 }
 
+/// Every generation subspace (all `("al","g",...)` keys).
+#[must_use]
+pub fn all_generations_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "g")))
+}
+
 /// Every key belonging to a generation.
 #[must_use]
 pub fn gen_range(generation: &GenId) -> KeyRange {
