@@ -183,17 +183,20 @@ impl Default for RpcPolicy {
 
 impl RpcPolicy {
     /// A policy derived from the former single per-RPC timeout: unary
-    /// RPCs and the deadline floor keep `timeout`, the progress timeout is
-    /// half of it, the minimum rate is 1 MiB/s, and shard RPCs are tried
-    /// three times.
+    /// RPCs, the progress timeout and the deadline floor all take
+    /// `timeout`; the minimum rate is 256 KiB/s; shard RPCs are tried
+    /// three times. (The R-47 matrix in RFC-009 §6.8 chose these: a
+    /// progress timeout shorter than TCP's retransmission backoff under
+    /// heavy loss restarts transfers that would have finished, and a
+    /// deadline without a rate term fails every transfer on a slow link.)
     #[must_use]
     pub fn from_timeout(timeout: Duration) -> Self {
         Self {
             connect_timeout: (timeout / 5).max(Duration::from_millis(200)),
             unary_timeout: timeout,
-            progress_timeout: (timeout / 2).max(Duration::from_millis(100)),
+            progress_timeout: timeout.max(Duration::from_millis(100)),
             base_deadline: timeout,
-            min_rate_bytes_per_s: 1 << 20,
+            min_rate_bytes_per_s: 256 << 10,
             max_attempts: 3,
             backoff: Duration::from_millis(100),
         }

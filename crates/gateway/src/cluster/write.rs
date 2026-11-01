@@ -173,6 +173,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn write_generation(
         &self,
         generation: GenId,
@@ -185,12 +186,14 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let mut md5 = Md5::new();
         let mut size = 0u64;
         let mut index = 0u32;
+        let lease_ms = u64::try_from(self.cfg.lease.as_millis()).unwrap_or(u64::MAX);
         let mut batch: Vec<(u32, ChunkRecord)> = Vec::new();
         let mut buf = BytesMut::with_capacity(max_chunk.min(8 << 20));
         let mut finished = false;
 
         // Read the first chunk to learn whether this is a small object.
         let mut first = true;
+        let mut last_renewal = std::time::Instant::now();
         while !finished {
             // Fill `buf` up to max_chunk or end of body.
             while buf.len() < max_chunk {
@@ -225,10 +228,25 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             if self.take_fault(FaultPoint::AfterShardsBeforeManifest) {
                 return Err(s3_error!(InternalError, "injected crash after shards").into());
             }
-            if batch.len() >= self.cfg.chunk_batch {
-                object::append_chunks(self.meta.as_ref(), &generation, &batch, now_ms())
+            // Keep the generation alive while bytes keep arriving: renew
+            // the lease once a third of it has passed since the last
+            // renewal (slow links, R-47). A stalled upload renews nothing.
+            if last_renewal.elapsed() >= self.cfg.lease / 3 {
+                object::renew_lease(self.meta.as_ref(), &generation, now_ms(), lease_ms)
                     .await
                     .map_err(meta_err)?;
+                last_renewal = std::time::Instant::now();
+            }
+            if batch.len() >= self.cfg.chunk_batch {
+                object::append_chunks_renewing(
+                    self.meta.as_ref(),
+                    &generation,
+                    &batch,
+                    now_ms(),
+                    lease_ms,
+                )
+                .await
+                .map_err(meta_err)?;
                 batch.clear();
             }
             if chunk.len() < max_chunk {
@@ -236,9 +254,15 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             }
         }
         if !batch.is_empty() {
-            object::append_chunks(self.meta.as_ref(), &generation, &batch, now_ms())
-                .await
-                .map_err(meta_err)?;
+            object::append_chunks_renewing(
+                self.meta.as_ref(),
+                &generation,
+                &batch,
+                now_ms(),
+                lease_ms,
+            )
+            .await
+            .map_err(meta_err)?;
         }
         if self.take_fault(FaultPoint::BeforeCommit) {
             return Err(s3_error!(InternalError, "injected crash before commit").into());

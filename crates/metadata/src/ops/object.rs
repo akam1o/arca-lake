@@ -96,6 +96,25 @@ pub async fn append_chunks<S: KvStore>(
     chunks: &[(u32, ChunkRecord)],
     now_ms: u64,
 ) -> Result<()> {
+    append_chunks_renewing(store, generation, chunks, now_ms, 0).await
+}
+
+/// [`append_chunks`] that also renews the pending generation's lease to
+/// `now_ms + lease_ms` (when that is later than the current lease): an
+/// upload that keeps delivering chunks keeps its generation, however slow
+/// the link; one that stops still expires (RFC-003, R-47). `lease_ms == 0`
+/// renews nothing.
+///
+/// # Errors
+///
+/// As [`append_chunks`].
+pub async fn append_chunks_renewing<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    chunks: &[(u32, ChunkRecord)],
+    now_ms: u64,
+    lease_ms: u64,
+) -> Result<()> {
     // FoundationDB counts more than the raw key and value bytes of a
     // mutation: each `set` also contributes a write conflict range (the key
     // twice) and per-mutation overhead. Charge a conservative estimate per
@@ -111,7 +130,7 @@ pub async fn append_chunks<S: KvStore>(
         let v = encode(chunk)?;
         let bytes = 3 * k.len() + v.len() + PER_MUTATION_OVERHEAD;
         if batch_bytes + bytes > budget && !batch.is_empty() {
-            flush_batch(store, generation, now_ms, &batch).await?;
+            flush_batch(store, generation, now_ms, lease_ms, &batch).await?;
             batch.clear();
             batch_bytes = 0;
         }
@@ -119,24 +138,73 @@ pub async fn append_chunks<S: KvStore>(
         batch.push((k, v));
     }
     if !batch.is_empty() {
-        flush_batch(store, generation, now_ms, &batch).await?;
+        flush_batch(store, generation, now_ms, lease_ms, &batch).await?;
     }
     Ok(())
+}
+
+/// Renew the lease of a pending generation to `now_ms + lease_ms` if that
+/// is later than the current expiry (no-op otherwise). Called by a gateway
+/// while an upload is still delivering bytes (R-47: progress keeps the
+/// generation alive, a stall lets it expire).
+///
+/// # Errors
+///
+/// [`MetaError::WrongGenerationState`] or [`MetaError::LeaseExpired`].
+pub async fn renew_lease<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    now_ms: u64,
+    lease_ms: u64,
+) -> Result<()> {
+    transact_idempotent(store, (*generation, now_ms, lease_ms), |tx, env| {
+        Box::pin(async move {
+            let (generation, now_ms, lease_ms) = *env;
+            let mut header = require_pending(tx, &generation, now_ms).await?;
+            if let GenState::Pending { lease_until_ms } = header.state
+                && now_ms.saturating_add(lease_ms) > lease_until_ms
+            {
+                let renewed = now_ms.saturating_add(lease_ms);
+                tx.clear(&keys::pending(lease_until_ms, &generation));
+                tx.set(&keys::pending(renewed, &generation), &[]);
+                header.state = GenState::Pending {
+                    lease_until_ms: renewed,
+                };
+                write(tx, &keys::gen_header(&generation), &header)?;
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 async fn flush_batch<S: KvStore>(
     store: &S,
     generation: &GenId,
     now_ms: u64,
+    lease_ms: u64,
     batch: &[(Vec<u8>, Vec<u8>)],
 ) -> Result<()> {
-    // Idempotent: chunk records are a pure function of the chunk.
-    transact_idempotent(store, (*generation, now_ms, batch), |tx, env| {
+    // Idempotent: chunk records are a pure function of the chunk, and the
+    // lease renewal only ever moves the expiry later.
+    transact_idempotent(store, (*generation, now_ms, lease_ms, batch), |tx, env| {
         Box::pin(async move {
-            let (generation, now_ms, batch) = *env;
-            require_pending(tx, &generation, now_ms).await?;
+            let (generation, now_ms, lease_ms, batch) = *env;
+            let mut header = require_pending(tx, &generation, now_ms).await?;
             for (k, v) in batch {
                 tx.set(k, v);
+            }
+            if lease_ms > 0
+                && let GenState::Pending { lease_until_ms } = header.state
+                && now_ms.saturating_add(lease_ms) > lease_until_ms
+            {
+                let renewed = now_ms.saturating_add(lease_ms);
+                tx.clear(&keys::pending(lease_until_ms, &generation));
+                tx.set(&keys::pending(renewed, &generation), &[]);
+                header.state = GenState::Pending {
+                    lease_until_ms: renewed,
+                };
+                write(tx, &keys::gen_header(&generation), &header)?;
             }
             Ok(())
         })

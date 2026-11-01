@@ -450,3 +450,48 @@ async fn too_slow_shard_stream_hits_the_absolute_deadline() {
     );
     c.shutdown().await;
 }
+
+/// An upload slower than the pending-generation lease keeps its generation
+/// because every chunk append renews the lease; the object commits and is
+/// readable, and nothing is collected by GC meanwhile.
+#[tokio::test]
+async fn slow_upload_renews_its_lease_and_commits() {
+    let c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        lease: Duration::from_millis(1500),
+        ..ClusterOptions::rs(3, 2, 1, 256 << 10, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    // Every shard write crawls: ~600 ms per 64 KiB frame step on one shard,
+    // so a 6-chunk object takes several seconds, well past the lease.
+    c.backend.node_clients().set_fault_hook(Some(hook(|ctx| {
+        if ctx.rpc == Rpc::PutShard && ctx.shard.is_some_and(|s| s.shard_index == 0) {
+            FaultAction::SlowStream(Duration::from_millis(600))
+        } else {
+            FaultAction::None
+        }
+    })));
+    let data = payload(usize::try_from(6 * (256u64 << 10) - 5).unwrap(), 40);
+    let started = std::time::Instant::now();
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "slow",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        started.elapsed() > Duration::from_millis(1500),
+        "the upload must outlast the lease for this test to mean anything"
+    );
+    c.backend.node_clients().set_fault_hook(None);
+    assert_eq!(s3::get(&c.backend, BUCKET, "slow").await.unwrap().0, data);
+    // GC with the lease long expired by wall clock finds nothing pending.
+    let r = c.gc(now_ms() + 60_000, 0).await;
+    assert_eq!(r.collected, 0, "{r:?}");
+    assert_eq!(s3::get(&c.backend, BUCKET, "slow").await.unwrap().0, data);
+    c.shutdown().await;
+}
