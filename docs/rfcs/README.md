@@ -31,7 +31,8 @@ acceptance criteria are testable.
 | [RFC-008](RFC-008-failure-recovery-and-garbage-collection.md) | Failure Recovery and Garbage Collection | 003, 004, 005 | draft | DD-7, DD-8, Phase 1 hardening tests |
 | RFC-009 | Performance Architecture | 004, 005, 007 | planned | Phase 0 measurements |
 | RFC-010 | Testing and Verification | 001–008 | planned | testkit design |
-| RFC-011 | Operations and Observability | 001, 006, 008 | planned | metrics registry, admin API |
+| [RFC-011](RFC-011-controller.md) | Controller | 003, 004, 008 | draft | Phase 1.2 controller process and failover tests |
+| RFC-013 | Operations and Observability | 001, 006, 008, 011 | planned | metrics registry, admin API |
 | RFC-012 | Security Architecture | 001, 007 | planned | threat model |
 
 ## Dependency graph
@@ -46,7 +47,8 @@ RFC-001 Architecture
  │                     (003..006) ─▶ RFC-008 Recovery & GC
  │                     (004,005,007) ─▶ RFC-009 Performance
  ├─▶ RFC-007 S3 Gateway (needs 003)
- ├─▶ RFC-011 Operations (needs 006, 008)
+ ├─▶ RFC-011 Controller (needs 003, 004, 008)
+ ├─▶ RFC-013 Operations (needs 006, 008, 011)
  ├─▶ RFC-012 Security (needs 007)
  └─▶ RFC-010 Testing (needs 001–008)
 ```
@@ -58,7 +60,7 @@ RFC-001 Architecture
    experiment and should be drafted before the experiment and finalized after.
 3. RFC-006 and RFC-007 once 003 and 004 stabilize.
 4. RFC-008 after 003–006, because recovery crosses all of them.
-5. RFC-009, RFC-010, RFC-011, RFC-012 can start as drafts early but are
+5. RFC-009, RFC-010, RFC-012, RFC-013 can start as drafts early but are
    accepted last.
 
 ## Relationship to Phase 0

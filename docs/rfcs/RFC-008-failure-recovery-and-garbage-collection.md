@@ -47,7 +47,9 @@ still accounts for.
 | I4 | Expiry retires only generations that were `Pending` with `lease_until <= now`. | `expire_pending` re-reads the header in its own transaction | model test |
 | I5 | Once a generation leaves `Pending`, its commit fails; once it is `Committed`, abort and a second commit fail. | state checks inside each transaction | `commit_unknown.rs` |
 | I6 | A shard is deleted only when metadata, read in one transaction, does not account for it (§6). | controller GC and reconciliation | `gc_safety.rs`, `transport.rs` |
-| I7 | A stripe group is `Active` only when every current member holds a shard for every chunk ID known to any member. | repair completion check | `repair.rs` |
+| I7 | A stripe group is `Active` only when every current member holds a shard for every chunk ID known to any member, with equal lengths, and the rebuilt member's shards verify (§7). | repair completion check | `repair.rs`, `repair_completion.rs` |
+| I9 | Every shard delete or repair write carries the group epoch of the fenced transaction that decided it; nodes reject lower epochs (§6.4). | controller GC and repair; node fencing | `repair_completion.rs::delete_decided_under_an_old_epoch_…` |
+| I10 | At most one controller commits metadata changes; a controller that lost its lease cannot commit after its successor's first transaction (RFC-011). | `FencedKv` | `controller.rs` |
 | I8 | A writer holding an epoch older than a member's enforced epoch cannot write to that member. | node fencing (RFC-004 §5.4) | `e2e.rs`, `repair.rs` |
 
 ## 5. Intermediate states and recovery
@@ -155,7 +157,74 @@ pending lease. It guards against the writer's clock (which stamps the chunk
 ID) being ahead of the controller's; it is never the reason a shard with
 metadata is deleted.
 
-### 6.4 Clock skew
+### 6.4 Deletion epochs
+
+Metadata transactions and node RPCs are not atomic together, so every
+decision to delete or write a shard is made in a (fenced) transaction and
+then carried out by an RPC that may arrive arbitrarily late. The RPC
+carries the group epoch the decision was made under, and a node rejects
+any `DeleteShard`/`PutShard` whose epoch is lower than the one it was last
+fenced to (RFC-004 §5.4). A membership change fences the replacement
+before committing the new membership (`repair::fence` fails otherwise).
+Hence a reconciliation that decided "this node is not a member" under
+epoch `E` cannot delete a shard of a node re-added at epoch `E+1`: the
+node learned `E+1` before it became a member and rejects the `E` delete.
+*Verified*: `repair_completion.rs::delete_decided_under_an_old_epoch_is_rejected_after_a_fence`.
+
+### 6.5 Paged listings
+
+`ListShards` and `VerifyShards` return pages in key order after a cursor.
+A page is a snapshot of the node's index when it was served; across pages
+the walk is not a snapshot:
+
+| Event during a walk | Effect | Why it is harmless |
+| --- | --- | --- |
+| Shard inserted with a key before the cursor (a writer with a slower clock) | Missed by this walk | Every consumer re-runs: GC and reconciliation on their schedule, repair until the completeness check passes |
+| Shard inserted after the cursor | Seen | Normal |
+| Shard deleted after being listed | Stale entry | Repair reads it and finds it missing (treated as absent); reconciliation's delete gets `NotFound` |
+| Node restarts between pages | Continues from the cursor; the index is rebuilt deterministically | Keys are totally ordered and stable |
+| Membership epoch changes | Repair stops with `EpochChanged` at its next write; GC deletes with the old epoch are rejected (§6.4) | Re-run under the new record |
+
+Duplicates are impossible within one member's stream (strictly increasing
+keys) and across members because the walker merges by chunk ID. Memory is
+O(page size × members). *Verified*: `paging.rs`.
+
+### 6.6 Why verify-then-delete has no TOCTOU hole
+
+The question is whether a shard that passed the check in §6.2 or §6.3 can
+become needed between the check and the delete RPC. Three facts about the
+metadata state machine answer it:
+
+1. **No transition leaves `Retiring`.** A generation that is `Retiring`
+   stays so until `finish` removes it; nothing re-references it (I2, model
+   test). So §6.2's check holds at delete time.
+2. **Chunk IDs are never reused.** A chunk ID is the generation's UUIDv7
+   prefix plus an index; a new generation always has a new prefix. A
+   delete can therefore never hit a shard written later by a different
+   generation under the same key. A retried write of the *same* generation
+   writes identical bytes.
+3. **`begin_put` commits the header before any shard is written.** A shard
+   whose prefix has no generation (§6.3, "no generation") can only mean the
+   generation was finished, or `begin_put`'s own retry is about to write
+   the same header; the age guard covers the latter.
+
+What these facts do not cover is membership: a node that is not a member
+when the decision is made and becomes one before the RPC arrives. That is
+the case §6.4 closes with the deletion epoch. Alternatives compared:
+
+| Option | Guarantee | Cost | Decision |
+| --- | --- | --- | --- |
+| Verify-then-delete with chunk-ID uniqueness and deletion epochs | Equivalent to atomicity for the cases above | One extra epoch check on the node (already present for writers) | **Chosen** |
+| `Deleting` reservation state in metadata before the RPC | Same, since `Retiring` is already terminal; would add a state and a transaction per generation | One more transaction per collected generation | Not needed |
+| Node-side tombstones with a deletion epoch | Lets a node refuse deletes older than its last membership change even without the fence | Per-shard tombstone state on nodes | Subsumed by epoch fencing |
+| Generation tombstone kept after `finish` | Would let reconciliation distinguish "finished" from "never existed" | Unbounded tombstone growth | Not needed: both cases are garbage |
+
+A long-stopped controller resuming is the same case as a stale leader: its
+decisions were made in fenced transactions that fail once a successor
+exists (RFC-011 §5.3), and RPCs it issued before losing leadership carry
+epochs that current members check.
+
+### 6.7 Clock skew
 
 Safety never depends on clocks agreeing: every decision is a transaction
 that reads the state it changes. Skew affects liveness only. A controller
@@ -167,14 +236,38 @@ clock far behind delays reclamation.
 
 ## 7. Repair completion and metadata order
 
-1. Fence reachable members (`UpdateGroupEpoch`).
-2. Commit `{members[index] = replacement, epoch + 1, Repairing, cursor = None}`
-   in one transaction that fails if the record changed since it was read.
-3. For each chunk ID in sorted order, write the reconstructed shard, then
-   persist `cursor = (index, chunk_id)`; stop with `EpochChanged` if a
-   write is fenced or the record moved.
-4. List every member; if all list the same chunk IDs, set `Active` in a
-   transaction conditioned on the epoch. Otherwise stay `Repairing`.
+1. Fence reachable members (`UpdateGroupEpoch`); the replacement must
+   acknowledge, otherwise the change is not started (§6.4).
+2. Commit `{members[index] = replacement, epoch + 1, Repairing,
+   cursor = (index, 0)}` in one transaction that fails if the record
+   changed since it was read. The cursor names the member being rebuilt so
+   that any controller can resume (RFC-011 §5.5).
+3. Walk the group in chunk-ID order (§6.5). For each chunk the replacement
+   lacks or holds corrupt (per `VerifyShards`): read `k` shards,
+   reconstruct, and **validate** before writing: the chunk's recorded
+   scheme and `k+m` equal the group's, its recorded placement is this
+   group, and the reconstructed chunk's CRC-32C equals the recorded one.
+   Write with the new epoch and require the node's returned CRC to match.
+   Persist `cursor = (index, chunk_id)`. Stop with `EpochChanged` if a
+   write is fenced or the record moved; stop with `Corrupt` or
+   `Unrecoverable` without writing anything if validation fails or fewer
+   than `k` shards of a live generation exist.
+4. **Completeness invariant (I7).** The group becomes `Active` only when,
+   in one walk, every member answers, lists every chunk, with equal payload
+   lengths across members, and the replacement's shards (optionally every
+   member's) pass `VerifyShards`. Otherwise the group stays `Repairing` and
+   the cursor is cleared so that the next run walks everything again.
+
+| Property checked at completion | How | Test |
+| --- | --- | --- |
+| Shard existence on every member | walker presence | `completion_requires_every_member_to_answer`, `paging.rs` |
+| Length consistency | `payload_len` per member | `repair_completion.rs` (length mismatch counter) |
+| Byte integrity of the rebuilt member | `VerifyShards` (block checksums) | `corrupt_shard_on_the_replacement_blocks_completion_until_rewritten` |
+| Byte integrity of other members | `VerifyShards` with `verify_all_members` | `corrupt_source_shard_is_not_propagated_and_blocks_full_verification` |
+| EC profile and placement of each rebuilt chunk | chunk record vs group record | `reconstruct_one` (error `Corrupt`) |
+| Generation liveness | `generation_is_live` | `delete_and_gc_during_repair_…` |
+| Whole-chunk checksum of rebuilt data | recorded CRC-32C vs reconstructed | `reconstruct_one`; a corrupt source never propagates |
+| Placement epoch | writes fenced; `EpochChanged` stops the run | `membership_change_during_repair_…` |
 
 Shards of the replaced member are never deleted by repair; reconciliation
 reclaims them after step 4 (§6.3, last row).
@@ -198,16 +291,20 @@ reproduces their observable effect on the protocols; TCP-level behaviour
 (resets mid-stream, HTTP/2 stream errors, kernel buffering) is **not**
 covered and needs tests on a real network.
 
+Verified on a three-process FoundationDB cluster (`fdb_failover.rs`):
+process loss during concurrent PUTs, coordinator loss, quorum loss with
+explicit failure, controller leader failover, repair and GC across a
+process loss.
+
 Not verified: metadata store unavailability lasting longer than a lease
-during a PUT; controller leader change in the middle of a repair (one
-controller at a time is assumed); more than one simultaneous repair on
-different groups; power loss of a storage node mid-`PutShard` beyond the
-storage engine's own crash tests (RFC-005).
+during a PUT; more than one simultaneous repair on different groups; power
+loss of a storage node mid-`PutShard` beyond the storage engine's own
+crash tests (RFC-005); real-network behaviour (RFC-011 §8, risk R-35).
 
 ## 10. Open questions
 
 - Grace-period measurement by commit version instead of wall clock (OD-16).
-- Reconciliation pagination and scheduling (`ListShards` is unpaginated).
+- Reconciliation scheduling and rate limits (paging exists, §6.5).
 - Whether `skipped_referenced > 0` should halt the controller.
 
 ## 11. Acceptance criteria

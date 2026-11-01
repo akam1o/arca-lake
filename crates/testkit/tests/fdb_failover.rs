@@ -112,6 +112,13 @@ async fn foundationdb_process_and_coordinator_failures() {
         eprintln!("ARCA_FDB_FAILOVER not set; skipping");
         return;
     }
+    // Nothing in this test may wait forever: a hung step is a failure.
+    tokio::time::timeout(Duration::from_mins(15), scenario())
+        .await
+        .expect("the failover scenario exceeded 15 minutes");
+}
+
+async fn scenario() {
     let Some(chaos) = Chaos::from_env() else {
         eprintln!("no chaos driver configured; skipping");
         return;

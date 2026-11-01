@@ -30,7 +30,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-ip_of() { docker inspect -f '{{.NetworkSettings.IPAddress}}' "$1"; }
+# The container's own view of its address works on every Docker-compatible
+# runtime (`docker inspect` templates differ between them).
+ip_of() { docker exec "$1" hostname -i | awk '{print $1}'; }
 
 echo "==> starting FoundationDB processes ($FDB_VERSION)"
 for i in 1 2 3; do docker rm -f "arca-fdb-$i" >/dev/null 2>&1 || true; done
@@ -44,18 +46,28 @@ for i in 2 3; do
     "foundationdb/foundationdb:${FDB_VERSION}" >/dev/null
 done
 for _ in $(seq 1 30); do
-  docker exec arca-fdb-1 fdbcli --exec "status minimal" 2>/dev/null | grep -q "available" && break
+  docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "available" && break
   sleep 1
 done
-docker exec arca-fdb-1 fdbcli --exec "configure new double memory" >/dev/null 2>&1 || true
+for _ in $(seq 1 60); do
+  n=$(docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status json" 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["cluster"]["processes"]))' 2>/dev/null || echo 0)
+  [[ "${n:-0}" -ge 3 ]] && break
+  sleep 2
+done
+if [[ "${n:-0}" -lt 3 ]]; then
+  echo "only ${n:-0} FoundationDB processes joined" >&2
+  for i in 1 2 3; do docker logs "arca-fdb-$i" 2>&1 | tail -20; done
+  exit 1
+fi
+docker exec arca-fdb-1 fdbcli --timeout 30 --exec "configure new double memory" >/dev/null 2>&1 || true
 sleep 3
-docker exec arca-fdb-1 fdbcli --exec \
+docker exec arca-fdb-1 fdbcli --timeout 30 --exec \
   "coordinators ${COORD_IP}:4500 $(ip_of arca-fdb-2):4500 $(ip_of arca-fdb-3):4500" || true
 for _ in $(seq 1 90); do
-  docker exec arca-fdb-1 fdbcli --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+  docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
   sleep 1
 done
-docker exec arca-fdb-1 fdbcli --exec "status minimal"
+docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal"
 CLUSTER_FILE_CONTENTS="$(docker exec arca-fdb-1 cat /var/fdb/fdb.cluster)"
 echo "    cluster: $CLUSTER_FILE_CONTENTS"
 

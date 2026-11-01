@@ -216,6 +216,31 @@ would need a resolution step before a second marker, which is not
 implemented. *Verified* on both backends by `tests/commit_unknown.rs` and
 the testkit fault suite (`faults.rs`, `faults_fdb.rs`).
 
+### 5.9 Linearization points
+
+Every state transition is one transaction; the table names it so that the
+recovery rules in RFC-008 can refer to "before" and "after" unambiguously.
+
+| Transition | Linearization point (transaction) | Visible effect |
+| --- | --- | --- |
+| Object version becomes visible | `commit_put` | pointer and header `Committed` written together |
+| Object version disappears | `delete_object` / `commit_put` of a successor | pointer removed or replaced; displaced generation `Retiring` |
+| Pending write abandoned | `abort_put` or `expire_pending` (per generation) | header `Retiring` |
+| Generation metadata gone | `gc::finish` | all keys of the generation cleared (shards must already be deleted) |
+| Membership changes | `cluster::update_group` in `repair::replace_member` | new members, `epoch + 1`, `Repairing`, cursor |
+| Group healthy again | `cluster::update_group` at repair completion | `Active` |
+| Controller leadership changes | `leader::try_acquire` | holder, token + 1, lease |
+| Leader keeps leadership | `leader::renew` | lease extended, token unchanged |
+
+Node-side effects (shard bytes durable, shard deleted) happen outside these
+transactions and are made safe by the epoch rules in RFC-008 §6.4.
+
+### 5.10 Leader election
+
+The controller's leader record and the fenced store wrapper live in this
+crate (`ops::leader`, `fence::FencedKv`) because they are plain
+transactions on the same store: see RFC-011 §5.2–5.3.
+
 ## 6. Alternatives considered
 
 | Alternative | Why not |

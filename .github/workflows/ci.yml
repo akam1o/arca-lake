@@ -71,15 +71,15 @@ jobs:
           docker run -d --name fdb --network host -e FDB_NETWORKING_MODE=host \
             "foundationdb/foundationdb:${FDB_VERSION}"
           for _ in $(seq 1 30); do
-            docker exec fdb fdbcli --exec "status minimal" 2>/dev/null | grep -q "available" && break
+            docker exec fdb fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "available" && break
             sleep 1
           done
-          docker exec fdb fdbcli --exec "configure new single memory" || true
+          docker exec fdb fdbcli --timeout 30 --exec "configure new single memory" || true
           for _ in $(seq 1 60); do
-            docker exec fdb fdbcli --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+            docker exec fdb fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
             sleep 1
           done
-          docker exec fdb fdbcli --exec "status minimal"
+          docker exec fdb fdbcli --timeout 30 --exec "status minimal"
           docker exec fdb cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
       - name: run tests
         env:
@@ -93,6 +93,7 @@ jobs:
   fdb-failover:
     name: FoundationDB failover (3 processes)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       FDB_VERSION: 7.3.77
     steps:
@@ -119,18 +120,31 @@ jobs:
               "foundationdb/foundationdb:${FDB_VERSION}"
           done
           for _ in $(seq 1 30); do
-            docker exec arca-fdb-1 fdbcli --exec "status minimal" 2>/dev/null | grep -q "available" && break
+            docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "available" && break
             sleep 1
           done
-          docker exec arca-fdb-1 fdbcli --exec "configure new double memory" || true
+          # All three processes must have joined before the database is
+          # configured; otherwise fail here with the container logs.
+          for _ in $(seq 1 60); do
+            n=$(docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status json" 2>/dev/null | jq '.cluster.processes | length' 2>/dev/null || echo 0)
+            [ "${n:-0}" -ge 3 ] && break
+            sleep 2
+          done
+          if [ "${n:-0}" -lt 3 ]; then
+            echo "only ${n:-0} FoundationDB processes joined"; for i in 1 2 3; do docker logs "arca-fdb-$i" | tail -20; done; exit 1
+          fi
+          docker exec arca-fdb-1 fdbcli --timeout 30 --exec "configure new double memory" || true
           sleep 3
-          docker exec arca-fdb-1 fdbcli --exec "coordinators 127.0.0.1:4500 127.0.0.1:4501 127.0.0.1:4502" || true
+          docker exec arca-fdb-1 fdbcli --timeout 30 --exec "coordinators 127.0.0.1:4500 127.0.0.1:4501 127.0.0.1:4502" || true
           for _ in $(seq 1 90); do
-            docker exec arca-fdb-1 fdbcli --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+            docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
             sleep 1
           done
-          docker exec arca-fdb-1 fdbcli --exec "status minimal"
+          docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status minimal"
+          docker exec arca-fdb-1 fdbcli --timeout 30 --exec "status details"
+          docker ps --format '{{.Names}} {{.Status}}'
           docker exec arca-fdb-1 cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
+          cat /tmp/fdb.cluster
       - name: run the failover test
         env:
           ARCA_FDB_TESTS: "1"

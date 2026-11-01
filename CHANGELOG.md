@@ -97,3 +97,27 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   - Tests: `gc_safety.rs`, `repair.rs`, `transport.rs`,
     `metadata/tests/commit_unknown.rs`, `metadata/tests/model.rs`.
   - RFC-008 draft; RFC-003 §5.8; RFC-004 §5.7 rewritten; ADR-0007.
+- Phase 1.2 distributed operations and failover:
+  - `arca-lake-protocol` / `arca-lake-storage-node`: paged `ListShards`
+    with payload lengths and continuation cursor; `VerifyShards`.
+  - `arca-lake-metadata`: shard attribution recipes (`attribute_shard`,
+    `generation_is_live`, `chunk_record_in_group`), leader election
+    (`ops::leader`), `fence::FencedKv`, `KvError::Fenced`,
+    `cluster::touch_node`, FoundationDB transaction timeout; model test
+    extended with shard attribution (I6).
+  - `arca-lake-controller`: bounded-memory group walker; repair with
+    acknowledged fence, per-member cursor from the membership commit,
+    chunk validation against recorded scheme/placement/CRC, verified
+    completion (existence, lengths, `VerifyShards`); reconciliation by
+    pages and metadata reference with deletion epochs; controller
+    process (election, lease, fencing, GC/reconcile/health/repair
+    schedulers, auto repair, backoff, graceful shutdown, metrics and
+    health endpoint, tracing).
+  - `arca-lake` CLI: `storage-node`, `controller`, `admin` subcommands and
+    `gateway --backend cluster` (feature `fdb`).
+  - Tests: `paging.rs`, `repair_completion.rs`, `controller.rs`,
+    `fdb_failover.rs` (three-process FoundationDB: process, coordinator,
+    and quorum loss; leader failover; repair and GC across process loss),
+    `deploy/dev/fdb-failover.sh`, CI job `fdb-failover`.
+  - RFC-011 Controller draft; RFC-003 §5.9–5.10; RFC-004 §5.13; RFC-008
+    §6.4–6.7, §7; ADR-0008.

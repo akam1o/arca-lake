@@ -302,9 +302,12 @@ them (RFC-008 owns scheduling):
 
 ### 5.13 Storage node API additions (`arca_lake.storage.v1`)
 
-`DeleteShard`, `ListShards(group, cursor)`, `UpdateGroupEpoch(group, epoch)`,
-`Health`. `PutShard` returns `EpochRejected` when the node knows a higher
-epoch. All are idempotent.
+`DeleteShard`, `ListShards(group, after, limit)` (paged, key order, with
+payload lengths), `VerifyShards(group, after, limit)` (paged; the node
+reads and checks block checksums, quarantines failures),
+`UpdateGroupEpoch(group, epoch)`, `Health`. `PutShard` and `DeleteShard`
+are rejected when the request's epoch is lower than the node's enforced
+epoch. All are idempotent. Paging semantics: RFC-008 §6.5.
 
 ## 6. Alternatives considered
 
@@ -378,8 +381,10 @@ backend, real storage engines and gRPC):
 | Failure-domain-aware group creation | *Verified* at unit level (`arca-lake-placement`); E2E clusters use one device per host |
 | Capacity-weighted group choice | Not implemented (free capacity is not reported yet; groups are rotated) |
 | Repair resumable after controller crash; stale repair stopped by a second membership change; writes during repair; DELETE during repair | *Verified* (`crates/testkit/tests/repair.rs`) |
-| Health detection, automatic repair triggering, rate limiting | Not implemented; repair and GC are driven explicitly |
-| `ListShards` pagination | Not implemented (whole list per group) |
+| Repair completion verified (existence, lengths, checksums of the rebuilt member, chunk records' scheme/placement/CRC) | *Verified* (`repair_completion.rs`) |
+| Automatic repair of unhealthy members by the controller process | *Verified* in-process (`controller.rs::health_monitor_triggers_auto_repair_…`) |
+| Repair rate limiting and prioritization | Not implemented |
+| `ListShards` / `VerifyShards` pagination with bounded-memory walkers | *Verified* (`paging.rs`) |
 | Rebalancing and profile change (migration, RFC-006) | Not implemented |
 | `--check-config` fault-tolerance statement | `EcProfile::fault_tolerance_statement` exists; not wired to a CLI flag |
 
