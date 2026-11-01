@@ -195,32 +195,47 @@ For each chunk covering the requested range:
 
 ### 5.7 Background repair
 
-Trigger: a member is unhealthy (missed heartbeats beyond a configurable
-window, or a device reports failure, or scrub/read reports corruption for
-many chunks). Controller:
+Trigger: a member is unhealthy (missed heartbeats, a device failure, or
+scrub/read reports), or an operator decommissions a member. The controller
+runs the following protocol (implemented in `arca-lake-controller::repair`,
+details and recovery table in RFC-008 §5.4 and §7):
 
-1. Membership change (§5.4) replacing member `i` with a device in a
-   different failure domain from the remaining members.
-2. Enumerate chunk IDs of the group by `ListShards(group)` on healthy
-   members (union); the replacement is included so already-written new
-   chunks are skipped.
-3. For each chunk whose shard `i` is missing on the replacement: fetch any
-   `k` shards, reconstruct shard `i`, `PutShard` it with `epoch'`. Idempotent
-   and resumable: progress is a cursor over chunk IDs stored in the group
-   record (`repair_cursor`), so a controller failover continues.
-4. When the enumeration completes, set the group `active` (or `sealed` if
-   it was sealed) and clear `degraded`.
+1. **Fence.** Every reachable member of the old and new membership learns
+   `epoch + 1` (`UpdateGroupEpoch`).
+2. **Commit membership.** One transaction sets the replacement, `epoch + 1`,
+   state `Repairing`, and clears the repair cursor; it fails with
+   `EpochChanged` if the record changed since it was read.
+3. **Reconstruct.** Chunk IDs are the union of what every member lists, in
+   sorted order. For each one the replacement lacks, any `k` shards are
+   read, the missing shard is reconstructed and written with the new epoch,
+   and the cursor `(member index, chunk ID)` is persisted. A shard already
+   on the replacement is skipped. A chunk with fewer than `k` shards whose
+   generation is no longer live (deleted meanwhile) is skipped; one whose
+   generation is live is reported unrecoverable and stops the repair.
+4. **Complete.** The group becomes `Active` only when every member lists the
+   same chunk IDs. Otherwise it stays `Repairing`.
 
-**Repair concurrent with writes.** New chunks written during repair already
-carry shard `i` on the replacement (they use `epoch'` and the new member
-set), so repair cannot "fix" them wrongly: step 3 skips shards that exist.
-A chunk whose write is in flight when the enumeration runs is either
-complete on the replacement (skipped) or will be completed by its writer;
-in both cases the end state is one shard `i` with identical bytes. Repair
-and writers never write different bytes under the same key because shard
-bytes are a deterministic function of the chunk.
+**Repair concurrent with writes.** `Repairing` groups accept writes. A
+chunk written during repair carries the new epoch and includes the
+replacement directly, so repair either skips it (present) or, if the
+writer's shard is still in flight when repair reaches that chunk, writes
+the identical bytes under the same key; the storage engine's put is
+idempotent. A writer holding the old epoch is rejected by every fenced
+member, refreshes the map, and rewrites the chunk (§5.4). *Verified* by
+`repair.rs::concurrent_puts_and_gets_during_repair_…`.
 
-Repair bandwidth is rate-limited by configuration per node and per cluster.
+**Interruptions.** A controller crash leaves `Repairing` and the cursor;
+re-issuing the same command resumes. A second membership change on the same
+group stops the running repair with `EpochChanged` and keeps the group
+`Repairing`; re-issuing completes it under the new epoch. A repair of an
+already replaced member is a no-op (no second epoch bump). *Verified* by
+`repair.rs`.
+
+**Deletion.** Repair deletes nothing. Shards of the replaced member are
+reclaimed by reconciliation once the group is `Active` and the node is no
+longer a member (RFC-008 §6.3).
+
+Repair bandwidth limiting and automatic triggering are Phase 2.
 
 ### 5.8 Rebalancing and node addition
 
@@ -311,7 +326,7 @@ epoch. All are idempotent.
 | Member down during read | Degraded read from `k` shards; chunk flagged. |
 | More than `m` members down | Read fails explicitly; writes avoid the group; data unavailable until members return (no silent loss). |
 | Controller fails mid-membership-change | Either the new record is committed (repair resumes from `repair_cursor`) or not (nodes may hold `epoch'` already; the next attempt reuses or increments it; writers with the old epoch are rejected and refresh; the map still shows the old members, which still serve reads). |
-| Stale gateway after membership change | Epoch rejected → refresh → rewrite chunk (idempotent). |
+| Stale gateway after membership change | Epoch rejected → refresh → rewrite chunk (idempotent). A member that missed the fence (down at the time) still accepts the old epoch but is no longer read; reconciliation reclaims it. |
 | Corrupt shard | Reported as missing by the node; decode from others; repair rewrites it. |
 | Network partition between gateway and some members | Writes to those groups fail protection; gateway uses other groups; reads degrade. |
 | Repair and writer race | Both produce identical bytes for the same key; storage engine put is idempotent. |
@@ -358,10 +373,11 @@ backend, real storage engines and gRPC):
 | Corrupt shard reported by the node as `DataLoss`, decoded around; two corrupt shards of a 2+1 chunk fail explicitly | *Verified* |
 | Repair of a replaced member: epoch bump, reconstruction of exactly the missing shards, byte-identical reads with another member down, new writes carry the new epoch, re-run is a no-op | *Verified* |
 | Stale-epoch writes rejected by nodes and by the gateway path until the membership commits | *Verified* |
-| Orphan shards reclaimed: generation-driven (abort, expiry, overwrite, delete) and node-driven reconciliation by generation prefix and age; young orphans kept | *Verified* |
+| Orphan shards reclaimed: generation-driven (abort, expiry, overwrite, delete) after a reference check, and node-driven reconciliation by metadata reference (pending generation, chunk record placement, membership); age is a guard only | *Verified* (`gc_safety.rs`, `transport.rs`) |
 | `m_ack < m` (under-protected chunks) | Not implemented; `m_ack = m` enforced (OD-17) |
 | Failure-domain-aware group creation | *Verified* at unit level (`arca-lake-placement`); E2E clusters use one device per host |
 | Capacity-weighted group choice | Not implemented (free capacity is not reported yet; groups are rotated) |
+| Repair resumable after controller crash; stale repair stopped by a second membership change; writes during repair; DELETE during repair | *Verified* (`crates/testkit/tests/repair.rs`) |
 | Health detection, automatic repair triggering, rate limiting | Not implemented; repair and GC are driven explicitly |
 | `ListShards` pagination | Not implemented (whole list per group) |
 | Rebalancing and profile change (migration, RFC-006) | Not implemented |

@@ -188,6 +188,34 @@ golden encodings of every record version are kept in tests
 fails CI unless a new version is introduced. The gRPC node API stays
 protobuf because it crosses processes and releases (RFC-004 §5.13).
 
+### 5.8 Commit outcome unknown
+
+A commit whose reply is lost (timeout, dropped connection, FoundationDB's
+`commit_unknown_result`) surfaces as `KvError::CommitUnknown`. `transact`
+never retries it. Resolution (ADR-0007, RFC-008 §5.2):
+
+1. `resolve_commit(generation)` reads the header: `Committed` → the PUT
+   succeeded; `Pending` with a live lease → the commit may be retried (the
+   commit transaction re-checks the state and the preconditions, so a
+   retry can never publish twice); `PendingExpired` → do not retry;
+   `Retiring`/`Missing` → the write failed.
+2. After a bounded number of still-unknown retries the gateway fences the
+   generation with `abort_put`. The abort reads and writes the header, so
+   it conflicts with a late commit: after a successful abort no commit can
+   land; an abort rejected with "committed" proves the commit landed and
+   the PUT is reported as success.
+3. If even the fence fails, the generation is left `Pending`; lease expiry
+   (`expire_pending`, same transaction shape) decides later with the same
+   exclusion.
+
+Idempotent recipes (`begin_put` with its pre-chosen generation ID,
+`append_chunks`) use `transact_idempotent`, which re-runs on an unknown
+outcome. `delete_object` on an unversioned bucket is retried once by the
+gateway (a repeated delete is a no-op there); on a versioned bucket it
+would need a resolution step before a second marker, which is not
+implemented. *Verified* on both backends by `tests/commit_unknown.rs` and
+the testkit fault suite (`faults.rs`, `faults_fdb.rs`).
+
 ## 6. Alternatives considered
 
 | Alternative | Why not |
@@ -196,7 +224,7 @@ protobuf because it crosses processes and releases (RFC-004 §5.13).
 | Two-phase commit across storage nodes | Storage nodes would need transactional state; the store already provides one atomic commit point (DD-4). |
 | TiKV | Viable; fewer size limits, more processes, weaker simulation-testing story. Kept behind the trait (DD-5). |
 | Separate metadata service | Extra hop and component (DD-10). |
-| Retrying unknown commit outcomes automatically | Recipes such as `commit_put` are not idempotent under re-execution after an actual commit (the displaced generation would be retired twice or a second version created); resolution must re-read first. |
+| Retrying unknown commit outcomes automatically | Recipes such as `commit_put` are not idempotent under re-execution after an actual commit (the displaced generation would be retired twice or a second version created); resolution re-reads first (§5.8). Only `begin_put` and `append_chunks` are retried. |
 
 ## 7. Failure scenarios
 
@@ -204,7 +232,7 @@ protobuf because it crosses processes and releases (RFC-004 §5.13).
 | --- | --- |
 | Gateway crash before commit | `Pending` with lease; expiry sweep retires; chunks reclaimed. |
 | Gateway crash after commit, before responding | Object is visible; client retries get the committed object (and, for `If-None-Match: *`, a `PreconditionFailed`, which is the S3-visible truth). |
-| Commit outcome unknown | Caller re-reads the pointer: if its generation is current → success; else if the generation is still `Pending` → retry commit; else fail. |
+| Commit outcome unknown | §5.8: re-read, bounded retry while pending, then fence with `abort_put`; an abort that finds `Committed` means success. *Verified* on both backends. |
 | Conflict | `transact` retries the whole body; recipes are written to be re-runnable (IDs chosen before the loop). |
 | Store unavailable | All operations fail with retryable errors; no stale data is served as authoritative. |
 | Oversized record (e.g., huge user metadata) | Explicit `TooLarge` before anything is published. *Verified* on both backends. |
@@ -214,6 +242,8 @@ protobuf because it crosses processes and releases (RFC-004 §5.13).
 
 - Operations on one key are linearized by the commit transaction; across
   keys, transactions are strictly serializable.
+- Invariants I1–I5 of RFC-008 §4 are maintained by the recipes and checked
+  by a model-based test (`tests/model.rs`) on random operation sequences.
 - A committed version's generation is immutable and `Committed`.
 - A `Retiring` generation is never referenced by a pointer or version record
   (V1 in RFC-002).
@@ -235,9 +265,8 @@ protobuf because it crosses processes and releases (RFC-004 §5.13).
 - OD-16 grace-period measurement.
 - Whether `append_chunks` should use FoundationDB's `get_approximate_size`
   instead of the static estimate.
-- The Phase 1 end-to-end tests drive the full protocol against the
-  in-memory backend; against FoundationDB only the recipe-level protocol
-  tests run (CI job). A FoundationDB-backed end-to-end run is outstanding.
+- Versioned-bucket DELETE after an unknown outcome needs a resolution step
+  before a second delete marker (§5.8).
 
 ## 11. Acceptance criteria
 

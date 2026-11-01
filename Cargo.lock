@@ -178,6 +178,7 @@ dependencies = [
  "foundationdb-tuple",
  "futures",
  "postcard",
+ "proptest",
  "serde",
  "thiserror",
  "uuid",

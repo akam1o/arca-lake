@@ -77,3 +77,23 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 - `arca-lake-storage`: `index_rebuild` example measuring index rebuild on
   open; `format::crc32c` helper.
 - ADR-0006 (Phase 1 integration decisions); Phase 1 roadmap page.
+- Phase 1 reliability hardening:
+  - `arca-lake-testkit`: `TestCluster` generic over the metadata backend;
+    the E2E suite and a commit-fault suite run on FoundationDB
+    (`e2e_fdb.rs`, `faults_fdb.rs`) in CI and via `deploy/dev/fdb-test.sh`.
+  - `arca-lake-metadata`: `KvError::CommitUnknown`, `transact_idempotent`,
+    `resolve_commit`, `fault::FaultKv` (commit fault injection for any
+    backend), model-based test of the generation state machine.
+  - `arca-lake-gateway`: commit resolution and fencing on unknown
+    outcomes; writes to `Repairing` groups; `FaultPoint::DieBeforeCommit`.
+  - `arca-lake-controller`: GC verifies generation state and references
+    before deleting; reconciliation decides by metadata reference
+    (pending generation, chunk placement, membership) with age as a guard
+    only; repair with per-member cursor, resume, completeness check,
+    `EpochChanged` detection, and step hooks. `GroupRecord.repair_cursor`
+    layout changed (pre-release).
+  - `arca-lake-protocol`: `NodeClients` fault hook (delay, fail before /
+    after, duplicate, reset).
+  - Tests: `gc_safety.rs`, `repair.rs`, `transport.rs`,
+    `metadata/tests/commit_unknown.rs`, `metadata/tests/model.rs`.
+  - RFC-008 draft; RFC-003 §5.8; RFC-004 §5.7 rewritten; ADR-0007.

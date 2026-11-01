@@ -28,7 +28,7 @@ acceptance criteria are testable.
 | [RFC-005](RFC-005-storage-engine-and-on-disk-format.md) | Storage Engine and On-disk Format | 002 | draft | DD-2, Phase 0 I/O and crash experiments |
 | RFC-006 | Multi-Tier Storage | 002, 003, 004 | planned | DD-6, DD-11, DD-12 |
 | RFC-007 | S3 Gateway Compatibility | 001, 003 | planned | Phase 0 `s3s` spike; compatibility matrix |
-| RFC-008 | Failure Recovery and Garbage Collection | 003, 004, 005, 006 | planned | DD-7, DD-8 |
+| [RFC-008](RFC-008-failure-recovery-and-garbage-collection.md) | Failure Recovery and Garbage Collection | 003, 004, 005 | draft | DD-7, DD-8, Phase 1 hardening tests |
 | RFC-009 | Performance Architecture | 004, 005, 007 | planned | Phase 0 measurements |
 | RFC-010 | Testing and Verification | 001–008 | planned | testkit design |
 | RFC-011 | Operations and Observability | 001, 006, 008 | planned | metrics registry, admin API |

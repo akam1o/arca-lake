@@ -1,6 +1,6 @@
 # Phase 1: Distributed object storage
 
-Status: **first iteration done**. Phase 1 turns the Phase 0 components into
+Status: **first iteration and reliability hardening done**. Phase 1 turns the Phase 0 components into
 one system: S3 PUT and GET through a gateway that erasure codes objects
 across storage nodes and publishes them atomically in the metadata store.
 Durability and consistency come first; performance work is Phase 4.
@@ -16,7 +16,12 @@ Durability and consistency come first; performance work is Phase 4.
 | 1.5 Controller operations | done as library functions | `arca-lake-controller`: group bootstrap, GC (expiry, collection, orphan reconciliation), member replacement with reconstruction. No process, scheduler, leader election, or admin API yet |
 | 1.6 Integration tests | done | `arca-lake-testkit` harness and `tests/e2e.rs` (18 tests, see below) |
 | 1.7 Design notes | done | Record encoding evaluation (RFC-003 §5.7), index persistence measurement (RFC-005 §5.6), ADR-0006 |
-| 1.8 FoundationDB-backed end-to-end run | not started | E2E tests use the in-memory backend; FoundationDB runs the recipe-level protocol tests only |
+| 1.8 FoundationDB-backed end-to-end run | done | `tests/e2e_fdb.rs` (18 cases) and `tests/faults_fdb.rs` (6 cases) run against a real single-process FoundationDB cluster in CI and in `deploy/dev/fdb-test.sh` |
+| 1.11 Commit outcome unknown | done | `KvError::CommitUnknown`, `resolve_commit`, gateway fencing by `abort_put`, `FaultKv` injection; RFC-003 §5.8, RFC-008 §5.2 |
+| 1.12 GC safety | done | Reference-checked collection and reconciliation by metadata reference; `gc_safety.rs`; RFC-008 §6 |
+| 1.13 Repair races | done | Cursor, resume, completeness check, `EpochChanged`; `repair.rs`; RFC-004 §5.7, RFC-008 §7 |
+| 1.14 Transport fault injection | done (client boundary) | `NodeClients` hook; `transport.rs`; real-network tests outstanding (R-35) |
+| 1.15 Model-based test | done | `crates/metadata/tests/model.rs` checks RFC-008 invariants I1–I5 |
 | 1.9 Controller process and admin API | not started | |
 | 1.10 Multipart upload, versioned-bucket GET/LIST of versions through the gateway | not started | Metadata recipes support versioning; the gateway exposes unversioned semantics |
 
@@ -46,24 +51,34 @@ skips when `aws` is not installed).
 | Crash | `crash_after_commit_means_object_is_visible_despite_error` | Commit is the linearization point; client retry is harmless |
 | Lease | `expired_pending_generation_is_retired_and_reclaimed` | Abandoned pending generation collected after the lease |
 
+## Additional suites (reliability hardening)
+
+| Suite | Cases | Verified behaviour |
+| --- | --- | --- |
+| `faults.rs` / `faults_fdb.rs` | 6 | Lost commit reply resolved as success; lost request retried once; persistently unknown commit fenced and invisible; conditional create with lost reply keeps one winner; DELETE with lost reply idempotent; `begin`/`append` retries publish once |
+| `gc_safety.rs` | 5 | Pending generation never collected before its lease (any controller clock, zero grace); forged retired-queue entry for a referenced generation is skipped; reconciliation keeps referenced shards at any age; former-member shards reclaimed only after repair completes; concurrent PUT/DELETE then GC leave exactly the visible shards |
+| `repair.rs` | 6 | PUT/GET during repair; DELETE+GC during repair; controller crash and resume from cursor; second membership change during repair; stale-epoch writer and returning old member; idempotent re-run without epoch bump |
+| `transport.rs` | 5 | Lost PutShard reply → diverted write and reference-based reconciliation; partition → degraded reads, failed writes, recovery; request timeout and slow node on reads; delayed ack / duplicate / reordered PutShard commit once; connection reset during repair resumed |
+| `metadata/tests/commit_unknown.rs` | 6 | Recipe-level resolution, fencing, expiry/commit exclusion, idempotent retries, conditional create |
+| `metadata/tests/model.rs` | 64 random sequences | Invariants I1–I5 of RFC-008 §4 |
+
 ## Not verified in Phase 1
 
 Listed so that nobody documents them as guaranteed:
 
-- Behaviour against FoundationDB end to end (only the in-memory backend in
-  E2E tests; FoundationDB runs the recipe-level tests).
-- Real network partitions, delayed or reordered messages, slow nodes; tests
-  stop processes cleanly or flip bytes on disk.
-- Metadata store unavailability or timeouts during a PUT (commit outcome
-  unknown, RFC-003 §7).
+- Real network failure modes: faults are injected at the client call
+  boundary (RFC-008 §9). TCP resets mid-stream, half-open connections, and
+  HTTP/2 stream errors need a two-host test with network impairment.
+- FoundationDB multi-process clusters and failover during a PUT (the CI
+  cluster is a single process); metadata unavailability longer than a
+  lease.
 - Power loss on hardware; `SIGKILL` tests exist for the storage engine
   (Phase 0), not for the full node.
-- Repair concurrent with writes to the same group; the race analysis in
-  RFC-004 §5.7 is a design argument, not a test.
-- Controller crash in the middle of a membership change (the fenced-but-not-
-  committed state is tested; a crash during reconstruction is not).
-- Profiles other than 2+1 and 1+2 end to end (the EC crate has property
-  tests for many profiles).
+- Controller leader change mid-repair and two simultaneous repairs on
+  different groups (one controller at a time is assumed).
+- Versioned-bucket DELETE after an unknown commit outcome.
+- Profiles other than 2+1, 2+2, and 1+2 end to end (the EC crate has
+  property tests for many profiles).
 - Any performance property.
 
 ## Acceptance criteria for closing Phase 1

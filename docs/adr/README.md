@@ -10,3 +10,4 @@ Short, immutable records of decisions. Use [the template](0000-template.md).
 | [0004](0004-supported-platforms.md) | Supported platforms | accepted |
 | [0005](0005-initial-architecture-decisions.md) | Initial architecture decisions confirmed at design review | accepted |
 | [0006](0006-phase-1-integration-decisions.md) | Phase 1 integration decisions: gRPC for internal RPC, postcard records, no persisted index, `m_ack = m` | accepted |
+| [0007](0007-commit-resolution-and-gc-safety.md) | Commit resolution, reference-checked garbage collection, and repair completion | accepted |

@@ -85,6 +85,9 @@ docker run --rm \
     apt-get update -qq >/dev/null
     apt-get install -y -qq "$deb" libclang-dev >/dev/null
     echo "$FDB_CLUSTER_FILE_CONTENTS" > /tmp/fdb.cluster
+    # One test binary per invocation: linking two of them in parallel has
+    # been seen to exhaust the memory of a small container runtime.
     cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1 "$@"
-    exec cargo test -p arca-lake-testkit --features fdb --test e2e_fdb --test faults_fdb -- --nocapture --test-threads=1 "$@"
+    cargo test -p arca-lake-testkit --features fdb --test e2e_fdb -- --nocapture --test-threads=1 "$@"
+    exec cargo test -p arca-lake-testkit --features fdb --test faults_fdb -- --nocapture --test-threads=1 "$@"
   ' -- "$@"
