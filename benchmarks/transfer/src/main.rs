@@ -588,12 +588,11 @@ async fn run_client(a: ClientArgs) {
             let mut channels = Vec::new();
             for _ in 0..a.connections.max(1) {
                 let scheme = if a.tls { "https" } else { "http" };
-                let mut ep =
-                    Channel::from_shared(format!("{scheme}://{}", a.addr))
-                        .unwrap()
-                        .tcp_nodelay(true)
-                        .initial_stream_window_size(Some(8 << 20))
-                        .initial_connection_window_size(Some(32 << 20));
+                let mut ep = Channel::from_shared(format!("{scheme}://{}", a.addr))
+                    .unwrap()
+                    .tcp_nodelay(true)
+                    .initial_stream_window_size(Some(8 << 20))
+                    .initial_connection_window_size(Some(32 << 20));
                 if let Some(ca) = &ca {
                     ep = ep
                         .tls_config(
