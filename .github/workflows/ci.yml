@@ -85,7 +85,10 @@ jobs:
         env:
           ARCA_FDB_TESTS: "1"
           ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
-        run: cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
+        run: |
+          set -euo pipefail
+          cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
+          cargo test -p arca-lake-testkit --features fdb --test e2e_fdb -- --nocapture --test-threads=1
 
   deny:
     name: licenses and advisories

@@ -1,8 +1,13 @@
-//! In-process test cluster: N storage nodes, an in-memory metadata store,
-//! and a gateway with the cluster backend, plus helpers to stop and
-//! restart nodes, corrupt shards, and drive GC and repair.
+//! In-process test cluster: N storage nodes, a metadata store (in-memory or
+//! FoundationDB), and a gateway with the cluster backend, plus helpers to
+//! stop and restart nodes, corrupt shards, and drive GC and repair. The
+//! end-to-end suite lives in [`suite`] and is instantiated per backend with
+//! [`e2e_suite!`].
 
+#[cfg(feature = "fdb")]
+pub mod fdb;
 pub mod s3;
+pub mod suite;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -13,6 +18,7 @@ use arca_lake_common::{EcProfile, SmallObjectPolicy};
 use arca_lake_controller::{gc, groups, repair};
 use arca_lake_gateway::cluster::{ClusterBackend, ClusterConfig};
 use arca_lake_gateway::{GatewayConfig, ServerHandle, serve};
+use arca_lake_metadata::KvStore;
 use arca_lake_metadata::mem::MemKv;
 use arca_lake_metadata::ops::{cluster, object};
 use arca_lake_metadata::records::{GroupMember, GroupRecord};
@@ -32,13 +38,13 @@ pub struct TestNode {
 }
 
 /// The cluster.
-pub struct TestCluster {
+pub struct TestCluster<S: KvStore + 'static = MemKv> {
     /// Metadata store.
-    pub meta: Arc<MemKv>,
+    pub meta: Arc<S>,
     /// Storage nodes.
     pub nodes: Vec<TestNode>,
     /// Gateway backend (for direct calls and fault injection).
-    pub backend: ClusterBackend<MemKv>,
+    pub backend: ClusterBackend<S>,
     /// Gateway HTTP server.
     pub gateway: Option<ServerHandle>,
     /// Gateway address.
@@ -100,15 +106,29 @@ fn node_store_config(dir: &std::path::Path) -> StoreConfig {
     }
 }
 
-impl TestCluster {
-    /// Start nodes, register them, create groups, start the gateway.
+impl TestCluster<MemKv> {
+    /// Start a cluster on a fresh in-memory metadata store.
+    pub async fn start(opts: ClusterOptions) -> Self {
+        Self::start_with(Arc::new(MemKv::default()), opts).await
+    }
+}
+
+/// Starter for the in-memory backend, for [`e2e_suite!`].
+pub fn mem_starter() -> impl suite::Starter<MemKv> {
+    |opts: ClusterOptions| -> futures::future::BoxFuture<'static, TestCluster<MemKv>> {
+        Box::pin(TestCluster::start(opts))
+    }
+}
+
+impl<S: KvStore + 'static> TestCluster<S> {
+    /// Start nodes, register them, create groups, start the gateway on an
+    /// existing (empty) metadata store.
     ///
     /// # Panics
     ///
     /// On any setup failure (tests).
-    pub async fn start(opts: ClusterOptions) -> Self {
+    pub async fn start_with(meta: Arc<S>, opts: ClusterOptions) -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let meta = Arc::new(MemKv::default());
         let clients = NodeClients::new(Duration::from_secs(5));
         let mut nodes = Vec::new();
         for i in 0..opts.nodes {

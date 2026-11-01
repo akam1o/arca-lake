@@ -8,6 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+# Run the end-to-end suite on FoundationDB (`tests/e2e_fdb.rs`).
+fdb = ["arca-lake-metadata/fdb"]
+
 [dependencies]
 arca-lake-common.workspace = true
 arca-lake-controller.workspace = true
@@ -25,6 +30,10 @@ futures.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs", "io-util"] }
 tempfile.workspace = true
 uuid.workspace = true
+
+[[test]]
+name = "e2e_fdb"
+required-features = ["fdb"]
 
 [lints]
 workspace = true

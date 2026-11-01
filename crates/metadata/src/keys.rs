@@ -172,6 +172,12 @@ pub fn retired_until_range(cutoff_ms: u64) -> KeyRange {
     KeyRange::new(pack(&(ROOT, "gc")), pack(&(ROOT, "gc", cutoff_ms + 1)))
 }
 
+/// Every arca-lake key (for test setup and teardown).
+#[must_use]
+pub fn all_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT,)))
+}
+
 /// Node record.
 #[must_use]
 pub fn node(node_id: u64) -> Key {

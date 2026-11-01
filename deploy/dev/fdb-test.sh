@@ -4,7 +4,8 @@
 # Starts a single-process FoundationDB server container and a Rust container
 # that shares its network namespace, installs the FoundationDB client
 # library inside it, and runs
-# `cargo test -p arca-lake-metadata --features fdb --test fdb`.
+# the FoundationDB-backed metadata protocol tests and the end-to-end suite
+# (`crates/testkit/tests/e2e_fdb.rs`).
 #
 # No image is built: some Docker-compatible runtimes do not support
 # `docker build` well, so the client library is installed at container start
@@ -84,5 +85,6 @@ docker run --rm \
     apt-get update -qq >/dev/null
     apt-get install -y -qq "$deb" libclang-dev >/dev/null
     echo "$FDB_CLUSTER_FILE_CONTENTS" > /tmp/fdb.cluster
-    exec cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1 "$@"
+    cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1 "$@"
+    exec cargo test -p arca-lake-testkit --features fdb --test e2e_fdb -- --nocapture --test-threads=1 "$@"
   ' -- "$@"
