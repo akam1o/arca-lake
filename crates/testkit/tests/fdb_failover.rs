@@ -26,11 +26,18 @@ use std::time::{Duration, Instant};
 use arca_lake_controller::ControlError;
 use arca_lake_controller::process::{ControllerConfig, spawn};
 use arca_lake_controller::repair::RepairStep;
+use arca_lake_metadata::Txn;
 use arca_lake_metadata::fdb::FdbKv;
 use arca_lake_metadata::records::GroupState;
-use arca_lake_testkit::s3::{self, PutOptions};
+use arca_lake_testkit::s3::{self, PutOptions, request};
 use arca_lake_testkit::{ClusterOptions, TestCluster, now_ms, random_bytes};
 use bytes::Bytes;
+use s3s::dto::{
+    AbortMultipartUploadInput, CompleteMultipartUploadInput, CompletedMultipartUpload,
+    CompletedPart, CreateMultipartUploadInput, ETag, ListMultipartUploadsInput, StreamingBlob,
+    UploadPartInput,
+};
+use s3s::{S3, S3Result};
 
 const MIB: u64 = 1 << 20;
 const BUCKET: &str = "failover";
@@ -98,14 +105,115 @@ async fn wait_until(what: &str, timeout: Duration, mut cond: impl AsyncFnMut() -
     }
 }
 
-/// Wait until the store answers again after processes were restarted.
+/// Wait until the store answers again after processes were restarted: a
+/// read succeeds before the transaction subsystem has recovered (R-50: a
+/// PUT issued right after a read-only probe timed out on its commit), so
+/// the probe is a committed write.
 async fn wait_for_store(c: &TestCluster<FdbKv>) {
     wait_until("store available", Duration::from_secs(120), async || {
-        arca_lake_metadata::ops::cluster::map_version(c.meta.as_ref())
-            .await
-            .is_ok()
+        arca_lake_metadata::transact(c.meta.as_ref(), (), |tx, ()| {
+            Box::pin(async move {
+                tx.set(b"zz-failover-probe", b"1");
+                Ok(())
+            })
+        })
+        .await
+        .is_ok()
     })
     .await;
+}
+
+/// Multipart helpers (RFC-007 A10).
+async fn create_upload(s3: &impl S3, key: &str) -> String {
+    s3.create_multipart_upload(request(CreateMultipartUploadInput {
+        bucket: BUCKET.into(),
+        key: key.into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap()
+    .output
+    .upload_id
+    .unwrap()
+}
+
+async fn upload_part(
+    s3: &impl S3,
+    key: &str,
+    upload_id: &str,
+    n: i32,
+    data: Bytes,
+) -> S3Result<String> {
+    let out = s3
+        .upload_part(request(UploadPartInput {
+            bucket: BUCKET.into(),
+            key: key.into(),
+            upload_id: upload_id.into(),
+            part_number: n,
+            body: Some(StreamingBlob::from_bytes(data)),
+            ..Default::default()
+        }))
+        .await?
+        .output;
+    Ok(match out.e_tag {
+        Some(ETag::Strong(s) | ETag::Weak(s)) => s,
+        None => panic!("no etag"),
+    })
+}
+
+async fn complete(
+    s3: &impl S3,
+    key: &str,
+    upload_id: &str,
+    parts: &[(i32, String)],
+) -> S3Result<s3s::dto::CompleteMultipartUploadOutput> {
+    Ok(s3
+        .complete_multipart_upload(request(CompleteMultipartUploadInput {
+            bucket: BUCKET.into(),
+            key: key.into(),
+            upload_id: upload_id.into(),
+            multipart_upload: Some(CompletedMultipartUpload {
+                parts: Some(
+                    parts
+                        .iter()
+                        .map(|(n, e)| CompletedPart {
+                            part_number: Some(*n),
+                            e_tag: Some(ETag::Strong(e.clone())),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+            }),
+            ..Default::default()
+        }))
+        .await?
+        .output)
+}
+
+async fn abort(s3: &impl S3, key: &str, upload_id: &str) -> S3Result<()> {
+    s3.abort_multipart_upload(request(AbortMultipartUploadInput {
+        bucket: BUCKET.into(),
+        key: key.into(),
+        upload_id: upload_id.into(),
+        ..Default::default()
+    }))
+    .await?;
+    Ok(())
+}
+
+async fn open_uploads(s3: &impl S3) -> Vec<String> {
+    s3.list_multipart_uploads(request(ListMultipartUploadsInput {
+        bucket: BUCKET.into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap()
+    .output
+    .uploads
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|u| u.upload_id)
+    .collect()
 }
 
 #[tokio::test]
@@ -267,6 +375,187 @@ async fn scenario() {
     }
     let report = c.gc(now_ms() + 3_600_000, 0).await;
     assert_eq!(report.skipped_referenced, 0);
+
+    // 4b. Multipart during process and coordinator loss (RFC-007 A10).
+    //     Every outcome is explicit; a completed object is never partially
+    //     visible; referenced parts survive GC; nothing leaks.
+    let shards_before_multipart = c.total_shards().await;
+    let part = |n: u64| payload(300 << 10, 100 + n);
+    // (a) UploadPart under process loss, then Complete.
+    let u1 = create_upload(&c.backend, "mp-1").await;
+    let uploads: Vec<_> = (1..=2i32)
+        .map(|n| {
+            let backend = c.backend.clone();
+            let u1 = u1.clone();
+            tokio::spawn(async move {
+                (
+                    n,
+                    upload_part(&backend, "mp-1", &u1, n, part(u64::try_from(n).unwrap())).await,
+                )
+            })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    chaos.run("kill 2").await;
+    let mut etags: Vec<(i32, String)> = Vec::new();
+    let mut retry = Vec::new();
+    for u in uploads {
+        let (n, r) = u.await.unwrap();
+        match r {
+            Ok(e) => etags.push((n, e)),
+            Err(e) => {
+                eprintln!("upload part {n} failed explicitly during process loss: {e}");
+                retry.push(n);
+            }
+        }
+    }
+    chaos.run("start 2").await;
+    wait_for_store(&c).await;
+    for n in retry {
+        etags.push((
+            n,
+            upload_part(&c.backend, "mp-1", &u1, n, part(u64::try_from(n).unwrap()))
+                .await
+                .unwrap(),
+        ));
+    }
+    etags.push((
+        3,
+        upload_part(&c.backend, "mp-1", &u1, 3, part(3))
+            .await
+            .unwrap(),
+    ));
+    etags.sort_by_key(|(n, _)| *n);
+    complete(&c.backend, "mp-1", &u1, &etags).await.unwrap();
+    let mp1: Bytes = Bytes::from([part(1), part(2), part(3)].concat());
+    assert_eq!(s3::get(&c.backend, BUCKET, "mp-1").await.unwrap().0, mp1);
+    committed.push(("mp-1".into(), mp1));
+
+    // (b) Concurrent Complete and Abort racing while a coordinator dies:
+    //     at most one wins; afterwards the object is whole or absent.
+    let u2 = create_upload(&c.backend, "mp-2").await;
+    let e1 = upload_part(&c.backend, "mp-2", &u2, 1, part(21))
+        .await
+        .unwrap();
+    let e2 = upload_part(&c.backend, "mp-2", &u2, 2, part(22))
+        .await
+        .unwrap();
+    let parts2 = vec![(1, e1), (2, e2)];
+    let (bc, bu, bp) = (c.backend.clone(), u2.clone(), parts2.clone());
+    let completing = tokio::spawn(async move { complete(&bc, "mp-2", &bu, &bp).await.map(|_| ()) });
+    let (bc, bu) = (c.backend.clone(), u2.clone());
+    let aborting = tokio::spawn(async move { abort(&bc, "mp-2", &bu).await });
+    chaos.run("kill 1").await;
+    let (rc, ra) = (completing.await.unwrap(), aborting.await.unwrap());
+    eprintln!("complete/abort race under coordinator loss: complete {rc:?}, abort {ra:?}");
+    assert!(!(rc.is_ok() && ra.is_ok()), "both cannot win");
+    wait_for_store(&c).await;
+    let mp2: Bytes = Bytes::from([part(21), part(22)].concat());
+    if let Ok((size, _)) = s3::head(&c.backend, BUCKET, "mp-2").await {
+        assert!(
+            ra.is_err(),
+            "the abort cannot have won if the object exists"
+        );
+        assert_eq!(size, mp2.len() as u64, "whole or nothing");
+        assert_eq!(s3::get(&c.backend, BUCKET, "mp-2").await.unwrap().0, mp2);
+        committed.push(("mp-2".into(), mp2));
+    } else {
+        assert!(
+            rc.is_err(),
+            "the complete cannot have won if the object is absent"
+        );
+        if open_uploads(&c.backend).await.contains(&u2) {
+            // Neither reached the store: abort now so that no orphan stays.
+            abort(&c.backend, "mp-2", &u2).await.unwrap();
+        }
+    }
+    chaos.run("start 1").await;
+    wait_for_store(&c).await;
+
+    // (c) Two concurrent Completes while a process dies (a commit whose
+    //     outcome is unknown to one caller): exactly one object version
+    //     results and both callers see success with the same ETag or an
+    //     explicit error.
+    let u3 = create_upload(&c.backend, "mp-3").await;
+    let e1 = upload_part(&c.backend, "mp-3", &u3, 1, part(31))
+        .await
+        .unwrap();
+    let e2 = upload_part(&c.backend, "mp-3", &u3, 2, part(32))
+        .await
+        .unwrap();
+    let parts3 = vec![(1, e1), (2, e2)];
+    let racers: Vec<_> = (0..2)
+        .map(|_| {
+            let (bc, bu, bp) = (c.backend.clone(), u3.clone(), parts3.clone());
+            tokio::spawn(async move { complete(&bc, "mp-3", &bu, &bp).await.map(|o| o.e_tag) })
+        })
+        .collect();
+    chaos.run("kill 3").await;
+    let mut etags3 = Vec::new();
+    for r in racers {
+        match r.await.unwrap() {
+            Ok(e) => etags3.push(e),
+            Err(e) => eprintln!("complete failed explicitly during process loss: {e}"),
+        }
+    }
+    chaos.run("start 3").await;
+    wait_for_store(&c).await;
+    let mp3: Bytes = Bytes::from([part(31), part(32)].concat());
+    if etags3.is_empty() {
+        // Both callers failed: the object is whole or absent; if absent and
+        // the upload is still open, complete it now.
+        match s3::head(&c.backend, BUCKET, "mp-3").await {
+            Ok((size, _)) => assert_eq!(size, mp3.len() as u64),
+            Err(_) => {
+                complete(&c.backend, "mp-3", &u3, &parts3).await.unwrap();
+            }
+        }
+    } else {
+        assert!(
+            etags3.windows(2).all(|w| w[0] == w[1]),
+            "one object, one ETag: {etags3:?}"
+        );
+    }
+    assert_eq!(s3::get(&c.backend, BUCKET, "mp-3").await.unwrap().0, mp3);
+    assert!(!open_uploads(&c.backend).await.contains(&u3));
+    committed.push(("mp-3".into(), mp3));
+
+    // (d) Orphan GC after the races: a GC pass and the multipart sweep keep
+    //     every referenced part (I-MP1) and remove nothing else; the
+    //     manifests verify clean.
+    c.gc(now_ms() + 3_600_000, 0).await;
+    c.gc(now_ms() + 3_600_000, 0).await;
+    arca_lake_controller::gc::sweep_multipart(
+        c.meta.as_ref(),
+        now_ms() + 3_600_000,
+        Some(now_ms() + 3_600_000),
+        100,
+    )
+    .await
+    .unwrap();
+    c.reconcile(now_ms() + 3_600_000, 0).await;
+    let (roots, findings) = arca_lake_controller::integrity::verify_manifests(c.meta.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(findings.len(), 0, "{findings:?}");
+    let mp_objects = committed
+        .iter()
+        .filter(|(k, _)| k.starts_with("mp-"))
+        .count();
+    assert_eq!(usize::try_from(roots).unwrap(), mp_objects);
+    let chunks: usize = committed
+        .iter()
+        .filter(|(k, _)| k.starts_with("mp-"))
+        .map(|(_, d)| d.len().div_ceil(300 << 10))
+        .sum();
+    assert_eq!(c.total_shards().await, shards_before_multipart + chunks * 3);
+    for (key, data) in committed.iter().filter(|(k, _)| k.starts_with("mp-")) {
+        assert_eq!(
+            &s3::get(&c.backend, BUCKET, key).await.unwrap().0,
+            data,
+            "{key}"
+        );
+    }
 
     // 5. Controller leader failover on the real store.
     let mut cfg = ControllerConfig::new("f1");
