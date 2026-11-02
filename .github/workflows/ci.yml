@@ -204,6 +204,17 @@ jobs:
           done
           fdbcli "status minimal" | tee /tmp/status.txt
           grep -q "is available" /tmp/status.txt || { echo "cluster not available"; fdbcli "status details" || true; docker logs arca-fdb; exit 1; }
+          # "available" is not "healthy": right after start some processes
+          # still report errors and transactions time out (flaky run seen on
+          # 2026-11-02). Wait for healthy data with no process messages.
+          for i in $(seq 1 30); do
+            if fdbcli "status json" 2>/dev/null | python3 -c '
+          import json,sys
+          s=json.load(sys.stdin)["cluster"]
+          ok = s.get("data",{}).get("state",{}).get("healthy", False) and all(not p.get("messages") for p in s.get("processes",{}).values())
+          sys.exit(0 if ok else 1)'; then echo "cluster healthy after $i checks"; break; fi
+            sleep 2
+          done
           fdbcli "status details" | head -40
           docker exec arca-fdb cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
           cat /tmp/fdb.cluster
@@ -299,7 +310,6 @@ jobs:
 
   dco:
     name: DCO sign-off
-    if: github.event_name == 'pull_request'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     steps:
@@ -307,10 +317,22 @@ jobs:
         with:
           fetch-depth: 0
       - name: check Signed-off-by trailers
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
         run: |
           set -euo pipefail
-          base="${{ github.event.pull_request.base.sha }}"
-          head="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT" = pull_request ]; then
+            base="$PR_BASE"; head="$PR_HEAD"
+          else
+            # Direct pushes to main: every commit of the push. A force push
+            # or a new branch has no usable "before"; fall back to HEAD only.
+            head="$PUSH_AFTER"
+            if git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then base="$PUSH_BEFORE"; else base="$head~1"; fi
+          fi
           missing=0
           for c in $(git rev-list "$base..$head"); do
             if ! git show -s --format=%B "$c" | grep -q '^Signed-off-by: '; then
