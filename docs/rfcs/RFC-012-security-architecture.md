@@ -451,16 +451,17 @@ Implemented / Not Verified); Designed never implies Implemented.
 
 | # | Criterion | Status |
 | --- | --- | --- |
-| S-A1 | A request signed with an unknown or inactive key is refused (`InvalidAccessKeyId`) and audited; two active keys per principal both sign successfully during a rotation; removing the old key refuses it | Designed |
-| S-A2 | Credentials file reload (SIGHUP and mtime) swaps the key set atomically; an invalid file keeps the previous set and increments the failure counter | Designed |
-| S-A3 | Default deny: a principal cannot list, head, read, write or delete another principal's bucket without a policy (rule 1); error is `AccessDenied`, not `NoSuchBucket` (rule 7) | Designed |
-| S-A4 | Explicit Deny beats Allow, including for the owner; the owner keeps `*BucketPolicy` despite a Deny (rule 4) | Designed |
-| S-A5 | `PutBucketPolicy` rejects every unsupported element in §5.3.3 with `MalformedPolicy` naming the element; nothing unknown is stored (rule 5) | Designed |
-| S-A6 | A corrupt stored policy denies non-owners and still lets the owner replace it (rule 6) | Designed |
-| S-A7 | Prefix-scoped `Allow` grants only that prefix; `aws:SourceIp` and `s3:prefix` conditions evaluate correctly; property test: the evaluator is a pure function of (policy, request) with Deny monotonic | Designed |
-| S-A8 | Anonymous mode: without a policy allowing `*`, anonymous requests are refused | Designed |
-| S-A9 | Audit: every S3 request in the conformance suite produces exactly one record with principal, key id, action, bucket, decision and status; a scan of the log finds no secret, signature or user metadata value | Designed |
-| S-A10 | Gateway/node boundary: a node never reads a bucket record or policy (code review + a test that nodes serve a cluster whose metadata store they cannot reach) | Designed |
-| S-A11 | mTLS: a gRPC connection without a client certificate, or with role `gateway`, cannot call `UpdateGroupEpoch`; a node presenting another node's name is refused by the client | Designed (Phase 3.3) |
-| S-A12 | Rate-limited and over-budget requests return `503 SlowDown` with `Retry-After`; the in-flight budget is never exceeded under 2× configured concurrency | Designed (Phase 3.3) |
-| S-A13 | Performance regression with TLS on both edges within the stated hypothesis or recorded | Designed (Phase 3.3) |
+| S-A1 | A request signed with an unknown or inactive key is refused (`InvalidAccessKeyId`) and audited; two active keys per principal both sign during a rotation; removing the old key refuses it | Implemented; Verified at the unit level (`auth.rs` tests: inactive, expired, unknown, rotation by file rewrite) and over HTTP for unknown keys (`s3_compat.rs`) |
+| S-A2 | Credentials file reload swaps the key set atomically; an invalid file keeps the previous set and counts a failure | Implemented, Verified (unit; `reload_failures` counter) |
+| S-A3 | Default deny: a principal cannot head, list, read, write or delete another principal's bucket without a policy; `AccessDenied`, not `NoSuchBucket` | Implemented, Verified (`s3_compat.rs::authorization_rules_over_http`) |
+| S-A4 | Explicit Deny beats Allow, for the owner too; the owner keeps `*BucketPolicy` | Implemented, Verified (HTTP) |
+| S-A5 | `PutBucketPolicy` rejects every unsupported element with `MalformedPolicy`; nothing unknown is stored | Implemented, Verified (unit grammar tests; HTTP) |
+| S-A6 | A corrupt stored policy denies non-owners and lets the owner replace it | Implemented, Not Verified (no test corrupts a stored policy) |
+| S-A7 | Prefix-scoped Allow, `s3:prefix` and `aws:SourceIp` conditions; Deny monotonic | Implemented, Verified (unit incl. the monotonicity property; HTTP for prefix) |
+| S-A8 | Anonymous mode: without a policy allowing `*`, anonymous requests are refused | Implemented, Verified (HTTP: 403 before, 200 after a `Principal: "*"` statement, 403 outside it) |
+| S-A9 | Audit: one record per request with principal, key id, action, bucket, decision, status; no secret material | Implemented (target `arca.audit`, `x-amz-request-id` on every response); Not Verified by an automated scan of the log |
+| S-A10 | Gateway/node boundary: nodes never read bucket records or policies | Verified by construction (nodes hold no metadata client; code review) |
+| S-A11 | mTLS and role-scoped RPC authorization | Designed (Phase 3.3) |
+| S-A12 | Rate limits and in-flight budgets with `503 SlowDown` | Designed (Phase 3.3) |
+| S-A13 | TLS performance regression | Designed (Phase 3.3) |
+| S-A14 | CopyObject and UploadPartCopy are authorized on the source bucket (`s3:GetObject[Version]`) as well as the destination | Implemented, Verified (found by the HTTP test during Phase 3.1) |

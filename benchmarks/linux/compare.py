@@ -16,6 +16,10 @@ reported and, with --record, stored. Tolerances (relative unless noted):
   hit ratio                     -0.05 absolute
   population chunks per second  -25 %
   metadata transactions per s   ±30 % (either direction is a change)
+  multipart PUT / GET           -15 % (Phase 3.1; absent from older baselines)
+
+A metric present in the run but absent from the baseline is reported as
+"new" and does not fail the check.
 """
 
 import json
@@ -34,6 +38,8 @@ RULES = {
     "hit_ratio": ("higher-abs", 0.05),
     "population_chunks_per_s": ("higher", 0.25),
     "meta_txn_per_s": ("either", 0.30),
+    "multipart_put_mib_s": ("higher", 0.15),
+    "multipart_get_warm_mib_s": ("higher", 0.15),
 }
 
 
@@ -59,6 +65,9 @@ def main():
     bad = 0
     for k, (direction, tol) in RULES.items():
         b, c = base.get(k), cur.get(k)
+        if b is None and c is not None:
+            print(f"| {k} | - | {c:.3g} | new | - | recorded |")
+            continue
         if b is None or c is None:
             continue
         if direction == "higher-abs":

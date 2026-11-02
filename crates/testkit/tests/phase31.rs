@@ -668,6 +668,70 @@ async fn complete_with_unknown_commit_outcome_publishes_exactly_once() {
     c.shutdown().await;
 }
 
+#[tokio::test]
+async fn gateway_death_mid_abort_is_finished_by_the_controller_sweep() {
+    let c = cluster().await;
+    let s3 = &c.backend;
+    let baseline = c.total_shards().await;
+    let key = "mp/abort-crash";
+    let upload_id = create_upload(s3, key, None).await;
+    for n in 1..=3 {
+        upload_part(
+            s3,
+            key,
+            &upload_id,
+            n,
+            payload(150 << 10, u64::from(n as u32)),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    // The gateway dies right after transaction 1 of Abort (`Aborting`).
+    let uid = upload_id_from_str(&upload_id).unwrap();
+    multipart::abort(c.meta.as_ref(), BUCKET, key, &uid)
+        .await
+        .unwrap();
+    assert!(
+        list_uploads(s3).await.is_empty(),
+        "aborting uploads are not listed"
+    );
+    // Nothing is collected before the sweep: parts are still committed.
+    c.gc(now_ms() + 600_000, 0).await;
+    assert!(c.total_shards().await > baseline);
+    // The controller sweep finishes the abort; GC then collects the parts.
+    let report = arca_lake_controller::gc::sweep_multipart(c.meta.as_ref(), now_ms(), None, 100)
+        .await
+        .unwrap();
+    assert_eq!(report.parts_processed, 3);
+    assert!(
+        multipart::get_upload(c.meta.as_ref(), BUCKET, key, &uid)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    c.gc(now_ms() + 600_000, 0).await;
+    assert_eq!(c.total_shards().await, baseline);
+    // Expiry: an open upload older than the limit is aborted by the sweep.
+    let upload_id = create_upload(s3, "mp/stale", None).await;
+    upload_part(s3, "mp/stale", &upload_id, 1, payload(100 << 10, 9), None)
+        .await
+        .unwrap();
+    let report = arca_lake_controller::gc::sweep_multipart(
+        c.meta.as_ref(),
+        now_ms(),
+        Some(now_ms() + 1),
+        100,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.expired, 1);
+    assert!(list_uploads(s3).await.is_empty());
+    c.gc(now_ms() + 600_000, 0).await;
+    assert_eq!(c.total_shards().await, baseline);
+    c.shutdown().await;
+}
+
 // ---- versioning -----------------------------------------------------------
 
 #[tokio::test]

@@ -6,7 +6,9 @@ regression check compares (Phase 2.3 §8), as one JSON document:
   cpu_s_per_gib_gateway_host, cpu_s_per_gib_node_host (durable warm GET),
   rss_mib (largest arca-lake process), hit_ratio (cache config, last pass),
   population_chunks_per_s (cache config, first GET pass),
-  meta_txn_per_s (durable PUT, gateway 1).
+  meta_txn_per_s (durable PUT, gateway 1),
+  multipart_put_mib_s, multipart_get_warm_mib_s (durable config with
+  multipart uploads, Phase 3.1).
 
 Medians across repetitions. Usage: perf_summary.py <results-dir> [--cores N]
 Repetition directories are named <config>-r<N> as repeat.sh writes them.
@@ -107,6 +109,25 @@ def main():
             meta_txn_per_s=med(txn),
             repetitions=len(reps(root, cfg)),
         )
+    multipart = [c for c in ("durable-c4-multipart", "durable-c1-multipart") if reps(root, c)]
+    if multipart:
+        cfg = multipart[0]
+        out["multipart_config"] = cfg
+        puts, gets = [], []
+        for r in reps(root, cfg):
+            d = os.path.join(root, r)
+            put = last_line(os.path.join(d, "put.jsonl"))
+            if put:
+                puts.append(put["mib_per_s"])
+            passes = sorted(
+                (p for p in os.listdir(d) if re.match(r"get\d+\.jsonl$", p)),
+                key=lambda s: int(s[3:-6]),
+            )
+            if passes:
+                g = last_line(os.path.join(d, passes[-1]))
+                if g:
+                    gets.append(g["mib_per_s"])
+        out.update(multipart_put_mib_s=med(puts), multipart_get_warm_mib_s=med(gets))
     if cache:
         cfg = cache[0]
         out["cache_config"] = cfg

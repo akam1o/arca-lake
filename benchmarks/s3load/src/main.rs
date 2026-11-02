@@ -18,6 +18,7 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
+use std::fmt::Write as _;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -26,6 +27,9 @@ enum Op {
     CreateBucket,
     /// PUT every object once.
     Put,
+    /// Upload every object once as a multipart upload of `--part-size`
+    /// parts (create, parts in order, complete).
+    MultipartPut,
     /// GET every object `--passes` times.
     Get,
 }
@@ -49,6 +53,9 @@ struct Args {
     /// Concurrent requests.
     #[arg(long, default_value_t = 8)]
     concurrency: usize,
+    /// Part size of `multipart-put` (the last part may be smaller).
+    #[arg(long, default_value_t = 8 << 20)]
+    part_size: u64,
     /// GET passes over the key space (pass 1 is the first touch).
     #[arg(long, default_value_t = 1)]
     passes: u32,
@@ -187,6 +194,12 @@ async fn one_request(
             let _ = resp.into_body().collect().await;
             (status, len as u64, None)
         }
+        Op::MultipartPut => {
+            let body = body_of(args.seed, index, args.size);
+            let len = body.len() as u64;
+            multipart_put(client, &uri, body, args.part_size).await?;
+            (http::StatusCode::OK, len, None)
+        }
         Op::Get => {
             let mut b = http::Request::builder().method("GET").uri(&uri);
             if args.range_bytes > 0 {
@@ -233,6 +246,102 @@ async fn one_request(
         .window_max_us
         .fetch_max((elapsed * 1000.0) as u64, Ordering::Relaxed);
     counters.latencies.lock().await.push(elapsed);
+    Ok(())
+}
+
+/// Text between the first `<tag>` and `</tag>` of an XML body.
+fn xml_text<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(&xml[start..end])
+}
+
+async fn send(
+    client: &HttpClient,
+    req: http::Request<Full<Bytes>>,
+) -> Result<(http::StatusCode, http::HeaderMap, Bytes), String> {
+    let resp = client.request(req).await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| e.to_string())?
+        .to_bytes();
+    Ok((status, headers, body))
+}
+
+/// One multipart upload: create, parts in order, complete (RFC-007 §5.3).
+async fn multipart_put(
+    client: &HttpClient,
+    uri: &str,
+    body: Bytes,
+    part_size: u64,
+) -> Result<(), String> {
+    let req = http::Request::builder()
+        .method("POST")
+        .uri(format!("{uri}?uploads"))
+        .header("content-length", 0)
+        .body(Full::new(Bytes::new()))
+        .map_err(|e| e.to_string())?;
+    let (status, _, resp) = send(client, req).await?;
+    if !status.is_success() {
+        return Err(format!("create-multipart-upload: HTTP {status}"));
+    }
+    let xml = String::from_utf8_lossy(&resp);
+    let upload_id = xml_text(&xml, "UploadId")
+        .ok_or_else(|| "create-multipart-upload: no UploadId".to_string())?
+        .to_string();
+    let part_size = usize::try_from(part_size.max(1)).unwrap_or(usize::MAX);
+    let mut parts = String::new();
+    let mut n = 1;
+    let mut offset = 0;
+    while offset < body.len() || (n == 1 && body.is_empty()) {
+        let end = (offset + part_size).min(body.len());
+        let part = body.slice(offset..end);
+        let req = http::Request::builder()
+            .method("PUT")
+            .uri(format!("{uri}?partNumber={n}&uploadId={upload_id}"))
+            .header("content-length", part.len())
+            .body(Full::new(part))
+            .map_err(|e| e.to_string())?;
+        let (status, headers, _) = send(client, req).await?;
+        if !status.is_success() {
+            return Err(format!("upload-part {n}: HTTP {status}"));
+        }
+        let etag = headers
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| format!("upload-part {n}: no ETag"))?;
+        let _ = write!(
+            parts,
+            "<Part><PartNumber>{n}</PartNumber><ETag>{etag}</ETag></Part>"
+        );
+        n += 1;
+        offset = end;
+        if body.is_empty() {
+            break;
+        }
+    }
+    let complete = format!("<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>");
+    let req = http::Request::builder()
+        .method("POST")
+        .uri(format!("{uri}?uploadId={upload_id}"))
+        .header("content-type", "application/xml")
+        .header("content-length", complete.len())
+        .body(Full::new(Bytes::from(complete)))
+        .map_err(|e| e.to_string())?;
+    let (status, _, resp) = send(client, req).await?;
+    if !status.is_success() {
+        return Err(format!("complete-multipart-upload: HTTP {status}"));
+    }
+    let xml = String::from_utf8_lossy(&resp);
+    if xml_text(&xml, "ETag").is_none() {
+        return Err(format!("complete-multipart-upload: unexpected body {xml}"));
+    }
     Ok(())
 }
 
@@ -408,8 +517,8 @@ fn main() {
                     1
                 }
             },
-            Op::Put | Op::Get => {
-                let passes = if args.op == Op::Put {
+            Op::Put | Op::MultipartPut | Op::Get => {
+                let passes = if matches!(args.op, Op::Put | Op::MultipartPut) {
                     1
                 } else {
                     args.passes.max(1)

@@ -244,6 +244,8 @@ cmd_run() {
   # overwrite another phase's objects use different prefixes);
   # S3LOAD_EXTRA: extra s3load flags for the GET passes (e.g. --order random);
   # SKIP_PUT=1: reuse the objects of a previous run with the same key space;
+  # PUT_OP=multipart-put [PUT_EXTRA="--part-size N"]: upload the objects as
+  # multipart uploads instead of single PUTs (RFC-007 §5.3 regression check);
   # MIXED_PUT_OBJECTS=N: during every GET pass, PUT N objects under another
   # prefix concurrently (recorded as mixedput<p>.jsonl).
   local extra="${S3LOAD_EXTRA:-}"
@@ -266,9 +268,9 @@ cmd_run() {
   if [ "${SKIP_PUT:-0}" != 1 ]; then
     if [ "${PROFILE:-0}" = 1 ]; then
       # Samplers on every host plus s3load's per-second progress on stderr.
-      with_profile "$dir/put" sg "$S3LOAD --endpoint $ep --bucket bench --op put ${PREFIX:+--prefix $PREFIX} --objects $objects --size $size --concurrency $conc --progress --label $label-put" > "$dir/put.jsonl" 2> "$dir/put-progress.jsonl"
+      with_profile "$dir/put" sg "$S3LOAD --endpoint $ep --bucket bench --op ${PUT_OP:-put} ${PUT_EXTRA:-} ${PREFIX:+--prefix $PREFIX} --objects $objects --size $size --concurrency $conc --progress --label $label-put" > "$dir/put.jsonl" 2> "$dir/put-progress.jsonl"
     else
-      with_sar "$dir/put" sg "$S3LOAD --endpoint $ep --bucket bench --op put ${PREFIX:+--prefix $PREFIX} --objects $objects --size $size --concurrency $conc --label $label-put" > "$dir/put.jsonl"
+      with_sar "$dir/put" sg "$S3LOAD --endpoint $ep --bucket bench --op ${PUT_OP:-put} ${PUT_EXTRA:-} ${PREFIX:+--prefix $PREFIX} --objects $objects --size $size --concurrency $conc --label $label-put" > "$dir/put.jsonl"
     fi
     cat "$dir/put.jsonl"
     sleep 2

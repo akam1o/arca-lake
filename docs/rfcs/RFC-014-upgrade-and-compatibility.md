@@ -279,8 +279,8 @@ Labels as RFC-007 §11.
 
 | # | Criterion | Status |
 | --- | --- | --- |
-| U-A1 | Schema key written at initialization; a store with data but no key is treated as `M = 1` and stamped; the startup gate refuses builds outside `[schema, schema + 1]` with the documented message | Designed (Phase 3.1 writes the key; gate Phase 3.3) |
-| U-A2 | Record version 2 (bucket owner/policy, generation kind/checksum) decodes version-1 records; golden encodings per version pass; a record change without a golden file fails CI | Designed (Phase 3.1) |
+| U-A1 | Schema key written at initialization; a store with data but no key is treated as `M = 1` and stamped; the startup gate refuses builds outside `[schema, schema + 1]` with the documented message | Designed; `SCHEMA_VERSION = 2` and the key are defined (Phase 3.1), writing and the gate are Not Implemented (Phase 3.3) |
+| U-A2 | Record version 2 (bucket owner/policy, generation kind/checksum) decodes version-1 records; golden encodings per version pass; a record change without a golden file fails CI | Implemented (`records.rs`, `Record::decode_v1`); Verified for the v1 → v2 decode of every changed record (unit test); golden files per version Not Implemented |
 | U-A3 | Protocol window: a node accepts `P − 1` and `P`, advertises the window in `Health`, a client negotiates down; incompatible nodes are counted and skipped | Designed (Phase 3.3) |
 | U-A4 | Format write gate: with `format_write < F_cur` a node writes the old format; a mixed-version group (bumped build) serves PUT/GET/repair; the old build reads every segment written while the gate was low | Designed (Phase 3.3) |
 | U-A5 | Finalize: idempotent (re-run is a no-op), crash-safe (killed after each step, resumed by the leader), concurrent invocations serialize; after step 3 the old build refuses to start | Designed (Phase 3.3) |

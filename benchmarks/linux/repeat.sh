@@ -7,7 +7,8 @@
 #   HOST_A=.. HOST_B=.. [HOST_C=..] benchmarks/linux/repeat.sh <results-dir> [repeats]
 #
 # Configurations: CONFIGS (space separated "mode:conc[:extra]"), default
-# "durable:4 none:4 repl:4 ec:4". Environment: OBJECTS SIZE PASSES SEED
+# "durable:4 none:4 repl:4 ec:4"; extra "multipart" uploads with multipart
+# uploads (labels "<mode>-c<conc>-multipart-r<N>"). Environment: OBJECTS SIZE PASSES SEED
 # CHUNK_BYTES CACHE_CAPACITY CACHE_MAX_POPULATIONS (passed to two-host.sh).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -29,7 +30,10 @@ echo "repeats=$REPEATS configs=\"$CONFIGS\" seed=$SEED objects=$OBJECTS size=$SI
 for rep in $(seq 1 "$REPEATS"); do
   for cfg in $(shuffle "$rep" $CONFIGS); do
     mode="${cfg%%:*}"; rest="${cfg#*:}"; conc="${rest%%:*}"
-    label="$mode-c$conc-r$rep"
+    extra="${rest#*:}"; [ "$extra" = "$rest" ] && extra=""
+    label="$mode-c$conc${extra:+-$extra}-r$rep"
+    # extra "multipart": the PUT phase uses multipart uploads (8 MiB parts).
+    if [ "$extra" = multipart ]; then export PUT_OP=multipart-put PUT_EXTRA="--part-size $((8 << 20))"; else unset PUT_OP PUT_EXTRA; fi
     echo "== repetition $rep: $label"
     bash "$TH" setup "$mode" >/dev/null 2>&1
     # Warm-up: one PUT and one GET pass on a separate key range, not recorded.

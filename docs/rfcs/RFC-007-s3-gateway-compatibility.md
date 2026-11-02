@@ -64,26 +64,49 @@ and returning tags without tag-based policy conditions.
 
 ### 5.1 Compatibility matrix
 
-| Area | Operation | Status after Phase 3.1 |
+Status after Phase 3.1. **Implemented** = on `main`; **Verified** = exercised
+by the conformance suite (`crates/testkit/tests/s3_compat.rs` with the AWS
+SDK for Rust, the AWS CLI and boto3, and `phase31.rs` over the `S3` trait);
+"not planned" operations return `NotImplemented`. arca-lake does not claim
+full AWS S3 compatibility: this table is the claim.
+
+| Area | Operation | Status |
 | --- | --- | --- |
-| Buckets | Create, Delete, Head, List | implemented |
-| Buckets | Get/PutBucketVersioning | Phase 3.1 |
-| Buckets | Get/Put/DeleteBucketPolicy | Phase 3.1 (RFC-012) |
-| Buckets | Get/Put/DeleteBucketLifecycleConfiguration | Phase 3.1 (subset §5.10) |
-| Buckets | Get/PutBucketTagging, GetBucketLocation | Phase 3.1 (tags stored; location fixed string) |
+| Buckets | Create, Delete, Head, List (owner-scoped), GetBucketLocation | Implemented, Verified |
+| Buckets | Get/PutBucketVersioning (`Enabled`/`Suspended`; MFA delete → `NotImplemented`) | Implemented, Verified |
+| Buckets | Get/Put/DeleteBucketPolicy (subset of RFC-012 §5.3.3; unknown elements → `MalformedPolicy`) | Implemented, Verified |
+| Buckets | Get/Put/DeleteBucketLifecycleConfiguration | Not Implemented (Phase 3.2; `NotImplemented`) |
+| Buckets | Get/PutBucketTagging | Not Implemented (`NotImplemented`) |
 | Buckets | ACL, CORS, Website, Logging, Notification, Replication, ObjectLock, Encryption, Accelerate, RequestPayment | not planned; `NotImplemented` |
-| Objects | Put, Get (range), Head, Delete | implemented |
-| Objects | DeleteObjects | Phase 3.1 |
-| Objects | CopyObject | Phase 3.1 |
-| Objects | ListObjectsV2 | implemented |
-| Objects | ListObjects (v1), ListObjectVersions | Phase 3.1 |
-| Objects | Get/Put/DeleteObjectTagging | Phase 3.1 |
-| Objects | GetObjectAttributes | Phase 3.1 |
-| Objects | Put/GetObjectAcl | accepted, ACL ignored except `public-read` (RFC-012 §3) |
+| Objects | Put (incl. `aws-chunked` trailers), Get (range, `partNumber`, `versionId`, `checksum-mode`), Head, Delete (`versionId`, `If-Match`) | Implemented, Verified |
+| Objects | DeleteObjects (≤ 1000 keys, `Quiet`, per-key errors) | Implemented, Verified |
+| Objects | CopyObject (physical copy; `versionId` source; copy-source conditions; `MetadataDirective`) | Implemented, Verified |
+| Objects | ListObjectsV2 | Implemented, Verified |
+| Objects | ListObjectVersions (`KeyMarker`/`VersionIdMarker`, delimiter) | Implemented, Verified |
+| Objects | ListObjects (v1) | Not Implemented (`NotImplemented`; the CLI and SDKs use v2) |
+| Objects | Get/Put/DeleteObjectTagging, GetObjectAttributes | Not Implemented (`NotImplemented`) |
+| Objects | Put/GetObjectAcl | Not Implemented (`NotImplemented`; the `public-read` policy of §5.9 is not applied) |
 | Objects | RestoreObject, SelectObjectContent, Object Lock | not planned |
-| Multipart | Create, UploadPart, UploadPartCopy, Complete, Abort, ListParts, ListMultipartUploads | Phase 3.1 |
-| Auth | SigV4 header, presigned, POST policy | implemented (s3s) |
-| Checksums | ETag MD5 (single part), composite ETag, five checksum algorithms, `checksum-mode` | Phase 3.1 |
+| Multipart | Create, UploadPart, UploadPartCopy (range), Complete (`If-None-Match`/`If-Match`), Abort, ListParts, ListMultipartUploads | Implemented, Verified (UploadPartCopy: Implemented, Not Verified by a client test) |
+| Conditional | `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since` on GET/HEAD; `If-None-Match: *` and `If-Match` on PUT/Complete/Copy destination/DELETE; copy-source conditions | Implemented, Verified (§5.5 table) |
+| Auth | SigV4 header, presigned, POST policy (s3s); multiple access keys per principal with rotation; bucket owner + policy subset | Implemented, Verified (presigned/POST policy by s3s's own tests only) |
+| Checksums | ETag MD5 (single part), composite ETag, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 on PUT/UploadPart/Complete/Copy, composite and full-object, `checksum-mode` on GET/HEAD | Implemented, Verified |
+
+#### 5.1.1 Documented differences from AWS S3
+
+| Topic | arca-lake | AWS S3 |
+| --- | --- | --- |
+| Version ids | 32 hex characters | opaque, up to 1024 characters |
+| `x-amz-version-id` on unversioned or suspended buckets | omitted | `null` is sent on suspended buckets |
+| `409 ConditionalRequestConflict` | never emitted (conditional writes are serialized in FoundationDB; exhausted retries are `503 SlowDown`) | emitted on concurrent conditional writes |
+| Conditional CopyObject destination (`If-None-Match: *`, `If-Match`) | supported | added by AWS later than PUT; behaviour matches PUT |
+| Missing bucket for a non-owner | `403 AccessDenied` (RFC-012 rule 7) | `404 NoSuchBucket` (bucket names are global) |
+| Minimum part size | 5 MiB by default; `--multipart-min-part-bytes` can lower it (non-AWS) | 5 MiB |
+| `x-amz-mp-object-size` on Complete | accepted; a mismatch is logged, not an error | mismatch → `400` |
+| Ranged GET with `checksum-mode` | no checksum headers (checksums describe whole objects or parts) | same for composite; full-object checksums are omitted for ranges as well |
+| `ListObjectVersions` with a version marker whose key no longer exists | resumes after the key | undefined |
+| Object ACLs | `NotImplemented` | supported |
+| Multipart upload expiry | controller sweep after `--multipart-expiry` (7 days by default) | lifecycle rule only |
 
 ### 5.2 Object model recap (RFC-002) and generation kinds
 
@@ -542,20 +565,20 @@ phase report.
 
 | # | Criterion | Status |
 | --- | --- | --- |
-| A1 | AWS CLI conformance (`aws s3 cp` multipart, `s3api` create/upload-part/complete/abort/list-parts/list-multipart-uploads, put/get-bucket-versioning, list-object-versions, copy-object, delete-objects, get-object `--version-id` and `--checksum-mode`) against the cluster backend in CI | Designed |
-| A2 | Two AWS SDKs (Python boto3, Rust aws-sdk-s3) pass the same conformance scenarios in CI | Designed |
-| A3 | Multipart ETag equals `md5(concat)-N` computed by the test; single-part ETag equals the body MD5 | Designed |
-| A4 | 10 000-part upload completes with one metadata transaction against FoundationDB; GET of the object verifies every byte | Designed |
-| A5 | Concurrent Completes (≥ 8 racers) produce exactly one version and one root; losers get the idempotent result or `NoSuchUpload` | Designed |
-| A6 | Concurrent UploadPart of the same part number keeps exactly one part generation live after GC; the other's shards are collected | Designed |
-| A7 | Complete × Abort race: exactly one wins; the loser gets `NoSuchUpload`; no part referenced by a root is ever retired (I-MP1 asserted by GC's `skipped_referenced == 0`) | Designed |
-| A8 | Complete with an unknown commit outcome (fault-injected) resolves to exactly one visible version with the chosen root id | Designed |
-| A9 | Gateway death during UploadPart, after Complete and mid-Abort leaves no leaked generation, part record or upload record after GC and the sweep | Designed |
-| A10 | FoundationDB failover during multipart uploads: every acknowledged part and every acknowledged Complete is durable | Designed |
-| A11 | Versioned bucket: PUT twice, GET each version, DELETE creates a marker, GET returns 404 with `x-amz-delete-marker`, DELETE of the marker restores, ListObjectVersions lists both and the marker; suspended-bucket `null` version semantics | Designed |
-| A12 | Conditional GET/HEAD matrix (16 header combinations) returns the RFC 9110 / AWS codes; PUT/Complete/Copy/DELETE conditions per §5.5 | Designed |
-| A13 | CopyObject: source version fixed under concurrent source DELETE, destination overwrite, `MetadataDirective`, content type, ETag, checksum recomputed, conditional copy, failure after partial placement leaves no visible object | Designed |
-| A14 | Checksums: five algorithms on PUT, UploadPart, Complete (composite and full-object), GET/HEAD return; mismatch publishes nothing and returns `BadDigest` | Designed |
-| A15 | Property-based and model-based tests of the versioned key state machine (PUT/DELETE/DELETE-version/GET sequences against a reference model) | Designed |
-| A16 | The compatibility matrix in §5.1 is generated from the conformance suite's list of exercised operations, so the two cannot drift | Designed |
-| A17 | Performance regression (Phase 2.3 tooling) with multipart PUT added: PUT/GET throughput, CPU-s/GiB, RSS, metadata transaction latency, p95/p99 within tolerance | Designed |
+| A1 | AWS CLI conformance (`aws s3 cp` multipart, `s3api` create/upload-part/complete/abort/list-parts/list-multipart-uploads, put/get-bucket-versioning, list-object-versions, copy-object, delete-objects, get-object `--version-id` and `--checksum-mode`) against the cluster backend in CI | Implemented, Verified (`s3_compat.rs::aws_cli_conformance`; skips where the CLI is absent; the CI runner installs it) |
+| A2 | Two AWS SDKs (Rust, Python boto3) pass the same conformance scenarios in CI | Implemented, Verified (`rust_sdk_conformance`, `boto3_conformance` via `tests/compat/boto3_compat.py`) |
+| A3 | Multipart ETag equals `md5(concat)-N` computed by the test; single-part ETag equals the body MD5 | Verified (SDK, CLI, boto3, `phase31.rs`) |
+| A4 | 10 000-part upload completes with one metadata transaction; GET verifies every byte | Verified on the in-memory store (`multipart.rs`, 10 000 parts, one transaction attempt, 1 KiB keys); Verified on FoundationDB in the CI backend job (`fdb.rs::ten_thousand_part_complete_is_one_transaction_on_foundationdb`) |
+| A5 | Concurrent Completes (≥ 8 racers) produce exactly one version and one root | Verified (`multipart.rs`, `phase31.rs`) |
+| A6 | Concurrent UploadPart of the same part number keeps exactly one part generation live after GC | Verified (`phase31.rs::multipart_abort_and_reupload_collect_exactly_the_right_shards`; re-upload sequential, superseded shards collected) |
+| A7 | Complete × Abort race: exactly one wins; no referenced part is ever retired (`skipped_referenced == 0`) | Verified (`multipart.rs`, `phase31.rs`) |
+| A8 | Complete with an unknown commit outcome resolves to exactly one visible version with the chosen root id | Verified (`phase31.rs`, fault-injected lost reply with and without apply) |
+| A9 | Gateway death during UploadPart, after Complete and mid-Abort leaves no leaked generation, part record or upload record after GC and the sweep | Verified (`phase31.rs`: UploadPart death → lease expiry; death after Complete → sweep discards unlisted parts; death mid-Abort → `sweep_multipart` finishes the abort and GC returns the shard count to the baseline; expiry of stale open uploads). The gateway "death" is modelled by stopping the gateway's own cleanup, not by killing a process |
+| A10 | FoundationDB failover during multipart uploads: every acknowledged part and Complete is durable | Not Verified (the failover suite covers single PUTs only; Phase 3.3/3.4) |
+| A11 | Versioned bucket semantics incl. markers, restore, suspended `null` | Verified (`versions.rs`, `phase31.rs`, SDK/CLI/boto3) |
+| A12 | Conditional GET/HEAD matrix (16 combinations) and PUT/Complete/Copy/DELETE conditions | Verified (`phase31.rs::conditional_get_head_matrix...`) |
+| A13 | CopyObject: fixed source version under concurrent DELETE, overwrite, directive, content type, ETag, checksum, conditional copy, failure recovery | Verified (`phase31.rs::copy_object_is_a_physical_copy...`) |
+| A14 | Five checksum algorithms on PUT, UploadPart, Complete (composite and full-object), GET/HEAD return; mismatch publishes nothing and returns `BadDigest` | Verified (`phase31.rs::checksums_are_verified...`, CRC combination unit tests, SDK trailer checksums) |
+| A15 | Property-based and model-based tests of the versioned key state machine | Implemented, Verified (`version_model.rs`: random PUT / DELETE / DELETE-version / Enable / Suspend sequences against a reference model, 400 cases; it found and fixed a duplicated `null` version record after a version delete restored the null version). The generation model (`model.rs`) and the policy monotonicity property (`policy.rs`) also exist |
+| A16 | The compatibility matrix is generated from the conformance suite's list of exercised operations | Not Implemented (maintained by hand; §5.1) |
+| A17 | Performance regression with multipart PUT added | see the Phase 3.1 report (`benchmarks/linux/results`) |

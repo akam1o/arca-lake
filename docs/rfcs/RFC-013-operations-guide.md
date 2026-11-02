@@ -73,8 +73,12 @@ written to the metadata store.
 5. Optional cache tier: `admin create-cache-groups …` (RFC-006).
 6. Start controllers (`--cache-tier`, `--auto-repair`, `--http`);
    verify one leader (`arca_controller_leader == 1` on exactly one).
-7. Start gateways with credentials and certificates; smoke test with the
-   AWS CLI (`aws s3 mb`, `cp`, `ls`, `rm`).
+7. Start gateways with `--credentials-file` (RFC-012 §5.2; principals and
+   keys, reloaded every 30 s when the file changes), `--authorize
+   owner-policy` (the default with a credentials file), optionally
+   `--bucket-creation` to restrict who creates buckets; audit records go
+   to the tracing target `arca.audit`. Smoke test with the AWS CLI
+   (`aws s3 mb`, `cp`, `ls`, `rm`).
 8. Record the layout version (`admin layout show`; RFC-014) and take the
    first backup (RFC-015).
 
@@ -224,6 +228,11 @@ Checklist applied before the repository becomes public (RFC-012 §5.11):
    (`sanitize.py --check` in CI); CI uploads no artifacts.
 5. Dependencies: `cargo-deny` on every push; Dependabot or an equivalent
    for advisories; `Cargo.lock` reviewed on update.
+6. Third-party tools on the runner are installed from distribution
+   packages or, where those are unusable, from the vendor's official
+   download pinned by version and SHA-256 in the workflow (the AWS CLI v2
+   bundle for the S3 conformance tests; the distribution's `awscli`
+   package fails on Python 3.14).
 
 ## 10. Troubleshooting runbooks
 

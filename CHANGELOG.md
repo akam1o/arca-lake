@@ -146,6 +146,39 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     CI and `deploy/dev/fdb-test.sh`), `tiering.rs` (5).
   - RFC-006 Multi-Tier Storage draft with Phase 2 status; ADR-0009;
     Phase 2 roadmap page; risks R-41–R-45.
+- Phase 3.1 S3 surface, metadata foundation and security controls:
+  - Metadata: record version 2 with version-1 decoders (bucket owner and
+    policy, generation kind and checksum), schema version constant and
+    key, multipart records and recipes (hierarchical manifest: parts are
+    immutable generations, Complete publishes a root with one reference
+    key per part in one bounded transaction, Abort and root finish are
+    batched, GC enforces part liveness), versioned reads and deletes,
+    null-version preservation when versioning is enabled, suspended-bucket
+    null semantics, ListObjectVersions, DELETE with `If-Match`.
+  - Gateway: multipart upload (Create/UploadPart/UploadPartCopy/Complete/
+    Abort/ListParts/ListMultipartUploads), GET/HEAD by version and part
+    number, conditional requests (RFC 9110 order), DeleteObjects,
+    ListObjectVersions, bucket versioning and policy operations,
+    CopyObject (physical copy, fixed source version, copy-source
+    conditions), checksums CRC32/CRC32C/CRC64NVME/SHA1/SHA256 from headers
+    or `aws-chunked` trailers with composite and full-object derivation,
+    `GetBucketLocation`; TOML credential store with key rotation and
+    reload; bucket owner + policy-subset authorizer (RFC-012 rules 1–7,
+    copy sources authorized on the source bucket); audit record per
+    request with `x-amz-request-id`; CLI flags `--credentials-file`,
+    `--authorize`, `--bucket-creation`, `--no-audit`,
+    `--multipart-min-part-bytes`.
+  - Controller: multipart sweep (aborting uploads, discarded parts, expiry
+    `--multipart-expiry`), batched multipart root finish.
+  - Tests: metadata multipart (10 000 parts in one transaction, races,
+    liveness) and versions suites, a model-based test of the versioned key
+    state machine, a 10 000-part Complete on FoundationDB,
+    gateway unit tests (checksums, policy grammar, credentials), testkit
+    `phase31.rs` (multipart with GC shard accounting, gateway death,
+    unknown commit outcome, versioning, conditional matrix, CopyObject,
+    checksums) and `s3_compat.rs` (AWS SDK for Rust, AWS CLI, boto3,
+    authorization over HTTP). `s3load --op multipart-put` and a multipart
+    configuration in the regression check.
 - Phase 3.0 review reflected (conditional approval): RFC-007 multipart
   redesigned as a hierarchical manifest (root + per-part reference keys,
   Complete in one bounded transaction, batched abort and root finish,

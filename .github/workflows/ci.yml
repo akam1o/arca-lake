@@ -34,9 +34,20 @@ jobs:
           fi
           # S3 compatibility tests drive the gateway with the AWS CLI and
           # boto3 (they skip when the tools are absent; the runner has them).
-          if ! command -v aws >/dev/null || ! python3 -c 'import boto3' 2>/dev/null; then
+          # The distribution's awscli package is unusable with Python 3.14
+          # ("badly formed help string"), so the official AWS CLI v2 bundle
+          # is installed instead, pinned by version and SHA-256.
+          if ! python3 -c 'import boto3' 2>/dev/null || ! command -v unzip >/dev/null; then
             sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq awscli python3-boto3
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-boto3 unzip
+          fi
+          if ! aws --version 2>/dev/null | grep -q 'aws-cli/2.37.9 .*exe/x86_64'; then
+            dpkg -s awscli >/dev/null 2>&1 && sudo apt-get remove -y -qq awscli
+            tmp="$(mktemp -d)"
+            curl -sSL --retry 5 -o "$tmp/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.9.zip"
+            echo "6b3a6a3d7bb3997928f0bdf7b866914224abf242c2e54e1dcebbe84bee64f356  $tmp/awscli.zip" | sha256sum -c -
+            (cd "$tmp" && unzip -q awscli.zip && sudo ./aws/install --update >/dev/null)
+            rm -rf "$tmp"
           fi
           # bindgen (foundationdb-sys) needs libclang.
           if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
@@ -90,9 +101,20 @@ jobs:
           fi
           # S3 compatibility tests drive the gateway with the AWS CLI and
           # boto3 (they skip when the tools are absent; the runner has them).
-          if ! command -v aws >/dev/null || ! python3 -c 'import boto3' 2>/dev/null; then
+          # The distribution's awscli package is unusable with Python 3.14
+          # ("badly formed help string"), so the official AWS CLI v2 bundle
+          # is installed instead, pinned by version and SHA-256.
+          if ! python3 -c 'import boto3' 2>/dev/null || ! command -v unzip >/dev/null; then
             sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq awscli python3-boto3
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-boto3 unzip
+          fi
+          if ! aws --version 2>/dev/null | grep -q 'aws-cli/2.37.9 .*exe/x86_64'; then
+            dpkg -s awscli >/dev/null 2>&1 && sudo apt-get remove -y -qq awscli
+            tmp="$(mktemp -d)"
+            curl -sSL --retry 5 -o "$tmp/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.9.zip"
+            echo "6b3a6a3d7bb3997928f0bdf7b866914224abf242c2e54e1dcebbe84bee64f356  $tmp/awscli.zip" | sha256sum -c -
+            (cd "$tmp" && unzip -q awscli.zip && sudo ./aws/install --update >/dev/null)
+            rm -rf "$tmp"
           fi
           # bindgen (foundationdb-sys) needs libclang.
           if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
@@ -165,9 +187,20 @@ jobs:
           fi
           # S3 compatibility tests drive the gateway with the AWS CLI and
           # boto3 (they skip when the tools are absent; the runner has them).
-          if ! command -v aws >/dev/null || ! python3 -c 'import boto3' 2>/dev/null; then
+          # The distribution's awscli package is unusable with Python 3.14
+          # ("badly formed help string"), so the official AWS CLI v2 bundle
+          # is installed instead, pinned by version and SHA-256.
+          if ! python3 -c 'import boto3' 2>/dev/null || ! command -v unzip >/dev/null; then
             sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq awscli python3-boto3
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-boto3 unzip
+          fi
+          if ! aws --version 2>/dev/null | grep -q 'aws-cli/2.37.9 .*exe/x86_64'; then
+            dpkg -s awscli >/dev/null 2>&1 && sudo apt-get remove -y -qq awscli
+            tmp="$(mktemp -d)"
+            curl -sSL --retry 5 -o "$tmp/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.9.zip"
+            echo "6b3a6a3d7bb3997928f0bdf7b866914224abf242c2e54e1dcebbe84bee64f356  $tmp/awscli.zip" | sha256sum -c -
+            (cd "$tmp" && unzip -q awscli.zip && sudo ./aws/install --update >/dev/null)
+            rm -rf "$tmp"
           fi
           # bindgen (foundationdb-sys) needs libclang.
           if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then

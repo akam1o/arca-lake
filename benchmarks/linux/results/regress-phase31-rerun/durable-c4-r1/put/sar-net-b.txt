@@ -1,0 +1,29 @@
+Linux 7.0.0-38-generic (<host>) 	11/02/26 	_x86_64_	(4 CPU)
+
+15:42:21        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+15:42:22           lo  15937.00  15937.00 420916.93 420916.93      0.00      0.00      0.00      0.00
+15:42:22         net0   3144.00   7325.00    260.85 267013.23      0.00      0.00      0.00      0.00
+
+15:42:22        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+15:42:23           lo  23114.00  23114.00 580068.80 580068.80      0.00      0.00      0.00      0.00
+15:42:23         net0   4879.00  10825.00    384.51 386126.88      0.00      0.00      0.00      0.00
+
+15:42:23        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+15:42:24           lo   8292.00   8292.00 208592.99 208592.99      0.00      0.00      0.00      0.00
+15:42:24         net0   1464.00   3732.00    122.67 143754.49      0.00      0.00      0.00      0.00
+
+15:42:24        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+15:42:25           lo   8487.00   8487.00 232817.20 232817.20      0.00      0.00      0.00      0.00
+15:42:25         net0   1520.00   3609.00    129.44 139143.92      0.00      0.00      0.00      0.00
+
+15:42:25        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+15:42:26           lo  15484.00  15484.00 393285.57 393285.57      0.00      0.00      0.00      0.00
+15:42:26         net0   3027.00   7332.00    245.46 267509.35      0.00      0.00      0.00      0.00
+
+15:42:26        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+15:42:27           lo  17044.00  17044.00 445293.64 445293.64      0.00      0.00      0.00      0.00
+15:42:27         net0   2983.00   7857.00    246.51 295731.63      0.00      0.00      0.00      0.00
+
+15:42:27        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+15:42:28           lo   4062.00   4062.00  92443.43  92443.43      0.00      0.00      0.00      0.00
+15:42:28         net0    758.00   2056.00     68.37  78047.95      0.00      0.00      0.00      0.00

@@ -996,10 +996,16 @@ pub(crate) async fn publish_version<X: Txn>(
         write(tx, &keys::version(bucket.id, key, p.ordinal), &record)?;
         // A displaced null version (written while unversioned or suspended)
         // has no version record; give it one so it stays listable and
-        // addressable as version "null" instead of being retired.
+        // addressable as version "null" instead of being retired. A null
+        // version that became current again through a version delete
+        // already has its record.
         if let Some(c) = current
             && c.version_id == NULL_VERSION_ID
             && c.next_ordinal > 0
+            && !version_records(tx, bucket.id, key)
+                .await?
+                .iter()
+                .any(|(_, v)| v.version_id == NULL_VERSION_ID)
         {
             let record = VersionRecord {
                 generation: c.generation,

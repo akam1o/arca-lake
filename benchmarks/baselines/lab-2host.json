@@ -16,6 +16,9 @@
     "repetitions": 3,
     "cache_config": "none-c4",
     "hit_ratio": 0.9322916666666666,
-    "population_chunks_per_s": 69.8691078652141
+    "population_chunks_per_s": 69.8691078652141,
+    "multipart_put_mib_s": 201.0,
+    "multipart_get_warm_mib_s": 688.0,
+    "multipart_note": "Phase 3.1: median of six repetitions (regress-phase31 and regress-phase31-rerun-mp), four of them in the slow storage state (R-48); 8 MiB parts uploaded sequentially per object"
   }
 }
