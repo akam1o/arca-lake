@@ -17,6 +17,8 @@
 //! | `("al","g",root,"m",part_number)` | `PartRef` | part manifest reference of a multipart root (RFC-007 §5.3) |
 //! | `("al","mpu",bucket_id,key,upload_id)` | `MultipartRecord` | multipart upload |
 //! | `("al","mpp",upload_id,part_number)` | `PartRecord` | sealed part of an upload |
+//! | `("al","scrub",group_id)` | `ScrubCursor` | scrub progress of a group (RFC-008 §8.3) |
+//! | `("al","repair",group_id,chunk_id)` | `RepairTask` | stripe repair task (RFC-008 §8.5) |
 //! | `("al","pend",lease_until_ms,gen)` | empty | pending generations by lease expiry |
 //! | `("al","gc",since_ms,gen)` | empty | retired generations awaiting GC |
 //!
@@ -50,6 +52,43 @@ pub fn schema_version() -> Key {
 #[must_use]
 pub fn cluster_state() -> Key {
     pack(&(ROOT, "meta", "cluster"))
+}
+
+/// Scrub cursor of a group (RFC-008 §8.3).
+#[must_use]
+pub fn scrub_cursor(group_id: u64) -> Key {
+    pack(&(ROOT, "scrub", group_id))
+}
+
+/// Every scrub cursor.
+#[must_use]
+pub fn scrub_cursors_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "scrub")))
+}
+
+/// Group id from a scrub cursor key, if it is one.
+#[must_use]
+pub fn scrub_group_from(key: &[u8]) -> Option<u64> {
+    unpack::<(String, String, u64)>(key).ok().map(|t| t.2)
+}
+
+/// Stripe repair task of `(group, chunk)` (RFC-008 §8.5).
+#[must_use]
+pub fn repair_task(group_id: u64, chunk_id: &[u8; 16]) -> Key {
+    pack(&(ROOT, "repair", group_id, Bytes::from(&chunk_id[..])))
+}
+
+/// Every repair task, in `(group, chunk)` order.
+#[must_use]
+pub fn repair_tasks_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "repair")))
+}
+
+/// `(group, chunk)` from a repair task key, if it is one.
+#[must_use]
+pub fn repair_task_from(key: &[u8]) -> Option<(u64, [u8; 16])> {
+    let (_, _, g, c): (String, String, u64, Bytes<'_>) = unpack(key).ok()?;
+    Some((g, <[u8; 16]>::try_from(c.as_ref()).ok()?))
 }
 
 /// Multipart upload record.

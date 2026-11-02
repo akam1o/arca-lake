@@ -10,6 +10,7 @@ pub mod bucket;
 pub mod cache;
 pub mod cluster;
 pub mod gc;
+pub mod integrity;
 pub mod leader;
 pub mod list;
 pub mod multipart;
