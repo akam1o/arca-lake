@@ -33,6 +33,11 @@ jobs:
             sudo apt-get update -qq
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
           fi
+          # bindgen (foundationdb-sys) needs libclang.
+          if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev
+          fi
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
@@ -68,6 +73,11 @@ jobs:
           if ! command -v cc >/dev/null; then
             sudo apt-get update -qq
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
+          fi
+          # bindgen (foundationdb-sys) needs libclang.
+          if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev
           fi
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -123,6 +133,11 @@ jobs:
           if ! command -v cc >/dev/null; then
             sudo apt-get update -qq
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
+          fi
+          # bindgen (foundationdb-sys) needs libclang.
+          if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev
           fi
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -189,6 +204,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
       - name: install cargo-deny (pinned release)
         env:
           DENY_VERSION: 0.18.5
@@ -265,5 +283,5 @@ jobs:
       - name: check markdown links (lychee, pinned image)
         run: |
           set -euo pipefail
-          sudo docker run --rm -v "$PWD:/input:ro" -w /input lycheeverse/lychee:0.20.1 \
+          sudo docker run --rm -v "$PWD:/input:ro" -w /input lycheeverse/lychee:latest \
             --no-progress --offline './**/*.md'
