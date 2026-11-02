@@ -5,7 +5,7 @@ deviation of throughput, the median of p50 / p95 / p99 latency, median
 CPU-seconds and network bytes per GiB per host, the cache hit ratio
 (hits / (hits + misses + fallbacks)), gateway RSS, and the error rate.
 
-Usage: aggregate.py <results-dir> [--cores N] [--iface eth0]
+Usage: aggregate.py <results-dir> [--cores N] [--iface net0]
 """
 
 import json
@@ -19,7 +19,7 @@ from summarize import cpu_seconds, metric, net_bytes  # noqa: E402
 
 
 def parse_args(argv):
-    cores, iface, root = 4, "eth0", None
+    cores, iface, root = 4, "net0", None
     i = 0
     while i < len(argv):
         if argv[i] == "--cores":

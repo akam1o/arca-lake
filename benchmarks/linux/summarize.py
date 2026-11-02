@@ -8,7 +8,7 @@ phase: throughput, latency percentiles, CPU-seconds per GiB on each host
 GiB on each host (from `sar -n DEV` eth totals rx+tx), and the cache hit /
 miss / degraded counters delta of the phase.
 
-Usage: summarize.py <results-dir> [--cores N] [--iface eth0]
+Usage: summarize.py <results-dir> [--cores N] [--iface net0]
 """
 
 import json
@@ -18,7 +18,7 @@ import sys
 
 
 def parse_args(argv):
-    cores, iface, root = 4, "eth0", None
+    cores, iface, root = 4, "net0", None
     i = 0
     while i < len(argv):
         if argv[i] == "--cores":
