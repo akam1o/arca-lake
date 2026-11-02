@@ -35,6 +35,7 @@ use arca_lake_metadata::records::{
     new_gen_id,
 };
 use arca_lake_metadata::{KvError, MetaError};
+use futures::{StreamExt, stream};
 
 fn run<T>(f: impl Future<Output = T>) -> T {
     futures::executor::block_on(f)
@@ -277,40 +278,54 @@ fn ten_thousand_part_complete_is_one_transaction_on_foundationdb() {
             .unwrap()
             .upload_id;
         let started = Instant::now();
-        let mut parts = Vec::with_capacity(10_000);
-        for n in 1..=10_000u32 {
-            let etag = format!("{n:032x}");
-            let p = multipart::begin_part(&kv, "b", &key, &uid, n, 2, LEASE)
+        // Parts are uploaded 32 at a time, as clients do; each part still
+        // runs begin, append, seal in order. The recipes write only
+        // per-generation and per-part keys, so the parts do not conflict.
+        let upload = |n: u32| {
+            let (kv, key, uid) = (&kv, &key, &uid);
+            async move {
+                let etag = format!("{n:032x}");
+                let p = multipart::begin_part(kv, "b", key, uid, n, 2, LEASE)
+                    .await
+                    .unwrap();
+                append_chunks(kv, &p.generation, &[chunk(0)], 2)
+                    .await
+                    .unwrap();
+                multipart::seal_part(
+                    kv,
+                    &p.generation,
+                    &PartInfo {
+                        size: 5 << 20,
+                        etag: etag.clone(),
+                        checksum: Some(arca_lake_metadata::records::Checksum {
+                            algorithm: ChecksumAlgorithm::Crc32c,
+                            kind: ChecksumType::FullObject,
+                            value: n.to_be_bytes().to_vec(),
+                            parts: None,
+                        }),
+                        chunk_count: 1,
+                    },
+                    2,
+                )
                 .await
                 .unwrap();
-            append_chunks(&kv, &p.generation, &[chunk(0)], 2)
-                .await
-                .unwrap();
-            multipart::seal_part(
-                &kv,
-                &p.generation,
-                &PartInfo {
-                    size: 5 << 20,
-                    etag: etag.clone(),
-                    checksum: Some(arca_lake_metadata::records::Checksum {
-                        algorithm: ChecksumAlgorithm::Crc32c,
-                        kind: ChecksumType::FullObject,
-                        value: n.to_be_bytes().to_vec(),
-                        parts: None,
-                    }),
-                    chunk_count: 1,
-                },
-                2,
-            )
-            .await
-            .unwrap();
-            parts.push(CompletePart {
-                part_number: n,
-                etag,
-                checksum: None,
-            });
-        }
-        eprintln!("uploaded 10 000 parts in {:?}", started.elapsed());
+                CompletePart {
+                    part_number: n,
+                    etag,
+                    checksum: None,
+                }
+            }
+        };
+        let mut parts: Vec<CompletePart> = stream::iter(1..=10_000u32)
+            .map(upload)
+            .buffer_unordered(32)
+            .collect()
+            .await;
+        parts.sort_by_key(|p| p.part_number);
+        eprintln!(
+            "uploaded 10 000 parts (32 concurrent) in {:?}",
+            started.elapsed()
+        );
         let before = arca_lake_metadata::kv::transact_stats();
         let root = new_gen_id();
         let t = Instant::now();

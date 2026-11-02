@@ -7,7 +7,9 @@
 //! - Every operation yields to the executor once so that concurrent
 //!   transactions in tests interleave at realistic points.
 //!
-//! Not intended for production use: each transaction clones the data map.
+//! Not intended for production use. Transactions share the committed map
+//! through an `Arc`; a commit copies it only while another transaction still
+//! holds a snapshot, and updates it in place otherwise.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -20,7 +22,7 @@ use crate::kv::{Key, KeyRange, KvError, KvStore, Limits, Txn, Value};
 #[derive(Debug, Default)]
 struct State {
     version: u64,
-    data: BTreeMap<Key, Value>,
+    data: Arc<BTreeMap<Key, Value>>,
     /// Version of the last write (set or clear) per key.
     modified: BTreeMap<Key, u64>,
 }
@@ -94,7 +96,7 @@ impl KvStore for MemKv {
         yield_once().await;
         let (read_version, snapshot) = {
             let s = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            (s.version, s.data.clone())
+            (s.version, Arc::clone(&s.data))
         };
         Ok(MemTx {
             state: Arc::clone(&self.state),
@@ -121,7 +123,7 @@ pub struct MemTx {
     state: Arc<Mutex<State>>,
     limits: Limits,
     read_version: u64,
-    snapshot: BTreeMap<Key, Value>,
+    snapshot: Arc<BTreeMap<Key, Value>>,
     reads: Vec<KeyRange>,
     /// `None` means cleared.
     writes: BTreeMap<Key, Option<Value>>,
@@ -263,58 +265,74 @@ impl Txn for MemTx {
 
     async fn commit(self) -> Result<u64, KvError> {
         yield_once().await;
-        if let Some(e) = self.pending_error {
+        let MemTx {
+            state,
+            limits,
+            read_version,
+            snapshot,
+            reads,
+            writes,
+            adds,
+            range_clears,
+            affected_bytes,
+            pending_error,
+        } = self;
+        // Release this transaction's snapshot first: with no other
+        // transaction open, the commit then updates the map in place.
+        drop(snapshot);
+        if let Some(e) = pending_error {
             return Err(e);
         }
-        if self.affected_bytes > self.limits.max_transaction_bytes {
+        if affected_bytes > limits.max_transaction_bytes {
             return Err(KvError::TooLarge {
                 what: "transaction",
-                limit: self.limits.max_transaction_bytes,
-                actual: self.affected_bytes,
+                limit: limits.max_transaction_bytes,
+                actual: affected_bytes,
             });
         }
-        let mut s = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut s = state.lock().unwrap_or_else(PoisonError::into_inner);
         // Read-only transactions cannot conflict and need no version.
-        if self.writes.is_empty() && self.range_clears.is_empty() && self.adds.is_empty() {
+        if writes.is_empty() && range_clears.is_empty() && adds.is_empty() {
             return Ok(s.version);
         }
-        for r in &self.reads {
+        for r in &reads {
             if s.modified
                 .range(r.begin.clone()..r.end.clone())
-                .any(|(_, &v)| v > self.read_version)
+                .any(|(_, &v)| v > read_version)
             {
                 return Err(KvError::Conflict);
             }
         }
         s.version += 1;
         let version = s.version;
-        for r in &self.range_clears {
-            let keys: Vec<Key> = s
-                .data
+        let State { data, modified, .. } = &mut *s;
+        let data = Arc::make_mut(data);
+        for r in &range_clears {
+            let keys: Vec<Key> = data
                 .range(r.begin.clone()..r.end.clone())
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in keys {
-                s.data.remove(&k);
-                s.modified.insert(k, version);
+                data.remove(&k);
+                modified.insert(k, version);
             }
         }
-        for (k, w) in self.writes {
+        for (k, w) in writes {
             match w {
                 Some(v) => {
-                    s.data.insert(k.clone(), v);
+                    data.insert(k.clone(), v);
                 }
                 None => {
-                    s.data.remove(&k);
+                    data.remove(&k);
                 }
             }
-            s.modified.insert(k, version);
+            modified.insert(k, version);
         }
         // Atomic additions see the value as committed by everyone else.
-        for (k, delta) in self.adds {
-            let next = add_le(s.data.get(&k).map(Vec::as_slice), delta);
-            s.data.insert(k.clone(), next);
-            s.modified.insert(k, version);
+        for (k, delta) in adds {
+            let next = add_le(data.get(&k).map(Vec::as_slice), delta);
+            data.insert(k.clone(), next);
+            modified.insert(k, version);
         }
         Ok(version)
     }
