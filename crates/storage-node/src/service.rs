@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -53,6 +54,9 @@ pub struct StorageNodeService {
     frame_bytes: usize,
     stream_progress_timeout: Duration,
     stats: NodeStats,
+    /// One deep verification (`ScrubShards`/`VerifyShards`) at a time per
+    /// node (RFC-008 §8.3).
+    scrub_slot: tokio::sync::Semaphore,
 }
 
 /// Decrements a gauge when dropped (`PutShard` streams in flight).
@@ -77,6 +81,15 @@ pub struct NodeStats {
     pub get_serve: Histogram,
     /// `PutShard` streams currently open.
     pub puts_in_flight: std::sync::atomic::AtomicU64,
+    /// Reads (`GetShard`, `VerifyShards`, `ScrubShards`) that found a
+    /// corrupt record (RFC-008 §8.2).
+    pub corrupt_reads: std::sync::atomic::AtomicU64,
+    /// Shards verified by `ScrubShards`.
+    pub scrub_shards: std::sync::atomic::AtomicU64,
+    /// Bytes read by `ScrubShards`.
+    pub scrub_bytes: std::sync::atomic::AtomicU64,
+    /// Shards `ScrubShards` found corrupt (and quarantined).
+    pub scrub_corrupt: std::sync::atomic::AtomicU64,
 }
 
 /// A copy of [`NodeStats`].
@@ -92,6 +105,18 @@ pub struct NodeStatsSnapshot {
     pub get_serve: HistogramSnapshot,
     /// See [`NodeStats::puts_in_flight`].
     pub puts_in_flight: u64,
+    /// See [`NodeStats::corrupt_reads`].
+    pub corrupt_reads: u64,
+    /// See [`NodeStats::scrub_shards`].
+    pub scrub_shards: u64,
+    /// See [`NodeStats::scrub_bytes`].
+    pub scrub_bytes: u64,
+    /// See [`NodeStats::scrub_corrupt`].
+    pub scrub_corrupt: u64,
+    /// Quarantined shards on the node.
+    pub quarantined_shards: u64,
+    /// Payload bytes of quarantined shards.
+    pub quarantined_bytes: u64,
 }
 
 impl StorageNodeService {
@@ -101,7 +126,18 @@ impl StorageNodeService {
     ///
     /// Storage or I/O errors while opening.
     pub fn open(cfg: &NodeConfig) -> Result<Self, StorageError> {
-        let (store, _report) = Store::open(cfg.store.clone())?;
+        let (store, report) = Store::open(cfg.store.clone())?;
+        if !report.quarantined.is_empty()
+            || !report.holes.is_empty()
+            || !report.corrupt_segments.is_empty()
+        {
+            tracing::warn!(
+                quarantined = report.quarantined.len(),
+                holes = report.holes.len(),
+                corrupt_segments = report.corrupt_segments.len(),
+                "storage open found damaged records (see quarantine.log)"
+            );
+        }
         let epochs = EpochTable::open(&cfg.store.dir);
         Ok(Self {
             store: Arc::new(store),
@@ -109,6 +145,7 @@ impl StorageNodeService {
             frame_bytes: cfg.frame_bytes,
             stream_progress_timeout: cfg.stream_progress_timeout,
             stats: NodeStats::default(),
+            scrub_slot: tokio::sync::Semaphore::new(1),
         })
     }
 
@@ -124,6 +161,12 @@ impl StorageNodeService {
                 .stats
                 .puts_in_flight
                 .load(std::sync::atomic::Ordering::Relaxed),
+            corrupt_reads: self.stats.corrupt_reads.load(Ordering::Relaxed),
+            scrub_shards: self.stats.scrub_shards.load(Ordering::Relaxed),
+            scrub_bytes: self.stats.scrub_bytes.load(Ordering::Relaxed),
+            scrub_corrupt: self.stats.scrub_corrupt.load(Ordering::Relaxed),
+            quarantined_shards: self.store.quarantine_stats().0 as u64,
+            quarantined_bytes: self.store.quarantine_stats().1,
         }
     }
 
@@ -192,6 +235,15 @@ impl StorageNodeService {
         }
     }
 
+    /// Status for a key that `get` reports missing: quarantined keys are
+    /// `DATA_LOSS` so that readers learn the difference from a real miss.
+    fn missing_status(&self, key: &ShardKey) -> tonic::Status {
+        match self.store.quarantine_entry(key) {
+            Some(q) => tonic::Status::data_loss(format!("shard quarantined: {}", q.reason)),
+            None => tonic::Status::not_found("shard not found"),
+        }
+    }
+
     fn storage_status(e: StorageError) -> tonic::Status {
         match e {
             StorageError::NotFound => tonic::Status::not_found("shard not found"),
@@ -203,6 +255,7 @@ impl StorageNodeService {
 }
 
 #[tonic::async_trait]
+#[allow(clippy::too_many_lines)]
 impl StorageNode for StorageNodeService {
     type GetShardStream = ReceiverStream<Result<pb::GetShardResponse, tonic::Status>>;
 
@@ -304,7 +357,14 @@ impl StorageNode for StorageNodeService {
         let data = tokio::task::spawn_blocking(move || store.get(&key, range))
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?
-            .map_err(Self::storage_status)?;
+            .map_err(|e| match e {
+                StorageError::NotFound => self.missing_status(&key),
+                StorageError::Corrupt { .. } => {
+                    self.stats.corrupt_reads.fetch_add(1, Ordering::Relaxed);
+                    Self::storage_status(e)
+                }
+                other => Self::storage_status(other),
+            })?;
         let data = if req.len == 0 && req.offset > 0 {
             let off = usize::try_from(req.offset)
                 .unwrap_or(usize::MAX)
@@ -358,18 +418,37 @@ impl StorageNode for StorageNodeService {
         Self::check_version(req.protocol_version)?;
         let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
         let limit = Self::page_limit(req.limit);
-        let page = self
+        let mut page: Vec<(ShardKey, u32, bool)> = self
             .store
-            .entries_in_group_after(req.group_id, after, limit);
+            .entries_in_group_after(req.group_id, after, limit)
+            .into_iter()
+            .map(|(k, len)| (k, len, false))
+            .collect();
         let more = page.len() == limit;
+        if req.include_quarantined {
+            // Quarantined keys of the same window, merged in key order; the
+            // cursor stays the last live key so that paging is unchanged.
+            let bound = page.last().map(|(k, _, _)| *k);
+            for (k, e) in self
+                .store
+                .quarantined_in_group_after(req.group_id, after, limit)
+            {
+                if more && bound.is_some_and(|b| k > b) {
+                    break;
+                }
+                page.push((k, e.location.payload_len, true));
+            }
+            page.sort_by_key(|a| a.0);
+        }
         let next = more
-            .then(|| page.last().map(|(k, _)| Self::pb_key(k)))
+            .then(|| page.last().map(|(k, _, _)| Self::pb_key(k)))
             .flatten();
         let entries = page
             .into_iter()
-            .map(|(k, len)| pb::ShardEntry {
+            .map(|(k, len, quarantined)| pb::ShardEntry {
                 key: Some(Self::pb_key(&k)),
                 payload_len: u64::from(len),
+                quarantined,
             })
             .collect();
         Ok(tonic::Response::new(pb::ListShardsResponse {
@@ -395,8 +474,15 @@ impl StorageNode for StorageNodeService {
             .then(|| page.last().map(|(k, _)| Self::pb_key(k)))
             .flatten();
         let store = Arc::clone(&self.store);
-        let verified = tokio::task::spawn_blocking(move || {
-            page.into_iter()
+        let _slot = self
+            .scrub_slot
+            .acquire()
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        let (verified, corrupt) = tokio::task::spawn_blocking(move || {
+            let mut corrupt = 0u64;
+            let out = page
+                .into_iter()
                 .map(|(key, len)| match store.get(&key, None) {
                     Ok(data) => pb::ShardVerification {
                         key: Some(Self::pb_key(&key)),
@@ -404,21 +490,153 @@ impl StorageNode for StorageNodeService {
                         crc32c: crc32c_of(&data),
                         ok: true,
                     },
-                    Err(_) => pb::ShardVerification {
-                        key: Some(Self::pb_key(&key)),
-                        payload_len: u64::from(len),
-                        crc32c: 0,
-                        ok: false,
-                    },
+                    Err(e) => {
+                        if matches!(e, StorageError::Corrupt { .. }) {
+                            corrupt += 1;
+                        }
+                        pb::ShardVerification {
+                            key: Some(Self::pb_key(&key)),
+                            payload_len: u64::from(len),
+                            crc32c: 0,
+                            ok: false,
+                        }
+                    }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (out, corrupt)
         })
         .await
         .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        self.stats
+            .corrupt_reads
+            .fetch_add(corrupt, Ordering::Relaxed);
         Ok(tonic::Response::new(pb::VerifyShardsResponse {
             shards: verified,
             next,
             more,
+        }))
+    }
+
+    async fn scrub_shards(
+        &self,
+        request: tonic::Request<pb::ScrubShardsRequest>,
+    ) -> Result<tonic::Response<pb::ScrubShardsResponse>, tonic::Status> {
+        let req = request.into_inner();
+        Self::check_version(req.protocol_version)?;
+        let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
+        let limit = Self::page_limit(req.limit);
+        // Live entries and quarantined entries of the window, in key order:
+        // a scrub reports quarantined shards as such instead of hiding them.
+        let mut keys: Vec<(ShardKey, u32, Option<arca_lake_storage::QuarantineEntry>)> = self
+            .store
+            .entries_in_group_after(req.group_id, after, limit)
+            .into_iter()
+            .map(|(k, len)| (k, len, None))
+            .collect();
+        let more = keys.len() == limit;
+        let bound = keys.last().map(|(k, _, _)| *k);
+        for (k, e) in self
+            .store
+            .quarantined_in_group_after(req.group_id, after, limit)
+        {
+            if more && bound.is_some_and(|b| k > b) {
+                break;
+            }
+            keys.push((k, e.location.payload_len, Some(e)));
+        }
+        keys.sort_by_key(|a| a.0);
+        let next = more.then(|| bound.map(|k| Self::pb_key(&k))).flatten();
+        let store = Arc::clone(&self.store);
+        let _slot = self
+            .scrub_slot
+            .acquire()
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        let (shards, bytes_read, corrupt) = tokio::task::spawn_blocking(move || {
+            let mut bytes = 0u64;
+            let mut corrupt = 0u64;
+            let out = keys
+                .into_iter()
+                .map(|(key, len, q)| {
+                    let pb_key = Some(Self::pb_key(&key));
+                    if let Some(q) = q {
+                        return pb::ShardScrub {
+                            key: pb_key,
+                            payload_len: u64::from(len),
+                            crc32c: 0,
+                            sequence: q.location.sequence,
+                            status: pb::ShardStatus::Quarantined as i32,
+                            reason: q.reason.to_string(),
+                        };
+                    }
+                    match store.verify(&key) {
+                        Ok(v) => {
+                            bytes += u64::from(v.payload_len);
+                            pb::ShardScrub {
+                                key: pb_key,
+                                payload_len: u64::from(v.payload_len),
+                                crc32c: v.crc32c,
+                                sequence: v.sequence,
+                                status: pb::ShardStatus::Ok as i32,
+                                reason: String::new(),
+                            }
+                        }
+                        Err(StorageError::Corrupt { reason, .. }) => {
+                            corrupt += 1;
+                            let status = match reason {
+                                "payload block crc mismatch" => pb::ShardStatus::ChecksumMismatch,
+                                r if r.contains("truncated") => pb::ShardStatus::Truncated,
+                                _ => pb::ShardStatus::InvalidHeader,
+                            };
+                            pb::ShardScrub {
+                                key: pb_key,
+                                payload_len: u64::from(len),
+                                crc32c: 0,
+                                sequence: 0,
+                                status: status as i32,
+                                reason: reason.to_string(),
+                            }
+                        }
+                        Err(StorageError::NotFound) => pb::ShardScrub {
+                            key: pb_key,
+                            payload_len: u64::from(len),
+                            crc32c: 0,
+                            sequence: 0,
+                            status: pb::ShardStatus::Quarantined as i32,
+                            reason: "quarantined during scrub".into(),
+                        },
+                        Err(e) => pb::ShardScrub {
+                            key: pb_key,
+                            payload_len: u64::from(len),
+                            crc32c: 0,
+                            sequence: 0,
+                            status: pb::ShardStatus::IoError as i32,
+                            reason: e.to_string(),
+                        },
+                    }
+                })
+                .collect::<Vec<_>>();
+            (out, bytes, corrupt)
+        })
+        .await
+        .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        self.stats
+            .scrub_shards
+            .fetch_add(shards.len() as u64, Ordering::Relaxed);
+        self.stats
+            .scrub_bytes
+            .fetch_add(bytes_read, Ordering::Relaxed);
+        self.stats
+            .scrub_corrupt
+            .fetch_add(corrupt, Ordering::Relaxed);
+        self.stats
+            .corrupt_reads
+            .fetch_add(corrupt, Ordering::Relaxed);
+        Ok(tonic::Response::new(pb::ScrubShardsResponse {
+            shards,
+            next,
+            more,
+            bytes_read,
         }))
     }
 
@@ -442,10 +660,13 @@ impl StorageNode for StorageNodeService {
         _request: tonic::Request<pb::HealthRequest>,
     ) -> Result<tonic::Response<pb::HealthResponse>, tonic::Status> {
         let stats = self.store.stats().map_err(Self::storage_status)?;
+        let (qn, qb) = self.store.quarantine_stats();
         Ok(tonic::Response::new(pb::HealthResponse {
             live_shards: stats.live_shards as u64,
             live_bytes: stats.live_bytes,
             segment_bytes: stats.segment_bytes,
+            quarantined_shards: qn as u64,
+            quarantined_bytes: qb,
         }))
     }
 }

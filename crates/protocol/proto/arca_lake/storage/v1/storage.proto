@@ -70,11 +70,15 @@ message ListShardsRequest {
   ShardKey after = 3;
   // 0 means the node's default page size.
   uint32 limit = 4;
+  // Also list quarantined shards (RFC-008 §8.2); they carry
+  // `quarantined = true`. Reconciliation uses this; readers and repair do not.
+  bool include_quarantined = 5;
 }
 
 message ShardEntry {
   ShardKey key = 1;
   uint64 payload_len = 2;
+  bool quarantined = 3;
 }
 
 message ListShardsResponse {
@@ -109,6 +113,43 @@ message VerifyShardsResponse {
   bool more = 3;
 }
 
+// Deep verification of a page of shards (RFC-008 §8.2): every shard is read
+// in full and classified; corrupt shards are quarantined durably on the node.
+// Quarantined shards of the window are reported with their status.
+message ScrubShardsRequest {
+  uint32 protocol_version = 1;
+  uint64 group_id = 2;
+  ShardKey after = 3;
+  uint32 limit = 4;
+}
+
+enum ShardStatus {
+  SHARD_STATUS_UNSPECIFIED = 0;
+  SHARD_STATUS_OK = 1;
+  SHARD_STATUS_CHECKSUM_MISMATCH = 2;
+  SHARD_STATUS_INVALID_HEADER = 3;
+  SHARD_STATUS_TRUNCATED = 4;
+  SHARD_STATUS_QUARANTINED = 5;
+  SHARD_STATUS_IO_ERROR = 6;
+}
+
+message ShardScrub {
+  ShardKey key = 1;
+  uint64 payload_len = 2;
+  // CRC-32C of the payload; meaningful only when OK.
+  uint32 crc32c = 3;
+  uint64 sequence = 4;
+  ShardStatus status = 5;
+  string reason = 6;
+}
+
+message ScrubShardsResponse {
+  repeated ShardScrub shards = 1;
+  ShardKey next = 2;
+  bool more = 3;
+  uint64 bytes_read = 4;
+}
+
 message UpdateGroupEpochRequest {
   uint32 protocol_version = 1;
   uint64 group_id = 2;
@@ -126,6 +167,8 @@ message HealthResponse {
   uint64 live_shards = 1;
   uint64 live_bytes = 2;
   uint64 segment_bytes = 3;
+  uint64 quarantined_shards = 4;
+  uint64 quarantined_bytes = 5;
 }
 
 service StorageNode {
@@ -134,6 +177,7 @@ service StorageNode {
   rpc DeleteShard(DeleteShardRequest) returns (DeleteShardResponse);
   rpc ListShards(ListShardsRequest) returns (ListShardsResponse);
   rpc VerifyShards(VerifyShardsRequest) returns (VerifyShardsResponse);
+  rpc ScrubShards(ScrubShardsRequest) returns (ScrubShardsResponse);
   rpc UpdateGroupEpoch(UpdateGroupEpochRequest) returns (UpdateGroupEpochResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
 }

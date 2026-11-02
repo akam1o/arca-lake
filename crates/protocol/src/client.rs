@@ -36,10 +36,78 @@ pub struct ShardRef {
 /// One page of a shard listing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShardPage {
-    /// `(shard, payload length)` in key order.
+    /// `(shard, payload length)` of live shards, in key order.
     pub entries: Vec<(ShardRef, u64)>,
+    /// Quarantined shards of the page (only when requested, RFC-008 §8.2),
+    /// with their payload lengths.
+    pub quarantined: Vec<(ShardRef, u64)>,
     /// Cursor for the next page, if any.
     pub next: Option<ShardRef>,
+}
+
+/// Classification of one shard by the node's deep verification
+/// (RFC-008 §8.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ShardStatus {
+    /// Header and every payload block verified.
+    Ok,
+    /// A payload block CRC failed; the node quarantined the shard.
+    ChecksumMismatch,
+    /// The record header did not validate; quarantined.
+    InvalidHeader,
+    /// The record is shorter than its header claims; quarantined.
+    Truncated,
+    /// Already quarantined (by an earlier read, scrub or open).
+    Quarantined,
+    /// A transient I/O error; nothing was quarantined.
+    IoError,
+}
+
+impl ShardStatus {
+    fn from_pb(v: i32) -> Self {
+        match pb::ShardStatus::try_from(v) {
+            Ok(pb::ShardStatus::Ok) => Self::Ok,
+            Ok(pb::ShardStatus::ChecksumMismatch) => Self::ChecksumMismatch,
+            Ok(pb::ShardStatus::InvalidHeader) => Self::InvalidHeader,
+            Ok(pb::ShardStatus::Truncated) => Self::Truncated,
+            Ok(pb::ShardStatus::Quarantined) => Self::Quarantined,
+            _ => Self::IoError,
+        }
+    }
+
+    /// Whether the shard may be used as a read or reconstruction source.
+    #[must_use]
+    pub fn is_good(self) -> bool {
+        self == Self::Ok
+    }
+}
+
+/// One scrubbed shard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardScrub {
+    /// Shard.
+    pub shard: ShardRef,
+    /// Payload length (the index's when not OK).
+    pub payload_len: u64,
+    /// CRC-32C of the payload when OK.
+    pub crc32c: u32,
+    /// Record sequence when OK or quarantined.
+    pub sequence: u64,
+    /// Classification.
+    pub status: ShardStatus,
+    /// Node-side reason for a non-OK status.
+    pub reason: String,
+}
+
+/// One page of scrubbed shards.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScrubPage {
+    /// Shards in key order (live and quarantined).
+    pub shards: Vec<ShardScrub>,
+    /// Cursor for the next page, if any.
+    pub next: Option<ShardRef>,
+    /// Payload bytes the node read for this page.
+    pub bytes_read: u64,
 }
 
 /// One verified shard.
@@ -95,6 +163,8 @@ pub enum Rpc {
     ListShards,
     /// `VerifyShards`.
     VerifyShards,
+    /// `ScrubShards`.
+    ScrubShards,
     /// `UpdateGroupEpoch`.
     UpdateEpoch,
     /// `Health`.
@@ -816,6 +886,24 @@ impl NodeClients {
         after: Option<ShardRef>,
         limit: u32,
     ) -> Result<ShardPage, tonic::Status> {
+        self.list_shards_page_with(addr, group_id, after, limit, false)
+            .await
+    }
+
+    /// [`Self::list_shards_page`], optionally including quarantined shards
+    /// (reported in `ShardPage::quarantined`; reconciliation only).
+    ///
+    /// # Errors
+    ///
+    /// RPC errors.
+    pub async fn list_shards_page_with(
+        &self,
+        addr: &str,
+        group_id: u64,
+        after: Option<ShardRef>,
+        limit: u32,
+        include_quarantined: bool,
+    ) -> Result<ShardPage, tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::ListShards,
@@ -830,14 +918,24 @@ impl NodeClients {
                     group_id,
                     after: after.map(|s| s.pb()),
                     limit,
+                    include_quarantined,
                 };
                 let resp = client.list_shards(req).await?.into_inner();
+                let mut entries = Vec::new();
+                let mut quarantined = Vec::new();
+                for e in resp.entries {
+                    let Some(key) = e.key.as_ref().and_then(ShardRef::from_pb) else {
+                        continue;
+                    };
+                    if e.quarantined {
+                        quarantined.push((key, e.payload_len));
+                    } else {
+                        entries.push((key, e.payload_len));
+                    }
+                }
                 Ok(ShardPage {
-                    entries: resp
-                        .entries
-                        .into_iter()
-                        .filter_map(|e| Some((ShardRef::from_pb(&e.key?)?, e.payload_len)))
-                        .collect(),
+                    entries,
+                    quarantined,
                     next: resp
                         .next
                         .as_ref()
@@ -918,6 +1016,62 @@ impl NodeClients {
                         .as_ref()
                         .and_then(ShardRef::from_pb)
                         .filter(|_| resp.more),
+                })
+            })
+        })
+        .await
+    }
+
+    /// One page of deep shard verification (RFC-008 §8.2): the node reads
+    /// every shard in full, classifies it and quarantines corrupt ones.
+    ///
+    /// # Errors
+    ///
+    /// RPC errors.
+    pub async fn scrub_shards_page(
+        &self,
+        addr: &str,
+        group_id: u64,
+        after: Option<ShardRef>,
+        limit: u32,
+    ) -> Result<ScrubPage, tonic::Status> {
+        let ctx = RpcContext {
+            addr,
+            rpc: Rpc::ScrubShards,
+            shard: None,
+            group_id: Some(group_id),
+        };
+        self.with_faults(ctx, |_| {
+            self.unary(async {
+                let mut client = self.client(addr)?;
+                let req = pb::ScrubShardsRequest {
+                    protocol_version: pb::PROTOCOL_VERSION,
+                    group_id,
+                    after: after.map(|s| s.pb()),
+                    limit,
+                };
+                let resp = client.scrub_shards(req).await?.into_inner();
+                Ok(ScrubPage {
+                    shards: resp
+                        .shards
+                        .into_iter()
+                        .filter_map(|v| {
+                            Some(ShardScrub {
+                                shard: ShardRef::from_pb(&v.key?)?,
+                                payload_len: v.payload_len,
+                                crc32c: v.crc32c,
+                                sequence: v.sequence,
+                                status: ShardStatus::from_pb(v.status),
+                                reason: v.reason,
+                            })
+                        })
+                        .collect(),
+                    next: resp
+                        .next
+                        .as_ref()
+                        .and_then(ShardRef::from_pb)
+                        .filter(|_| resp.more),
+                    bytes_read: resp.bytes_read,
                 })
             })
         })

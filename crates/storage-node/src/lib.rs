@@ -9,7 +9,7 @@
 mod epochs;
 mod service;
 
-pub use arca_lake_storage::StoreTimingsSnapshot;
+pub use arca_lake_storage::{ShardKey, Store, StoreTimingsSnapshot};
 pub use service::{
     NodeConfig, NodeHandle, NodeStats, NodeStatsSnapshot, StorageNodeService, serve,
 };
