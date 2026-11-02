@@ -196,6 +196,7 @@ async fn multipart_manifests_verify_clean_and_parts_are_scrubbed_repaired_and_ke
         &coders(),
         &RepairWorkerOptions::default(),
         None,
+        None,
         now_ms(),
     )
     .await

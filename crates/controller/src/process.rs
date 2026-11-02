@@ -411,12 +411,14 @@ fn start_leader_tasks<S: KvStore + 'static>(
                 let clients = clients.clone();
                 let cfg = cfg.clone();
                 let coders = Arc::clone(&coders);
+                let stop = stop.clone();
                 move || {
                     let meta = Arc::clone(&meta);
                     let clients = clients.clone();
                     let cfg = cfg.clone();
                     let metrics = Arc::clone(&metrics);
                     let coders = Arc::clone(&coders);
+                    let stop = stop.clone();
                     async move {
                         crate::integrity::scrub_pass(
                             meta.as_ref(),
@@ -424,6 +426,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
                             &coders,
                             &cfg.scrub,
                             Some(&metrics),
+                            Some(&stop),
                             now_ms(),
                         )
                         .await
@@ -435,18 +438,20 @@ fn start_leader_tasks<S: KvStore + 'static>(
         tokio::spawn(scheduler(
             "stripe-repair",
             cfg.stripe_repair_interval,
-            stop,
+            stop.clone(),
             Arc::clone(metrics),
             {
                 let metrics = Arc::clone(metrics);
                 let meta = Arc::clone(meta);
                 let cfg = cfg.clone();
+                let stop = stop.clone();
                 move || {
                     let meta = Arc::clone(&meta);
                     let clients = clients.clone();
                     let cfg = cfg.clone();
                     let metrics = Arc::clone(&metrics);
                     let coders = Arc::clone(&coders);
+                    let stop = stop.clone();
                     async move {
                         crate::integrity::repair_pass(
                             meta.as_ref(),
@@ -454,6 +459,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
                             &coders,
                             &cfg.stripe_repair,
                             Some(&metrics),
+                            Some(&stop),
                             now_ms(),
                         )
                         .await

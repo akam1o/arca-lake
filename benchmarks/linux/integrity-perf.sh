@@ -91,10 +91,12 @@ b0=$(metric "$m0" arca_controller_repair_bytes_total)
 t0=$(date +%s.%N)
 sa "$ADMIN integrity scrub --group 1 --wait --rate-mib 0 --page 256 --page-mib 0" > "$OUT/scrub-after-wipe.txt" 2>&1
 QUEUED=$(awk '/enqueued/ {for (i=1;i<=NF;i++) if ($i=="enqueued") print $(i+1)}' "$OUT/scrub-after-wipe.txt" | head -1)
+# Queue depth from metadata: the controller gauge is refreshed only at
+# the end of a worker pass and is stale while a long pass runs.
 for _ in $(seq 1 900); do
+  depth=$(sa "$ADMIN integrity status" | awk '/repair queue depth/ {print $4}')
   m="$(ctl_metrics)"
   r=$(metric "$m" arca_controller_stripe_repairs_succeeded_total)
-  depth=$(metric "$m" arca_controller_repair_queue_depth)
   if [ "${depth:-1}" = 0 ] && [ $((r - r0)) -ge 1 ]; then break; fi
   sleep 1
 done
@@ -111,6 +113,10 @@ printf '%s\n' "$m1" | grep -E '^arca_controller_(scrub|integrity|repair|stripe|s
 sb "$S3LOAD --endpoint $EP --bucket bench --op get --objects $OBJECTS --size $SIZE --concurrency 4 --verify --label verify" > "$OUT/verify-get.jsonl"
 sa "$ADMIN integrity scrub --group 1 --wait --rate-mib 0 --page 256 --page-mib 0" > "$OUT/scrub-final.txt" 2>&1
 sa "$ADMIN integrity status" | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g' > "$OUT/status-final.txt"
+mkdir -p "$OUT/logs"
+sa "cd $RUN_DIR/logs && tar czf - controller.log d0.log d1.log 2>/dev/null" | tar xzf - -C "$OUT/logs" 2>/dev/null || true
+sb "cd $RUN_DIR/logs && tar czf - d2.log gateway.log 2>/dev/null" | tar xzf - -C "$OUT/logs" 2>/dev/null || true
+sed -i -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g' "$OUT"/logs/*.log 2>/dev/null || true
 bash "$TH" teardown > /dev/null 2>&1 || true
 
 cat > "$OUT/env.txt" <<EOF

@@ -74,9 +74,13 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   s3 "r$round-put" --op put --prefix "r$round" --objects $N --size $SIZE --concurrency 4
   s3 "r$round-mpput" --op multipart-put --prefix "m$round" --objects $MP_N --size $MP_SIZE --part-size $((8 << 20)) --concurrency 2
   overwrite_errors=0
+  echo "r$round $round" >> "$OUT/seeds.txt"
   if [ $round -ge 2 ]; then
     s3 "r$round-overwrite" --op put --prefix "r$((round-1))" --objects $N --size $SIZE --concurrency 4 --seed $round
     overwrite_errors=$(tail -1 "$OUT/rounds.txt" | sed -E 's/.*errors=([0-9]+).*/\1/')
+    # The effective content of r<round-1>: the new seed when every
+    # overwrite succeeded, unknown (mixed) when some failed explicitly.
+    if [ "${overwrite_errors:-0}" = 0 ]; then echo "r$((round-1)) $round" >> "$OUT/seeds.txt"; else echo "r$((round-1)) mixed" >> "$OUT/seeds.txt"; fi
   fi
   # Delete the round before last (delete markers; GC keeps versions).
   if [ $round -ge 3 ]; then
@@ -133,7 +137,12 @@ sa "$ADMIN integrity verify-manifests" | strip_addr > "$OUT/manifests-final.txt"
 # Final verified read of everything that should exist.
 for r in $(seq 1 $round); do
   if [ $r -le $((round-2)) ]; then allow="--allow-missing"; else allow=""; fi
-  s3 "final-r$r" --op get --prefix "r$r" --objects $N --size $SIZE --concurrency 4 --verify --seed $(( r < round ? r + 1 : 1 )) $allow
+  seed=$(awk -v k="r$r" '$1==k {s=$2} END{print s}' "$OUT/seeds.txt")
+  if [ "$seed" = mixed ]; then
+    s3 "final-r$r-noverify" --op get --prefix "r$r" --objects $N --size $SIZE --concurrency 4 $allow
+  else
+    s3 "final-r$r" --op get --prefix "r$r" --objects $N --size $SIZE --concurrency 4 --verify --seed "$seed" $allow
+  fi
   s3 "final-m$r" --op get --prefix "m$r" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify
 done
 { echo "== final"; ctl_metrics | grep -E '^arca_controller_'; sb "curl -s http://127.0.0.1:9901/metrics" | grep -E '^arca_controller_' | sed 's/^/ctl-b /'; gw_metrics | grep -E '^arca_gateway_(degraded|unreadable|integrity|cache_)'; sa "curl -s http://127.0.0.1:9910/metrics; curl -s http://127.0.0.1:9911/metrics" | grep -E '^arca_node_(quarantined|corrupt|scrub)'; sb "curl -s http://127.0.0.1:9910/metrics" | grep -E '^arca_node_(quarantined|corrupt|scrub)'; } >> "$OUT/metrics.txt" 2>/dev/null || true

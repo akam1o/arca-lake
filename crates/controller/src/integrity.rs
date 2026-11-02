@@ -34,6 +34,15 @@ use crate::ControlError;
 use crate::metrics::Metrics;
 use crate::walk::GroupWalker;
 
+/// Shutdown signal checked between pages and tasks (and inside pacing
+/// sleeps): a pass stops promptly when it flips to `true`; the persisted
+/// cursor or task state resumes it later.
+pub type Cancel<'a> = Option<&'a tokio::sync::watch::Receiver<bool>>;
+
+fn cancelled(cancel: Cancel<'_>) -> bool {
+    cancel.is_some_and(|c| *c.borrow())
+}
+
 /// Scrub scheduler options (RFC-008 §8.3).
 #[derive(Debug, Clone)]
 pub struct ScrubOptions {
@@ -186,6 +195,7 @@ pub async fn scrub_pass<S: KvStore>(
     coders: &Coders,
     opts: &ScrubOptions,
     metrics: Option<&Metrics>,
+    cancel: Cancel<'_>,
     now_ms: u64,
 ) -> Result<ScrubReport, ControlError> {
     let mut report = ScrubReport::default();
@@ -219,6 +229,9 @@ pub async fn scrub_pass<S: KvStore>(
     }
     let mut budget = Pacer::new(opts.rate_bytes_per_s);
     for (_, group) in due.into_iter().take(opts.concurrency.max(1)) {
+        if cancelled(cancel) {
+            break;
+        }
         let cursor = match cursors.get(&group.id) {
             Some(c) if !c.is_done() => c.clone(),
             Some(c) => ScrubCursor::start(c.pass + 1, c.finished_ms, now_ms),
@@ -234,6 +247,7 @@ pub async fn scrub_pass<S: KvStore>(
             opts,
             &mut budget,
             metrics,
+            cancel,
             now_ms,
         )
         .await
@@ -328,7 +342,7 @@ impl Pacer {
         }
     }
 
-    async fn account(&mut self, bytes: u64) {
+    async fn account(&mut self, bytes: u64, cancel: Cancel<'_>) {
         self.bytes += bytes;
         if self.rate == 0 {
             return;
@@ -336,7 +350,17 @@ impl Pacer {
         let allowed = std::time::Duration::from_millis(self.bytes.saturating_mul(1000) / self.rate);
         let elapsed = self.started.elapsed();
         if allowed > elapsed {
-            tokio::time::sleep(allowed.saturating_sub(elapsed)).await;
+            let sleep = tokio::time::sleep(allowed.saturating_sub(elapsed));
+            match cancel {
+                Some(c) => {
+                    let mut c = c.clone();
+                    tokio::select! {
+                        () = sleep => {}
+                        _ = c.changed() => {}
+                    }
+                }
+                None => sleep.await,
+            }
         }
     }
 }
@@ -355,6 +379,7 @@ async fn scrub_group<S: KvStore>(
     opts: &ScrubOptions,
     pacer: &mut Pacer,
     metrics: Option<&Metrics>,
+    cancel: Cancel<'_>,
     now_ms: u64,
 ) -> Result<(bool, ScrubReport), ControlError> {
     let mut report = ScrubReport::default();
@@ -550,7 +575,10 @@ async fn scrub_group<S: KvStore>(
                     },
                 };
                 integrity::set_scrub_cursor(meta, group.id, &cursor).await?;
-                pacer.account(page.bytes_read).await;
+                pacer.account(page.bytes_read, cancel).await;
+                if cancelled(cancel) {
+                    return Ok((false, report));
+                }
             }
             ScrubPhase::Presence { after } => {
                 let mut walker = GroupWalker::new(clients, nodes, group, after, opts.page);
@@ -604,6 +632,9 @@ async fn scrub_group<S: KvStore>(
                 if seen >= opts.page {
                     cursor.phase = ScrubPhase::Presence { after: last };
                     integrity::set_scrub_cursor(meta, group.id, &cursor).await?;
+                    if cancelled(cancel) {
+                        return Ok((false, report));
+                    }
                     continue;
                 }
                 cursor.phase = ScrubPhase::Done;
@@ -638,6 +669,7 @@ pub async fn repair_pass<S: KvStore>(
     coders: &Coders,
     opts: &RepairWorkerOptions,
     metrics: Option<&Metrics>,
+    cancel: Cancel<'_>,
     now_ms: u64,
 ) -> Result<RepairWorkerReport, ControlError> {
     let mut report = RepairWorkerReport::default();
@@ -648,6 +680,9 @@ pub async fn repair_pass<S: KvStore>(
         .collect();
     let tasks = integrity::tasks(meta, usize::MAX).await?;
     for (group_id, chunk_id, task) in tasks.into_iter().take(opts.tasks_per_pass) {
+        if cancelled(cancel) {
+            break;
+        }
         if task.next_attempt_ms > now_ms {
             report.deferred += 1;
             continue;
@@ -1147,7 +1182,7 @@ pub async fn scrub_group_now<S: KvStore>(
     };
     let mut pacer = Pacer::new(opts.rate_bytes_per_s);
     let (_, report) = scrub_group(
-        meta, clients, coders, &nodes, &group, cursor, opts, &mut pacer, None, now_ms,
+        meta, clients, coders, &nodes, &group, cursor, opts, &mut pacer, None, None, now_ms,
     )
     .await?;
     Ok(report)

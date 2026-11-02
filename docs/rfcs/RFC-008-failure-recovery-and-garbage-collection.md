@@ -372,8 +372,15 @@ controller failover and node restarts (nodes keep no scrub state).
   written after every page in a fenced transaction (RFC-011), so the
   next leader resumes at the page where the previous one stopped.
 - Phase `Shards`: for each current member in turn, `ScrubShards` pages
-  of `--scrub-page` keys; every shard is classified (§8.4); findings are
-  counted and `CorruptShard`/`Mismatch` findings enqueue a repair task.
+  of at most `--scrub-page` keys and `--scrub-page-mib` payload bytes
+  (default 8 MiB: the node stops after the shard that crosses the byte
+  bound and reports `more`); every shard is classified (§8.4); findings
+  are counted and `CorruptShard`/`Mismatch` findings enqueue a repair
+  task. The byte bound is the burst one page puts on a device between
+  two pacing sleeps: with 2 MiB shards a 256-key page is 512 MiB read at
+  device speed, which the first host run showed costs a third of the
+  warm GET throughput even at a 32 MiB/s average; 8 MiB pages spread
+  the same budget evenly.
 - Phase `Presence`: the merged member listing (`GroupWalker`, quarantined
   shards excluded) yields every chunk id with the members holding it; a
   gap on a live, placed chunk is `MissingShard` (enqueued); a chunk with

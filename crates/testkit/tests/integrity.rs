@@ -120,9 +120,17 @@ async fn scrub(c: &TestCluster, group: u64) -> arca_lake_controller::integrity::
 }
 
 async fn repair(c: &TestCluster, now: u64) -> arca_lake_controller::integrity::RepairWorkerReport {
-    repair_pass(c.meta.as_ref(), &c.clients, &coders(), &worker(), None, now)
-        .await
-        .unwrap()
+    repair_pass(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders(),
+        &worker(),
+        None,
+        None,
+        now,
+    )
+    .await
+    .unwrap()
 }
 
 async fn tasks(c: &TestCluster) -> Vec<(u64, [u8; 16], itasks::RepairTask)> {
@@ -686,6 +694,47 @@ async fn byte_bounded_scrub_pages_cover_every_shard_exactly_once() {
 }
 
 #[tokio::test]
+async fn scrub_pages_larger_than_the_key_bound_cover_every_shard() {
+    let c = cluster(3, 2, 1).await;
+    // More shards per member than one 256-key page.
+    for i in 0..300u64 {
+        s3::put(
+            &c.backend,
+            BUCKET,
+            &format!("small{i}"),
+            payload(4096, 1000 + i),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+    }
+    let group = c.groups().await.remove(0);
+    let total = u64::try_from(shards_of(&c, &group)).unwrap();
+    assert_eq!(total, 900);
+    for (page, page_bytes) in [(256u32, 0u64), (256, 8 << 20), (7, 0), (1000, 1)] {
+        let r = scrub_group_now(
+            c.meta.as_ref(),
+            &c.clients,
+            &coders(),
+            group.id,
+            &ScrubOptions {
+                page,
+                page_bytes,
+                rate_bytes_per_s: 0,
+                interval_ms: 1,
+                concurrency: 1,
+            },
+            now_ms(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.verified, total, "page {page} bytes {page_bytes}: {r:?}");
+        assert_eq!(r.findings, [0; 8]);
+    }
+    c.shutdown().await;
+}
+
+#[tokio::test]
 async fn scrub_skips_a_member_that_is_down_and_counts_the_error() {
     let mut c = cluster(3, 2, 1).await;
     let objects = seed_objects(&c, 2, usize::try_from(MIB / 2).unwrap()).await;
@@ -975,6 +1024,46 @@ async fn metrics_of(h: &arca_lake_controller::process::ControllerHandle) -> Stri
         .await
         .unwrap();
     out
+}
+
+#[tokio::test]
+async fn shutdown_interrupts_a_paced_scrub_pass_promptly() {
+    let c = cluster(3, 2, 1).await;
+    seed_objects(&c, 4, usize::try_from(MIB / 2).unwrap()).await;
+    let group = first_chunk(&c, "obj0").await.0;
+    let mut cfg = fast("slow");
+    // One shard per page at 1 B/s: the pass sleeps for ages after its
+    // first page; shutdown must not wait for it.
+    cfg.scrub = ScrubOptions {
+        page: 1,
+        page_bytes: 1,
+        rate_bytes_per_s: 1,
+        interval_ms: 1,
+        concurrency: 1,
+    };
+    let h = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    let meta = Arc::clone(&c.meta);
+    wait_until("a pass in progress", Duration::from_secs(10), async || {
+        matches!(
+            itasks::scrub_cursor(meta.as_ref(), group.id).await.unwrap(),
+            Some(cur) if matches!(cur.phase, ScrubPhase::Shards { after: Some(_), .. })
+        )
+    })
+    .await;
+    let started = std::time::Instant::now();
+    h.shutdown().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "shutdown took {:?}",
+        started.elapsed()
+    );
+    // The cursor is persisted mid-pass: the next leader resumes it.
+    let cur = itasks::scrub_cursor(c.meta.as_ref(), group.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!cur.is_done(), "{cur:?}");
+    c.shutdown().await;
 }
 
 #[tokio::test]
