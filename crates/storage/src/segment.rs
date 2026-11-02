@@ -138,6 +138,30 @@ pub enum ScanEnd {
     },
 }
 
+/// A record whose header validates but whose payload does not (RFC-005
+/// §5.6a): skipped by recovery and quarantined.
+#[derive(Debug, Clone)]
+pub struct DamagedRecord {
+    /// Record offset.
+    pub offset: u64,
+    /// Decoded (valid) header.
+    pub header: RecordHeader,
+    /// Why the payload failed.
+    pub reason: &'static str,
+}
+
+/// A region whose record header does not validate, followed by a valid
+/// record at `end` where the scan resynchronised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hole {
+    /// First byte of the hole.
+    pub offset: u64,
+    /// Offset of the next valid record.
+    pub end: u64,
+    /// Why the record at `offset` was rejected.
+    pub reason: &'static str,
+}
+
 /// Result of scanning one segment.
 #[derive(Debug)]
 pub struct ScanResult {
@@ -145,6 +169,10 @@ pub struct ScanResult {
     pub header: SegmentHeader,
     /// Valid records in file order.
     pub records: Vec<ScannedRecord>,
+    /// Records with a valid header and a corrupt payload, in file order.
+    pub damaged: Vec<DamagedRecord>,
+    /// Regions skipped because their header did not validate.
+    pub holes: Vec<Hole>,
     /// Offset at which valid data ends (next append position if reopened).
     pub valid_len: u64,
     /// File length at scan time.
@@ -154,7 +182,11 @@ pub struct ScanResult {
 }
 
 /// Scan a segment file, validating every record (header CRC and payload
-/// block CRCs) and stopping at the first invalid one.
+/// block CRCs). A record whose header validates but whose payload does not
+/// is reported as damaged and skipped; a region whose header does not
+/// validate is a hole if a fully valid record follows at some later
+/// aligned offset (the scan resynchronises there) and a torn tail
+/// otherwise (the scan ends).
 pub fn scan(path: &Path, segment_id: u64) -> Result<ScanResult> {
     let mut file = File::open(path)?;
     let file_len = file.metadata()?.len();
@@ -171,6 +203,8 @@ pub fn scan(path: &Path, segment_id: u64) -> Result<ScanResult> {
     let align = u64::from(header.record_alignment);
     let mut offset = header.padded_len();
     let mut records = Vec::new();
+    let mut damaged = Vec::new();
+    let mut holes: Vec<Hole> = Vec::new();
     let mut prefix_buf = [0u8; RECORD_FIXED_LEN];
 
     let end = loop {
@@ -183,14 +217,38 @@ pub fn scan(path: &Path, segment_id: u64) -> Result<ScanResult> {
                 records.push(rec);
                 offset += len;
             }
-            Err(reason) => {
+            Err(ScanFailure::Payload { header: h, reason }) => {
+                let len = round_up(rec_len(&h.prefix()), align);
+                damaged.push(DamagedRecord {
+                    offset,
+                    header: h,
+                    reason,
+                });
+                offset += len;
+            }
+            Err(ScanFailure::Header(reason) | ScanFailure::Truncated(reason)) => {
                 let valid_len = offset;
-                if later_valid_record_exists(&file, &header, offset + align, file_len) {
-                    break ScanEnd::Corrupt { valid_len, reason };
+                if let Some(next) = next_valid_record(&file, &header, offset + align, file_len) {
+                    holes.push(Hole {
+                        offset,
+                        end: next,
+                        reason,
+                    });
+                    offset = next;
+                    continue;
                 }
                 break ScanEnd::TornTail { valid_len, reason };
             }
         }
+    };
+    // A segment with a hole is never appended to again: the first hole
+    // marks where appendable data ends, as before.
+    let end = match (&end, holes.first()) {
+        (ScanEnd::Clean | ScanEnd::TornTail { .. }, Some(h)) => ScanEnd::Corrupt {
+            valid_len: h.offset,
+            reason: h.reason,
+        },
+        _ => end,
     };
     let valid_len = match &end {
         ScanEnd::Clean => offset,
@@ -199,10 +257,26 @@ pub fn scan(path: &Path, segment_id: u64) -> Result<ScanResult> {
     Ok(ScanResult {
         header,
         records,
+        damaged,
+        holes,
         valid_len,
         file_len,
         end,
     })
+}
+
+/// Why a record at an offset could not be accepted.
+enum ScanFailure {
+    /// The fixed prefix or the header did not validate (or could not be
+    /// read): the record's length is unknown.
+    Header(&'static str),
+    /// The header validates but the record extends past the file.
+    Truncated(&'static str),
+    /// The header validates; a payload block failed its CRC.
+    Payload {
+        header: RecordHeader,
+        reason: &'static str,
+    },
 }
 
 fn rec_len(p: &RecordPrefix) -> u64 {
@@ -216,24 +290,27 @@ fn read_record_at(
     offset: u64,
     prefix_buf: &mut [u8; RECORD_FIXED_LEN],
     file_len: u64,
-) -> std::result::Result<ScannedRecord, &'static str> {
+) -> std::result::Result<ScannedRecord, ScanFailure> {
     if offset + RECORD_FIXED_LEN as u64 > file_len {
-        return Err("record header truncated");
+        return Err(ScanFailure::Truncated("record header truncated"));
     }
     file.read_exact_at(prefix_buf, offset)
-        .map_err(|_| "read error")?;
-    let prefix = RecordHeader::decode_prefix(prefix_buf, seg.block_size)?;
+        .map_err(|_| ScanFailure::Header("read error"))?;
+    let prefix =
+        RecordHeader::decode_prefix(prefix_buf, seg.block_size).map_err(ScanFailure::Header)?;
     if offset + prefix.unpadded_len() > file_len {
-        return Err("record truncated");
+        return Err(ScanFailure::Truncated("record truncated"));
     }
     let mut hbuf = vec![0u8; prefix.header_len()];
     file.read_exact_at(&mut hbuf, offset)
-        .map_err(|_| "read error")?;
-    let header = RecordHeader::decode(&hbuf, seg.block_size)?;
+        .map_err(|_| ScanFailure::Header("read error"))?;
+    let header = RecordHeader::decode(&hbuf, seg.block_size).map_err(ScanFailure::Header)?;
     let mut payload = vec![0u8; prefix.payload_len as usize];
     file.read_exact_at(&mut payload, offset + prefix.header_len() as u64)
-        .map_err(|_| "read error")?;
-    verify_blocks(&payload, 0, &header.block_crcs, seg.block_size)?;
+        .map_err(|_| ScanFailure::Header("read error"))?;
+    if let Err(reason) = verify_blocks(&payload, 0, &header.block_crcs, seg.block_size) {
+        return Err(ScanFailure::Payload { header, reason });
+    }
     Ok(ScannedRecord { offset, header })
 }
 
@@ -259,18 +336,21 @@ pub fn verify_blocks(
 /// invalid record for a fully valid record. If one exists, the invalid
 /// region is followed by data that was written *after* it, which a crash
 /// cannot produce (writes are sequential and a record is only followed by
-/// another once it was completely written), so it is corruption.
-fn later_valid_record_exists(file: &File, seg: &SegmentHeader, from: u64, file_len: u64) -> bool {
+/// another once it was completely written), so it is corruption; the scan
+/// resynchronises at that record. A damaged record (valid header, bad
+/// payload) also counts as "valid data follows".
+fn next_valid_record(file: &File, seg: &SegmentHeader, from: u64, file_len: u64) -> Option<u64> {
     let align = u64::from(seg.record_alignment);
     let mut prefix_buf = [0u8; RECORD_FIXED_LEN];
     let mut offset = from;
     while offset + RECORD_FIXED_LEN as u64 <= file_len {
-        if read_record_at(file, seg, offset, &mut prefix_buf, file_len).is_ok() {
-            return true;
+        match read_record_at(file, seg, offset, &mut prefix_buf, file_len) {
+            Ok(_) | Err(ScanFailure::Payload { .. }) => return Some(offset),
+            Err(_) => {}
         }
         offset += align;
     }
-    false
+    None
 }
 
 /// Truncate a segment to `len` and sync it.

@@ -44,10 +44,49 @@ pub struct SegmentLive {
     pub records: usize,
 }
 
+/// A shard whose record failed validation (RFC-005 §5.6a): absent from
+/// the live index, its bytes kept until compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuarantineEntry {
+    /// Where the failed record lives.
+    pub location: Location,
+    /// Why it failed.
+    pub reason: &'static str,
+    /// When it was quarantined, Unix milliseconds.
+    pub since_unix_ms: u64,
+}
+
+/// Why a quarantine entry was released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseCause {
+    /// A newer data record for the key was written (repair).
+    Superseded,
+    /// A newer tombstone for the key was written (delete).
+    Tombstone,
+    /// The segment holding the bytes was compacted away.
+    Purged,
+}
+
+impl ReleaseCause {
+    /// Name used in the quarantine log.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Superseded => "superseded",
+            Self::Tombstone => "tombstone",
+            Self::Purged => "purged",
+        }
+    }
+}
+
 /// Ordered in-memory index.
 #[derive(Debug, Default)]
 pub struct MemIndex {
     map: BTreeMap<ShardKey, Location>,
+    /// Quarantined shards (not live).
+    quarantined: BTreeMap<ShardKey, QuarantineEntry>,
+    /// Quarantine entries released since the last drain, for the log.
+    released: Vec<(ShardKey, QuarantineEntry, ReleaseCause)>,
     /// Highest tombstone sequence seen per key. Consulted so that a data
     /// record encountered *after* a newer tombstone (possible when segments
     /// are scanned in ID order and records were copied forward) is ignored.
@@ -70,6 +109,15 @@ impl MemIndex {
         {
             return None;
         }
+        if let Some(q) = self.quarantined.get(&key) {
+            if q.location.sequence >= loc.sequence {
+                // An older record cannot resurrect a key whose newest record
+                // is quarantined.
+                return None;
+            }
+            let q = self.quarantined.remove(&key).expect("present");
+            self.released.push((key, q, ReleaseCause::Superseded));
+        }
         self.account_add(&loc);
         let old = self.map.insert(key, loc);
         if let Some(old) = &old {
@@ -83,6 +131,12 @@ impl MemIndex {
     pub fn tombstone(&mut self, key: ShardKey, sequence: u64) -> Option<Location> {
         let t = self.tombstones.entry(key).or_insert(0);
         *t = (*t).max(sequence);
+        if let Some(q) = self.quarantined.get(&key)
+            && q.location.sequence < sequence
+        {
+            let q = self.quarantined.remove(&key).expect("present");
+            self.released.push((key, q, ReleaseCause::Tombstone));
+        }
         match self.map.get(&key) {
             Some(existing) if existing.sequence < sequence => {
                 let old = self.map.remove(&key)?;
@@ -108,11 +162,90 @@ impl MemIndex {
         }
     }
 
-    /// Forget a record that failed validation. Returns the removed location.
-    pub fn quarantine(&mut self, key: &ShardKey) -> Option<Location> {
-        let old = self.map.remove(key)?;
-        self.account_remove(&old);
-        Some(old)
+    /// Quarantine the record at `entry.location` for `key` (RFC-005
+    /// §5.6a): the key leaves the live index if its live record is not
+    /// newer, and the entry is kept so that older records cannot resurrect
+    /// the key. Returns whether the entry was recorded (a newer live
+    /// record, tombstone or quarantine entry for the key wins instead).
+    pub fn quarantine(&mut self, key: ShardKey, entry: QuarantineEntry) -> bool {
+        let seq = entry.location.sequence;
+        if self.map.get(&key).is_some_and(|l| l.sequence > seq)
+            || self.tombstones.get(&key).is_some_and(|&t| t >= seq)
+            || self
+                .quarantined
+                .get(&key)
+                .is_some_and(|q| q.location.sequence >= seq)
+        {
+            return false;
+        }
+        if let Some(old) = self.map.remove(&key) {
+            self.account_remove(&old);
+        }
+        self.quarantined.insert(key, entry);
+        true
+    }
+
+    /// The quarantine entry of `key`, if any.
+    #[must_use]
+    pub fn quarantine_entry(&self, key: &ShardKey) -> Option<QuarantineEntry> {
+        self.quarantined.get(key).copied()
+    }
+
+    /// Release the quarantine entry of `key` (its bytes are gone).
+    pub fn purge_quarantine(&mut self, key: &ShardKey, location: &Location) -> bool {
+        match self.quarantined.get(key) {
+            Some(q) if q.location == *location => {
+                let q = self.quarantined.remove(key).expect("present");
+                self.released.push((*key, q, ReleaseCause::Purged));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Quarantine entries released since the last call.
+    pub fn drain_released(&mut self) -> Vec<(ShardKey, QuarantineEntry, ReleaseCause)> {
+        std::mem::take(&mut self.released)
+    }
+
+    /// Quarantined shards in `group_id` strictly after `after`, in key
+    /// order, at most `limit`.
+    pub fn quarantined_in_group_after(
+        &self,
+        group_id: u64,
+        after: Option<ShardKey>,
+        limit: usize,
+    ) -> impl Iterator<Item = (ShardKey, QuarantineEntry)> + '_ {
+        let start = match after {
+            Some(k) => Bound::Excluded(k),
+            None => Bound::Included(ShardKey {
+                group_id,
+                chunk_id: [0; 16],
+                shard_index: 0,
+            }),
+        };
+        self.quarantined
+            .range((start, Bound::Unbounded))
+            .take_while(move |(k, _)| k.group_id == group_id)
+            .map(|(k, q)| (*k, *q))
+            .take(limit)
+    }
+
+    /// Every quarantined shard.
+    pub fn quarantined(&self) -> impl Iterator<Item = (&ShardKey, &QuarantineEntry)> + '_ {
+        self.quarantined.iter()
+    }
+
+    /// Number of quarantined shards and their payload bytes.
+    #[must_use]
+    pub fn quarantine_stats(&self) -> (usize, u64) {
+        (
+            self.quarantined.len(),
+            self.quarantined
+                .values()
+                .map(|q| u64::from(q.location.payload_len))
+                .sum(),
+        )
     }
 
     /// Drop the tombstone history kept for rebuild. Afterwards only live

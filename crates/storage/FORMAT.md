@@ -138,3 +138,17 @@ the rebuild yields the same state; after step 4 only `N` exists. Re-running
 compaction on `S` completes an interrupted run. Reads that already hold the
 file of `S` finish on the unlinked file (POSIX semantics); new reads go
 through the index.
+
+## Quarantine log (Phase 3.2, RFC-005 §5.6a)
+
+`<device-dir>/quarantine.log` is an append-only text file, fsynced after
+every line, recording records that failed validation and the release of
+those entries. It is evidence and history: recovery re-derives the
+quarantine state by re-scanning the segments, so the log is never
+required for correctness and may be deleted by an operator after
+investigation.
+
+```text
+quarantine group=<u64> chunk=<32 hex> index=<u16> segment=<u64> offset=<u64> sequence=<u64> len=<u32> reason="<text>" ms=<unix ms>
+release    group=<u64> chunk=<32 hex> index=<u16> segment=<u64> offset=<u64> sequence=<u64> cause=superseded|tombstone|purged ms=<unix ms>
+```

@@ -16,7 +16,7 @@ use crate::format::{
     FLAG_TOMBSTONE, RecordHeader, SEGMENT_FORMAT_VERSION, SegmentHeader, ShardKey,
     padded_header_len, validate_geometry,
 };
-use crate::index::{Location, MemIndex};
+use crate::index::{Location, MemIndex, QuarantineEntry, ReleaseCause};
 use crate::segment::{self, ScanEnd, SegmentWriter, segment_path, verify_blocks};
 
 /// When `put` and `delete` make data durable.
@@ -81,6 +81,12 @@ pub struct OpenReport {
     /// Segments in which corruption (not a torn tail) was detected, with the
     /// offset where valid data ends and the reason.
     pub corrupt_segments: Vec<(u64, u64, &'static str)>,
+    /// Records quarantined at open (valid header, corrupt payload), as
+    /// `(segment, offset, reason)`.
+    pub quarantined: Vec<(u64, u64, &'static str)>,
+    /// Regions skipped because their header did not validate, as
+    /// `(segment, offset, end, reason)`.
+    pub holes: Vec<(u64, u64, u64, &'static str)>,
 }
 
 /// Scrub result.
@@ -88,9 +94,109 @@ pub struct OpenReport {
 pub struct ScrubReport {
     /// Shards verified intact.
     pub verified: usize,
-    /// Shards whose on-disk data no longer validates. These are removed from
-    /// the index so that reads report them as missing.
+    /// Shards whose on-disk data no longer validates. These are quarantined
+    /// so that reads report them as missing.
     pub corrupt: Vec<ShardKey>,
+    /// Shards that were already quarantined.
+    pub quarantined: usize,
+}
+
+/// Result of verifying one shard end to end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verified {
+    /// Payload length.
+    pub payload_len: u32,
+    /// CRC-32C of the whole payload.
+    pub crc32c: u32,
+    /// Record sequence number.
+    pub sequence: u64,
+}
+
+/// Append-only, fsynced record of quarantine events (RFC-005 §5.6a).
+/// Lines: `quarantine group=.. chunk=<hex> index=.. segment=.. offset=..
+/// sequence=.. len=.. reason="..." ms=..` and `release ... cause=..`.
+#[derive(Debug)]
+struct QuarantineLog {
+    file: Mutex<File>,
+}
+
+impl QuarantineLog {
+    const NAME: &'static str = "quarantine.log";
+
+    fn open(dir: &Path) -> Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(dir.join(Self::NAME))?;
+        Ok(Self {
+            file: Mutex::new(file),
+        })
+    }
+
+    fn write(&self, line: &str) -> Result<()> {
+        use std::io::Write as _;
+        let mut f = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        f.write_all(line.as_bytes())?;
+        f.write_all(b"\n")?;
+        f.sync_data()?;
+        Ok(())
+    }
+
+    fn key_fields(key: &ShardKey) -> String {
+        use std::fmt::Write as _;
+        let mut hex = String::with_capacity(32);
+        for b in key.chunk_id {
+            let _ = write!(hex, "{b:02x}");
+        }
+        format!(
+            "group={} chunk={hex} index={}",
+            key.group_id, key.shard_index
+        )
+    }
+
+    fn quarantine(&self, key: &ShardKey, q: &QuarantineEntry) -> Result<()> {
+        self.write(&format!(
+            "quarantine {} segment={} offset={} sequence={} len={} reason=\"{}\" ms={}",
+            Self::key_fields(key),
+            q.location.segment_id,
+            q.location.offset,
+            q.location.sequence,
+            q.location.payload_len,
+            q.reason,
+            q.since_unix_ms
+        ))
+    }
+
+    fn release(&self, key: &ShardKey, q: &QuarantineEntry, cause: ReleaseCause) -> Result<()> {
+        self.write(&format!(
+            "release {} segment={} offset={} sequence={} cause={} ms={}",
+            Self::key_fields(key),
+            q.location.segment_id,
+            q.location.offset,
+            q.location.sequence,
+            cause.name(),
+            unix_ms()
+        ))
+    }
+
+    /// Lines of the log (for operators and tests).
+    fn lines(&self) -> Result<Vec<String>> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let mut f = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut text = String::new();
+        f.seek(SeekFrom::Start(0))?;
+        f.read_to_string(&mut text)?;
+        Ok(text.lines().map(str::to_string).collect())
+    }
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 /// Capacity accounting.
@@ -190,6 +296,9 @@ struct DurState {
 struct Recovery {
     report: OpenReport,
     index: MemIndex,
+    /// Damaged records seen by the scans, quarantined once every segment
+    /// has been read.
+    damaged: Vec<(ShardKey, QuarantineEntry)>,
     readers: BTreeMap<u64, SegmentInfo>,
     device_id: Option<[u8; 16]>,
     max_sequence: u64,
@@ -208,6 +317,7 @@ pub struct Store {
     readers: RwLock<BTreeMap<u64, SegmentInfo>>,
     durability: Durability,
     timings: StoreTimings,
+    quarantine_log: QuarantineLog,
 }
 
 /// Where a write spends its time (R-48 PUT profiling).
@@ -257,6 +367,7 @@ impl Store {
         let mut rec = Recovery {
             report: OpenReport::default(),
             index: MemIndex::default(),
+            damaged: Vec::new(),
             readers: BTreeMap::new(),
             device_id: None,
             max_sequence: 0,
@@ -293,6 +404,21 @@ impl Store {
 
         let start = (active.header().segment_id, active.end());
         rec.report.live_shards = rec.index.len();
+        let quarantine_log = QuarantineLog::open(&cfg.dir)?;
+        // Damaged records found by the scan are quarantined now that the
+        // whole index is known (an older damaged record must not displace a
+        // newer live one). Every entry is logged; replay is by re-scan.
+        for (key, entry) in std::mem::take(&mut rec.damaged) {
+            if rec.index.quarantine(key, entry) {
+                quarantine_log.quarantine(&key, &entry)?;
+                rec.report.quarantined.push((
+                    entry.location.segment_id,
+                    entry.location.offset,
+                    entry.reason,
+                ));
+            }
+        }
+        rec.index.drain_released();
         let store = Self {
             cfg,
             device_id,
@@ -313,6 +439,7 @@ impl Store {
                 cv: Condvar::new(),
             },
             timings: StoreTimings::default(),
+            quarantine_log,
         };
         Ok((store, rec.report))
     }
@@ -378,6 +505,27 @@ impl Store {
             }
         }
 
+        for d in &scan.damaged {
+            let p = d.header.prefix();
+            rec.max_sequence = rec.max_sequence.max(p.sequence);
+            rec.damaged.push((
+                d.header.key,
+                QuarantineEntry {
+                    location: Location {
+                        segment_id: id,
+                        offset: d.offset,
+                        header_len: p.header_len() as u64,
+                        payload_len: p.payload_len,
+                        sequence: p.sequence,
+                    },
+                    reason: d.reason,
+                    since_unix_ms: unix_ms(),
+                },
+            ));
+        }
+        for h in &scan.holes {
+            rec.report.holes.push((id, h.offset, h.end, h.reason));
+        }
         let mut appendable = is_last;
         match scan.end {
             ScanEnd::Clean => {}
@@ -514,6 +662,7 @@ impl Store {
         } else {
             idx.tombstone(key, sequence);
         }
+        self.log_released(&mut idx);
         Ok(())
     }
 
@@ -667,36 +816,142 @@ impl Store {
         // Re-read and validate the header so that a stale index entry can
         // never return bytes from the wrong record.
         let mut hbuf = vec![0u8; to_usize(loc.header_len)];
-        seg.file.read_exact_at(&mut hbuf, loc.offset)?;
+        if let Err(e) = seg.file.read_exact_at(&mut hbuf, loc.offset) {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Err(self.quarantine(key, loc, "record header truncated"));
+            }
+            return Err(e.into());
+        }
         let header = match RecordHeader::decode(&hbuf, seg.header.block_size) {
             Ok(h) if h.key == *key && h.sequence == loc.sequence => h,
-            Ok(_) => return Err(self.quarantine(key, corrupt("record does not match index"))),
-            Err(reason) => return Err(self.quarantine(key, corrupt(reason))),
+            Ok(_) => {
+                return Err(self.quarantine(key, loc, "record does not match index"));
+            }
+            Err(reason) => return Err(self.quarantine(key, loc, reason)),
         };
 
         let mut buf = vec![0u8; to_usize(read_end - read_start)];
-        seg.file
-            .read_exact_at(&mut buf, loc.payload_offset() + read_start)?;
+        if let Err(e) = seg
+            .file
+            .read_exact_at(&mut buf, loc.payload_offset() + read_start)
+        {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                // The record extends past the segment: truncated on disk.
+                return Err(self.quarantine(key, loc, "record truncated"));
+            }
+            return Err(e.into());
+        }
         if let Err(reason) = verify_blocks(
             &buf,
             to_usize(first_block),
             &header.block_crcs,
             seg.header.block_size,
         ) {
-            return Err(self.quarantine(key, corrupt(reason)));
+            return Err(self.quarantine(key, loc, reason));
         }
+        let _ = corrupt;
         buf.drain(..to_usize(range.start - read_start));
         buf.truncate(to_usize(range.end - range.start));
         Ok(buf)
     }
 
-    /// Drop a shard that failed validation from the index and return `err`.
-    fn quarantine(&self, key: &ShardKey, err: StorageError) -> StorageError {
+    /// Quarantine the record at `loc` for `key` durably (RFC-005 §5.6a):
+    /// the event is logged and fsynced, then the key leaves the live index.
+    /// Returns the `Corrupt` error to report to the caller.
+    fn quarantine(&self, key: &ShardKey, loc: Location, reason: &'static str) -> StorageError {
+        let entry = QuarantineEntry {
+            location: loc,
+            reason,
+            since_unix_ms: unix_ms(),
+        };
+        // A log write failure must not hide the corruption from the caller
+        // nor keep serving the bytes: the index change still happens.
+        let _ = self.quarantine_log.quarantine(key, &entry);
         self.index
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .quarantine(key);
-        err
+            .quarantine(*key, entry);
+        StorageError::Corrupt {
+            segment_id: loc.segment_id,
+            offset: loc.offset,
+            reason,
+        }
+    }
+
+    /// Verify a shard end to end (every block) without returning the bytes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::get`]: a `Corrupt` shard is quarantined.
+    pub fn verify(&self, key: &ShardKey) -> Result<Verified> {
+        let loc = self.locate(key).ok_or(StorageError::NotFound)?;
+        let data = self.get(key, None)?;
+        Ok(Verified {
+            payload_len: loc.payload_len,
+            crc32c: crate::format::crc32c(&data),
+            sequence: loc.sequence,
+        })
+    }
+
+    /// The quarantine entry of `key`, if it is quarantined.
+    #[must_use]
+    pub fn quarantine_entry(&self, key: &ShardKey) -> Option<QuarantineEntry> {
+        self.index
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .quarantine_entry(key)
+    }
+
+    /// Quarantined shards of `group_id` after `after`, in key order, at
+    /// most `limit`.
+    #[must_use]
+    pub fn quarantined_in_group_after(
+        &self,
+        group_id: u64,
+        after: Option<ShardKey>,
+        limit: usize,
+    ) -> Vec<(ShardKey, QuarantineEntry)> {
+        self.index
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .quarantined_in_group_after(group_id, after, limit)
+            .collect()
+    }
+
+    /// Every quarantined shard.
+    #[must_use]
+    pub fn quarantined(&self) -> Vec<(ShardKey, QuarantineEntry)> {
+        self.index
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .quarantined()
+            .map(|(k, q)| (*k, *q))
+            .collect()
+    }
+
+    /// Number of quarantined shards and their payload bytes.
+    #[must_use]
+    pub fn quarantine_stats(&self) -> (usize, u64) {
+        self.index
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .quarantine_stats()
+    }
+
+    /// The quarantine log's lines (operators and tests).
+    ///
+    /// # Errors
+    ///
+    /// I/O errors.
+    pub fn quarantine_log(&self) -> Result<Vec<String>> {
+        self.quarantine_log.lines()
+    }
+
+    /// Log the quarantine entries released by the last index change.
+    fn log_released(&self, idx: &mut MemIndex) {
+        for (key, q, cause) in idx.drain_released() {
+            let _ = self.quarantine_log.release(&key, &q, cause);
+        }
     }
 
     /// Live keys in `group_id`.
@@ -751,6 +1006,7 @@ impl Store {
                 Err(e) => return Err(e),
             }
         }
+        report.quarantined = self.quarantine_stats().0;
         Ok(report)
     }
 
@@ -918,6 +1174,14 @@ impl Store {
                     sequence: p.sequence,
                 };
                 let live = self.locate(&r.header.key) == Some(old);
+                if !live {
+                    // A quarantined record of this segment loses its bytes
+                    // with the segment: release the entry.
+                    let mut idx = self.index.write().unwrap_or_else(PoisonError::into_inner);
+                    if idx.purge_quarantine(&r.header.key, &old) {
+                        self.log_released(&mut idx);
+                    }
+                }
                 if live {
                     let mut payload = vec![0u8; to_usize(u64::from(p.payload_len))];
                     source.read_exact_at(&mut payload, old.payload_offset())?;
@@ -965,6 +1229,21 @@ impl Store {
             hooks(CompactionStep::Copied(moved.len()))?;
         }
 
+        for d in &scan.damaged {
+            let p = d.header.prefix();
+            let loc = Location {
+                segment_id,
+                offset: d.offset,
+                header_len: p.header_len() as u64,
+                payload_len: p.payload_len,
+                sequence: p.sequence,
+            };
+            let mut idx = self.index.write().unwrap_or_else(PoisonError::into_inner);
+            if idx.purge_quarantine(&d.header.key, &loc) {
+                self.log_released(&mut idx);
+            }
+            report.dropped_records += 1;
+        }
         if let Some(out) = &output {
             out.sync()?;
             File::open(&self.cfg.dir)?.sync_all()?;

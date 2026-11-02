@@ -18,8 +18,8 @@ mod store;
 
 pub use error::StorageError;
 pub use format::ShardKey;
-pub use index::Location;
+pub use index::{Location, QuarantineEntry, ReleaseCause};
 pub use store::{
     CompactionReport, CompactionStep, OpenReport, ScrubReport, SegmentStats, Store, StoreConfig,
-    StoreStats, StoreTimings, StoreTimingsSnapshot, SyncPolicy,
+    StoreStats, StoreTimings, StoreTimingsSnapshot, SyncPolicy, Verified,
 };
