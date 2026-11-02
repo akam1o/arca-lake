@@ -680,7 +680,63 @@ capacity-limited insert. Every operation runs through the production
 transaction loop, whose counters (attempts, conflicts, unknown-outcome
 retries, exhausted) are reported.
 
-<!-- HOT-KEYS -->
+Single FoundationDB process (`memory` engine) on a 4-vCPU host, 10 s
+per cell, one run each (`results/metabench/fdb.jsonl`):
+
+| Workload | Tasks | Placement transactions / s | p50 ms | p99 ms | Attempts | Conflicts | Exhausted |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| insert / remove | 1 | 278 | 3.5 | 8.9 | 2784 | 0 | 0 |
+| insert / remove | 4 | 1050 | 2.3 | 16.9 | 10504 | 0 | 0 |
+| insert / remove | 8 | 3202 | 2.3 | 6.9 | 32024 | 0 | 0 |
+| insert / remove | 16 | 6083 | 2.6 | 4.5 | 60848 | 0 | 0 |
+| insert / remove | 32 | 8264 | 3.6 | 11.2 | 82774 | 0 | 0 |
+| touch (recency) | 1 | 408 | 1.8 | 9.5 | 4143 | 0 | 0 |
+| touch (recency) | 4 | 701 | 3.1 | 29.0 | 7268 | 0 | 0 |
+| touch (recency) | 8 | 3066 | 2.5 | 6.0 | 31184 | 0 | 0 |
+| touch (recency) | 16 | 5160 | 2.9 | 7.4 | 52640 | 0 | 0 |
+| touch (recency) | 32 | 1687 | 10.1 | 71.5 | 18945 | 0 | 0 |
+| mixed (half insert/remove, half touch) | 1 | 52 | 14.3 | 67.5 | 517 | 0 | 0 |
+| mixed (half insert/remove, half touch) | 4 | 342 | 10.5 | 28.0 | 3546 | 0 | 0 |
+| mixed (half insert/remove, half touch) | 8 | 600 | 10.6 | 87.8 | 6264 | 0 | 0 |
+| mixed (half insert/remove, half touch) | 16 | 1345 | 11.0 | 26.4 | 13992 | 0 | 0 |
+| mixed (half insert/remove, half touch) | 32 | 1046 | 27.2 | 47.5 | 11496 | 0 | 0 |
+| insert / remove + evictor (controller recipe, 50 sweeps/s) | 8 | 1077 | 6.5 | 18.7 | 11873 | 0 | 0 |
+| insert / remove + evictor (controller recipe, 50 sweeps/s) | 32 | 4375 | 7.5 | 14.3 | 45184 | 0 | 0 |
+| two processes, same tier (A) | 16 | 1926 | 7.6 | 22.4 | 19269 | 0 | 0 |
+| two processes, same tier (B) | 16 | 1929 | 7.5 | 24.4 | 19296 | 0 | 0 |
+| two processes, two tiers (A) | 16 | 1577 | 7.5 | 32.1 | 15777 | 0 | 0 |
+| two processes, two tiers (B) | 16 | 1578 | 7.5 | 33.9 | 15792 | 0 | 0 |
+| insert / remove with a 1 GiB capacity (most inserts refused) | 16 | 15335 | 0.9 | 3.2 | 153376 | 0 | 0 |
+| in-memory store reference | 8 | 7801 | 0.7 | 4.4 | 39029 | 0 | 0 |
+| in-memory store reference | 32 | 3100 | 7.1 | 33.9 | 15541 | 0 | 0 |
+
+What it shows:
+
+- **No conflicts at all.** Every cell, including 32 concurrent tasks on
+  one tier, an evictor removing entries while they are inserted, and
+  two processes on the same tier, completed every placement transaction
+  on its first attempt (attempts equal operations; conflicts and
+  exhausted are zero). The Phase 2.2 change (usage as an atomic
+  addition, capacity as a snapshot read) removed the one key that
+  conflicted; the recency index keys are unique per entry and the
+  generation header is only read (it conflicts solely with a retire of
+  that generation). The sharded counter, reservation and quota
+  reconciliation alternatives are therefore not needed; the capacity
+  guarantee stays as RFC-006 §5.4 states it (an overshoot bounded by
+  the populations in flight).
+- **The limit is the metadata server, not the keys.** One process
+  reaches about 8,300 placement transactions per second at 32 tasks
+  (p50 3.6 ms), two processes together about 3,900 (p50 7.5 ms each):
+  the single FoundationDB process saturates, and latency, not conflict
+  retries, is what grows. At the PUT rates of §6.16 (a few hundred
+  chunk appends per second) and the population rates of §6.12 (tens of
+  inserts per second) the metadata path has two orders of magnitude of
+  headroom on this cluster; a multi-process FoundationDB layout remains
+  unmeasured (§8).
+- The in-memory store reference (7,800 per second at 8 tasks, falling
+  at 32 under its single lock) only bounds the benchmark's own
+  overhead; it is not a target.
+
 
 ### 6.18 Phase 2.3: multi-gateway
 
