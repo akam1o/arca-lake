@@ -206,7 +206,7 @@ persisted index is worth a second source of truth.
 
 ## 11. Acceptance criteria
 
-- All tests in `crates/storage/tests` pass on Linux and macOS in CI
+- All tests in `crates/storage/tests` pass on Linux in CI (and on macOS for development)
   (*Verified* at the time of writing).
 - SIGKILL test runs with ≥ 1,000 iterations in a nightly job (planned).
 - A power-loss test on real hardware or a write-cache-dropping simulator

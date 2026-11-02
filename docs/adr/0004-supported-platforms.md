@@ -35,5 +35,5 @@ testing surface for durability-critical code.
 
 - Platform-specific code is feature gated; the portable path must always
   build.
-- CI matrix: Linux (x86-64, AArch64 where runners are available) and macOS
+- CI matrix: Linux (x86-64) on self-hosted runners; macOS is a development platform and is verified by developers, not by CI (Phase 2.3)
   for build and unit tests; Linux only for crash and io_uring tests.

@@ -42,8 +42,8 @@ jobs:
           toolchain: "1.99"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # The `fdb` feature links libfdb_c; install the client library on Linux
-      # so that --all-features builds and runs. macOS tests skip that feature.
+      # The `fdb` feature links libfdb_c; install the client library so that
+      # --all-features builds and runs.
       - name: install FoundationDB client library
         env:
           FDB_VERSION: 7.3.77
