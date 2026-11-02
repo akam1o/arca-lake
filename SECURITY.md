@@ -36,5 +36,5 @@ isolation requirements for the metadata store.
 
 The security architecture (authentication, authorization, TLS,
 service-to-service identity, tenant isolation, encryption at rest, audit
-logging, resource exhaustion protection) is specified in RFC-012. Until it is
+logging, resource exhaustion protection) is specified in [RFC-012](docs/rfcs/RFC-012-security-architecture.md) (design under review; see also the [threat model](docs/security/threat-model.md)). Until it is
 accepted, assume no security guarantee beyond what the code explicitly tests.
