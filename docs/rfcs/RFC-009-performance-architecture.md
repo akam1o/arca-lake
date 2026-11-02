@@ -639,6 +639,62 @@ GET of the mixed phase as a mismatch; the small phases now use their own
 prefix and the run was repeated (`results/diskbound-overlap-bug` keeps
 the first run's data for the record; its large-object phases are valid).
 
+### 6.14 Phase 2.3: where a PUT waits (R-48)
+
+Method: `put-profile.sh` (RFC-009 §4 conditions, 96 × 16 MiB objects at
+concurrency 4, fresh cluster per repetition) with `PROFILE=1`: the
+gateway, every storage node and the store record per-phase histograms
+(`arca_gateway_put_phase_seconds{phase}`, `arca_node_phase_seconds{phase}`),
+`sampler.sh` records `sar` (CPU, disks, network, context switches,
+memory), `pidstat`, the TCP counters, every metrics endpoint and a
+FoundationDB status digest once per second, and `s3load --progress`
+writes the bytes completed per second; `summarize_putprofile.py` aligns
+the series.
+
+<!-- R48-PROFILE -->
+
+### 6.15 Phase 2.3: GET CPU profile and frame pass-through
+
+Method: `netns-faults.sh cpuprofile` on one host (perf at 499 Hz on the
+gateway and one durable node for 20 s of an 8-pass GET at concurrency 4,
+96 × 16 MiB objects; durable-only, and the cache tier populating and
+warm). Before and after the frame pass-through (ADR-0012).
+
+<!-- GET-CPU-PROFILE -->
+
+### 6.16 Phase 2.3: pipelined chunk placement
+
+Method: `put-profile.sh` with `--write-pipeline 1 / 2 / 4`, three
+repetitions each on idle hosts, then depth 1 against 2 with a
+synchronous write load running on another VM of the same storage.
+
+<!-- WRITE-PIPELINE -->
+
+### 6.17 Phase 2.3: metadata hot keys
+
+Method: `metabench` against the FoundationDB cluster on one host: 1 to
+32 tasks recording and dropping cache placements of one tier, touching
+them, or a mix; with an evictor running the controller's recipe; two
+processes on the same tier (two gateways) and on two tiers; a
+capacity-limited insert. Every operation runs through the production
+transaction loop, whose counters (attempts, conflicts, unknown-outcome
+retries, exhausted) are reported.
+
+<!-- HOT-KEYS -->
+
+### 6.18 Phase 2.3: multi-gateway
+
+Method: `multi-gateway.sh`: one, two and three gateways, each driven by
+the load generator on its own host with its own key prefix, PUT then two
+GET passes, durable-only and with the unprotected cache tier; aggregate
+throughput is total bytes over the longest gateway's run.
+
+<!-- MULTI-GATEWAY -->
+
+### 6.19 Phase 2.3: regression check baseline
+
+<!-- REGRESS-BASELINE -->
+
 ## 7. Interpretation
 
 *Verified on this environment* (one run each; see §4 for the error
