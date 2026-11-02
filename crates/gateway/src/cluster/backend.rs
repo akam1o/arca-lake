@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arca_lake_common::EcProfile;
+use arca_lake_common::timing::{Histogram, HistogramSnapshot};
 use arca_lake_metadata::ops::object::Precondition;
 use arca_lake_metadata::ops::{bucket, list, object};
 use arca_lake_metadata::records::{GenId, Versioning};
@@ -79,6 +80,67 @@ pub struct ClusterBackend<S> {
     fault: Arc<Mutex<Option<FaultPoint>>>,
     pub(super) cache_stats: Arc<CacheStats>,
     pub(super) cache_state: Arc<CacheState>,
+    pub(super) put_stats: Arc<PutStats>,
+}
+
+/// Where a PUT spends its time in this gateway (R-48 profiling). Chunk
+/// phases are observed per chunk, `commit` and `total` per object.
+#[derive(Debug, Default)]
+pub struct PutStats {
+    /// Waiting for the client's body bytes of one chunk.
+    pub body_read: Histogram,
+    /// Erasure coding and checksum of one chunk.
+    pub encode: Histogram,
+    /// Writing one chunk's shards (all attempts, including map refreshes).
+    pub shard_write: Histogram,
+    /// One `append_chunks` metadata transaction batch.
+    pub append: Histogram,
+    /// One lease renewal transaction.
+    pub lease_renew: Histogram,
+    /// The commit transaction (including precondition resolution).
+    pub commit: Histogram,
+    /// Whole PUT, from begin to commit.
+    pub total: Histogram,
+    /// PUTs currently in progress.
+    pub in_flight: std::sync::atomic::AtomicU64,
+}
+
+/// A copy of [`PutStats`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PutStatsSnapshot {
+    /// See [`PutStats::body_read`].
+    pub body_read: HistogramSnapshot,
+    /// See [`PutStats::encode`].
+    pub encode: HistogramSnapshot,
+    /// See [`PutStats::shard_write`].
+    pub shard_write: HistogramSnapshot,
+    /// See [`PutStats::append`].
+    pub append: HistogramSnapshot,
+    /// See [`PutStats::lease_renew`].
+    pub lease_renew: HistogramSnapshot,
+    /// See [`PutStats::commit`].
+    pub commit: HistogramSnapshot,
+    /// See [`PutStats::total`].
+    pub total: HistogramSnapshot,
+    /// See [`PutStats::in_flight`].
+    pub in_flight: u64,
+}
+
+impl PutStats {
+    /// Copy the counters.
+    #[must_use]
+    pub fn snapshot(&self) -> PutStatsSnapshot {
+        PutStatsSnapshot {
+            body_read: self.body_read.snapshot(),
+            encode: self.encode.snapshot(),
+            shard_write: self.shard_write.snapshot(),
+            append: self.append.snapshot(),
+            lease_renew: self.lease_renew.snapshot(),
+            commit: self.commit.snapshot(),
+            total: self.total.snapshot(),
+            in_flight: self.in_flight.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 /// Counters of the read-through cache (per gateway process).
@@ -332,6 +394,7 @@ impl CacheState {
 impl<S> Clone for ClusterBackend<S> {
     fn clone(&self) -> Self {
         Self {
+            put_stats: Arc::clone(&self.put_stats),
             meta: Arc::clone(&self.meta),
             clients: self.clients.clone(),
             map: Arc::clone(&self.map),
@@ -387,6 +450,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             coders: Arc::new(Coders::default()),
             fault: Arc::new(Mutex::new(None)),
             cache_stats: Arc::new(CacheStats::default()),
+            put_stats: Arc::new(PutStats::default()),
             cache_state: Arc::new(CacheState::with_population_permits(permits)),
         })
     }
@@ -450,6 +514,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     #[must_use]
     pub fn cache_stats(&self) -> CacheStatsSnapshot {
         self.cache_stats.snapshot()
+    }
+
+    /// PUT phase timings of this gateway.
+    #[must_use]
+    pub fn put_stats(&self) -> PutStatsSnapshot {
+        self.put_stats.snapshot()
     }
 }
 

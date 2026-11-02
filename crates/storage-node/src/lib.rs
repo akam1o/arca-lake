@@ -9,4 +9,7 @@
 mod epochs;
 mod service;
 
-pub use service::{NodeConfig, NodeHandle, StorageNodeService, serve};
+pub use arca_lake_storage::StoreTimingsSnapshot;
+pub use service::{
+    NodeConfig, NodeHandle, NodeStats, NodeStatsSnapshot, StorageNodeService, serve,
+};

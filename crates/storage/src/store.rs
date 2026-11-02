@@ -5,6 +5,9 @@ use std::fs::File;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use arca_lake_common::timing::{Histogram, HistogramSnapshot};
 use std::sync::{Condvar, Mutex, PoisonError, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -204,6 +207,34 @@ pub struct Store {
     index: RwLock<MemIndex>,
     readers: RwLock<BTreeMap<u64, SegmentInfo>>,
     durability: Durability,
+    timings: StoreTimings,
+}
+
+/// Where a write spends its time (R-48 PUT profiling).
+#[derive(Debug, Default)]
+pub struct StoreTimings {
+    /// Appending header and payload to the active segment, under the
+    /// writer lock (includes a rollover when one happens).
+    pub append: Histogram,
+    /// Segment rollover (sync old, create and sync new, sync directory).
+    pub rollover: Histogram,
+    /// Waiting in the group commit until the record is durable.
+    pub sync_wait: Histogram,
+    /// One `fdatasync` call issued by the group committer.
+    pub fsync: Histogram,
+}
+
+/// A copy of [`StoreTimings`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StoreTimingsSnapshot {
+    /// See [`StoreTimings::append`].
+    pub append: HistogramSnapshot,
+    /// See [`StoreTimings::rollover`].
+    pub rollover: HistogramSnapshot,
+    /// See [`StoreTimings::sync_wait`].
+    pub sync_wait: HistogramSnapshot,
+    /// See [`StoreTimings::fsync`].
+    pub fsync: HistogramSnapshot,
 }
 
 impl Store {
@@ -281,6 +312,7 @@ impl Store {
                 }),
                 cv: Condvar::new(),
             },
+            timings: StoreTimings::default(),
         };
         Ok((store, rec.report))
     }
@@ -420,10 +452,24 @@ impl Store {
         self.append(key, FLAG_TOMBSTONE, &[])
     }
 
+    /// Timing of writes since the store was opened.
+    #[must_use]
+    pub fn timings(&self) -> StoreTimingsSnapshot {
+        StoreTimingsSnapshot {
+            append: self.timings.append.snapshot(),
+            rollover: self.timings.rollover.snapshot(),
+            sync_wait: self.timings.sync_wait.snapshot(),
+            fsync: self.timings.fsync.snapshot(),
+        }
+    }
+
     fn append(&self, key: ShardKey, flags: u8, payload: &[u8]) -> Result<()> {
         let mut w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        let append_started = Instant::now();
         if w.active.end() >= self.cfg.segment_max_bytes {
+            let t = Instant::now();
             self.rollover(&mut w)?;
+            self.timings.rollover.observe(t.elapsed());
         }
         let sequence = w.next_sequence;
         let header = RecordHeader::for_payload(key, flags, sequence, payload, self.cfg.block_size)?;
@@ -445,9 +491,12 @@ impl Store {
             }
         }
         drop(w);
+        self.timings.append.observe(append_started.elapsed());
 
         if self.cfg.sync == SyncPolicy::Group {
+            let t = Instant::now();
             self.wait_durable((segment_id, end))?;
+            self.timings.sync_wait.observe(t.elapsed());
         }
 
         let mut idx = self.index.write().unwrap_or_else(PoisonError::into_inner);
@@ -537,7 +586,9 @@ impl Store {
                         .file
                         .try_clone()?
                 };
+                let t = Instant::now();
                 file.sync_data()?;
+                self.timings.fsync.observe(t.elapsed());
                 Ok(())
             })();
 

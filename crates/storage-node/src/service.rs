@@ -3,7 +3,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use arca_lake_common::timing::{Histogram, HistogramSnapshot};
 
 use arca_lake_protocol::storage::v1 as pb;
 use arca_lake_protocol::storage::v1::storage_node_server::{StorageNode, StorageNodeServer};
@@ -50,6 +52,46 @@ pub struct StorageNodeService {
     epochs: Mutex<EpochTable>,
     frame_bytes: usize,
     stream_progress_timeout: Duration,
+    stats: NodeStats,
+}
+
+/// Decrements a gauge when dropped (`PutShard` streams in flight).
+struct InFlightGuard<'a>(&'a std::sync::atomic::AtomicU64);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Where a `PutShard` spends its time on the node (R-48 PUT profiling).
+#[derive(Debug, Default)]
+pub struct NodeStats {
+    /// From the header frame to the last data frame.
+    pub put_recv: Histogram,
+    /// From the last frame until the blocking store write starts.
+    pub put_queue: Histogram,
+    /// The store write (append + group commit).
+    pub put_store: Histogram,
+    /// `GetShard` streams: from request to the last frame handed over.
+    pub get_serve: Histogram,
+    /// `PutShard` streams currently open.
+    pub puts_in_flight: std::sync::atomic::AtomicU64,
+}
+
+/// A copy of [`NodeStats`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NodeStatsSnapshot {
+    /// See [`NodeStats::put_recv`].
+    pub put_recv: HistogramSnapshot,
+    /// See [`NodeStats::put_queue`].
+    pub put_queue: HistogramSnapshot,
+    /// See [`NodeStats::put_store`].
+    pub put_store: HistogramSnapshot,
+    /// See [`NodeStats::get_serve`].
+    pub get_serve: HistogramSnapshot,
+    /// See [`NodeStats::puts_in_flight`].
+    pub puts_in_flight: u64,
 }
 
 impl StorageNodeService {
@@ -66,7 +108,23 @@ impl StorageNodeService {
             epochs: Mutex::new(epochs),
             frame_bytes: cfg.frame_bytes,
             stream_progress_timeout: cfg.stream_progress_timeout,
+            stats: NodeStats::default(),
         })
+    }
+
+    /// Timing counters of this node.
+    #[must_use]
+    pub fn stats(&self) -> NodeStatsSnapshot {
+        NodeStatsSnapshot {
+            put_recv: self.stats.put_recv.snapshot(),
+            put_queue: self.stats.put_queue.snapshot(),
+            put_store: self.stats.put_store.snapshot(),
+            get_serve: self.stats.get_serve.snapshot(),
+            puts_in_flight: self
+                .stats
+                .puts_in_flight
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
     }
 
     /// Direct access to the underlying store (tests and tooling).
@@ -153,6 +211,11 @@ impl StorageNode for StorageNodeService {
         request: tonic::Request<tonic::Streaming<pb::PutShardRequest>>,
     ) -> Result<tonic::Response<pb::PutShardResponse>, tonic::Status> {
         let mut stream = request.into_inner();
+        let started = Instant::now();
+        self.stats
+            .puts_in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _in_flight = InFlightGuard(&self.stats.puts_in_flight);
         let header = match stream.next().await {
             Some(Ok(pb::PutShardRequest {
                 body: Some(pb::put_shard_request::Body::Header(h)),
@@ -204,12 +267,21 @@ impl StorageNode for StorageNodeService {
         // Re-check the epoch after receiving the body: a membership change
         // may have landed while the data was in flight.
         self.check_epoch(key.group_id, header.group_epoch)?;
+        self.stats.put_recv.observe(started.elapsed());
         let crc = crc32c_of(&payload);
         let store = Arc::clone(&self.store);
-        tokio::task::spawn_blocking(move || store.put(key, &payload))
-            .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?
-            .map_err(Self::storage_status)?;
+        let queued = Instant::now();
+        let (queue_wait, store_time, result) = tokio::task::spawn_blocking(move || {
+            let queue_wait = queued.elapsed();
+            let t = Instant::now();
+            let r = store.put(key, &payload);
+            (queue_wait, t.elapsed(), r)
+        })
+        .await
+        .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        self.stats.put_queue.observe(queue_wait);
+        self.stats.put_store.observe(store_time);
+        result.map_err(Self::storage_status)?;
         Ok(tonic::Response::new(pb::PutShardResponse {
             crc32c: crc,
             bytes_received: header.payload_len,

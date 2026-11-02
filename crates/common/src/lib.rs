@@ -2,6 +2,7 @@
 //! components interpret identically.
 
 pub mod ec_profile;
+pub mod timing;
 
 pub use ec_profile::{EcProfile, ProfileError, SmallObjectPolicy};
 

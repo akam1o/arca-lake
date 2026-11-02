@@ -80,6 +80,12 @@ struct Args {
     /// Worker threads.
     #[arg(long, default_value_t = 4)]
     threads: usize,
+    /// Print one JSON line per second to stderr with the operations and
+    /// bytes completed in that second, the requests in flight and the
+    /// longest latency completed in it (for aligning stalls with sampled
+    /// system counters).
+    #[arg(long)]
+    progress: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -152,6 +158,9 @@ struct Counters {
     mismatches: AtomicU64,
     missing: AtomicU64,
     latencies: Mutex<Vec<f64>>,
+    in_flight: AtomicU64,
+    /// Longest latency (microseconds) completed since the last progress line.
+    window_max_us: AtomicU64,
 }
 
 async fn one_request(
@@ -219,6 +228,10 @@ async fn one_request(
     }
     counters.ops.fetch_add(1, Ordering::Relaxed);
     counters.bytes.fetch_add(got_bytes, Ordering::Relaxed);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    counters
+        .window_max_us
+        .fetch_max((elapsed * 1000.0) as u64, Ordering::Relaxed);
     counters.latencies.lock().await.push(elapsed);
     Ok(())
 }
@@ -264,15 +277,47 @@ async fn run_pass(client: &HttpClient, args: &Arc<Args>, pass: u32) -> Summary {
                 let Some(&index) = keys.get(slot) else {
                     return;
                 };
-                if let Err(e) = one_request(&client, &args, index, &counters).await {
+                counters.in_flight.fetch_add(1, Ordering::Relaxed);
+                let r = one_request(&client, &args, index, &counters).await;
+                counters.in_flight.fetch_sub(1, Ordering::Relaxed);
+                if let Err(e) = r {
                     counters.errors.fetch_add(1, Ordering::Relaxed);
                     eprintln!("error: {e}");
                 }
             }
         }));
     }
+    #[allow(clippy::cast_precision_loss)]
+    let progress = args.progress.then(|| {
+        let counters = Arc::clone(&counters);
+        let label = args.label.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            tick.tick().await;
+            let (mut last_ops, mut last_bytes) = (0u64, 0u64);
+            loop {
+                tick.tick().await;
+                let ops = counters.ops.load(Ordering::Relaxed);
+                let bytes = counters.bytes.load(Ordering::Relaxed);
+                let max_us = counters.window_max_us.swap(0, Ordering::Relaxed);
+                eprintln!(
+                    "{{\"progress\":1,\"label\":\"{label}\",\"t_s\":{:.0},\"ops\":{},\"bytes\":{},\"in_flight\":{},\"max_lat_ms\":{:.1}}}",
+                    started.elapsed().as_secs_f64(),
+                    ops - last_ops,
+                    bytes - last_bytes,
+                    counters.in_flight.load(Ordering::Relaxed),
+                    max_us as f64 / 1000.0
+                );
+                last_ops = ops;
+                last_bytes = bytes;
+            }
+        })
+    });
     for t in tasks {
         let _ = t.await;
+    }
+    if let Some(p) = progress {
+        p.abort();
     }
     let duration = started.elapsed();
     let mut lats = counters.latencies.lock().await.clone();

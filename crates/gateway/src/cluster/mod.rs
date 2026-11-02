@@ -6,6 +6,8 @@ mod map;
 mod read;
 mod write;
 
-pub use backend::{CacheStatsSnapshot, ClusterBackend, ClusterConfig, FaultPoint};
+pub use backend::{
+    CacheStatsSnapshot, ClusterBackend, ClusterConfig, FaultPoint, PutStats, PutStatsSnapshot,
+};
 pub use map::ClusterMap;
 pub use write::Committed;

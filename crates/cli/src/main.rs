@@ -223,6 +223,10 @@ struct StorageNodeArgs {
     /// Device directory.
     #[arg(long)]
     dir: PathBuf,
+    /// Serve node timing counters in the Prometheus text format
+    /// (`GET /metrics`).
+    #[arg(long)]
+    metrics_listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -488,10 +492,12 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
             tracing::info!(%addr, "gateway metrics endpoint");
             let stats_backend = backend.clone();
             tokio::spawn(serve_gateway_metrics(listener, move || {
-                render_cache_stats(
+                let mut out = render_cache_stats(
                     &stats_backend.cache_stats(),
                     &stats_backend.node_clients().stats(),
-                )
+                );
+                render_put_stats(&mut out, &stats_backend.put_stats());
+                out
             }));
         }
         arca_lake_gateway::serve(cfg, backend).await
@@ -519,6 +525,17 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
         Err(e) => return fail(format!("cannot start the storage node: {e}")),
     };
     tracing::info!(addr = %node.local_addr, dir = %args.dir.display(), "storage node listening");
+    if let Some(addr) = args.metrics_listen {
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => return fail(format!("cannot bind metrics endpoint {addr}: {e}")),
+        };
+        tracing::info!(%addr, "storage node metrics endpoint");
+        let service = Arc::clone(node.service());
+        tokio::spawn(serve_gateway_metrics(listener, move || {
+            render_node_stats(&service.stats(), &service.store().timings())
+        }));
+    }
     wait_for_shutdown().await;
     tracing::info!("shutting down");
     node.shutdown().await;
@@ -850,6 +867,62 @@ fn render_cache_stats(
         ("arca_gateway_node_rpc_exhausted_total", r.exhausted),
     ] {
         let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
+    }
+    out
+}
+
+fn render_put_stats(out: &mut String, p: &arca_lake_gateway::cluster::PutStatsSnapshot) {
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
+        "# TYPE arca_gateway_put_in_flight gauge\narca_gateway_put_in_flight {}",
+        p.in_flight
+    );
+    let _ = writeln!(out, "# TYPE arca_gateway_put_phase_seconds histogram");
+    for (phase, h) in [
+        ("body_read", &p.body_read),
+        ("encode", &p.encode),
+        ("shard_write", &p.shard_write),
+        ("append", &p.append),
+        ("lease_renew", &p.lease_renew),
+        ("commit", &p.commit),
+        ("total", &p.total),
+    ] {
+        h.render_prometheus(
+            out,
+            "arca_gateway_put_phase_seconds",
+            &format!("phase=\"{phase}\""),
+        );
+    }
+}
+
+fn render_node_stats(
+    n: &arca_lake_storage_node::NodeStatsSnapshot,
+    t: &arca_lake_storage_node::StoreTimingsSnapshot,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# TYPE arca_node_put_in_flight gauge\narca_node_put_in_flight {}",
+        n.puts_in_flight
+    );
+    let _ = writeln!(out, "# TYPE arca_node_phase_seconds histogram");
+    for (phase, h) in [
+        ("put_recv", &n.put_recv),
+        ("put_queue", &n.put_queue),
+        ("put_store", &n.put_store),
+        ("get_serve", &n.get_serve),
+        ("store_append", &t.append),
+        ("store_rollover", &t.rollover),
+        ("store_sync_wait", &t.sync_wait),
+        ("store_fsync", &t.fsync),
+    ] {
+        h.render_prometheus(
+            &mut out,
+            "arca_node_phase_seconds",
+            &format!("phase=\"{phase}\""),
+        );
     }
     out
 }

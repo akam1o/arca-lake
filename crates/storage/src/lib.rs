@@ -21,5 +21,5 @@ pub use format::ShardKey;
 pub use index::Location;
 pub use store::{
     CompactionReport, CompactionStep, OpenReport, ScrubReport, SegmentStats, Store, StoreConfig,
-    StoreStats, SyncPolicy,
+    StoreStats, StoreTimings, StoreTimingsSnapshot, SyncPolicy,
 };

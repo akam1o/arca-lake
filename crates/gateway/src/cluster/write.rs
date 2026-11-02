@@ -49,6 +49,15 @@ struct Placed {
     record: ChunkRecord,
 }
 
+/// Decrements a gauge when dropped (PUTs in flight).
+struct InFlightGuard<'a>(&'a std::sync::atomic::AtomicU64);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl<S: KvStore + 'static> ClusterBackend<S> {
     /// Full PUT: begin a generation, stream the body into chunks, erasure
     /// code and place each chunk, append manifest entries, commit.
@@ -64,6 +73,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let profile = &self.cfg.profile;
         let max_chunk = usize::try_from(profile.max_chunk_bytes).unwrap_or(usize::MAX);
         let now = now_ms();
+        let put_started = std::time::Instant::now();
+        self.put_stats
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _in_flight = InFlightGuard(&self.put_stats.in_flight);
         let lease_ms = u64::try_from(self.cfg.lease.as_millis()).unwrap_or(u64::MAX);
         let pending = object::begin_put(self.meta.as_ref(), bucket, key, now, lease_ms)
             .await
@@ -81,7 +95,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             )
             .await;
         match result {
-            Ok(c) => Ok(c),
+            Ok(c) => {
+                self.put_stats.total.observe(put_started.elapsed());
+                Ok(c)
+            }
             Err(WriteFailure { error, abort }) => {
                 // Best effort: mark the generation retiring so GC reclaims
                 // its shards sooner than the lease would. If this fails the
@@ -197,6 +214,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let mut last_renewal = std::time::Instant::now();
         while !finished {
             // Fill `buf` up to max_chunk or end of body.
+            let body_started = std::time::Instant::now();
             while buf.len() < max_chunk {
                 let next = body
                     .try_next()
@@ -212,6 +230,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 self.renew_if_due(generation, lease_ms, &mut last_renewal)
                     .await?;
             }
+            self.put_stats.body_read.observe(body_started.elapsed());
             let chunk = if buf.len() > max_chunk {
                 buf.split_to(max_chunk).freeze()
             } else {
@@ -228,6 +247,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             // stream fails within the RPC policy's progress timeout and
             // retry budget, after which renewal stops and the lease runs
             // out).
+            let shard_started = std::time::Instant::now();
             let placed = self
                 .renewing(
                     generation,
@@ -236,6 +256,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                     self.place_chunk(generation, index, chunk.clone(), size, small),
                 )
                 .await??;
+            self.put_stats.shard_write.observe(shard_started.elapsed());
             size += chunk.len() as u64;
             batch.push((placed.index, placed.record));
             index += 1;
@@ -244,6 +265,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 return Err(s3_error!(InternalError, "injected crash after shards").into());
             }
             if batch.len() >= self.cfg.chunk_batch {
+                let t = std::time::Instant::now();
                 object::append_chunks_renewing(
                     self.meta.as_ref(),
                     &generation,
@@ -253,6 +275,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 )
                 .await
                 .map_err(meta_err)?;
+                self.put_stats.append.observe(t.elapsed());
                 batch.clear();
             }
             if chunk.len() < max_chunk {
@@ -260,6 +283,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             }
         }
         if !batch.is_empty() {
+            let t = std::time::Instant::now();
             object::append_chunks_renewing(
                 self.meta.as_ref(),
                 &generation,
@@ -269,6 +293,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             )
             .await
             .map_err(meta_err)?;
+            self.put_stats.append.observe(t.elapsed());
         }
         if self.take_fault(FaultPoint::BeforeCommit) {
             return Err(s3_error!(InternalError, "injected crash before commit").into());
@@ -290,7 +315,9 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 .unwrap_or_default(),
             chunk_count: index,
         };
+        let t = std::time::Instant::now();
         self.commit_resolving(generation, &info, pre).await?;
+        self.put_stats.commit.observe(t.elapsed());
         if self.take_fault(FaultPoint::AfterCommit) {
             return Err(WriteFailure {
                 error: s3_error!(InternalError, "injected crash after commit"),
@@ -304,9 +331,6 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         })
     }
 
-    /// Encode one chunk and write its shards to a stripe group, retrying
-    /// with a refreshed map on epoch rejection and with another group on
-    /// node failures.
     /// Renew the pending generation's lease if a third of it has passed
     /// since `last_renewal`.
     async fn renew_if_due(
@@ -316,9 +340,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         last_renewal: &mut std::time::Instant,
     ) -> Result<(), WriteFailure> {
         if last_renewal.elapsed() >= self.cfg.lease / 3 {
+            let t = std::time::Instant::now();
             object::renew_lease(self.meta.as_ref(), &generation, now_ms(), lease_ms)
                 .await
                 .map_err(meta_err)?;
+            self.put_stats.lease_renew.observe(t.elapsed());
             *last_renewal = std::time::Instant::now();
         }
         Ok(())
@@ -345,6 +371,9 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }
     }
 
+    /// Encode one chunk and write its shards to a stripe group, retrying
+    /// with a refreshed map on epoch rejection and with another group on
+    /// node failures.
     async fn place_chunk(
         &self,
         generation: GenId,
@@ -372,11 +401,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .coders
             .get(&scheme, k, m)
             .map_err(|e| s3_error!(InternalError, "{e}"))?;
+        let encode_started = std::time::Instant::now();
         let (_, shards) =
             arca_lake_tiering::durable::encode_chunk(coder.as_ref(), usize::from(k), &chunk)
                 .map_err(|e| s3_error!(InternalError, "{e}"))?;
         let cid = chunk_id(&generation, index);
         let crc = arca_lake_storage::format::crc32c(&chunk);
+        self.put_stats.encode.observe(encode_started.elapsed());
 
         let mut tried: Vec<u64> = Vec::new();
         let mut last_reason: Option<String> = None;
