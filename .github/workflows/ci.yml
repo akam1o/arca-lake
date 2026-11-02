@@ -42,16 +42,25 @@ jobs:
           toolchain: "1.99"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       # The `fdb` feature links libfdb_c; install the client library so that
       # --all-features builds and runs.
+      - name: cache downloaded tools and packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/arca-lake
+          key: tools-${{ runner.os }}-fdb${{ env.FDB_VERSION }}-v1
       - name: install FoundationDB client library
         env:
           FDB_VERSION: 7.3.77
         run: |
           set -euo pipefail
-          curl -sSL -o /tmp/fdb-clients.deb \
+          mkdir -p "$HOME/.cache/arca-lake/fdb"
+          deb="$HOME/.cache/arca-lake/fdb/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          [ -f "$deb" ] || curl -sSL -o "$deb" \
             "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
-          sudo apt-get install -y /tmp/fdb-clients.deb
+          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo apt-get install -y "$deb"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features
       - name: test (all features)
@@ -82,12 +91,21 @@ jobs:
         with:
           toolchain: "1.99"
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: cache downloaded tools and packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/arca-lake
+          key: tools-${{ runner.os }}-fdb${{ env.FDB_VERSION }}-v1
       - name: install FoundationDB client library
         run: |
           set -euo pipefail
-          curl -sSL -o /tmp/fdb-clients.deb \
+          mkdir -p "$HOME/.cache/arca-lake/fdb"
+          deb="$HOME/.cache/arca-lake/fdb/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          [ -f "$deb" ] || curl -sSL -o "$deb" \
             "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
-          sudo apt-get install -y /tmp/fdb-clients.deb
+          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo apt-get install -y "$deb"
       - name: start FoundationDB server
         run: |
           set -euo pipefail
@@ -142,12 +160,21 @@ jobs:
         with:
           toolchain: "1.99"
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: cache downloaded tools and packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/arca-lake
+          key: tools-${{ runner.os }}-fdb${{ env.FDB_VERSION }}-v1
       - name: install FoundationDB client library
         run: |
           set -euo pipefail
-          curl -sSL -o /tmp/fdb-clients.deb \
+          mkdir -p "$HOME/.cache/arca-lake/fdb"
+          deb="$HOME/.cache/arca-lake/fdb/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          [ -f "$deb" ] || curl -sSL -o "$deb" \
             "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
-          sudo apt-get install -y /tmp/fdb-clients.deb
+          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo apt-get install -y "$deb"
       - name: start a three-process FoundationDB cluster (bridge network)
         run: |
           set -euo pipefail
@@ -206,16 +233,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: cache cargo-deny and the advisory database
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/arca-lake/cargo-deny
+            ~/.cargo/advisory-dbs
+          key: cargo-deny-${{ runner.os }}-0.20.2-${{ github.run_id }}
+          restore-keys: cargo-deny-${{ runner.os }}-0.20.2-
       - name: install cargo-deny (pinned release)
         env:
           DENY_VERSION: 0.20.2
         run: |
           set -euo pipefail
-          base="https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VERSION}"
-          curl -sSL -o deny.tar.gz "${base}/cargo-deny-${DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          mkdir -p "$HOME/.local/bin"
-          tar -xzf deny.tar.gz --strip-components=1 -C "$HOME/.local/bin" "cargo-deny-${DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          dir="$HOME/.cache/arca-lake/cargo-deny"; mkdir -p "$dir"
+          if [ ! -x "$dir/cargo-deny" ]; then
+            base="https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VERSION}"
+            curl -sSL -o deny.tar.gz "${base}/cargo-deny-${DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+            tar -xzf deny.tar.gz --strip-components=1 -C "$dir" "cargo-deny-${DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
+          fi
+          echo "$dir" >> "$GITHUB_PATH"
       - run: cargo-deny check
 
   secrets:
@@ -229,20 +269,27 @@ jobs:
       # The gitleaks GitHub Action fails on the first push of a branch
       # (empty "before" SHA), so run the pinned CLI directly and scan the
       # full history plus the working tree.
+      - name: cache gitleaks
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/arca-lake/gitleaks
+          key: gitleaks-${{ runner.os }}-8.30.1
       - name: install gitleaks
         env:
           GITLEAKS_VERSION: 8.30.1
         run: |
           set -euo pipefail
-          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
-          curl -sSL -o gitleaks.tar.gz "${base}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSL -o checksums.txt "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
-          grep "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" checksums.txt \
-            | sed "s#gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz#gitleaks.tar.gz#" \
-            | sha256sum -c -
-          mkdir -p "$HOME/.local/bin"
-          tar -xzf gitleaks.tar.gz -C "$HOME/.local/bin" gitleaks
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          dir="$HOME/.cache/arca-lake/gitleaks"; mkdir -p "$dir"
+          if [ ! -x "$dir/gitleaks" ]; then
+            base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+            curl -sSL -o gitleaks.tar.gz "${base}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+            curl -sSL -o checksums.txt "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+            grep "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" checksums.txt \
+              | sed "s#gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz#gitleaks.tar.gz#" \
+              | sha256sum -c -
+            tar -xzf gitleaks.tar.gz -C "$dir" gitleaks
+          fi
+          echo "$dir" >> "$GITHUB_PATH"
       - name: scan git history
         run: gitleaks git --no-banner --redact --verbose --exit-code 1 .
       - name: scan working tree
