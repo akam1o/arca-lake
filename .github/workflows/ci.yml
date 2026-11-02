@@ -208,7 +208,7 @@ jobs:
           toolchain: "1.99"
       - name: install cargo-deny (pinned release)
         env:
-          DENY_VERSION: 0.18.5
+          DENY_VERSION: 0.20.2
         run: |
           set -euo pipefail
           base="https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VERSION}"
