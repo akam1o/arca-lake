@@ -58,7 +58,7 @@ def phase_rates(metrics, url_filter):
         for url, vals in metrics[ts].items():
             if not url_filter(url):
                 continue
-            phases = {p for (p, _k) in vals if isinstance(p, str)} if vals else set()
+            phases = {k[0] for k in vals if isinstance(k, tuple)}
             for p in phases:
                 s, c = vals.get((p, "sum")), vals.get((p, "count"))
                 if s is None or c is None:

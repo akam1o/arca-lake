@@ -235,7 +235,8 @@ cmd_run() {
     sleep 2
   fi
   cache_usage > "$dir/cache-usage-after-put.json"
-  for p in $(seq 1 "$passes"); do
+  # (not `seq 1 $passes`: BSD seq counts down from 1 to 0)
+  for p in $(seq 1 "$passes" 2>/dev/null | awk -v n="$passes" '$1 <= n'); do
     metrics > "$dir/metrics-before-get$p.txt"
     if [ -n "${MIXED_PUT_OBJECTS:-}" ]; then
       (sg "$S3LOAD --endpoint $ep --bucket bench --op put --prefix mixed$p --objects $MIXED_PUT_OBJECTS --size $size --concurrency $conc --label $label-mixedput$p" > "$dir/mixedput$p.jsonl" 2>/dev/null || true) &
