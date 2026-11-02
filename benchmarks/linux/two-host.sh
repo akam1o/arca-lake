@@ -135,9 +135,18 @@ cmd_setup() {
   fi
   start sa controller "$BIN controller --cluster-file $CLUSTER_FILE --id ctl-a --http 127.0.0.1:9901 --failure-domain node --evict-interval-secs 2 --gc-interval-secs 10 --gc-grace-secs 30 $cache_args"
   start sg gateway "$BIN gateway --backend cluster --cluster-file $CLUSTER_FILE --allow-anonymous --listen $ADDR_G:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node $cache_args ${GW_EXTRA_ARGS:-}"
+  # GATEWAYS=2|3: more gateways on the other hosts (multi-gateway runs,
+  # Phase 2.3 §7); the load generator on each host drives its own.
+  if [ "${GATEWAYS:-1}" -ge 2 ]; then
+    start sa gateway2 "$BIN gateway --backend cluster --cluster-file $CLUSTER_FILE --allow-anonymous --listen $ADDR_A:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node $cache_args ${GW_EXTRA_ARGS:-}"
+  fi
+  if [ "${GATEWAYS:-1}" -ge 3 ]; then
+    [ -n "$HOST_C" ] || { echo "GATEWAYS=3 needs HOST_C" >&2; exit 2; }
+    start sb gateway3 "$BIN gateway --backend cluster --cluster-file $CLUSTER_FILE --allow-anonymous --listen $ADDR_B:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node $cache_args ${GW_EXTRA_ARGS:-}"
+  fi
   sleep 2
   sa "$ADMIN status" | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g'
-  echo "mode=$mode chunk_bytes=$CHUNK_BYTES cache_capacity=$CACHE_CAPACITY hosts=$( [ -n "$HOST_C" ] && echo 3 || echo 2 )" > /tmp/arca-two-host.mode
+  echo "mode=$mode chunk_bytes=$CHUNK_BYTES cache_capacity=$CACHE_CAPACITY hosts=$( [ -n "$HOST_C" ] && echo 3 || echo 2 ) gateways=${GATEWAYS:-1}" > /tmp/arca-two-host.mode
 }
 
 # Per-second samplers on every host for the duration of one command
@@ -206,6 +215,21 @@ wait_populations() { # <log>
   done
 }
 
+# Multi-gateway fan-out: gateway i is driven by the load generator on its
+# own host (1: the gateway host, 2: host A, 3: host B) with its own key
+# prefix; the phases run concurrently and each writes <phase>-g<i>.jsonl.
+gw_fn() { case "$1" in 1) echo sg ;; 2) echo sa ;; 3) echo sb ;; esac; }
+gw_addr() { case "$1" in 1) echo "$ADDR_G" ;; 2) echo "$ADDR_A" ;; 3) echo "$ADDR_B" ;; esac; }
+fanout() { # <dir> <phase> <s3load args without --endpoint/--prefix/--label>
+  local dir="$1" phase="$2"; shift 2
+  local n="${GATEWAYS:-1}" i
+  for i in $(seq 1 "$n"); do
+    ( "$(gw_fn "$i")" "$S3LOAD --endpoint http://$(gw_addr "$i"):9000 --bucket bench --prefix ${PREFIX:-obj}-g$i --label $phase-g$i $*" > "$dir/$phase-g$i.jsonl" 2>/dev/null || true ) &
+  done
+  wait
+  cat "$dir/$phase"-g*.jsonl
+}
+
 cmd_run() {
   local label="${1:?label}"
   local objects="${OBJECTS:-32}" size="${SIZE:-$((16 << 20))}" conc="${CONC:-4}" passes="${PASSES:-3}" range="${RANGE_BYTES:-0}"
@@ -224,6 +248,21 @@ cmd_run() {
   # prefix concurrently (recorded as mixedput<p>.jsonl).
   local extra="${S3LOAD_EXTRA:-}"
   sg "$S3LOAD --endpoint $ep --bucket bench --op create-bucket" >/dev/null
+  if [ "${GATEWAYS:-1}" -ge 2 ]; then
+    metrics > "$dir/metrics-before-put.txt"
+    [ "${SKIP_PUT:-0}" = 1 ] || with_sar "$dir/put" fanout "$dir" put --op put --objects $objects --size $size --concurrency $conc > "$dir/put.jsonl"
+    metrics > "$dir/metrics-after-put.txt"
+    for p in $(seq 1 "$passes" 2>/dev/null | awk -v n="$passes" '$1 <= n'); do
+      metrics > "$dir/metrics-before-get$p.txt"
+      with_sar "$dir/get$p" fanout "$dir" get$p --op get --objects $objects --size $size --concurrency $conc --range-bytes $range --verify $extra > "$dir/get$p.jsonl"
+      wait_populations "$dir/population-after-get$p.txt"
+      metrics > "$dir/metrics-after-get$p.txt"
+    done
+    rss > "$dir/rss.txt"
+    echo "results in $dir"
+    return
+  fi
+  metrics > "$dir/metrics-before-put.txt"
   if [ "${SKIP_PUT:-0}" != 1 ]; then
     if [ "${PROFILE:-0}" = 1 ]; then
       # Samplers on every host plus s3load's per-second progress on stderr.
@@ -234,6 +273,7 @@ cmd_run() {
     cat "$dir/put.jsonl"
     sleep 2
   fi
+  metrics > "$dir/metrics-after-put.txt"
   cache_usage > "$dir/cache-usage-after-put.json"
   # (not `seq 1 $passes`: BSD seq counts down from 1 to 0)
   for p in $(seq 1 "$passes" 2>/dev/null | awk -v n="$passes" '$1 <= n'); do
