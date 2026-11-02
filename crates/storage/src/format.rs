@@ -171,6 +171,14 @@ pub fn crc32c(data: &[u8]) -> u32 {
     crc32c::crc32c(data)
 }
 
+/// CRC-32C over the concatenation of `parts`, without concatenating them.
+#[must_use]
+pub fn crc32c_parts<P: AsRef<[u8]>>(parts: &[P]) -> u32 {
+    parts
+        .iter()
+        .fold(0u32, |crc, p| crc32c::crc32c_append(crc, p.as_ref()))
+}
+
 /// Round `n` up to a multiple of `align` (which must be non-zero).
 #[must_use]
 pub const fn round_up(n: u64, align: u64) -> u64 {

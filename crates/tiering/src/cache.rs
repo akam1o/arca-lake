@@ -18,7 +18,7 @@ use arca_lake_metadata::KvStore;
 use arca_lake_metadata::ops::cache as meta_cache;
 use arca_lake_metadata::ops::gc as meta_gc;
 use arca_lake_metadata::records::{CachePlacement, ChunkRecord, GenId, GroupRecord, GroupState};
-use arca_lake_protocol::client::{NodeClients, ShardRef};
+use arca_lake_protocol::client::{NodeClients, ShardRef, frames_len};
 use bytes::Bytes;
 
 use crate::TierError;
@@ -191,8 +191,9 @@ pub async fn populate<S: KvStore>(
 /// A chunk served from the cache.
 #[derive(Debug, Clone)]
 pub struct CachedRead {
-    /// The chunk, validated against its record.
-    pub bytes: Bytes,
+    /// The chunk, validated against its record, as the frames received
+    /// (see [`crate::durable::CodedRead::parts`]).
+    pub parts: Vec<Bytes>,
     /// Member indexes whose shard was missing or unusable (a *degraded*
     /// hit when non-empty; the caller may rewrite them with
     /// [`repair_shards`]).
@@ -228,19 +229,19 @@ pub async fn read_cached(
             chunk_id: cid,
             shard_index: 0,
         };
-        let bytes = clients
-            .get_shard(&addr, shard, 0, 0)
+        let parts = clients
+            .get_shard_frames(&addr, shard, 0, 0)
             .await
             .map_err(|status| TierError::Node { addr, status })?;
-        if bytes.len() != usize::try_from(chunk.len).unwrap_or(usize::MAX)
-            || arca_lake_storage::format::crc32c(&bytes) != chunk.crc32c
+        if frames_len(&parts) != usize::try_from(chunk.len).unwrap_or(usize::MAX)
+            || arca_lake_storage::format::crc32c_parts(&parts) != chunk.crc32c
         {
             return Err(TierError::Corrupt(format!(
                 "cached chunk {index} does not match its record"
             )));
         }
         return Ok(CachedRead {
-            bytes,
+            parts,
             missing: Vec::new(),
         });
     }
@@ -256,7 +257,7 @@ pub async fn read_cached(
     )
     .await?;
     Ok(CachedRead {
-        bytes: r.bytes,
+        parts: r.parts,
         missing: r.missing,
     })
 }

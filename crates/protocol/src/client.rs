@@ -258,6 +258,29 @@ enum StreamFault {
     Slow(Duration),
 }
 
+/// Concatenate frames into one buffer (one copy; the frame form avoids it).
+#[must_use]
+pub fn concat_frames(frames: Vec<Bytes>) -> Bytes {
+    match frames.len() {
+        0 => Bytes::new(),
+        1 => frames.into_iter().next().unwrap_or_default(),
+        _ => {
+            let total: usize = frames.iter().map(Bytes::len).sum();
+            let mut out = bytes::BytesMut::with_capacity(total);
+            for f in &frames {
+                out.extend_from_slice(f);
+            }
+            out.freeze()
+        }
+    }
+}
+
+/// Total length of frames.
+#[must_use]
+pub fn frames_len(frames: &[Bytes]) -> usize {
+    frames.iter().map(Bytes::len).sum()
+}
+
 /// Shared pool of channels keyed by node address.
 #[derive(Clone, Default)]
 pub struct NodeClients {
@@ -661,6 +684,24 @@ impl NodeClients {
         offset: u64,
         len: u64,
     ) -> Result<Bytes, tonic::Status> {
+        let frames = self.get_shard_frames(addr, shard, offset, len).await?;
+        Ok(concat_frames(frames))
+    }
+
+    /// Read a shard as the frames the node streamed, in order, without
+    /// concatenating them (the zero-copy read path: each frame is a slice
+    /// of the transport's receive buffer).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_shard`].
+    pub async fn get_shard_frames(
+        &self,
+        addr: &str,
+        shard: ShardRef,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<Bytes>, tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::GetShard,
@@ -685,7 +726,7 @@ impl NodeClients {
         offset: u64,
         len: u64,
         fault: StreamFault,
-    ) -> Result<Bytes, tonic::Status> {
+    ) -> Result<Vec<Bytes>, tonic::Status> {
         let mut client = self.client(addr)?;
         let req = pb::GetShardRequest {
             protocol_version: pb::PROTOCOL_VERSION,
@@ -705,7 +746,7 @@ impl NodeClients {
             let progress = Arc::clone(&progress);
             async move {
                 let mut stream = client.get_shard(req).await?.into_inner();
-                let mut out = bytes::BytesMut::new();
+                let mut out: Vec<Bytes> = Vec::new();
                 let mut first = true;
                 while let Some(msg) = stream.next().await {
                     if fault == StreamFault::Stall && !first {
@@ -715,13 +756,16 @@ impl NodeClients {
                         tokio::time::sleep(d).await;
                     }
                     first = false;
-                    out.extend_from_slice(&msg?.data);
+                    let data = msg?.data;
+                    if !data.is_empty() {
+                        out.push(data);
+                    }
                     progress.store(
                         u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
-                Ok(out.freeze())
+                Ok(out)
             }
         };
         self.guard_stream(rpc, &progress, budget).await

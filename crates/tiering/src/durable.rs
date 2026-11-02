@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use arca_lake_ec::{CodeParams, ErasureCoder, SchemeId, StripeLayout};
 use arca_lake_metadata::records::{ChunkRecord, GroupRecord};
-use arca_lake_protocol::client::{NodeClients, ShardRef};
+use arca_lake_protocol::client::{NodeClients, ShardRef, concat_frames, frames_len};
 use bytes::Bytes;
 
 use crate::TierError;
@@ -73,8 +73,10 @@ impl Coders {
 /// A chunk assembled from a coded group.
 #[derive(Debug, Clone)]
 pub struct CodedRead {
-    /// The chunk.
-    pub bytes: Bytes,
+    /// The chunk, as the frames received from the nodes in chunk order
+    /// (one part when a shard had to be reconstructed). Concatenate with
+    /// [`concat_frames`] when a contiguous buffer is needed.
+    pub parts: Vec<Bytes>,
     /// Member indexes whose shard was missing, short, or unreachable
     /// (empty for a clean read). Parity shards that were never requested
     /// are not listed.
@@ -123,29 +125,29 @@ pub async fn read_coded(
         };
         async move {
             let Some(addr) = addr else { return (i, None) };
-            match clients.get_shard(&addr, shard, 0, 0).await {
-                Ok(b) if b.len() == layout.shard_len() => (i, Some(b)),
+            match clients.get_shard_frames(&addr, shard, 0, 0).await {
+                Ok(f) if frames_len(&f) == layout.shard_len() => (i, Some(f)),
                 Ok(_) | Err(_) => (i, None),
             }
         }
     };
-    let mut shards: Vec<Option<Vec<u8>>> = vec![None; total];
+    let mut shards: Vec<Option<Vec<Bytes>>> = vec![None; total];
     let mut missing = Vec::new();
     let mut have = 0usize;
-    for (i, b) in futures::future::join_all((0..k).map(fetch)).await {
-        match b {
-            Some(b) => {
-                shards[i] = Some(b.to_vec());
+    for (i, f) in futures::future::join_all((0..k).map(fetch)).await {
+        match f {
+            Some(f) => {
+                shards[i] = Some(f);
                 have += 1;
             }
             None => missing.push(i),
         }
     }
     if have < k {
-        for (i, b) in futures::future::join_all((k..total).map(fetch)).await {
-            match b {
-                Some(b) => {
-                    shards[i] = Some(b.to_vec());
+        for (i, f) in futures::future::join_all((k..total).map(fetch)).await {
+            match f {
+                Some(f) => {
+                    shards[i] = Some(f);
                     have += 1;
                 }
                 None => missing.push(i),
@@ -155,27 +157,49 @@ pub async fn read_coded(
     if have < k {
         return Err(TierError::Unreadable { have, need: k });
     }
-    if shards[..k].iter().any(Option::is_none) {
+    let chunk_len = usize::try_from(len).unwrap_or(0);
+    let parts: Vec<Bytes> = if shards[..k].iter().all(Option::is_some) {
+        // Fast path: the data shards are the chunk in order; hand their
+        // frames through, trimming the padding of the last shard, with
+        // no copy at all.
+        let mut parts = Vec::new();
+        let mut remaining = chunk_len;
+        for s in shards.into_iter().take(k) {
+            for f in s.unwrap_or_default() {
+                if remaining == 0 {
+                    break;
+                }
+                let take = f.len().min(remaining);
+                remaining -= take;
+                parts.push(if take == f.len() { f } else { f.slice(..take) });
+            }
+        }
+        parts
+    } else {
+        // Slow path: a data shard is missing; the decoder needs contiguous
+        // shards, so concatenate, reconstruct, and join.
+        let mut owned: Vec<Option<Vec<u8>>> = shards
+            .into_iter()
+            .map(|s| s.map(|f| concat_frames(f).to_vec()))
+            .collect();
         coder
-            .reconstruct(&mut shards)
+            .reconstruct(&mut owned)
             .map_err(|e| TierError::Other(format!("decode failed: {e}")))?;
-    }
-    let data: Vec<Vec<u8>> = shards
-        .into_iter()
-        .take(k)
-        .map(Option::unwrap_or_default)
-        .collect();
-    let bytes = layout.join(&data);
-    if arca_lake_storage::format::crc32c(&bytes) != crc32c {
+        let data: Vec<Vec<u8>> = owned
+            .into_iter()
+            .take(k)
+            .map(Option::unwrap_or_default)
+            .collect();
+        vec![Bytes::from(layout.join(&data))]
+    };
+    if frames_len(&parts) != chunk_len || arca_lake_storage::format::crc32c_parts(&parts) != crc32c
+    {
         return Err(TierError::Corrupt(
             "chunk checksum mismatch after assembly".into(),
         ));
     }
     missing.sort_unstable();
-    Ok(CodedRead {
-        bytes: Bytes::from(bytes),
-        missing,
-    })
+    Ok(CodedRead { parts, missing })
 }
 
 /// Read and verify one whole chunk from its durable placement.
@@ -189,7 +213,7 @@ pub async fn read_chunk(
     addr_of: AddrOf<'_>,
     chunk: &ChunkRecord,
     coder: &dyn ErasureCoder,
-) -> Result<Bytes, TierError> {
+) -> Result<Vec<Bytes>, TierError> {
     if usize::from(chunk.data_shards) != usize::from(group.data_shards)
         || usize::from(chunk.parity_shards) != usize::from(group.parity_shards)
     {
@@ -212,7 +236,7 @@ pub async fn read_chunk(
         coder,
     )
     .await
-    .map(|r| r.bytes)
+    .map(|r| r.parts)
 }
 
 /// Encode a chunk into `k + m` shards.

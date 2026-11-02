@@ -7,6 +7,7 @@
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::ops::cluster;
 use arca_lake_metadata::records::{ChunkRecord, GenId, GroupRecord};
+use arca_lake_protocol::client::concat_frames;
 use arca_lake_protocol::client::{NodeClients, ShardRef};
 
 use crate::TierError;
@@ -65,7 +66,8 @@ pub async fn migrate_chunk<S: KvStore>(
     }
     // 1. Read and verify the chunk from its current placement.
     let coder = coders.get(&record.scheme, record.data_shards, record.parity_shards)?;
-    let bytes = read_chunk(clients, source_group, addr_of, record, coder.as_ref()).await?;
+    let bytes =
+        concat_frames(read_chunk(clients, source_group, addr_of, record, coder.as_ref()).await?);
 
     // 2–3. Encode with the target's profile, write every shard, read back.
     let written = write_and_verify(clients, coders, addr_of, target, record, &bytes).await?;

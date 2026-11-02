@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::ops::object::{self, Manifest};
 use arca_lake_metadata::records::{CachePlacement, ChunkRecord, GenId, GroupRecord};
+use arca_lake_protocol::client::concat_frames;
 use arca_lake_tiering::TierError;
 use arca_lake_tiering::cache::{self as tcache, CacheTierConfig};
 use bytes::Bytes;
@@ -18,7 +19,7 @@ use super::backend::{ClusterBackend, meta_err, now_ms};
 use super::map::ClusterMap;
 
 /// An in-flight chunk read.
-type ChunkTask = tokio::task::JoinHandle<Result<Bytes, S3Error>>;
+type ChunkTask = tokio::task::JoinHandle<Result<Vec<Bytes>, S3Error>>;
 
 fn addr_of(map: &ClusterMap) -> impl Fn(u64) -> Option<String> + Sync + '_ {
     move |node_id| map.node_addr(node_id).map(str::to_string)
@@ -128,8 +129,8 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 let Some((chunk, task)) = pending.pop_front() else {
                     return;
                 };
-                let bytes = match task.await {
-                    Ok(Ok(b)) => b,
+                let parts = match task.await {
+                    Ok(Ok(p)) => p,
                     Ok(Err(e)) => {
                         abort_all(&mut pending);
                         let _ = tx.send(Err(e)).await;
@@ -145,10 +146,29 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 let cs = chunk.offset;
                 let ce = chunk.offset + u64::from(chunk.len);
                 let from = usize::try_from(start.max(cs) - cs).unwrap_or(0);
-                let to = usize::try_from(end.min(ce) - cs).unwrap_or(bytes.len());
-                if tx.send(Ok(bytes.slice(from..to))).await.is_err() {
-                    abort_all(&mut pending);
-                    return;
+                let to = usize::try_from(end.min(ce) - cs).unwrap_or(usize::MAX);
+                // Hand the frames through as received, clipped to the
+                // requested range; no concatenation.
+                let mut pos = 0usize;
+                for part in parts {
+                    let p_end = pos + part.len();
+                    let lo = from.max(pos);
+                    let hi = to.min(p_end);
+                    if lo < hi {
+                        let piece = if lo == pos && hi == p_end {
+                            part
+                        } else {
+                            part.slice(lo - pos..hi - pos)
+                        };
+                        if tx.send(Ok(piece)).await.is_err() {
+                            abort_all(&mut pending);
+                            return;
+                        }
+                    }
+                    pos = p_end;
+                    if pos >= to {
+                        break;
+                    }
                 }
             }
         });
@@ -164,23 +184,25 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         index: u32,
         chunk: &ChunkRecord,
         cached: Option<&CachePlacement>,
-    ) -> Result<Bytes, S3Error> {
+    ) -> Result<Vec<Bytes>, S3Error> {
         if let (Some(_), Some(p)) = (self.cfg.cache.as_ref(), cached) {
             self.cache_stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
-            if let Some(bytes) = self.try_cache_hit(map, generation, index, chunk, p).await {
+            if let Some(parts) = self.try_cache_hit(map, generation, index, chunk, p).await {
                 self.cache_stats.hits.fetch_add(1, Ordering::Relaxed);
                 self.touch_cache(generation, index);
-                return Ok(bytes);
+                return Ok(parts);
             }
             self.cache_stats.fallbacks.fetch_add(1, Ordering::Relaxed);
         } else if self.cfg.cache.is_some() {
             self.cache_stats.misses.fetch_add(1, Ordering::Relaxed);
         }
-        let bytes = self.read_durable(map, chunk).await?;
+        let parts = self.read_durable(map, chunk).await?;
         if self.cfg.cache.is_some() && cached.is_none() {
-            self.maybe_populate(map, generation, index, chunk, bytes.clone());
+            // Populating needs the contiguous chunk (one copy, off the
+            // GET's path once queued).
+            self.maybe_populate(map, generation, index, chunk, concat_frames(parts.clone()));
         }
-        Ok(bytes)
+        Ok(parts)
     }
 
     /// Durable read of one chunk (RFC-004 §5.6).
@@ -188,7 +210,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         &self,
         map: &ClusterMap,
         chunk: &ChunkRecord,
-    ) -> Result<Bytes, S3Error> {
+    ) -> Result<Vec<Bytes>, S3Error> {
         let group = map.groups.get(&chunk.placement.group_id).ok_or_else(|| {
             s3_error!(
                 InternalError,
@@ -226,7 +248,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         index: u32,
         chunk: &ChunkRecord,
         p: &CachePlacement,
-    ) -> Option<Bytes> {
+    ) -> Option<Vec<Bytes>> {
         let Some(group) = map.groups.get(&p.group_id) else {
             self.cache_stats
                 .fallback_unknown_group
@@ -269,11 +291,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 group.clone(),
                 generation,
                 index,
-                r.bytes.clone(),
+                concat_frames(r.parts.clone()),
                 r.missing,
             );
         }
-        Some(r.bytes)
+        Some(r.parts)
     }
 
     fn invalidate_cache(
@@ -524,7 +546,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 cached += 1;
                 continue;
             }
-            let bytes = self.read_durable(&map, chunk).await?;
+            let bytes = concat_frames(self.read_durable(&map, chunk).await?);
             let cid = arca_lake_common::chunk_id(&generation, *index);
             let Some(group) = tcache::choose_group(map.groups.values(), &cfg.tier, &cid) else {
                 return Err(s3_error!(
