@@ -51,6 +51,7 @@ fn info(etag: &str) -> CommitInfo {
         content_type: None,
         user_metadata: vec![],
         chunk_count: 1,
+        checksum: None,
     }
 }
 

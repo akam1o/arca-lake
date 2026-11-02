@@ -1,20 +1,30 @@
 //! Stored record types and their encoding.
 //!
-//! Encoding (prototype): one version byte followed by `postcard`. Postcard is
-//! compact but not self-describing, so any field change requires a new
-//! record version and a decoder for the old one. Whether the production
-//! format should be protobuf instead is an RFC-003 question.
+//! Encoding: one version byte followed by `postcard`. Postcard is compact
+//! but not self-describing, so any field change requires a new record
+//! version and a decoder for the old one (RFC-014 §5.4). Version 1 is the
+//! Phase 0–2 encoding; version 2 (Phase 3.1) adds the generation kind and
+//! checksum, bucket ownership and policy, and the multipart records.
+//! Writers always encode the current version; readers accept the current
+//! and the previous one.
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::MetaError;
 use crate::kv::Value;
 
-/// Record encoding version.
-pub const RECORD_VERSION: u8 = 1;
+/// Record encoding version written by this build.
+pub const RECORD_VERSION: u8 = 2;
+
+/// Oldest record encoding version this build decodes.
+pub const RECORD_VERSION_MIN: u8 = 1;
 
 /// Generation identifier: a UUID (version 7, time ordered) as raw bytes.
 pub type GenId = [u8; 16];
+
+/// Multipart upload identifier: a UUID (version 7) as raw bytes; rendered
+/// as 32 hex characters on the wire.
+pub type UploadId = [u8; 16];
 
 /// Allocate a new generation ID.
 #[must_use]
@@ -28,8 +38,41 @@ pub fn new_version_id() -> String {
     uuid::Uuid::now_v7().simple().to_string()
 }
 
+/// Allocate a new upload ID.
+#[must_use]
+pub fn new_upload_id() -> UploadId {
+    *uuid::Uuid::now_v7().as_bytes()
+}
+
+/// Render an upload ID for the wire.
+#[must_use]
+pub fn upload_id_to_string(id: &UploadId) -> String {
+    uuid::Uuid::from_bytes(*id).simple().to_string()
+}
+
+/// Parse a wire upload ID (32 hex characters).
+#[must_use]
+pub fn upload_id_from_str(s: &str) -> Option<UploadId> {
+    if s.len() != 32 {
+        return None;
+    }
+    uuid::Uuid::try_parse(s).ok().map(|u| *u.as_bytes())
+}
+
 /// The version ID of objects in buckets without versioning.
 pub const NULL_VERSION_ID: &str = "null";
+
+/// A stored record type: how to decode its previous encoding version.
+pub trait Record: DeserializeOwned {
+    /// Decode the version-1 body (the bytes after the version byte).
+    ///
+    /// # Errors
+    ///
+    /// [`MetaError::Codec`] if the bytes are not a valid version-1 record.
+    fn decode_v1(body: &[u8]) -> Result<Self, MetaError> {
+        postcard::from_bytes(body).map_err(|e| MetaError::Codec(e.to_string()))
+    }
+}
 
 /// Encode a record.
 ///
@@ -40,19 +83,24 @@ pub fn encode<T: Serialize>(v: &T) -> Result<Value, MetaError> {
     postcard::to_extend(v, vec![RECORD_VERSION]).map_err(|e| MetaError::Codec(e.to_string()))
 }
 
-/// Decode a record.
+/// Decode a record of the current or the previous encoding version.
 ///
 /// # Errors
 ///
 /// Returns [`MetaError::Codec`] on an unknown version or malformed bytes.
-pub fn decode<T: DeserializeOwned>(b: &[u8]) -> Result<T, MetaError> {
+pub fn decode<T: Record>(b: &[u8]) -> Result<T, MetaError> {
     match b.split_first() {
         Some((&RECORD_VERSION, rest)) => {
             postcard::from_bytes(rest).map_err(|e| MetaError::Codec(e.to_string()))
         }
+        Some((&1, rest)) => T::decode_v1(rest),
         Some((v, _)) => Err(MetaError::Codec(format!("unknown record version {v}"))),
         None => Err(MetaError::Codec("empty record".into())),
     }
+}
+
+macro_rules! unchanged_since_v1 {
+    ($($t:ty),* $(,)?) => { $(impl Record for $t {})* };
 }
 
 /// Bucket versioning state.
@@ -77,6 +125,34 @@ pub struct BucketRecord {
     pub versioning: Versioning,
     /// Creation time, Unix milliseconds.
     pub created_ms: u64,
+    /// Owning principal (RFC-012 §5.3). Empty for buckets created before
+    /// ownership existed: nobody but the operator can grant access.
+    pub owner: String,
+    /// Bucket policy document as registered (validated, RFC-012 §5.3.3).
+    pub policy: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BucketRecordV1 {
+    id: u64,
+    name: String,
+    versioning: Versioning,
+    created_ms: u64,
+}
+
+impl Record for BucketRecord {
+    fn decode_v1(body: &[u8]) -> Result<Self, MetaError> {
+        let v: BucketRecordV1 =
+            postcard::from_bytes(body).map_err(|e| MetaError::Codec(e.to_string()))?;
+        Ok(Self {
+            id: v.id,
+            name: v.name,
+            versioning: v.versioning,
+            created_ms: v.created_ms,
+            owner: String::new(),
+            policy: None,
+        })
+    }
 }
 
 /// The current version of an object key. Denormalizes what listing needs so
@@ -145,6 +221,134 @@ impl GenState {
     }
 }
 
+/// Checksum algorithms (`x-amz-checksum-*`, RFC-007 §5.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChecksumAlgorithm {
+    /// CRC-32 (IEEE).
+    Crc32,
+    /// CRC-32C (Castagnoli).
+    Crc32c,
+    /// CRC-64/NVME.
+    Crc64Nvme,
+    /// SHA-1.
+    Sha1,
+    /// SHA-256.
+    Sha256,
+}
+
+impl ChecksumAlgorithm {
+    /// AWS header name suffix (`x-amz-checksum-<name>`), upper case as in
+    /// the `ChecksumAlgorithm` API field.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Crc32 => "CRC32",
+            Self::Crc32c => "CRC32C",
+            Self::Crc64Nvme => "CRC64NVME",
+            Self::Sha1 => "SHA1",
+            Self::Sha256 => "SHA256",
+        }
+    }
+
+    /// Parse the API name (case-insensitive).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_uppercase().as_str() {
+            "CRC32" => Some(Self::Crc32),
+            "CRC32C" => Some(Self::Crc32c),
+            "CRC64NVME" => Some(Self::Crc64Nvme),
+            "SHA1" => Some(Self::Sha1),
+            "SHA256" => Some(Self::Sha256),
+            _ => None,
+        }
+    }
+
+    /// Length of a checksum value in bytes.
+    #[must_use]
+    pub const fn byte_len(self) -> usize {
+        match self {
+            Self::Crc32 | Self::Crc32c => 4,
+            Self::Crc64Nvme => 8,
+            Self::Sha1 => 20,
+            Self::Sha256 => 32,
+        }
+    }
+
+    /// Whether checksums of parts can be combined into a full-object
+    /// checksum (CRCs can, digests cannot).
+    #[must_use]
+    pub const fn combinable(self) -> bool {
+        matches!(self, Self::Crc32 | Self::Crc32c | Self::Crc64Nvme)
+    }
+}
+
+/// Whether a checksum covers the whole object or is a checksum of the
+/// parts' checksums (`x-amz-checksum-type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChecksumType {
+    /// One checksum over all bytes.
+    FullObject,
+    /// Checksum of the concatenated part checksums, suffixed `-N`.
+    Composite,
+}
+
+impl ChecksumType {
+    /// API name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::FullObject => "FULL_OBJECT",
+            Self::Composite => "COMPOSITE",
+        }
+    }
+
+    /// Parse the API name (case-insensitive).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_uppercase().as_str() {
+            "FULL_OBJECT" => Some(Self::FullObject),
+            "COMPOSITE" => Some(Self::Composite),
+            _ => None,
+        }
+    }
+}
+
+/// A stored checksum.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Checksum {
+    /// Algorithm.
+    pub algorithm: ChecksumAlgorithm,
+    /// Full-object or composite.
+    pub kind: ChecksumType,
+    /// Raw value (`algorithm.len()` bytes).
+    pub value: Vec<u8>,
+    /// Number of parts for a composite checksum (`-N` suffix).
+    pub parts: Option<u32>,
+}
+
+/// What a generation is (RFC-007 §5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GenKind {
+    /// A whole object with inline chunk records.
+    Object,
+    /// One part of a multipart upload, with inline chunk records.
+    Part {
+        /// The upload.
+        upload_id: UploadId,
+        /// Part number (1–10 000).
+        part_number: u32,
+    },
+    /// A completed multipart object: no chunk records of its own; part
+    /// manifest references `("al","g",root,"m",n)` instead.
+    MultipartRoot {
+        /// The upload it completed (its record is removed when the root is
+        /// finished by GC).
+        upload_id: UploadId,
+        /// Number of part references.
+        part_count: u32,
+    },
+}
+
 /// One immutable generation of an object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerationHeader {
@@ -166,6 +370,119 @@ pub struct GenerationHeader {
     pub chunk_count: u32,
     /// Creation time, Unix milliseconds.
     pub created_ms: u64,
+    /// Kind (object, part, multipart root).
+    pub kind: GenKind,
+    /// Stored checksum, if the client supplied one.
+    pub checksum: Option<Checksum>,
+}
+
+#[derive(Deserialize)]
+struct GenerationHeaderV1 {
+    state: GenState,
+    bucket_id: u64,
+    key: String,
+    size: u64,
+    etag: String,
+    content_type: Option<String>,
+    user_metadata: Vec<(String, String)>,
+    chunk_count: u32,
+    created_ms: u64,
+}
+
+impl Record for GenerationHeader {
+    fn decode_v1(body: &[u8]) -> Result<Self, MetaError> {
+        let v: GenerationHeaderV1 =
+            postcard::from_bytes(body).map_err(|e| MetaError::Codec(e.to_string()))?;
+        Ok(Self {
+            state: v.state,
+            bucket_id: v.bucket_id,
+            key: v.key,
+            size: v.size,
+            etag: v.etag,
+            content_type: v.content_type,
+            user_metadata: v.user_metadata,
+            chunk_count: v.chunk_count,
+            created_ms: v.created_ms,
+            kind: GenKind::Object,
+            checksum: None,
+        })
+    }
+}
+
+/// State of a multipart upload (RFC-007 §5.3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MultipartState {
+    /// Accepting parts.
+    Open,
+    /// Abort in progress: parts are being retired in batches.
+    Aborting,
+    /// Completed: the object generation is `root`.
+    Completed {
+        /// The multipart root generation.
+        root: GenId,
+    },
+}
+
+/// A multipart upload (`("al","mpu",bucket_id,key,upload_id)`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultipartRecord {
+    /// Upload ID.
+    pub upload_id: UploadId,
+    /// Bucket.
+    pub bucket_id: u64,
+    /// Object key.
+    pub key: String,
+    /// Initiation time, Unix milliseconds.
+    pub initiated_ms: u64,
+    /// Initiating principal.
+    pub owner: String,
+    /// Content type for the completed object.
+    pub content_type: Option<String>,
+    /// User metadata for the completed object.
+    pub user_metadata: Vec<(String, String)>,
+    /// Checksum algorithm announced at creation, if any.
+    pub checksum_algorithm: Option<ChecksumAlgorithm>,
+    /// Checksum type announced at creation, if any.
+    pub checksum_type: Option<ChecksumType>,
+    /// State.
+    pub state: MultipartState,
+}
+
+/// A sealed part of an open upload (`("al","mpp",upload_id,part_number)`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartRecord {
+    /// The part generation.
+    pub generation: GenId,
+    /// Part size.
+    pub size: u64,
+    /// MD5 ETag of the part.
+    pub etag: String,
+    /// Part checksum, if supplied.
+    pub checksum: Option<Checksum>,
+    /// Chunk records of the part generation.
+    pub chunk_count: u32,
+    /// Seal time, Unix milliseconds.
+    pub uploaded_ms: u64,
+}
+
+/// A part manifest reference of a multipart root
+/// (`("al","g",root,"m",part_number)`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartRef {
+    /// The part generation (immutable, holds the chunk records).
+    pub generation: GenId,
+    /// Part number.
+    pub part_number: u32,
+    /// Byte offset of the part within the object.
+    pub offset: u64,
+    /// Part size.
+    pub size: u64,
+    /// Chunk records of the part.
+    pub chunk_count: u32,
+    /// MD5 ETag of the part.
+    pub etag: String,
+    /// Part checksum, if any.
+    pub checksum: Option<Checksum>,
 }
 
 /// Where a chunk's durable copy lives.
@@ -313,9 +630,99 @@ impl GroupRecord {
     }
 }
 
+unchanged_since_v1!(
+    CurrentPointer,
+    VersionRecord,
+    ChunkRecord,
+    CachePlacement,
+    NodeRecord,
+    GroupRecord,
+    MultipartRecord,
+    PartRecord,
+    PartRef,
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_1_records_decode_with_defaults() {
+        let h1 = GenerationHeaderV1Enc {
+            state: GenState::Committed,
+            bucket_id: 1,
+            key: "k".into(),
+            size: 3,
+            etag: "e".into(),
+            content_type: Some("t".into()),
+            user_metadata: vec![],
+            chunk_count: 1,
+            created_ms: 9,
+        };
+        let bytes = postcard::to_extend(&h1, vec![1u8]).unwrap();
+        let h = decode::<GenerationHeader>(&bytes).unwrap();
+        assert_eq!(h.kind, GenKind::Object);
+        assert_eq!(h.checksum, None);
+        assert_eq!(h.etag, "e");
+        let b1 = BucketRecordV1Enc {
+            id: 5,
+            name: "b".into(),
+            versioning: Versioning::Enabled,
+            created_ms: 1,
+        };
+        let bytes = postcard::to_extend(&b1, vec![1u8]).unwrap();
+        let b = decode::<BucketRecord>(&bytes).unwrap();
+        assert_eq!(b.owner, "");
+        assert_eq!(b.policy, None);
+        assert_eq!(b.versioning, Versioning::Enabled);
+        // Unchanged records: version 1 and 2 bodies are identical.
+        let c = ChunkRecord {
+            chunk_id: [1; 16],
+            offset: 0,
+            len: 1,
+            scheme: "s".into(),
+            data_shards: 1,
+            parity_shards: 1,
+            crc32c: 0,
+            placement: DurablePlacement {
+                group_id: 1,
+                epoch: 1,
+            },
+        };
+        let mut v1 = encode(&c).unwrap();
+        v1[0] = 1;
+        assert_eq!(decode::<ChunkRecord>(&v1).unwrap(), c);
+    }
+
+    #[derive(Serialize)]
+    struct GenerationHeaderV1Enc {
+        state: GenState,
+        bucket_id: u64,
+        key: String,
+        size: u64,
+        etag: String,
+        content_type: Option<String>,
+        user_metadata: Vec<(String, String)>,
+        chunk_count: u32,
+        created_ms: u64,
+    }
+
+    #[derive(Serialize)]
+    struct BucketRecordV1Enc {
+        id: u64,
+        name: String,
+        versioning: Versioning,
+        created_ms: u64,
+    }
+
+    #[test]
+    fn upload_ids_roundtrip() {
+        let u = new_upload_id();
+        let s = upload_id_to_string(&u);
+        assert_eq!(s.len(), 32);
+        assert_eq!(upload_id_from_str(&s), Some(u));
+        assert_eq!(upload_id_from_str("nope"), None);
+    }
 
     #[test]
     fn roundtrip_and_version_check() {
@@ -329,6 +736,8 @@ mod tests {
             user_metadata: vec![("a".into(), "b".into())],
             chunk_count: 0,
             created_ms: 1,
+            kind: GenKind::Object,
+            checksum: None,
         };
         let b = encode(&h).unwrap();
         assert_eq!(b[0], RECORD_VERSION);

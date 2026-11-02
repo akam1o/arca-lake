@@ -44,6 +44,31 @@ pub enum MetaError {
     /// A stored record could not be decoded.
     #[error("record codec error: {0}")]
     Codec(String),
+    /// The multipart upload does not exist or is no longer open.
+    #[error("no such upload")]
+    NoSuchUpload,
+    /// The version does not exist.
+    #[error("no such version")]
+    NoSuchVersion,
+    /// A listed part does not exist or its ETag does not match.
+    #[error("invalid part {0}")]
+    InvalidPart(u32),
+    /// Parts are not in ascending order.
+    #[error("invalid part order")]
+    InvalidPartOrder,
+    /// A part other than the last is smaller than the minimum part size.
+    #[error("part {0} too small")]
+    EntityTooSmall(u32),
+    /// The metadata schema version is outside this build's range.
+    #[error("metadata schema {found} requires software with schema in [{min}, {max}]")]
+    SchemaMismatch {
+        /// Version found in the store.
+        found: u64,
+        /// Oldest version this build serves.
+        min: u64,
+        /// Newest version this build serves.
+        max: u64,
+    },
 }
 
 /// Convenience alias.

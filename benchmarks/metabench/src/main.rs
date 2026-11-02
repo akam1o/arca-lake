@@ -164,6 +164,7 @@ async fn committed_generation<S: KvStore>(
             content_type: None,
             user_metadata: Vec::new(),
             chunk_count: chunks,
+            checksum: None,
         },
         &Precondition::default(),
         now,

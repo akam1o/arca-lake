@@ -12,6 +12,7 @@ pub mod cluster;
 pub mod gc;
 pub mod leader;
 pub mod list;
+pub mod multipart;
 pub mod object;
 
 use crate::error::Result;
@@ -20,7 +21,7 @@ use crate::records::{BucketRecord, CurrentPointer, GenerationHeader, decode, enc
 use crate::{MetaError, keys};
 
 /// Read and decode a record, if present.
-async fn read<T: serde::de::DeserializeOwned, X: Txn>(tx: &mut X, key: &[u8]) -> Result<Option<T>> {
+async fn read<T: crate::records::Record, X: Txn>(tx: &mut X, key: &[u8]) -> Result<Option<T>> {
     match tx.get(key).await? {
         Some(v) => Ok(Some(decode(&v)?)),
         None => Ok(None),

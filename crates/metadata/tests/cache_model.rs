@@ -83,6 +83,7 @@ async fn setup(kv: &MemKv) -> Vec<GenId> {
                     content_type: None,
                     user_metadata: vec![],
                     chunk_count: 3,
+                    checksum: None,
                 },
                 &Precondition::default(),
                 2,

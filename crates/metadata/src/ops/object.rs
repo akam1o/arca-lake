@@ -18,8 +18,8 @@ use crate::error::Result;
 use crate::kv::{KvStore, Txn};
 use crate::ops::{bucket_by_id, bucket_by_name, current_pointer, generation_header, read, write};
 use crate::records::{
-    ChunkRecord, CurrentPointer, GenId, GenState, GenerationHeader, NULL_VERSION_ID, VersionRecord,
-    Versioning, encode, new_gen_id, new_version_id,
+    Checksum, ChunkRecord, CurrentPointer, GenId, GenKind, GenState, GenerationHeader,
+    NULL_VERSION_ID, VersionRecord, Versioning, encode, new_gen_id, new_version_id,
 };
 use crate::{MetaError, keys, transact, transact_idempotent};
 
@@ -68,6 +68,8 @@ pub async fn begin_put<S: KvStore>(
                     user_metadata: Vec::new(),
                     chunk_count: 0,
                     created_ms: now_ms,
+                    kind: GenKind::Object,
+                    checksum: None,
                 };
                 write(tx, &keys::gen_header(&generation), &header)?;
                 tx.set(&keys::pending(lease_until_ms, &generation), &[]);
@@ -225,12 +227,16 @@ pub struct CommitInfo {
     pub user_metadata: Vec<(String, String)>,
     /// Number of chunk records written with [`append_chunks`].
     pub chunk_count: u32,
+    /// Client-supplied checksum, verified by the caller before commit.
+    pub checksum: Option<Checksum>,
 }
 
 /// Conditional-write preconditions, evaluated inside the commit transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Precondition {
-    /// `If-Match`: the current version's ETag must equal this.
+    /// `If-Match`: the current version's ETag must equal this. A key with
+    /// no current version fails with [`MetaError::NoSuchKey`] (AWS
+    /// behaviour for conditional PUT and DELETE).
     pub if_match: Option<String>,
     /// `If-None-Match: *`: no current (non-delete-marker) version may exist.
     pub if_none_match_any: bool,
@@ -288,40 +294,33 @@ pub async fn commit_put<S: KvStore>(
                     content_type: info.content_type.clone(),
                     user_metadata: info.user_metadata.clone(),
                     chunk_count: info.chunk_count,
+                    checksum: info.checksum.clone(),
                     ..header.clone()
                 };
                 write(tx, &keys::gen_header(&generation), &committed)?;
                 if let GenState::Pending { lease_until_ms } = header.state {
                     tx.clear(&keys::pending(lease_until_ms, &generation));
                 }
-
-                let pointer = CurrentPointer {
-                    generation,
-                    version_id: version_id.clone(),
-                    delete_marker: false,
-                    next_ordinal: ordinal + 1,
-                    size: info.size,
-                    etag: info.etag.clone(),
-                    last_modified_ms: now_ms,
-                };
-                write(tx, &keys::object_current(bucket.id, &header.key), &pointer)?;
-                if bucket.versioning == Versioning::Enabled {
-                    let record = VersionRecord {
+                let published = publish_version(
+                    tx,
+                    &bucket,
+                    &header.key,
+                    current.as_ref(),
+                    Publish {
                         generation,
-                        version_id: version_id.clone(),
+                        version_id: &version_id,
                         delete_marker: false,
-                        committed_ms: now_ms,
+                        ordinal,
                         size: info.size,
-                        etag: info.etag.clone(),
-                    };
-                    write(tx, &keys::version(bucket.id, &header.key, ordinal), &record)?;
-                }
-
-                let retired = retire_displaced(tx, current.as_ref(), now_ms).await?;
+                        etag: &info.etag,
+                        now_ms,
+                    },
+                )
+                .await?;
                 Ok(Committed {
                     generation,
                     version_id,
-                    retired,
+                    retired: published,
                 })
             })
         },
@@ -346,7 +345,7 @@ pub async fn abort_put<S: KvStore>(store: &S, generation: &GenId, now_ms: u64) -
                     "pending",
                 ));
             };
-            tx.clear(&keys::pending(lease_until_ms, &generation));
+            let _ = lease_until_ms;
             retire(tx, &generation, &header, now_ms)
         })
     })
@@ -356,6 +355,7 @@ pub async fn abort_put<S: KvStore>(store: &S, generation: &GenId, now_ms: u64) -
 /// What a generation turned out to be after a commit whose outcome was
 /// unknown (RFC-003 §5.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum CommitOutcome {
     /// The commit was applied: the generation is current (or a version).
     Committed(GenerationHeader),
@@ -413,7 +413,70 @@ pub struct ObjectInfo {
     pub header: GenerationHeader,
 }
 
-/// HEAD semantics.
+/// How a read resolves the version of a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lookup {
+    /// The current version.
+    Current,
+    /// A specific version id (`"null"` selects the null version).
+    Version(&'static str),
+}
+
+/// What a lookup found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum Found {
+    /// A data version.
+    Object(ObjectInfo),
+    /// A delete marker (the current one, or the requested version).
+    DeleteMarker {
+        /// Its version id.
+        version_id: String,
+        /// Its time.
+        last_modified_ms: u64,
+    },
+    /// No current version (lookup `Current`) or no such version.
+    Missing,
+}
+
+/// Resolve `version_id` (or the current version) to a pointer-shaped view:
+/// for a non-current version the pointer is synthesized from its version
+/// record (`next_ordinal` is 0 and meaningless).
+async fn resolve_pointer<X: Txn>(
+    tx: &mut X,
+    bucket_id: u64,
+    key: &str,
+    version_id: Option<&str>,
+) -> Result<Option<(CurrentPointer, bool)>> {
+    let current = current_pointer(tx, bucket_id, key).await?;
+    let Some(wanted) = version_id else {
+        return Ok(current.map(|c| (c, true)));
+    };
+    if let Some(c) = &current
+        && c.version_id == wanted
+    {
+        return Ok(Some((c.clone(), true)));
+    }
+    for (_, v) in version_records(tx, bucket_id, key).await? {
+        if v.version_id == wanted {
+            return Ok(Some((
+                CurrentPointer {
+                    generation: v.generation,
+                    version_id: v.version_id,
+                    delete_marker: v.delete_marker,
+                    next_ordinal: 0,
+                    size: v.size,
+                    etag: v.etag,
+                    last_modified_ms: v.committed_ms,
+                },
+                false,
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// HEAD semantics for the current version.
 ///
 /// # Errors
 ///
@@ -423,36 +486,63 @@ pub async fn head_object<S: KvStore>(
     bucket: &str,
     key: &str,
 ) -> Result<Option<ObjectInfo>> {
-    transact(store, (bucket, key), |tx, env| {
+    match head_version(store, bucket, key, None).await? {
+        Found::Object(info) => Ok(Some(info)),
+        Found::DeleteMarker { .. } | Found::Missing => Ok(None),
+    }
+}
+
+/// HEAD semantics for the current version or a specific version id.
+///
+/// # Errors
+///
+/// [`MetaError::NoSuchBucket`].
+pub async fn head_version<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+) -> Result<Found> {
+    transact(store, (bucket, key, version_id), |tx, env| {
         Box::pin(async move {
-            let (bucket, key) = *env;
+            let (bucket, key, version_id) = *env;
             let b = bucket_by_name(tx, bucket).await?;
-            let Some(pointer) = current_pointer(tx, b.id, key).await? else {
-                return Ok(None);
+            let Some((pointer, _)) = resolve_pointer(tx, b.id, key, version_id).await? else {
+                return Ok(Found::Missing);
             };
             if pointer.delete_marker {
-                return Ok(None);
+                return Ok(Found::DeleteMarker {
+                    version_id: pointer.version_id,
+                    last_modified_ms: pointer.last_modified_ms,
+                });
             }
             let header = generation_header(tx, &pointer.generation).await?;
-            Ok(Some(ObjectInfo { pointer, header }))
+            Ok(Found::Object(ObjectInfo { pointer, header }))
         })
     })
     .await
 }
 
-/// Everything a GET needs, read in one transaction: the current pointer, the
-/// generation header, and the chunk records (optionally only `chunks`).
+/// Everything a GET needs, read in one transaction: the pointer, the
+/// generation header, and either the chunk records (optionally only
+/// `chunks`) or, for a multipart root, the part manifest references.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
-    /// Current pointer.
+    /// Pointer of the version read (synthesized for a non-current version).
     pub pointer: CurrentPointer,
+    /// Whether the version read is the current one.
+    pub is_latest: bool,
     /// Generation header.
     pub header: GenerationHeader,
-    /// Chunk records in index order.
+    /// Chunk records in index order (empty for a multipart root).
     pub chunks: Vec<(u32, ChunkRecord)>,
     /// Cache placements of the same generation, read in the same
     /// transaction, in index order (RFC-006 §5.3).
     pub cache: Vec<(u32, crate::records::CachePlacement)>,
+    /// Part manifest references in part-number order (multipart roots
+    /// only). Chunk records of each part are read with
+    /// [`read_part_manifest`].
+    pub parts: Vec<crate::records::PartRef>,
 }
 
 /// Read the manifest of the current version.
@@ -466,34 +556,125 @@ pub async fn read_manifest<S: KvStore>(
     key: &str,
     chunks: Option<Range<u32>>,
 ) -> Result<Option<Manifest>> {
-    transact(store, (bucket, key, &chunks), |tx, env| {
+    match read_manifest_version(store, bucket, key, None, chunks).await? {
+        ManifestFound::Manifest(m) => Ok(Some(m)),
+        ManifestFound::DeleteMarker { .. } | ManifestFound::Missing => Ok(None),
+    }
+}
+
+/// Result of [`read_manifest_version`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum ManifestFound {
+    /// A data version.
+    Manifest(Manifest),
+    /// A delete marker.
+    DeleteMarker {
+        /// Its version id.
+        version_id: String,
+        /// Its time.
+        last_modified_ms: u64,
+    },
+    /// No current version, or no such version.
+    Missing,
+}
+
+/// Read the manifest of the current version or of `version_id`.
+///
+/// # Errors
+///
+/// [`MetaError::NoSuchBucket`].
+pub async fn read_manifest_version<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+    chunks: Option<Range<u32>>,
+) -> Result<ManifestFound> {
+    transact(store, (bucket, key, version_id, &chunks), |tx, env| {
         Box::pin(async move {
-            let (bucket, key, chunks) = *env;
+            let (bucket, key, version_id, chunks) = *env;
             let b = bucket_by_name(tx, bucket).await?;
-            let Some(pointer) = current_pointer(tx, b.id, key).await? else {
-                return Ok(None);
+            let Some((pointer, is_latest)) = resolve_pointer(tx, b.id, key, version_id).await?
+            else {
+                return Ok(ManifestFound::Missing);
             };
             if pointer.delete_marker {
-                return Ok(None);
+                return Ok(ManifestFound::DeleteMarker {
+                    version_id: pointer.version_id,
+                    last_modified_ms: pointer.last_modified_ms,
+                });
             }
             let header = generation_header(tx, &pointer.generation).await?;
-            let range = match chunks {
-                Some(r) => keys::gen_chunks_subrange(&pointer.generation, r.clone()),
-                None => keys::gen_chunks_range(&pointer.generation),
-            };
+            let mut parts = Vec::new();
             let mut out = Vec::new();
-            for (k, v) in tx.get_range(&range, usize::MAX, false).await? {
+            if matches!(header.kind, GenKind::MultipartRoot { .. }) {
+                for (_, v) in tx
+                    .get_range(
+                        &keys::part_refs_range(&pointer.generation),
+                        usize::MAX,
+                        false,
+                    )
+                    .await?
+                {
+                    parts.push(crate::records::decode::<crate::records::PartRef>(&v)?);
+                }
+            } else {
+                let range = match chunks {
+                    Some(r) => keys::gen_chunks_subrange(&pointer.generation, r.clone()),
+                    None => keys::gen_chunks_range(&pointer.generation),
+                };
+                for (k, v) in tx.get_range(&range, usize::MAX, false).await? {
+                    let index = keys::chunk_index_from(&k)
+                        .ok_or_else(|| MetaError::Codec("unexpected key in chunk range".into()))?;
+                    out.push((index, crate::records::decode::<ChunkRecord>(&v)?));
+                }
+            }
+            let cache = crate::ops::cache::placements_in_tx(tx, &pointer.generation).await?;
+            Ok(ManifestFound::Manifest(Manifest {
+                pointer,
+                is_latest,
+                header,
+                chunks: out,
+                cache,
+                parts,
+            }))
+        })
+    })
+    .await
+}
+
+/// Chunk records and cache placements of one part generation (immutable
+/// once sealed; RFC-007 §5.3). `None` if the generation is gone.
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn read_part_manifest<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+) -> Result<
+    Option<(
+        Vec<(u32, ChunkRecord)>,
+        Vec<(u32, crate::records::CachePlacement)>,
+    )>,
+> {
+    transact(store, *generation, |tx, generation| {
+        Box::pin(async move {
+            if tx.get(&keys::gen_header(generation)).await?.is_none() {
+                return Ok(None);
+            }
+            let mut out = Vec::new();
+            for (k, v) in tx
+                .get_range(&keys::gen_chunks_range(generation), usize::MAX, false)
+                .await?
+            {
                 let index = keys::chunk_index_from(&k)
                     .ok_or_else(|| MetaError::Codec("unexpected key in chunk range".into()))?;
                 out.push((index, crate::records::decode::<ChunkRecord>(&v)?));
             }
-            let cache = crate::ops::cache::placements_in_tx(tx, &pointer.generation).await?;
-            Ok(Some(Manifest {
-                pointer,
-                header,
-                chunks: out,
-                cache,
-            }))
+            let cache = crate::ops::cache::placements_in_tx(tx, generation).await?;
+            Ok(Some((out, cache)))
         })
     })
     .await
@@ -519,15 +700,33 @@ pub async fn delete_object<S: KvStore>(
     key: &str,
     now_ms: u64,
 ) -> Result<Deleted> {
+    delete_object_if(store, bucket, key, &Precondition::default(), now_ms).await
+}
+
+/// DELETE without a version ID, with `If-Match` evaluated in the same
+/// transaction (RFC-007 §5.5).
+///
+/// # Errors
+///
+/// [`MetaError::NoSuchBucket`], [`MetaError::PreconditionFailed`],
+/// [`MetaError::NoSuchKey`] (`If-Match` on a key without a current version).
+pub async fn delete_object_if<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+    pre: &Precondition,
+    now_ms: u64,
+) -> Result<Deleted> {
     let fresh_version_id = new_version_id();
     transact(
         store,
-        (bucket, key, now_ms, fresh_version_id.as_str()),
+        (bucket, key, pre, now_ms, fresh_version_id.as_str()),
         |tx, env| {
             Box::pin(async move {
-                let (bucket, key, now_ms, fresh_version_id) = *env;
+                let (bucket, key, pre, now_ms, fresh_version_id) = *env;
                 let b = bucket_by_name(tx, bucket).await?;
                 let current = current_pointer(tx, b.id, key).await?;
+                check_preconditions(tx, pre, current.as_ref()).await?;
                 match b.versioning {
                     Versioning::Disabled => {
                         let retired = retire_displaced(tx, current.as_ref(), now_ms).await?;
@@ -544,28 +743,22 @@ pub async fn delete_object<S: KvStore>(
                             NULL_VERSION_ID.to_string()
                         };
                         let ordinal = current.as_ref().map_or(0, |c| c.next_ordinal);
-                        let marker = CurrentPointer {
-                            generation: [0; 16],
-                            version_id: version_id.clone(),
-                            delete_marker: true,
-                            next_ordinal: ordinal + 1,
-                            size: 0,
-                            etag: String::new(),
-                            last_modified_ms: now_ms,
-                        };
-                        write(tx, &keys::object_current(b.id, key), &marker)?;
-                        if b.versioning == Versioning::Enabled {
-                            let record = VersionRecord {
+                        let retired = publish_version(
+                            tx,
+                            &b,
+                            key,
+                            current.as_ref(),
+                            Publish {
                                 generation: [0; 16],
-                                version_id: version_id.clone(),
+                                version_id: &version_id,
                                 delete_marker: true,
-                                committed_ms: now_ms,
+                                ordinal,
                                 size: 0,
-                                etag: String::new(),
-                            };
-                            write(tx, &keys::version(b.id, key, ordinal), &record)?;
-                        }
-                        let retired = retire_displaced(tx, current.as_ref(), now_ms).await?;
+                                etag: "",
+                                now_ms,
+                            },
+                        )
+                        .await?;
                         Ok(Deleted {
                             delete_marker_version: Some(version_id),
                             retired,
@@ -575,6 +768,104 @@ pub async fn delete_object<S: KvStore>(
             })
         },
     )
+    .await
+}
+
+/// Outcome of a version-specific DELETE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedVersion {
+    /// Whether the removed version was a delete marker.
+    pub was_delete_marker: bool,
+    /// Generation retired, if the version held data.
+    pub retired: Option<GenId>,
+    /// Whether the version existed (a missing version is a successful,
+    /// idempotent no-op, RFC-007 §5.4).
+    pub existed: bool,
+}
+
+/// DELETE with a version ID: removes exactly that version (data version or
+/// delete marker). When it was the current version, the newest remaining
+/// version becomes current; when none remains the key disappears.
+/// Idempotent on the version id.
+///
+/// # Errors
+///
+/// [`MetaError::NoSuchBucket`].
+pub async fn delete_version<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+    version_id: &str,
+    now_ms: u64,
+) -> Result<DeletedVersion> {
+    transact(store, (bucket, key, version_id, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (bucket, key, version_id, now_ms) = *env;
+            let b = bucket_by_name(tx, bucket).await?;
+            let current = current_pointer(tx, b.id, key).await?;
+            let versions = version_records(tx, b.id, key).await?;
+            let target = versions
+                .iter()
+                .find(|(_, v)| v.version_id == version_id)
+                .cloned();
+            let is_current = current.as_ref().is_some_and(|c| c.version_id == version_id);
+            if !is_current && target.is_none() {
+                return Ok(DeletedVersion {
+                    was_delete_marker: false,
+                    retired: None,
+                    existed: false,
+                });
+            }
+            let (generation, was_delete_marker) = match (&current, &target) {
+                (Some(c), _) if is_current => (c.generation, c.delete_marker),
+                (_, Some((_, v))) => (v.generation, v.delete_marker),
+                _ => {
+                    return Ok(DeletedVersion {
+                        was_delete_marker: false,
+                        retired: None,
+                        existed: false,
+                    });
+                }
+            };
+            if let Some((ordinal, _)) = &target {
+                tx.clear(&keys::version(b.id, key, *ordinal));
+            }
+            let retired = if was_delete_marker {
+                None
+            } else {
+                let header = generation_header(tx, &generation).await?;
+                retire(tx, &generation, &header, now_ms)?;
+                Some(generation)
+            };
+            if let Some(c) = current.as_ref().filter(|_| is_current) {
+                // Newest remaining version becomes current.
+                let next = versions
+                    .iter()
+                    .find(|(_, v)| v.version_id != version_id)
+                    .map(|(_, v)| v.clone());
+                match next {
+                    Some(v) => {
+                        let pointer = CurrentPointer {
+                            generation: v.generation,
+                            version_id: v.version_id,
+                            delete_marker: v.delete_marker,
+                            next_ordinal: c.next_ordinal,
+                            size: v.size,
+                            etag: v.etag,
+                            last_modified_ms: v.committed_ms,
+                        };
+                        write(tx, &keys::object_current(b.id, key), &pointer)?;
+                    }
+                    None => tx.clear(&keys::object_current(b.id, key)),
+                }
+            }
+            Ok(DeletedVersion {
+                was_delete_marker,
+                retired,
+                existed: true,
+            })
+        })
+    })
     .await
 }
 
@@ -604,7 +895,7 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-async fn require_pending<X: Txn>(
+pub(crate) async fn require_pending<X: Txn>(
     tx: &mut X,
     generation: &GenId,
     now_ms: u64,
@@ -617,7 +908,7 @@ async fn require_pending<X: Txn>(
     }
 }
 
-async fn check_preconditions<X: Txn>(
+pub(crate) async fn check_preconditions<X: Txn>(
     tx: &mut X,
     pre: &Precondition,
     current: Option<&CurrentPointer>,
@@ -628,7 +919,7 @@ async fn check_preconditions<X: Txn>(
     }
     if let Some(expected) = &pre.if_match {
         let Some(c) = live else {
-            return Err(MetaError::PreconditionFailed);
+            return Err(MetaError::NoSuchKey);
         };
         // The pointer's ETag is authoritative; re-read the header to make
         // the commit depend on the displaced generation as well.
@@ -638,6 +929,110 @@ async fn check_preconditions<X: Txn>(
         }
     }
     Ok(())
+}
+
+/// The version records of a key, newest first, with their ordinals.
+pub(crate) async fn version_records<X: Txn>(
+    tx: &mut X,
+    bucket_id: u64,
+    key: &str,
+) -> Result<Vec<(u64, VersionRecord)>> {
+    let mut out = Vec::new();
+    for (k, v) in tx
+        .get_range(&keys::versions_range(bucket_id, key), usize::MAX, false)
+        .await?
+    {
+        let ordinal = keys::version_ordinal_from(&k)
+            .ok_or_else(|| MetaError::Codec("unexpected key in version range".into()))?;
+        out.push((ordinal, crate::records::decode::<VersionRecord>(&v)?));
+    }
+    Ok(out)
+}
+
+/// What [`publish_version`] publishes.
+pub(crate) struct Publish<'a> {
+    pub generation: GenId,
+    pub version_id: &'a str,
+    pub delete_marker: bool,
+    pub ordinal: u64,
+    pub size: u64,
+    pub etag: &'a str,
+    pub now_ms: u64,
+}
+
+/// Make `p` the current version of `key` (RFC-002 rule V1; RFC-007 §5.4):
+/// write the pointer; on `Enabled` buckets write a version record and keep
+/// a displaced `null` version as a non-current version (AWS semantics when
+/// versioning is enabled after writes); on other buckets retire the
+/// displaced `null` version, including a non-current `null` version left
+/// from an earlier enabled period (`Suspended`). Returns the generation
+/// retired, if any.
+pub(crate) async fn publish_version<X: Txn>(
+    tx: &mut X,
+    bucket: &crate::records::BucketRecord,
+    key: &str,
+    current: Option<&CurrentPointer>,
+    p: Publish<'_>,
+) -> Result<Option<GenId>> {
+    let pointer = CurrentPointer {
+        generation: p.generation,
+        version_id: p.version_id.to_string(),
+        delete_marker: p.delete_marker,
+        next_ordinal: p.ordinal + 1,
+        size: p.size,
+        etag: p.etag.to_string(),
+        last_modified_ms: p.now_ms,
+    };
+    write(tx, &keys::object_current(bucket.id, key), &pointer)?;
+    if bucket.versioning == Versioning::Enabled {
+        let record = VersionRecord {
+            generation: p.generation,
+            version_id: p.version_id.to_string(),
+            delete_marker: p.delete_marker,
+            committed_ms: p.now_ms,
+            size: p.size,
+            etag: p.etag.to_string(),
+        };
+        write(tx, &keys::version(bucket.id, key, p.ordinal), &record)?;
+        // A displaced null version (written while unversioned or suspended)
+        // has no version record; give it one so it stays listable and
+        // addressable as version "null" instead of being retired.
+        if let Some(c) = current
+            && c.version_id == NULL_VERSION_ID
+            && c.next_ordinal > 0
+        {
+            let record = VersionRecord {
+                generation: c.generation,
+                version_id: c.version_id.clone(),
+                delete_marker: c.delete_marker,
+                committed_ms: c.last_modified_ms,
+                size: c.size,
+                etag: c.etag.clone(),
+            };
+            write(
+                tx,
+                &keys::version(bucket.id, key, c.next_ordinal - 1),
+                &record,
+            )?;
+        }
+        return Ok(None);
+    }
+    let mut retired = retire_displaced(tx, current, p.now_ms).await?;
+    if bucket.versioning == Versioning::Suspended {
+        // A non-current null version from an earlier enabled period is
+        // overwritten by the new null version (AWS behaviour).
+        for (ordinal, v) in version_records(tx, bucket.id, key).await? {
+            if v.version_id == NULL_VERSION_ID {
+                tx.clear(&keys::version(bucket.id, key, ordinal));
+                if !v.delete_marker && current.is_none_or(|c| c.generation != v.generation) {
+                    let header = generation_header(tx, &v.generation).await?;
+                    retire(tx, &v.generation, &header, p.now_ms)?;
+                    retired.get_or_insert(v.generation);
+                }
+            }
+        }
+    }
+    Ok(retired)
 }
 
 /// Retire the generation behind `current` if nothing else references it: a
@@ -659,12 +1054,20 @@ async fn retire_displaced<X: Txn>(
     Ok(Some(c.generation))
 }
 
-fn retire<X: Txn>(
+/// Mark a generation retiring (idempotent: an already retiring generation
+/// keeps its original `since_ms` and queue entry).
+pub(crate) fn retire<X: Txn>(
     tx: &mut X,
     generation: &GenId,
     header: &GenerationHeader,
     now_ms: u64,
 ) -> Result<()> {
+    if matches!(header.state, GenState::Retiring { .. }) {
+        return Ok(());
+    }
+    if let GenState::Pending { lease_until_ms } = header.state {
+        tx.clear(&keys::pending(lease_until_ms, generation));
+    }
     let retiring = GenerationHeader {
         state: GenState::Retiring { since_ms: now_ms },
         ..header.clone()
@@ -727,6 +1130,8 @@ pub struct AccessRecord {
     /// Reads counted since the record was created or reset.
     pub count: u64,
 }
+
+impl crate::records::Record for AccessRecord {}
 
 /// Record a read of `generation` (callers coalesce; one write per call).
 ///

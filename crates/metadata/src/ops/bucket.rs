@@ -17,12 +17,28 @@ pub async fn create_bucket<S: KvStore>(
     versioning: Versioning,
     now_ms: u64,
 ) -> Result<BucketRecord> {
+    create_bucket_owned(store, name, versioning, "", now_ms).await
+}
+
+/// Create a bucket owned by `owner` (a principal name, RFC-012 §5.3; empty
+/// means no owner).
+///
+/// # Errors
+///
+/// [`MetaError::BucketAlreadyExists`] if the name is taken.
+pub async fn create_bucket_owned<S: KvStore>(
+    store: &S,
+    name: &str,
+    versioning: Versioning,
+    owner: &str,
+    now_ms: u64,
+) -> Result<BucketRecord> {
     if name.is_empty() {
         return Err(MetaError::InvalidArgument("empty bucket name".into()));
     }
-    transact(store, (name, versioning, now_ms), |tx, env| {
+    transact(store, (name, versioning, owner, now_ms), |tx, env| {
         Box::pin(async move {
-            let (name, versioning, now_ms) = *env;
+            let (name, versioning, owner, now_ms) = *env;
             if tx.get(&keys::bucket_by_name(name)).await?.is_some() {
                 return Err(MetaError::BucketAlreadyExists);
             }
@@ -37,6 +53,8 @@ pub async fn create_bucket<S: KvStore>(
                 name: name.to_string(),
                 versioning,
                 created_ms: now_ms,
+                owner: owner.to_string(),
+                policy: None,
             };
             write(tx, &keys::bucket_by_name(name), &record)?;
             write(tx, &keys::bucket_by_id(next), &record)?;
@@ -81,6 +99,45 @@ pub async fn set_versioning<S: KvStore>(
     .await
 }
 
+/// Replace the bucket policy document (`None` deletes it). The document
+/// must already be validated by the caller (RFC-012 §5.3.3).
+///
+/// # Errors
+///
+/// [`MetaError::NoSuchBucket`].
+pub async fn set_policy<S: KvStore>(store: &S, name: &str, policy: Option<&str>) -> Result<()> {
+    transact(store, (name, policy), |tx, env| {
+        Box::pin(async move {
+            let (name, policy) = *env;
+            let mut record = bucket_by_name(tx, name).await?;
+            record.policy = policy.map(str::to_string);
+            write(tx, &keys::bucket_by_name(name), &record)?;
+            write(tx, &keys::bucket_by_id(record.id), &record)?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Change the bucket owner (operator tooling, RFC-012 §5.3.1).
+///
+/// # Errors
+///
+/// [`MetaError::NoSuchBucket`].
+pub async fn set_owner<S: KvStore>(store: &S, name: &str, owner: &str) -> Result<()> {
+    transact(store, (name, owner), |tx, env| {
+        Box::pin(async move {
+            let (name, owner) = *env;
+            let mut record = bucket_by_name(tx, name).await?;
+            record.owner = owner.to_string();
+            write(tx, &keys::bucket_by_name(name), &record)?;
+            write(tx, &keys::bucket_by_id(record.id), &record)?;
+            Ok(())
+        })
+    })
+    .await
+}
+
 /// Delete an empty bucket.
 ///
 /// # Errors
@@ -105,6 +162,12 @@ pub async fn delete_bucket<S: KvStore>(store: &S, name: &str) -> Result<()> {
                 )
                 .await?;
             if !versions.is_empty() {
+                return Err(MetaError::BucketNotEmpty);
+            }
+            let uploads = tx
+                .get_range(&keys::mpu_prefix_range(record.id, ""), 1, false)
+                .await?;
+            if !uploads.is_empty() {
                 return Err(MetaError::BucketNotEmpty);
             }
             tx.clear(&keys::bucket_by_name(name));

@@ -5,7 +5,8 @@
 //!
 //! | Tuple | Value | Purpose |
 //! | --- | --- | --- |
-//! | `("al","meta","layout")` | layout version | format marker |
+//! | `("al","meta","schema")` | u64 LE | metadata schema version (RFC-014 §5.4) |
+//! | `("al","meta","cluster")` | `ClusterState` | recovery state and incarnation (RFC-015 §5.3) |
 //! | `("al","ctr","bucket")` | u64 LE | bucket ID allocator |
 //! | `("al","b",name)` | `BucketRecord` | bucket by name |
 //! | `("al","bi",bucket_id)` | `BucketRecord` | bucket by ID |
@@ -13,6 +14,9 @@
 //! | `("al","v",bucket_id,key,ordinal_desc)` | `VersionRecord` | version history, newest first |
 //! | `("al","g",gen,"h")` | `GenerationHeader` | one immutable generation |
 //! | `("al","g",gen,"c",index)` | `ChunkRecord` | chunk manifest + placement, one key per chunk |
+//! | `("al","g",root,"m",part_number)` | `PartRef` | part manifest reference of a multipart root (RFC-007 §5.3) |
+//! | `("al","mpu",bucket_id,key,upload_id)` | `MultipartRecord` | multipart upload |
+//! | `("al","mpp",upload_id,part_number)` | `PartRecord` | sealed part of an upload |
 //! | `("al","pend",lease_until_ms,gen)` | empty | pending generations by lease expiry |
 //! | `("al","gc",since_ms,gen)` | empty | retired generations awaiting GC |
 //!
@@ -24,17 +28,122 @@
 use foundationdb_tuple::{Bytes, pack, unpack};
 
 use crate::kv::{Key, KeyRange, strinc};
-use crate::records::GenId;
+use crate::records::{GenId, UploadId};
 
 const ROOT: &str = "al";
 
-/// Layout version written to `("al","meta","layout")`.
-pub const LAYOUT_VERSION: u64 = 1;
+/// Metadata schema version of this build (RFC-014 §5.4): 1 = Phase 0–2
+/// layout (record version 1); 2 = Phase 3.1 (record version 2, multipart
+/// and cluster-state keys).
+pub const SCHEMA_VERSION: u64 = 2;
 
-/// Key holding the layout version.
+/// Oldest schema version this build serves.
+pub const SCHEMA_VERSION_MIN: u64 = 1;
+
+/// Key holding the schema version (u64 little-endian).
 #[must_use]
-pub fn layout_version() -> Key {
-    pack(&(ROOT, "meta", "layout"))
+pub fn schema_version() -> Key {
+    pack(&(ROOT, "meta", "schema"))
+}
+
+/// Key holding the cluster recovery state (RFC-015 §5.3).
+#[must_use]
+pub fn cluster_state() -> Key {
+    pack(&(ROOT, "meta", "cluster"))
+}
+
+/// Multipart upload record.
+#[must_use]
+pub fn mpu(bucket_id: u64, key: &str, upload_id: &UploadId) -> Key {
+    pack(&(ROOT, "mpu", bucket_id, key, Bytes::from(&upload_id[..])))
+}
+
+/// Upload records of a bucket whose object key starts with `prefix`.
+#[must_use]
+pub fn mpu_prefix_range(bucket_id: u64, prefix: &str) -> KeyRange {
+    let mut begin = pack(&(ROOT, "mpu", bucket_id, prefix));
+    begin.pop();
+    let end = strinc(&begin);
+    KeyRange::new(begin, end)
+}
+
+/// First key strictly after the upload record `(key, upload_id)`, or after
+/// every upload of `key` when `upload_id` is `None`.
+#[must_use]
+pub fn mpu_after(bucket_id: u64, key: &str, upload_id: Option<&UploadId>) -> Key {
+    match upload_id {
+        Some(u) => {
+            let mut k = mpu(bucket_id, key, u);
+            k.push(0);
+            k
+        }
+        None => KeyRange::prefix(&pack(&(ROOT, "mpu", bucket_id, key))).end,
+    }
+}
+
+/// `(key, upload_id)` from an upload record key, if it is one.
+#[must_use]
+pub fn mpu_from(key: &[u8]) -> Option<(String, UploadId)> {
+    let (_, _, _, k, u): (String, String, u64, String, Bytes<'_>) = unpack(key).ok()?;
+    Some((k, <[u8; 16]>::try_from(u.as_ref()).ok()?))
+}
+
+/// Part record `part_number` of an upload.
+#[must_use]
+pub fn part(upload_id: &UploadId, part_number: u32) -> Key {
+    pack(&(
+        ROOT,
+        "mpp",
+        Bytes::from(&upload_id[..]),
+        u64::from(part_number),
+    ))
+}
+
+/// All part records of an upload, in part-number order.
+#[must_use]
+pub fn parts_range(upload_id: &UploadId) -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "mpp", Bytes::from(&upload_id[..]))))
+}
+
+/// Part records with part number strictly greater than `after`.
+#[must_use]
+pub fn parts_after(upload_id: &UploadId, after: u32) -> KeyRange {
+    KeyRange::new(
+        part(upload_id, after.saturating_add(1)),
+        parts_range(upload_id).end,
+    )
+}
+
+/// Part number from a part record key, if it is one.
+#[must_use]
+pub fn part_number_from(key: &[u8]) -> Option<u32> {
+    let (_, _, _, n): (String, String, Bytes<'_>, u64) = unpack(key).ok()?;
+    u32::try_from(n).ok()
+}
+
+/// Part manifest reference `part_number` of a multipart root.
+#[must_use]
+pub fn part_ref(root: &GenId, part_number: u32) -> Key {
+    pack(&(
+        ROOT,
+        "g",
+        Bytes::from(&root[..]),
+        "m",
+        u64::from(part_number),
+    ))
+}
+
+/// All part manifest references of a root, in part-number order.
+#[must_use]
+pub fn part_refs_range(root: &GenId) -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "g", Bytes::from(&root[..]), "m")))
+}
+
+/// Part number from a part reference key, if it is one.
+#[must_use]
+pub fn part_ref_number_from(key: &[u8]) -> Option<u32> {
+    let (_, _, _, tag, n): (String, String, Bytes<'_>, String, u64) = unpack(key).ok()?;
+    (tag == "m").then(|| u32::try_from(n).ok()).flatten()
 }
 
 /// Bucket ID allocator.
@@ -93,6 +202,14 @@ pub fn object_key_from(key: &[u8]) -> Option<String> {
 #[must_use]
 pub fn version(bucket_id: u64, key: &str, ordinal: u64) -> Key {
     pack(&(ROOT, "v", bucket_id, key, u64::MAX - ordinal))
+}
+
+/// Ordinal from a version record key, if it is one.
+#[must_use]
+pub fn version_ordinal_from(key: &[u8]) -> Option<u64> {
+    unpack::<(String, String, u64, String, u64)>(key)
+        .ok()
+        .map(|t| u64::MAX - t.4)
 }
 
 /// All version records of an object key, newest first.
@@ -395,6 +512,35 @@ mod tests {
         assert!(!r.contains(&gen_header(&other)));
         assert_eq!(gen_from_gen_key(&gen_header(&g)), Some(g));
         assert_eq!(gen_from_gen_key(&gen_chunk(&g, 9)), Some(g));
+    }
+
+    #[test]
+    fn multipart_keys_sort_and_parse() {
+        let u1 = [1u8; 16];
+        let u2 = [2u8; 16];
+        let r = mpu_prefix_range(3, "a");
+        assert!(r.contains(&mpu(3, "a", &u1)) && r.contains(&mpu(3, "ab", &u2)));
+        assert!(!r.contains(&mpu(3, "b", &u1)) && !r.contains(&mpu(4, "a", &u1)));
+        assert!(mpu(3, "a", &u1) < mpu(3, "a", &u2) && mpu(3, "a", &u2) < mpu(3, "ab", &u1));
+        assert!(mpu_after(3, "a", Some(&u1)) > mpu(3, "a", &u1));
+        assert!(mpu_after(3, "a", Some(&u1)) < mpu(3, "a", &u2));
+        assert!(mpu_after(3, "a", None) > mpu(3, "a", &u2));
+        assert!(mpu_after(3, "a", None) < mpu(3, "ab", &u1));
+        assert_eq!(mpu_from(&mpu(3, "k", &u1)), Some(("k".to_string(), u1)));
+        assert!(parts_range(&u1).contains(&part(&u1, 1)));
+        assert!(!parts_range(&u1).contains(&part(&u2, 1)));
+        assert!(part(&u1, 2) < part(&u1, 10));
+        assert!(parts_after(&u1, 2).contains(&part(&u1, 3)));
+        assert!(!parts_after(&u1, 2).contains(&part(&u1, 2)));
+        assert_eq!(part_number_from(&part(&u1, 7)), Some(7));
+        let g = [5u8; 16];
+        assert!(gen_range(&g).contains(&part_ref(&g, 1)));
+        assert!(!gen_chunks_range(&g).contains(&part_ref(&g, 1)));
+        assert!(part_refs_range(&g).contains(&part_ref(&g, 10_000)));
+        assert!(!part_refs_range(&g).contains(&gen_chunk(&g, 1)));
+        assert_eq!(part_ref_number_from(&part_ref(&g, 42)), Some(42));
+        assert_eq!(part_ref_number_from(&gen_chunk(&g, 42)), None);
+        assert_eq!(gen_from_gen_key(&part_ref(&g, 1)), Some(g));
     }
 
     #[test]

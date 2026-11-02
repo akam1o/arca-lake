@@ -365,6 +365,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 .map(|m| m.into_iter().collect())
                 .unwrap_or_default(),
             chunk_count: index,
+            checksum: None,
         };
         let t = std::time::Instant::now();
         self.commit_resolving(generation, &info, pre).await?;

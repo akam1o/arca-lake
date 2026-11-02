@@ -13,7 +13,7 @@
 use crate::error::Result;
 use crate::kv::{Key, KeyRange, KvStore, Txn, strinc};
 use crate::ops::bucket_by_name;
-use crate::records::{CurrentPointer, decode};
+use crate::records::{CurrentPointer, NULL_VERSION_ID, VersionRecord, decode};
 use crate::{MetaError, keys, transact};
 
 /// Listing request.
@@ -137,4 +137,182 @@ pub async fn list_objects<S: KvStore>(
         begin.clone_from(&resume);
     }
     Ok(resp)
+}
+
+/// ListObjectVersions request.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ListVersionsRequest {
+    /// Only keys starting with this prefix.
+    pub prefix: String,
+    /// Delimiter for common prefixes.
+    pub delimiter: Option<String>,
+    /// Resume after this key (and version, if `version_id_marker` is set;
+    /// otherwise after every version of the key).
+    pub key_marker: Option<String>,
+    /// Resume after this version of `key_marker`.
+    pub version_id_marker: Option<String>,
+    /// Maximum versions plus delete markers plus common prefixes.
+    pub max_keys: usize,
+}
+
+/// One listed version (data or delete marker).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionEntry {
+    /// Object key.
+    pub key: String,
+    /// Version id (`"null"` for the null version).
+    pub version_id: String,
+    /// Whether this is the current version of the key.
+    pub is_latest: bool,
+    /// Whether this is a delete marker.
+    pub delete_marker: bool,
+    /// Size (0 for markers).
+    pub size: u64,
+    /// ETag (empty for markers).
+    pub etag: String,
+    /// Commit time, Unix milliseconds.
+    pub last_modified_ms: u64,
+}
+
+/// ListObjectVersions response.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ListVersionsResponse {
+    /// Versions in key order, newest first within a key.
+    pub versions: Vec<VersionEntry>,
+    /// Common prefixes.
+    pub common_prefixes: Vec<String>,
+    /// Whether more results exist.
+    pub is_truncated: bool,
+    /// `(key, version id)` of the last entry returned, for the next page.
+    pub next_markers: Option<(String, String)>,
+}
+
+/// Versions of one key, newest first: the current pointer first (it may
+/// lack a version record: null version, or a key that was never versioned),
+/// then the version records, deduplicated by version id.
+fn versions_of_key(
+    key: &str,
+    current: Option<&CurrentPointer>,
+    records: &[VersionRecord],
+) -> Vec<VersionEntry> {
+    let mut out = Vec::with_capacity(records.len() + 1);
+    if let Some(c) = current {
+        out.push(VersionEntry {
+            key: key.to_string(),
+            version_id: c.version_id.clone(),
+            is_latest: true,
+            delete_marker: c.delete_marker,
+            size: c.size,
+            etag: c.etag.clone(),
+            last_modified_ms: c.last_modified_ms,
+        });
+    }
+    for v in records {
+        if current.is_some_and(|c| c.version_id == v.version_id) {
+            continue;
+        }
+        out.push(VersionEntry {
+            key: key.to_string(),
+            version_id: v.version_id.clone(),
+            is_latest: false,
+            delete_marker: v.delete_marker,
+            size: v.size,
+            etag: v.etag.clone(),
+            last_modified_ms: v.committed_ms,
+        });
+    }
+    let _ = NULL_VERSION_ID;
+    out
+}
+
+/// ListObjectVersions (RFC-007 §5.4). Each page is one read-only
+/// transaction over the current pointers and the version records of the
+/// keys it covers.
+///
+/// # Errors
+///
+/// [`MetaError::NoSuchBucket`]; `max_keys == 0` is an invalid argument.
+#[allow(clippy::too_many_lines)]
+pub async fn list_versions<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    req: &ListVersionsRequest,
+) -> Result<ListVersionsResponse> {
+    if req.max_keys == 0 {
+        return Err(MetaError::InvalidArgument("max_keys must be >= 1".into()));
+    }
+    transact(store, (bucket, req), |tx, env| {
+        Box::pin(async move {
+            let (bucket, req) = *env;
+            let b = bucket_by_name(tx, bucket).await?;
+            let full = keys::object_prefix_range(b.id, &req.prefix);
+            let mut begin = full.begin.clone();
+            // With a version marker the key itself is revisited (its
+            // remaining versions); without one the scan resumes after it.
+            let mut skip_through_version: Option<&str> = None;
+            if let Some(k) = &req.key_marker {
+                if req.version_id_marker.is_some() {
+                    begin = begin.max(keys::object_current(b.id, k));
+                    skip_through_version = req.version_id_marker.as_deref();
+                } else {
+                    begin = begin.max(keys::object_after(b.id, k));
+                }
+            }
+            let delimiter = req.delimiter.as_deref().filter(|d| !d.is_empty());
+            let mut resp = ListVersionsResponse::default();
+            let count = |r: &ListVersionsResponse| r.versions.len() + r.common_prefixes.len();
+            'outer: while begin < full.end {
+                let page = tx
+                    .get_range(&KeyRange::new(begin.clone(), full.end.clone()), PAGE, false)
+                    .await?;
+                if page.is_empty() {
+                    break;
+                }
+                for (k, v) in &page {
+                    let key = keys::object_key_from(k)
+                        .ok_or_else(|| MetaError::Codec("unexpected key in object range".into()))?;
+                    if count(&resp) >= req.max_keys {
+                        resp.is_truncated = true;
+                        return Ok(resp);
+                    }
+                    if let Some(delim) = delimiter {
+                        let tail = &key[req.prefix.len()..];
+                        if let Some(pos) = tail.find(delim) {
+                            let common = key[..req.prefix.len() + pos + delim.len()].to_string();
+                            begin = strinc(&keys::object_prefix_range(b.id, &common).begin);
+                            resp.next_markers = Some((common.clone(), String::new()));
+                            resp.common_prefixes.push(common);
+                            skip_through_version = None;
+                            continue 'outer;
+                        }
+                    }
+                    let pointer: CurrentPointer = decode(v)?;
+                    let mut records = Vec::new();
+                    for (_, rv) in tx
+                        .get_range(&keys::versions_range(b.id, &key), usize::MAX, false)
+                        .await?
+                    {
+                        records.push(decode::<VersionRecord>(&rv)?);
+                    }
+                    let mut entries = versions_of_key(&key, Some(&pointer), &records);
+                    if let Some(marker) = skip_through_version.take()
+                        && let Some(pos) = entries.iter().position(|e| e.version_id == marker)
+                    {
+                        entries.drain(..=pos);
+                    }
+                    for e in entries {
+                        if count(&resp) >= req.max_keys {
+                            resp.is_truncated = true;
+                            return Ok(resp);
+                        }
+                        resp.next_markers = Some((e.key.clone(), e.version_id.clone()));
+                        resp.versions.push(e);
+                    }
+                    begin = keys::object_after(b.id, &key);
+                }
+            }
+            Ok(resp)
+        })
+    })
+    .await
 }

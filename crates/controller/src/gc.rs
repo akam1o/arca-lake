@@ -19,10 +19,10 @@
 use std::collections::HashMap;
 
 use arca_lake_common::{split_chunk_id, uuid_v7_unix_ms};
-use arca_lake_metadata::ops::{cluster, gc, object};
+use arca_lake_metadata::ops::{cluster, gc, multipart, object};
 use arca_lake_metadata::records::{
     CachePlacement, ChunkRecord, CurrentPointer, GenId, GenState, GenerationHeader, GroupRecord,
-    GroupState, NodeRecord, VersionRecord, decode,
+    GroupState, MultipartState, NodeRecord, VersionRecord, decode,
 };
 use arca_lake_metadata::{KvStore, MetaError, Txn, keys, transact};
 use arca_lake_protocol::client::{NodeClients, ShardRef};
@@ -103,6 +103,16 @@ pub async fn run_once<S: KvStore>(
         .collect();
 
     for generation in gc::collectable(meta, now_ms, grace_ms, limit).await? {
+        // A multipart root first retires its parts in bounded steps (I-MP2);
+        // its own metadata is finished only once no reference remains.
+        match finish_root_parts(meta, &generation, now_ms).await {
+            Ok(()) => {}
+            Err(e) if is_deferrable(&e) => {
+                report.deferred += 1;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
         let (chunks, cached) = match verify_unreferenced(meta, &generation).await {
             Ok(Some(found)) => found,
             Ok(None) => {
@@ -132,6 +142,104 @@ pub async fn run_once<S: KvStore>(
             }
             Err(ControlError::Node { .. }) => report.deferred += 1,
             Err(e) => return Err(e),
+        }
+    }
+    Ok(report)
+}
+
+/// Part references and records retired per transaction when a multipart
+/// root is finished (RFC-007 §5.3.4).
+pub const ROOT_FINISH_BATCH: usize = 256;
+
+/// Retire every part of a retiring multipart root, `ROOT_FINISH_BATCH` per
+/// transaction. A non-root or a non-retiring generation is a no-op here
+/// (`verify_unreferenced` decides what happens to it).
+async fn finish_root_parts<S: KvStore>(
+    meta: &S,
+    generation: &GenId,
+    now_ms: u64,
+) -> Result<(), MetaError> {
+    loop {
+        match multipart::finish_root_step(meta, generation, ROOT_FINISH_BATCH, now_ms).await {
+            Ok(true) => {}
+            Ok(false) | Err(MetaError::WrongGenerationState(..)) => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// What the multipart sweep did (RFC-007 §5.3.4).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// Open uploads older than the expiry that were aborted.
+    pub expired: usize,
+    /// Part records processed (retired or dropped) across uploads.
+    pub parts_processed: usize,
+    /// Uploads whose sweep was left for the next pass (metadata error).
+    pub deferred: usize,
+}
+
+/// Part records processed per sweep transaction.
+pub const SWEEP_BATCH: usize = 256;
+
+/// One multipart sweep: finish aborts a gateway left behind, discard parts
+/// of completed uploads that were never listed, and abort open uploads
+/// initiated before `expire_before_ms`.
+///
+/// # Errors
+///
+/// Metadata errors that are not deferrable.
+pub async fn sweep_multipart<S: KvStore>(
+    meta: &S,
+    now_ms: u64,
+    expire_before_ms: Option<u64>,
+    limit: usize,
+) -> Result<SweepReport, ControlError> {
+    let mut report = SweepReport::default();
+    for upload in multipart::sweep_candidates(meta, expire_before_ms, limit).await? {
+        let bucket = match multipart::bucket_of(meta, upload.bucket_id).await {
+            Ok(b) => b,
+            Err(MetaError::NoSuchBucket) => continue,
+            Err(e) if is_deferrable(&e) => {
+                report.deferred += 1;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if upload.state == MultipartState::Open {
+            match multipart::abort(meta, &bucket.name, &upload.key, &upload.upload_id).await {
+                Ok(_) => report.expired += 1,
+                Err(MetaError::NoSuchUpload) => continue,
+                Err(e) if is_deferrable(&e) => {
+                    report.deferred += 1;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        loop {
+            match multipart::discard_parts(
+                meta,
+                upload.bucket_id,
+                &upload.key,
+                &upload.upload_id,
+                SWEEP_BATCH,
+                now_ms,
+            )
+            .await
+            {
+                Ok(n) => {
+                    report.parts_processed += n;
+                    if n < SWEEP_BATCH {
+                        break;
+                    }
+                }
+                Err(e) if is_deferrable(&e) => {
+                    report.deferred += 1;
+                    break;
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
     }
     Ok(report)
@@ -168,6 +276,11 @@ async fn verify_unreferenced<S: KvStore>(
             };
             let header: GenerationHeader = decode(&header)?;
             if !matches!(header.state, GenState::Retiring { .. }) {
+                return Ok(None);
+            }
+            // I-MP1 (RFC-007 §5.3.4): a part named by an open upload's part
+            // record or by its root's reference is never collected.
+            if multipart::part_is_referenced(tx, &header, generation).await? {
                 return Ok(None);
             }
             if let Some(p) = tx

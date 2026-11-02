@@ -30,6 +30,8 @@ pub struct LeaderRecord {
     pub lease_until_ms: u64,
 }
 
+impl crate::records::Record for LeaderRecord {}
+
 /// A held leadership.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Leadership {

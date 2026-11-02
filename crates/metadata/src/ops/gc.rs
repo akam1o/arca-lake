@@ -12,7 +12,7 @@
 use crate::error::Result;
 use crate::kv::{KeyRange, KvStore, Txn};
 use crate::ops::{generation_header, write};
-use crate::records::{ChunkRecord, GenId, GenState, GenerationHeader, decode};
+use crate::records::{ChunkRecord, GenId, GenKind, GenState, GenerationHeader, decode};
 use crate::{MetaError, keys, transact};
 
 /// Retire pending generations whose lease expired at or before `now_ms`.
@@ -124,6 +124,19 @@ pub async fn finish<S: KvStore>(store: &S, generation: &GenId) -> Result<()> {
                     "retiring",
                 ));
             };
+            // A multipart root is finished only after every part reference
+            // was processed by `multipart::finish_root_step` (I-MP2):
+            // clearing references here would leak their part generations.
+            if matches!(header.kind, GenKind::MultipartRoot { .. })
+                && !tx
+                    .get_range(&keys::part_refs_range(generation), 1, false)
+                    .await?
+                    .is_empty()
+            {
+                return Err(MetaError::InvalidArgument(
+                    "multipart root still has part references".into(),
+                ));
+            }
             // Cache placements live in the generation's subspace; their
             // recency entries and usage are outside it.
             for (index, p) in crate::ops::cache::placements_in_tx(tx, generation).await? {

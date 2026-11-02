@@ -22,12 +22,18 @@ use std::time::Instant;
 
 use arca_lake_metadata::fdb::FdbKv;
 use arca_lake_metadata::kv::KeyRange;
+use arca_lake_metadata::ops::multipart::{
+    self, CompletePart, CompleteRequest, PartInfo, UploadInfo,
+};
 use arca_lake_metadata::ops::object::{
     CommitInfo, Precondition, append_chunks, begin_put, commit_put, delete_object, head_object,
     read_manifest,
 };
 use arca_lake_metadata::ops::{bucket, gc, list};
-use arca_lake_metadata::records::{ChunkRecord, DurablePlacement, GenState, Versioning};
+use arca_lake_metadata::records::{
+    ChecksumAlgorithm, ChecksumType, ChunkRecord, DurablePlacement, GenState, Versioning,
+    new_gen_id,
+};
 use arca_lake_metadata::{KvError, MetaError};
 
 fn run<T>(f: impl Future<Output = T>) -> T {
@@ -74,6 +80,7 @@ fn info(etag: &str, chunks: u32) -> CommitInfo {
         content_type: None,
         user_metadata: vec![],
         chunk_count: chunks,
+        checksum: None,
     }
 }
 
@@ -244,6 +251,120 @@ fn commit_latency_sample() {
             pct(&begin_us, 99),
             pct(&commit_us, 50),
             pct(&commit_us, 99)
+        );
+    });
+}
+
+/// RFC-007 §5.3: a 10 000-part upload completes in exactly one
+/// FoundationDB transaction (the transaction size is bounded by the number
+/// of parts, not by chunks or bytes), and finishing the retired root
+/// retires every part in bounded steps (I-MP2).
+#[test]
+fn ten_thousand_part_complete_is_one_transaction_on_foundationdb() {
+    let Some(kv) = open() else { return };
+    run(async {
+        bucket::create_bucket(&kv, "b", Versioning::Disabled, 1)
+            .await
+            .unwrap();
+        let key = "k".repeat(1024);
+        let info = UploadInfo {
+            checksum_algorithm: Some(ChecksumAlgorithm::Crc32c),
+            checksum_type: Some(ChecksumType::Composite),
+            ..Default::default()
+        };
+        let uid = multipart::create_upload(&kv, "b", &key, &info, 1)
+            .await
+            .unwrap()
+            .upload_id;
+        let started = Instant::now();
+        let mut parts = Vec::with_capacity(10_000);
+        for n in 1..=10_000u32 {
+            let etag = format!("{n:032x}");
+            let p = multipart::begin_part(&kv, "b", &key, &uid, n, 2, LEASE)
+                .await
+                .unwrap();
+            append_chunks(&kv, &p.generation, &[chunk(0)], 2)
+                .await
+                .unwrap();
+            multipart::seal_part(
+                &kv,
+                &p.generation,
+                &PartInfo {
+                    size: 5 << 20,
+                    etag: etag.clone(),
+                    checksum: Some(arca_lake_metadata::records::Checksum {
+                        algorithm: ChecksumAlgorithm::Crc32c,
+                        kind: ChecksumType::FullObject,
+                        value: n.to_be_bytes().to_vec(),
+                        parts: None,
+                    }),
+                    chunk_count: 1,
+                },
+                2,
+            )
+            .await
+            .unwrap();
+            parts.push(CompletePart {
+                part_number: n,
+                etag,
+                checksum: None,
+            });
+        }
+        eprintln!("uploaded 10 000 parts in {:?}", started.elapsed());
+        let before = arca_lake_metadata::kv::transact_stats();
+        let root = new_gen_id();
+        let t = Instant::now();
+        let done = multipart::complete(
+            &kv,
+            "b",
+            &key,
+            &uid,
+            &CompleteRequest {
+                parts: &parts,
+                root,
+                pre: &Precondition::default(),
+                min_part_size: 5 << 20,
+                etag: "composite-10000",
+                expected_checksum: None,
+                derive_checksum: &|_, kind, inputs| {
+                    (kind == ChecksumType::Composite)
+                        .then(|| inputs.iter().flat_map(|(_, v)| v.clone()).collect())
+                },
+            },
+            3,
+        )
+        .await
+        .unwrap();
+        let after = arca_lake_metadata::kv::transact_stats();
+        eprintln!("complete of 10 000 parts: {:?}", t.elapsed());
+        assert_eq!(after.attempts - before.attempts, 1, "one transaction");
+        assert_eq!(done.size, (5 << 20) * 10_000);
+        let m = read_manifest(&kv, "b", &key, None).await.unwrap().unwrap();
+        assert_eq!(m.parts.len(), 10_000);
+        loop {
+            if multipart::discard_parts(&kv, 1, &key, &uid, 512, 4)
+                .await
+                .unwrap()
+                < 512
+            {
+                break;
+            }
+        }
+        delete_object(&kv, "b", &key, 5).await.unwrap();
+        let t = Instant::now();
+        let mut steps = 0;
+        while multipart::finish_root_step(&kv, &root, 256, 6)
+            .await
+            .unwrap()
+        {
+            steps += 1;
+        }
+        gc::finish(&kv, &root).await.unwrap();
+        eprintln!("root finish: {steps} steps in {:?}", t.elapsed());
+        assert!(steps >= 39);
+        assert_eq!(
+            gc::collectable(&kv, 1_000, 0, 20_000).await.unwrap().len(),
+            10_000
         );
     });
 }

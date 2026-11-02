@@ -53,6 +53,7 @@ fn info(etag: &str, chunks: u32) -> CommitInfo {
         content_type: None,
         user_metadata: vec![],
         chunk_count: chunks,
+        checksum: None,
     }
 }
 
@@ -331,10 +332,10 @@ fn if_match_requires_the_current_etag() {
                 .etag,
             "v2"
         );
-        // If-Match on a missing key fails.
+        // If-Match on a missing key is NoSuchKey (AWS conditional PUT).
         assert_eq!(
             put(&kv, "b", "other", "x", 1, 4, &right).await.unwrap_err(),
-            MetaError::PreconditionFailed
+            MetaError::NoSuchKey
         );
     });
 }

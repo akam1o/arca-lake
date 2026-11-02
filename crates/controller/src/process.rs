@@ -51,6 +51,9 @@ pub struct ControllerConfig {
     pub auto_repair: bool,
     /// Grace period before a retired generation's shards are deleted.
     pub gc_grace: Duration,
+    /// Open multipart uploads older than this are aborted by the sweep
+    /// (RFC-007 §5.3.4, I-MP4); zero disables expiry.
+    pub multipart_expiry: Duration,
     /// Minimum age for orphan shards without a generation (≥ gateway lease).
     pub min_orphan_age: Duration,
     /// Failure domain label for replacement choice.
@@ -92,6 +95,7 @@ impl ControllerConfig {
             unhealthy_after: Duration::from_secs(60),
             auto_repair: false,
             gc_grace: Duration::from_mins(10),
+            multipart_expiry: Duration::from_days(7),
             min_orphan_age: Duration::from_mins(15),
             failure_domain: "host".into(),
             page_size: 0,
@@ -447,6 +451,12 @@ async fn gc_pass<S: KvStore>(
         );
     }
     info!(?report, "gc pass");
+    let expire_before = (!cfg.multipart_expiry.is_zero())
+        .then(|| now_ms().saturating_sub(ms(cfg.multipart_expiry)));
+    let sweep = gc::sweep_multipart(meta, now_ms(), expire_before, 1000).await?;
+    if sweep != gc::SweepReport::default() {
+        info!(?sweep, "multipart sweep");
+    }
     Ok(())
 }
 

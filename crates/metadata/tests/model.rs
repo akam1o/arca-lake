@@ -150,6 +150,7 @@ async fn step(kv: &MemKv, m: &mut Model, op: &Op) {
                 content_type: None,
                 user_metadata: vec![],
                 chunk_count: 0,
+                checksum: None,
             };
             let r = commit_put(kv, &entry.id, &info, &pre, m.now).await;
             let leased =

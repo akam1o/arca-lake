@@ -79,7 +79,11 @@ All keys are FoundationDB tuples rooted at `"al"`:
 
 | Tuple | Value | Purpose |
 | --- | --- | --- |
-| `("al","meta","layout")` | layout version | format marker |
+| `("al","meta","schema")` | u64 LE | metadata schema version (RFC-014 §5.4; 2 since Phase 3.1) |
+| `("al","meta","cluster")` | `ClusterState` | recovery state and incarnation (RFC-015 §5.3) |
+| `("al","g",root,"m",part_number)` | `PartRef` | part manifest reference of a multipart root (RFC-007 §5.3) |
+| `("al","mpu",bucket_id,key,upload_id)` | `MultipartRecord` | multipart upload (`Open`, `Aborting`, `Completed`) |
+| `("al","mpp",upload_id,part_number)` | `PartRecord` | sealed part of an upload |
 | `("al","ctr","bucket")` | u64 | bucket ID allocator |
 | `("al","b",name)` / `("al","bi",id)` | `BucketRecord` | bucket by name / by ID |
 | `("al","o",bucket_id,key)` | `CurrentPointer` | current version of a key |
