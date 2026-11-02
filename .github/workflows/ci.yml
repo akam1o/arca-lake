@@ -17,6 +17,11 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Test binaries at opt-level 1: the metadata multipart test that drives
+  # 10 000 parts through the in-memory store is CPU-bound and ran for about
+  # three minutes unoptimized. The persistent target directory absorbs the
+  # one-time cost of the slower compile.
+  CARGO_PROFILE_TEST_OPT_LEVEL: "1"
 
 jobs:
   check:
@@ -58,9 +63,16 @@ jobs:
         with:
           toolchain: "1.99"
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+      # The runner is persistent, but actions/checkout cleans the workspace
+      # (`git clean -ffdx` removes target/). Build outside it so that the
+      # artifacts survive between runs; restoring them from the GitHub cache
+      # instead took longer than the build itself (777 MB at ~3 MB/s per job).
+      - name: build in a target directory that outlives the checkout
+        run: |
+          dir="$HOME/.cache/arca-lake/target"
+          # Start over once the directory has grown past 20 GB.
+          if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       # The `fdb` feature links libfdb_c; install the client library so that
       # --all-features builds and runs.
       - name: cache downloaded tools and packages
@@ -124,9 +136,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+      # The runner is persistent, but actions/checkout cleans the workspace
+      # (`git clean -ffdx` removes target/). Build outside it so that the
+      # artifacts survive between runs; restoring them from the GitHub cache
+      # instead took longer than the build itself (777 MB at ~3 MB/s per job).
+      - name: build in a target directory that outlives the checkout
+        run: |
+          dir="$HOME/.cache/arca-lake/target"
+          # Start over once the directory has grown past 20 GB.
+          if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - name: cache downloaded tools and packages
         uses: actions/cache@v4
         with:
@@ -147,13 +166,18 @@ jobs:
           docker rm -f fdb >/dev/null 2>&1 || true
           docker run -d --name fdb --network host -e FDB_NETWORKING_MODE=host \
             "foundationdb/foundationdb:${FDB_VERSION}"
+          # The image starts fdbserver without a database, and `status` on
+          # an unconfigured cluster prints nothing until fdbcli's timeout
+          # (polling it this way cost 30 x 30 s per run). Create the database
+          # right away and retry until the process answers.
           for _ in $(seq 1 30); do
-            docker exec fdb fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "available" && break
+            out="$(docker exec fdb fdbcli --timeout 10 --exec "configure new single memory" 2>&1 || true)"
+            echo "$out"
+            grep -qE "Database created|already exists" <<<"$out" && break
             sleep 1
           done
-          docker exec fdb fdbcli --timeout 30 --exec "configure new single memory" || true
           for _ in $(seq 1 60); do
-            docker exec fdb fdbcli --timeout 30 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+            docker exec fdb fdbcli --timeout 10 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
             sleep 1
           done
           docker exec fdb fdbcli --timeout 30 --exec "status minimal"
@@ -210,9 +234,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+      # The runner is persistent, but actions/checkout cleans the workspace
+      # (`git clean -ffdx` removes target/). Build outside it so that the
+      # artifacts survive between runs; restoring them from the GitHub cache
+      # instead took longer than the build itself (777 MB at ~3 MB/s per job).
+      - name: build in a target directory that outlives the checkout
+        run: |
+          dir="$HOME/.cache/arca-lake/target"
+          # Start over once the directory has grown past 20 GB.
+          if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - name: cache downloaded tools and packages
         uses: actions/cache@v4
         with:
@@ -295,17 +326,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+      # cargo-deny refreshes the advisory database on every check, so the
+      # cache only spares the initial clone; a key per run re-uploaded it
+      # every time (about a minute).
       - name: cache cargo-deny and the advisory database
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/arca-lake/cargo-deny
             ~/.cargo/advisory-dbs
-          key: cargo-deny-${{ runner.os }}-0.20.2-${{ github.run_id }}
-          restore-keys: cargo-deny-${{ runner.os }}-0.20.2-
+          key: cargo-deny-${{ runner.os }}-0.20.2
       - name: install cargo-deny (pinned release)
         env:
           DENY_VERSION: 0.20.2
