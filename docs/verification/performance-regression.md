@@ -72,3 +72,95 @@ expected below single PUT at equal concurrency: `s3load` uploads the
 8 MiB parts of one object sequentially (two chunks per part, so the
 placement pipeline refills per part) and each object costs three extra
 requests; in the same storage state it reached 90 % of single PUT.
+
+## Phase 3.2 run (2026-11-02/03): scrubbing, repair, soak
+
+Results: `benchmarks/linux/results/phase32-20261103-0340` (label
+`lab-2host`, 3 durable nodes `2+1`, 4 MiB chunks, 16 MiB objects). Every
+figure is the median of three repetitions (`repeat.sh`, `CONFIGS=
+durable:4`) unless noted. Controller flags for the scrub runs:
+`--scrub-interval-secs 1 --scrub-tick-secs 1 --scrub-rate-mib 32
+--scrub-concurrency 4`, i.e. the group is scrubbed back to back for the
+whole run at the default budget.
+
+### GET and PUT during scrubbing
+
+| metric | scrub off (`baseline`) | scrub, 256-key pages (`scrub`) | scrub off, later (`baseline2`) | scrub, 8 MiB pages (`scrub8`) | verdict |
+| --- | --- | --- | --- | --- | --- |
+| PUT MiB/s | 182 | 167 (−8 %) | 270 (reps 270 / 224 / 318) | 341 (reps 341 / 256 / 351) | no scrub cost; the spread is the storage state (R-48) |
+| warm GET MiB/s | 660 | 442 (−33 %) | 671 (reps 671 / 706 / 468) | 675 (reps 675 / 673 / 690) | ok (+1 %) |
+| GET p50 / p95 / p99 ms | 83 / 108 / 119 | 126 / 157 / 178 | 80 / 104 / 114 | 78 / 103 / 111 | ok (−2 / −1 / −3 %) |
+| CPU-s/GiB gateway host / node host | 4.9 / 3.1 | 7.2 / 5.0 | 5.0 / 3.2 | 4.9 / 2.2 | ok |
+| RSS MiB | 115 | 135 | 111 | 118 | ok (+6 %) |
+
+The first scrub run paid a third of the warm GET throughput and half
+again on p99. The cause was pacing granularity, not the budget: a
+`ScrubShards` page was bounded in keys only, and 256 keys of 2 MiB
+shards is a 512 MiB read at device speed followed by a 16 s sleep, so
+the "32 MiB/s" average arrived as bursts that starved the concurrent
+GETs. `94ef98a` bounds a page in bytes as well (`max_bytes` in the RPC,
+`--scrub-page-mib`, default 8 MiB), which spreads the same budget into
+8 MiB reads every quarter second. With that, GET throughput and tail
+latency under continuous scrubbing are within the repetition noise of
+the scrub-off runs measured right after (`baseline2`), and PUT is
+unaffected. Acceptance G10 (less than 15 % cost at the default rate) is
+met on this layout.
+
+Limitation: the 1.5 GiB working set fits the hosts' page cache, so the
+scrub's reads did not reach the devices (`disk_read_amplification 0.0`
+in `integrity3/summary.json`); the contention measured here is CPU and
+RPC contention on the node, not disk queueing. A run with a working set
+larger than memory is listed as a next task.
+
+### Scrub and repair throughput (`integrity-perf.sh`, `integrity3`)
+
+64 objects × 16 MiB = 1 GiB of data, 1.5 GiB of shards.
+
+| measurement | value |
+| --- | --- |
+| scrub, unpaced (one `admin integrity scrub --wait`, page cache warm) | 1.5 GiB in 6.4 s = 241 MiB/s; admin-side CPU 1.8 s/GiB (CRC-32C over every shard plus metadata lookups per shard), node CPU 0.7 s/GiB |
+| scrub at the default budget (32 MiB/s, 8 MiB pages) | 49.1 s measured, 48.0 s expected: the pacer holds the budget to within 2 % |
+| repair after a wiped device (one of three members emptied and restarted; the presence phase queued 256 stripes) | 256 of 256 repaired, 0 failed, 512 MiB rewritten in 22.6 s = 22.7 MiB/s (one worker, one task at a time, ~88 ms per 2 MiB shard: two reads, decode, re-encode, one write, one read-back) |
+| repair cost | controller CPU 18 s/GiB written (decode + re-encode of the full stripe per task), node CPU 12 s/GiB; disk writes 2.1 B per repaired byte (the shard plus its read-back and the quarantine/segment bookkeeping), network 2.0 B sent per repaired byte (two source shards in, one shard out plus the read-back) |
+| afterwards | every object read back and verified (`verify-get.jsonl`: 64 objects, 0 errors, 0 mismatches, 706 MiB/s); a final scrub pass was clean |
+
+Repair throughput is bounded by the single serial worker, not by the
+nodes: a parallel worker (per-task concurrency bounded by the same byte
+budget as the scrub) is the next step if a wiped device must be rebuilt
+faster than ~20 MiB/s. The first measurement run (`integrity/`) recorded
+a wrong repair window (it waited for a metric gauge that is refreshed
+only at the end of a worker pass) and is kept for the scrub figures
+only.
+
+### Bounded integrity soak (`soak.sh`, 20 minutes, `soak3`)
+
+Layout: durable `2+1` plus a coded cache tier (256 MiB, eviction every
+2 s), versioning on, two controllers (leader failover every fifth
+round), continuous scrubbing (5 s interval, 32 MiB/s), GC with a 10 s
+grace, stripe repair every 5 s. Each round: 16 × 8 MiB PUTs, 6 × 24 MiB
+multipart PUTs, overwrite of the previous round, DELETE of the round
+before, verified GETs of the current, previous and multipart objects in
+random order. Faults, one per round in rotation: storage node restart,
+controller leader kill, six byte flips on a stopped device, cache node
+restart, controller rejoin.
+
+| outcome | value |
+| --- | --- |
+| rounds | 86 (≈ 2 300 single PUTs, 500 multipart PUTs, 1 400 overwrites, 1 300 deletes, 5 500 verified GETs) |
+| body mismatches on verified reads | 0 attributable to the system (one label, `final-r86`, was the harness verifying the last round against the wrong seed; fixed in `0b3bae0`, re-run below) |
+| unreadable reads (`arca_gateway_unreadable_reads_total`) | 0 |
+| degraded reads served correctly with parity | 1 587 (1 290 reported to the repair queue, 297 deduplicated) |
+| byte flips quarantined on the node (`quarantine.log`, d1) | 192 entries over 17 flip rounds; 85 released by repair (`cause=superseded`), the rest by GC tombstones of overwritten or deleted versions |
+| stripe repairs | 88 succeeded (71 missing-shard, 17 checksum-mismatch), 138 attempts failed explicitly and were retried (116 `write failed: unavailable` and 22 `members unavailable`, all inside the node-restart windows), 0 unrecoverable, 0 left failed |
+| final scrub after settling | two passes: findings `[0, 19, 0, 0, 1392, 0, 0, 0]` then `[0, 5, …]` (checksum mismatches queued and repaired between the passes; the 1 392 "unexpected" findings are shards of versions GC had retired but not yet collected, which reconciliation removes, never scrub) |
+| manifest scrub | 470 roots, 0 findings; repair queue empty; `data_integrity_status 0` |
+| cache | 1 708 populations, 1 668 evictions, hits served including 89 degraded cache hits repaired in the background |
+| explicit request failures during fault windows | 59 labels; every one a PUT, multipart PUT or overwrite that failed with an error while a node or the leader was restarting, and never a partially visible object: a failed overwrite left the previous version readable, a failed multipart upload left no object |
+| controller failover | 17 leader kills; the follower took over each time and resumed the persisted scrub cursor and repair tasks |
+
+The first two soaks (`soak`, `soak2`) are kept: `soak` reported five
+"mismatch" labels that were the harness expecting the new content of
+overwrites that had failed explicitly (the previous version was, as
+designed, still served), and `soak2` one label from the seed error above.
+No run reported an unreadable read, an unrecoverable stripe, a failed
+task left behind or a manifest finding.

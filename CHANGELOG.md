@@ -163,8 +163,10 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     manifest verification (roots, references, part generations, chunk
     coverage, checksums, layout).
   - Controller: paced background scrub (`--scrub-interval-secs`,
-    `--scrub-rate-mib`, `--scrub-page`, `--scrub-concurrency`,
-    `--scrub-tick-secs`) with the cursor persisted after every page;
+    `--scrub-rate-mib`, `--scrub-page`, `--scrub-page-mib`,
+    `--scrub-concurrency`, `--scrub-tick-secs`) with byte-bounded pages
+    and the cursor persisted after every page, stopping promptly on
+    shutdown;
     stripe repair worker (`--stripe-repair-*`): Classify, Plan,
     Reconstruct from a verifying `k`-subset, write under the planned
     epoch, read-back Verify, Commit, with back-off and `Failed` /
@@ -191,6 +193,10 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     rotation under concurrent requests, tenant isolation); the
     FoundationDB failover test covers multipart (RFC-007 A10) and waits
     for a committed write after a process loss (R-50).
+  - Benchmarks: `integrity-perf.sh` (scrub and repair throughput, CPU
+    per GiB, disk and network amplification) and `soak.sh` (bounded
+    integrity soak with fault injection); results and analysis in
+    `docs/verification/performance-regression.md` (Phase 3.2 run).
 - Phase 3.1 S3 surface, metadata foundation and security controls:
   - Metadata: record version 2 with version-1 decoders (bucket owner and
     policy, generation kind and checksum), schema version constant and
