@@ -173,6 +173,36 @@ needed for correctness.
 | Read-through with node-local cache index only (no metadata) | same hits | none | exact | a gateway cannot know what is cached without probing every cache node | low, but hit/miss needs probes |
 | Whole-object cache | simplest | 1 key per object | wastes space on cold chunks | — | low | 
 
+#### 5.3.1 Population queue (Phase 2.3)
+
+A miss that passes admission hands the chunk to the gateway's
+population queue and returns; the GET never waits for it and a failed
+population only counts. The queue bounds the work three ways:
+
+- **bounded FIFO** (`population_queue_depth`, CLI
+  `--cache-population-queue-depth`, default 32): when full, the
+  population is dropped and counted as skipped, which is the
+  backpressure signal to the miss path;
+- **workers** (`max_populations_in_flight`): at most that many
+  populations run at once per gateway;
+- **per-node permits** (`populations_per_node`, CLI
+  `--cache-populations-per-node`, default 2): a population holds one
+  permit on every member node of its cache group while it writes, taken
+  in node order so that two populations never deadlock.
+
+Durable reads come first: before taking its permits a population yields
+while the gateway has shard reads in flight to any of its nodes (up to
+200 ms) or to any node (up to 50 ms), then proceeds, so a read burst is
+served before the cache is written and a busy node cannot starve the
+cache. Node errors are retried up to three times with exponential
+backoff; metadata and corruption errors are not retried (the next miss
+tries again). At shutdown the queue stops accepting, running attempts
+finish, queued populations are dropped and counted. Counters:
+`arca_gateway_population_queue_{enqueued,dropped_full,dropped_shutdown,completed,retries,deferred_for_reads}_total`
+and the gauges `queued` and `running`. The dedup marker of a chunk is
+released on every exit path, so a dropped population is retried by a
+later miss. See ADR-0012.
+
 ### 5.4 Admission and eviction
 
 | Policy | Hit ratio | State | Complexity | Decision |

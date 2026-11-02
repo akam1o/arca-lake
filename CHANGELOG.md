@@ -146,6 +146,36 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     CI and `deploy/dev/fdb-test.sh`), `tiering.rs` (5).
   - RFC-006 Multi-Tier Storage draft with Phase 2 status; ADR-0009;
     Phase 2 roadmap page; risks R-41–R-45.
+- Phase 2.3 performance stabilization and scalability:
+  - `benchmarks/linux/sanitize.py` and `docs/security/public-artifacts.md`:
+    a policy for what committed measurement artifacts may contain, a
+    sanitizer that rewrites and verifies, a CI check (`secret scan`).
+  - CI on self-hosted Linux runners (GitHub-hosted runners refused for
+    billing reasons): self-sufficient jobs, GitHub Actions cache for
+    build artifacts, tools and the advisory database; macOS leg removed.
+  - PUT phase timing (`arca_gateway_put_phase_seconds{phase}`), storage
+    node and store timing (`arca_node_phase_seconds{phase}`, storage node
+    `--metrics-listen`), metadata transaction counters
+    (`arca_gateway_meta_txn_*`), `s3load --progress`.
+  - `arca-lake-gateway`: pipelined chunk placement within a PUT
+    (`--write-pipeline`, default 2); frame pass-through on GET (no
+    concatenation of shard frames; CRC over frames); population queue
+    (`--cache-population-queue-depth`, `--cache-populations-per-node`)
+    with per-node permits, bounded yield to reads in flight, retries with
+    backoff, graceful shutdown and counters.
+  - `arca-lake-protocol`: `get_shard_frames`, `concat_frames`,
+    per-node reads-in-flight accounting.
+  - Tests: `population_queue.rs` (5 cases); every suite runs with the
+    write pipeline and frame pass-through.
+  - Measurement tooling: `put-profile.sh` + `sampler.sh` +
+    `summarize_putprofile.py` (per-second alignment of throughput with
+    sar, pidstat, TCP counters, every metrics endpoint and FoundationDB
+    status), `netns-faults.sh cpuprofile` (perf), `metabench` (metadata
+    hot-key micro-benchmark), `multi-gateway.sh` + `summarize_multigw.py`,
+    `regress.sh` + `perf_summary.py` + `compare.py` with per-environment
+    baselines.
+  - RFC-009 §6.14–§6.19, RFC-006 §5.3.1, ADR-0012, risks R-48 (explained,
+    mitigated) and R-49, Phase 2.3 roadmap page.
 - Phase 2.2 performance and resilience optimization:
   - `arca-lake-protocol`: `RpcPolicy` for node RPCs (progress timeout for
     stalled shard streams, absolute deadline `base + bytes / min_rate`,
