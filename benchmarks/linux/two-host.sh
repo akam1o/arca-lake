@@ -81,13 +81,13 @@ cmd_setup() {
 
   if [ -n "$HOST_C" ]; then
     # Three hosts: one durable node and one cache node per host.
-    start sa d0 "$BIN storage-node --listen $ADDR_A:9100 --dir $RUN_DIR/d0"
-    start sb d1 "$BIN storage-node --listen $ADDR_B:9100 --dir $RUN_DIR/d1"
-    start sc d2 "$BIN storage-node --listen $ADDR_C:9100 --dir $RUN_DIR/d2"
+    start sa d0 "$BIN storage-node --listen $ADDR_A:9100 --dir $RUN_DIR/d0 --metrics-listen 127.0.0.1:9910"
+    start sb d1 "$BIN storage-node --listen $ADDR_B:9100 --dir $RUN_DIR/d1 --metrics-listen 127.0.0.1:9910"
+    start sc d2 "$BIN storage-node --listen $ADDR_C:9100 --dir $RUN_DIR/d2 --metrics-listen 127.0.0.1:9910"
     if [ "$mode" != durable ]; then
-      start sa c0 "$BIN storage-node --listen $ADDR_A:9110 --dir $RUN_DIR/c0"
-      start sb c1 "$BIN storage-node --listen $ADDR_B:9110 --dir $RUN_DIR/c1"
-      start sc c2 "$BIN storage-node --listen $ADDR_C:9110 --dir $RUN_DIR/c2"
+      start sa c0 "$BIN storage-node --listen $ADDR_A:9110 --dir $RUN_DIR/c0 --metrics-listen 127.0.0.1:9920"
+      start sb c1 "$BIN storage-node --listen $ADDR_B:9110 --dir $RUN_DIR/c1 --metrics-listen 127.0.0.1:9920"
+      start sc c2 "$BIN storage-node --listen $ADDR_C:9110 --dir $RUN_DIR/c2 --metrics-listen 127.0.0.1:9920"
     fi
     sleep 2
     register sa "$ADDR_A:9100" a-d0 hdd
@@ -101,14 +101,14 @@ cmd_setup() {
   else
     # Two hosts: durable nodes two on A, one on B; cache c0 on A, c2 on B,
     # and c3 on B for the coded mode.
-    start sa d0 "$BIN storage-node --listen $ADDR_A:9100 --dir $RUN_DIR/d0"
-    start sa d1 "$BIN storage-node --listen $ADDR_A:9101 --dir $RUN_DIR/d1"
-    start sb d2 "$BIN storage-node --listen $ADDR_B:9100 --dir $RUN_DIR/d2"
+    start sa d0 "$BIN storage-node --listen $ADDR_A:9100 --dir $RUN_DIR/d0 --metrics-listen 127.0.0.1:9910"
+    start sa d1 "$BIN storage-node --listen $ADDR_A:9101 --dir $RUN_DIR/d1 --metrics-listen 127.0.0.1:9911"
+    start sb d2 "$BIN storage-node --listen $ADDR_B:9100 --dir $RUN_DIR/d2 --metrics-listen 127.0.0.1:9910"
     if [ "$mode" != durable ]; then
-      start sa c0 "$BIN storage-node --listen $ADDR_A:9110 --dir $RUN_DIR/c0"
-      start sb c2 "$BIN storage-node --listen $ADDR_B:9110 --dir $RUN_DIR/c2"
+      start sa c0 "$BIN storage-node --listen $ADDR_A:9110 --dir $RUN_DIR/c0 --metrics-listen 127.0.0.1:9920"
+      start sb c2 "$BIN storage-node --listen $ADDR_B:9110 --dir $RUN_DIR/c2 --metrics-listen 127.0.0.1:9920"
       if [ "$mode" = ec ]; then
-        start sb c3 "$BIN storage-node --listen $ADDR_B:9111 --dir $RUN_DIR/c3"
+        start sb c3 "$BIN storage-node --listen $ADDR_B:9111 --dir $RUN_DIR/c3 --metrics-listen 127.0.0.1:9921"
       fi
     fi
     sleep 2
@@ -138,6 +138,32 @@ cmd_setup() {
   sleep 2
   sa "$ADMIN status" | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g'
   echo "mode=$mode chunk_bytes=$CHUNK_BYTES cache_capacity=$CACHE_CAPACITY hosts=$( [ -n "$HOST_C" ] && echo 3 || echo 2 )" > /tmp/arca-two-host.mode
+}
+
+# Per-second samplers on every host for the duration of one command
+# (benchmarks/linux/sampler.sh: sar, pidstat, TCP counters, every metrics
+# endpoint, FoundationDB status). Used when PROFILE=1.
+with_profile() { # <dir> <command...>
+  local dir="$1"; shift
+  mkdir -p "$dir"
+  local urls_a="http://127.0.0.1:9910/metrics http://127.0.0.1:9911/metrics http://127.0.0.1:9920/metrics"
+  local urls_b="http://127.0.0.1:9900/metrics http://127.0.0.1:9910/metrics http://127.0.0.1:9920/metrics http://127.0.0.1:9921/metrics"
+  local urls_c="http://127.0.0.1:9900/metrics http://127.0.0.1:9910/metrics http://127.0.0.1:9920/metrics"
+  sa "FDB_CLUSTER_FILE=$CLUSTER_FILE bash $REMOTE_REPO/benchmarks/linux/sampler.sh start $RUN_DIR/profile $urls_a"
+  sb "bash $REMOTE_REPO/benchmarks/linux/sampler.sh start $RUN_DIR/profile $urls_b"
+  [ -n "$HOST_C" ] && sc "bash $REMOTE_REPO/benchmarks/linux/sampler.sh start $RUN_DIR/profile $urls_c"
+  local rc=0
+  "$@" || rc=$?
+  for fn in $HOSTS_FNS; do
+    "$fn" "bash $REMOTE_REPO/benchmarks/linux/sampler.sh stop $RUN_DIR/profile"
+    local suffix="${fn#s}"
+    mkdir -p "$dir/profile-$suffix"
+    for f in sar.txt pidstat.txt snmp.txt metrics.txt fdb.txt; do
+      "$fn" "cat $RUN_DIR/profile/$f 2>/dev/null" > "$dir/profile-$suffix/$f" || true
+    done
+    "$fn" "rm -rf $RUN_DIR/profile"
+  done
+  return $rc
 }
 
 # sar collectors on both hosts for the duration of one command.
@@ -188,6 +214,8 @@ cmd_run() {
   cp /tmp/arca-two-host.mode "$dir/mode.txt" 2>/dev/null || true
   echo "objects=$objects size=$size concurrency=$conc passes=$passes range_bytes=$range" > "$dir/params.txt"
   local ep="http://$ADDR_G:9000"
+  # PROFILE=1: run the per-second samplers (sampler.sh) on every host during
+  # the PUT and record s3load --progress (put-progress.jsonl);
   # PREFIX: key prefix for the PUT and GET phases (phases that must not
   # overwrite another phase's objects use different prefixes);
   # S3LOAD_EXTRA: extra s3load flags for the GET passes (e.g. --order random);
@@ -197,7 +225,12 @@ cmd_run() {
   local extra="${S3LOAD_EXTRA:-}"
   sg "$S3LOAD --endpoint $ep --bucket bench --op create-bucket" >/dev/null
   if [ "${SKIP_PUT:-0}" != 1 ]; then
-    with_sar "$dir/put" sg "$S3LOAD --endpoint $ep --bucket bench --op put ${PREFIX:+--prefix $PREFIX} --objects $objects --size $size --concurrency $conc --label $label-put" > "$dir/put.jsonl"
+    if [ "${PROFILE:-0}" = 1 ]; then
+      # Samplers on every host plus s3load's per-second progress on stderr.
+      with_profile "$dir/put" sg "$S3LOAD --endpoint $ep --bucket bench --op put ${PREFIX:+--prefix $PREFIX} --objects $objects --size $size --concurrency $conc --progress --label $label-put" > "$dir/put.jsonl" 2> "$dir/put-progress.jsonl"
+    else
+      with_sar "$dir/put" sg "$S3LOAD --endpoint $ep --bucket bench --op put ${PREFIX:+--prefix $PREFIX} --objects $objects --size $size --concurrency $conc --label $label-put" > "$dir/put.jsonl"
+    fi
     cat "$dir/put.jsonl"
     sleep 2
   fi

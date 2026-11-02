@@ -287,32 +287,9 @@ async fn run_pass(client: &HttpClient, args: &Arc<Args>, pass: u32) -> Summary {
             }
         }));
     }
-    #[allow(clippy::cast_precision_loss)]
-    let progress = args.progress.then(|| {
-        let counters = Arc::clone(&counters);
-        let label = args.label.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
-            tick.tick().await;
-            let (mut last_ops, mut last_bytes) = (0u64, 0u64);
-            loop {
-                tick.tick().await;
-                let ops = counters.ops.load(Ordering::Relaxed);
-                let bytes = counters.bytes.load(Ordering::Relaxed);
-                let max_us = counters.window_max_us.swap(0, Ordering::Relaxed);
-                eprintln!(
-                    "{{\"progress\":1,\"label\":\"{label}\",\"t_s\":{:.0},\"ops\":{},\"bytes\":{},\"in_flight\":{},\"max_lat_ms\":{:.1}}}",
-                    started.elapsed().as_secs_f64(),
-                    ops - last_ops,
-                    bytes - last_bytes,
-                    counters.in_flight.load(Ordering::Relaxed),
-                    max_us as f64 / 1000.0
-                );
-                last_ops = ops;
-                last_bytes = bytes;
-            }
-        })
-    });
+    let progress = args
+        .progress
+        .then(|| spawn_progress(Arc::clone(&counters), args.label.clone(), started));
     for t in tasks {
         let _ = t.await;
     }
@@ -355,6 +332,39 @@ async fn run_pass(client: &HttpClient, args: &Arc<Args>, pass: u32) -> Summary {
         lat_ms_p99: percentile(&lats, 0.99),
         lat_ms_max: lats.last().copied().unwrap_or(0.0),
     }
+}
+
+/// One progress line per second on stderr (see `--progress`).
+#[allow(clippy::cast_precision_loss)]
+fn spawn_progress(
+    counters: Arc<Counters>,
+    label: String,
+    started: Instant,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        tick.tick().await;
+        let (mut last_ops, mut last_bytes) = (0u64, 0u64);
+        loop {
+            tick.tick().await;
+            let ops = counters.ops.load(Ordering::Relaxed);
+            let bytes = counters.bytes.load(Ordering::Relaxed);
+            let max_us = counters.window_max_us.swap(0, Ordering::Relaxed);
+            let epoch_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis());
+            eprintln!(
+                "{{\"progress\":1,\"label\":\"{label}\",\"t_s\":{:.0},\"epoch_ms\":{epoch_ms},\"ops\":{},\"bytes\":{},\"in_flight\":{},\"max_lat_ms\":{:.1}}}",
+                started.elapsed().as_secs_f64(),
+                ops - last_ops,
+                bytes - last_bytes,
+                counters.in_flight.load(Ordering::Relaxed),
+                max_us as f64 / 1000.0
+            );
+            last_ops = ops;
+            last_bytes = bytes;
+        }
+    })
 }
 
 async fn create_bucket(client: &HttpClient, args: &Args) -> Result<(), String> {
