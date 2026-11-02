@@ -73,8 +73,10 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # Write: fresh objects, multipart objects, overwrite of the previous round.
   s3 "r$round-put" --op put --prefix "r$round" --objects $N --size $SIZE --concurrency 4
   s3 "r$round-mpput" --op multipart-put --prefix "m$round" --objects $MP_N --size $MP_SIZE --part-size $((8 << 20)) --concurrency 2
+  overwrite_errors=0
   if [ $round -ge 2 ]; then
     s3 "r$round-overwrite" --op put --prefix "r$((round-1))" --objects $N --size $SIZE --concurrency 4 --seed $round
+    overwrite_errors=$(tail -1 "$OUT/rounds.txt" | sed -E 's/.*errors=([0-9]+).*/\1/')
   fi
   # Delete the round before last (delete markers; GC keeps versions).
   if [ $round -ge 3 ]; then
@@ -95,8 +97,17 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # evictions). Objects deleted two rounds ago are allowed to be missing.
   s3 "r$round-get" --op get --prefix "r$round" --objects $N --size $SIZE --concurrency 4 --verify --passes 2 --order random
   s3 "r$round-mpget" --op get --prefix "m$round" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify
+  # A failed overwrite PUT leaves the previous version in place (atomic
+  # visibility), so the verified read of the overwritten round is only
+  # meaningful when every overwrite succeeded; otherwise it is read
+  # without body verification (errors still count).
   if [ $round -ge 2 ]; then
-    s3 "r$round-prevget" --op get --prefix "r$((round-1))" --objects $N --size $SIZE --concurrency 4 --verify --seed $round --order random --allow-missing
+    if [ "${overwrite_errors:-0}" = 0 ]; then
+      s3 "r$round-prevget" --op get --prefix "r$((round-1))" --objects $N --size $SIZE --concurrency 4 --verify --seed $round --order random --allow-missing
+    else
+      log "round $round: $overwrite_errors overwrite PUTs failed explicitly (fault window); reading r$((round-1)) without body verification"
+      s3 "r$round-prevget-noverify" --op get --prefix "r$((round-1))" --objects $N --size $SIZE --concurrency 4 --order random --allow-missing
+    fi
   fi
   if [ $round -ge 2 ]; then
     s3 "r$round-prevmpget" --op get --prefix "m$((round-1))" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify
@@ -105,14 +116,18 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   { echo "== round $round"; ctl_metrics | grep -E '^arca_controller_(leader |scrub|integrity|repair|stripe|data_integrity|manifest|gc_passes|cache_evicted)' ; sb "curl -s http://127.0.0.1:9901/metrics" | grep -E '^arca_controller_(leader |stripe_repairs_succeeded)' | sed 's/^/ctl-b /'; gw_metrics | grep -E '^arca_gateway_(degraded|unreadable|integrity|cache_hits|cache_misses|cache_populated)'; } >> "$OUT/metrics.txt" 2>/dev/null || true
 done
 
-# Settle: let scrub and repair catch up, then the final checks.
-log "settling"
-for _ in $(seq 1 60); do
+# Settle: a full scrub pass of the group (finds everything the faults
+# left: quarantined shards, missing shards), then wait until the repair
+# queue drains, then a second pass that must be clean.
+log "settling: full scrub, then drain the repair queue"
+sa "$ADMIN integrity scrub --group 1 --wait --rate-mib 0 --page 256 --page-mib 0" | strip_addr >> "$OUT/soak.log" 2>&1 || true
+for _ in $(seq 1 120); do
   m="$(ctl_metrics 2>/dev/null || true)"; m2="$(sb 'curl -s http://127.0.0.1:9901/metrics' 2>/dev/null || true)"
   depth=$(printf '%s\n%s\n' "$m" "$m2" | awk '$1=="arca_controller_repair_queue_depth"{print $2}' | sort -n | head -1)
   [ "${depth:-1}" = 0 ] && break
   sleep 5
 done
+sa "$ADMIN integrity scrub --group 1 --wait --rate-mib 0 --page 256 --page-mib 0" | strip_addr >> "$OUT/soak.log" 2>&1 || true
 sa "$ADMIN integrity status" | strip_addr > "$OUT/status-final.txt" || true
 sa "$ADMIN integrity verify-manifests" | strip_addr > "$OUT/manifests-final.txt" || echo "verify-manifests exit $?" >> "$OUT/manifests-final.txt"
 # Final verified read of everything that should exist.
@@ -121,8 +136,14 @@ for r in $(seq 1 $round); do
   s3 "final-r$r" --op get --prefix "r$r" --objects $N --size $SIZE --concurrency 4 --verify --seed $(( r < round ? r + 1 : 1 )) $allow
   s3 "final-m$r" --op get --prefix "m$r" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify
 done
-{ echo "== final"; ctl_metrics | grep -E '^arca_controller_'; gw_metrics | grep -E '^arca_gateway_(degraded|unreadable|integrity|cache_)'; sa "curl -s http://127.0.0.1:9910/metrics; curl -s http://127.0.0.1:9911/metrics" | grep -E '^arca_node_(quarantined|corrupt|scrub)'; sb "curl -s http://127.0.0.1:9910/metrics" | grep -E '^arca_node_(quarantined|corrupt|scrub)'; } >> "$OUT/metrics.txt" 2>/dev/null || true
+{ echo "== final"; ctl_metrics | grep -E '^arca_controller_'; sb "curl -s http://127.0.0.1:9901/metrics" | grep -E '^arca_controller_' | sed 's/^/ctl-b /'; gw_metrics | grep -E '^arca_gateway_(degraded|unreadable|integrity|cache_)'; sa "curl -s http://127.0.0.1:9910/metrics; curl -s http://127.0.0.1:9911/metrics" | grep -E '^arca_node_(quarantined|corrupt|scrub)'; sb "curl -s http://127.0.0.1:9910/metrics" | grep -E '^arca_node_(quarantined|corrupt|scrub)'; } >> "$OUT/metrics.txt" 2>/dev/null || true
 for h in sa sb; do $h "grep -h -i 'unrecoverable\|panic\|invariant' $RUN_DIR/logs/*.log | head -50" >> "$OUT/log-grep.txt" 2>/dev/null || true; done
+mkdir -p "$OUT/logs"
+sa "cd $RUN_DIR/logs && tar czf - controller.log d0.log d1.log 2>/dev/null" | tar xzf - -C "$OUT/logs" 2>/dev/null || true
+sb "cd $RUN_DIR/logs && tar czf - controller2.log d2.log gateway.log 2>/dev/null" | tar xzf - -C "$OUT/logs" 2>/dev/null || true
+sed -i -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g' "$OUT"/logs/*.log 2>/dev/null || true
+sa "for d in d0 d1; do echo \"== \$d\"; cat $RUN_DIR/\$d/quarantine.log 2>/dev/null; done" > "$OUT/quarantine-logs.txt" 2>/dev/null || true
+sb "echo '== d2'; cat $RUN_DIR/d2/quarantine.log 2>/dev/null" >> "$OUT/quarantine-logs.txt" 2>/dev/null || true
 bash "$TH" teardown > /dev/null 2>&1 || true
 sb "kill \$(cat $RUN_DIR/controller2.pid) 2>/dev/null" || true
 

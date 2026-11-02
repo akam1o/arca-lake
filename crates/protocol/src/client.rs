@@ -1034,6 +1034,7 @@ impl NodeClients {
         group_id: u64,
         after: Option<ShardRef>,
         limit: u32,
+        max_bytes: u64,
     ) -> Result<ScrubPage, tonic::Status> {
         let ctx = RpcContext {
             addr,
@@ -1049,6 +1050,7 @@ impl NodeClients {
                     group_id,
                     after: after.map(|s| s.pb()),
                     limit,
+                    max_bytes,
                 };
                 let resp = client.scrub_shards(req).await?.into_inner();
                 Ok(ScrubPage {

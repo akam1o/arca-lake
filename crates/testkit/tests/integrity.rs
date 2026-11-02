@@ -91,6 +91,7 @@ fn member_node(c: &TestCluster, group: &GroupRecord, index: usize) -> usize {
 fn unpaced() -> ScrubOptions {
     ScrubOptions {
         page: 4,
+        page_bytes: 0,
         rate_bytes_per_s: 0,
         interval_ms: 1,
         concurrency: 1,
@@ -591,6 +592,7 @@ async fn scrub_cursor_resumes_after_an_interrupted_pass_and_a_node_restart() {
     let paced = tokio::spawn(async move {
         let opts = ScrubOptions {
             page: 2,
+            page_bytes: 0,
             rate_bytes_per_s: 1,
             interval_ms: 1,
             concurrency: 1,
@@ -644,6 +646,41 @@ async fn scrub_cursor_resumes_after_an_interrupted_pass_and_a_node_restart() {
             .pass,
         2
     );
+    assert_all_readable(&c, &objects).await;
+    c.shutdown().await;
+}
+
+#[tokio::test]
+async fn byte_bounded_scrub_pages_cover_every_shard_exactly_once() {
+    let c = cluster(3, 2, 1).await;
+    let objects = seed_objects(&c, 4, usize::try_from(MIB / 2).unwrap()).await;
+    let group = first_chunk(&c, "obj0").await.0;
+    let total = u64::try_from(shards_of(&c, &group)).unwrap();
+    // One byte per page: the node stops after every shard and reports
+    // `more`; the controller's cursor walks on; nothing is skipped or
+    // repeated.
+    let r = scrub_group_now(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders(),
+        group.id,
+        &ScrubOptions {
+            page: 256,
+            page_bytes: 1,
+            rate_bytes_per_s: 0,
+            interval_ms: 1,
+            concurrency: 1,
+        },
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.verified, total, "{r:?}");
+    assert_eq!(r.findings, [0; 8]);
+    let stats = c.nodes[member_node(&c, &group, 0)]
+        .handle_stats()
+        .expect("running");
+    assert_eq!(stats.scrub_shards, total / 3, "each shard once on its node");
     assert_all_readable(&c, &objects).await;
     c.shutdown().await;
 }
@@ -911,6 +948,7 @@ fn fast(id: &str) -> ControllerConfig {
     cfg.health_interval = Duration::from_millis(200);
     cfg.scrub = ScrubOptions {
         page: 8,
+        page_bytes: 0,
         rate_bytes_per_s: 0,
         interval_ms: 1,
         concurrency: 4,

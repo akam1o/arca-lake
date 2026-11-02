@@ -525,6 +525,11 @@ impl StorageNode for StorageNodeService {
         Self::check_version(req.protocol_version)?;
         let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
         let limit = Self::page_limit(req.limit);
+        let max_bytes = if req.max_bytes == 0 {
+            u64::MAX
+        } else {
+            req.max_bytes
+        };
         // Live entries and quarantined entries of the window, in key order:
         // a scrub reports quarantined shards as such instead of hiding them.
         let mut keys: Vec<(ShardKey, u32, Option<arca_lake_storage::QuarantineEntry>)> = self
@@ -533,43 +538,43 @@ impl StorageNode for StorageNodeService {
             .into_iter()
             .map(|(k, len)| (k, len, None))
             .collect();
-        let more = keys.len() == limit;
+        let page_full = keys.len() == limit;
         let bound = keys.last().map(|(k, _, _)| *k);
         for (k, e) in self
             .store
             .quarantined_in_group_after(req.group_id, after, limit)
         {
-            if more && bound.is_some_and(|b| k > b) {
+            if page_full && bound.is_some_and(|b| k > b) {
                 break;
             }
             keys.push((k, e.location.payload_len, Some(e)));
         }
         keys.sort_by_key(|a| a.0);
-        let next = more.then(|| bound.map(|k| Self::pb_key(&k))).flatten();
         let store = Arc::clone(&self.store);
         let _slot = self
             .scrub_slot
             .acquire()
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
-        let (shards, bytes_read, corrupt) = tokio::task::spawn_blocking(move || {
+        let (shards, bytes_read, corrupt, stopped_early) = tokio::task::spawn_blocking(move || {
             let mut bytes = 0u64;
             let mut corrupt = 0u64;
-            let out = keys
-                .into_iter()
-                .map(|(key, len, q)| {
-                    let pb_key = Some(Self::pb_key(&key));
-                    if let Some(q) = q {
-                        return pb::ShardScrub {
-                            key: pb_key,
-                            payload_len: u64::from(len),
-                            crc32c: 0,
-                            sequence: q.location.sequence,
-                            status: pb::ShardStatus::Quarantined as i32,
-                            reason: q.reason.to_string(),
-                        };
-                    }
-                    match store.verify(&key) {
+            let mut out = Vec::with_capacity(keys.len());
+            let mut stopped_early = false;
+            let total = keys.len();
+            for (n, (key, len, q)) in keys.into_iter().enumerate() {
+                let pb_key = Some(Self::pb_key(&key));
+                if let Some(q) = q {
+                    out.push(pb::ShardScrub {
+                        key: pb_key,
+                        payload_len: u64::from(len),
+                        crc32c: 0,
+                        sequence: q.location.sequence,
+                        status: pb::ShardStatus::Quarantined as i32,
+                        reason: q.reason.to_string(),
+                    });
+                } else {
+                    out.push(match store.verify(&key) {
                         Ok(v) => {
                             bytes += u64::from(v.payload_len);
                             pb::ShardScrub {
@@ -613,13 +618,21 @@ impl StorageNode for StorageNodeService {
                             status: pb::ShardStatus::IoError as i32,
                             reason: e.to_string(),
                         },
-                    }
-                })
-                .collect::<Vec<_>>();
-            (out, bytes, corrupt)
+                    });
+                }
+                if bytes >= max_bytes && n + 1 < total {
+                    stopped_early = true;
+                    break;
+                }
+            }
+            (out, bytes, corrupt, stopped_early)
         })
         .await
         .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        let more = page_full || stopped_early;
+        let next = more
+            .then(|| shards.last().and_then(|s| s.key.clone()))
+            .flatten();
         self.stats
             .scrub_shards
             .fetch_add(shards.len() as u64, Ordering::Relaxed);

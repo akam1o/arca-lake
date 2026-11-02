@@ -121,6 +121,10 @@ message ScrubShardsRequest {
   uint64 group_id = 2;
   ShardKey after = 3;
   uint32 limit = 4;
+  // Stop after the shard whose bytes bring the page past this many payload
+  // bytes (0 = no byte bound); the page then reports `more`. Bounds the
+  // burst a scrub puts on the device between two pacing sleeps.
+  uint64 max_bytes = 5;
 }
 
 enum ShardStatus {

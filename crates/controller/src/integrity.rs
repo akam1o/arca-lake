@@ -37,8 +37,12 @@ use crate::walk::GroupWalker;
 /// Scrub scheduler options (RFC-008 §8.3).
 #[derive(Debug, Clone)]
 pub struct ScrubOptions {
-    /// Shards per `ScrubShards` RPC.
+    /// Shards per `ScrubShards` RPC (upper bound).
     pub page: u32,
+    /// Payload bytes per `ScrubShards` RPC (the node stops after the shard
+    /// that crosses it; 0 = unbounded). This is the burst a scrub puts on
+    /// a device between two pacing sleeps, so it stays small.
+    pub page_bytes: u64,
     /// Byte budget per second across groups (0 = unpaced).
     pub rate_bytes_per_s: u64,
     /// A group is due when its last pass finished longer ago than this
@@ -52,6 +56,7 @@ impl Default for ScrubOptions {
     fn default() -> Self {
         Self {
             page: 256,
+            page_bytes: 8 << 20,
             rate_bytes_per_s: 32 << 20,
             interval_ms: 24 * 3600 * 1000,
             concurrency: 1,
@@ -389,7 +394,13 @@ async fn scrub_group<S: KvStore>(
                     shard_index: u16::MAX,
                 });
                 let page = match clients
-                    .scrub_shards_page(&node.address, group.id, after_ref, opts.page)
+                    .scrub_shards_page(
+                        &node.address,
+                        group.id,
+                        after_ref,
+                        opts.page,
+                        opts.page_bytes,
+                    )
                     .await
                 {
                     Ok(p) => p,

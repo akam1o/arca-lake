@@ -123,6 +123,7 @@ async fn scrub(c: &TestCluster) -> arca_lake_controller::integrity::ScrubReport 
         group,
         &ScrubOptions {
             page: 8,
+            page_bytes: 0,
             rate_bytes_per_s: 0,
             interval_ms: 1,
             concurrency: 1,

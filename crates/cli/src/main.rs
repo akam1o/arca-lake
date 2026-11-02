@@ -376,9 +376,13 @@ struct ControllerArgs {
     /// Seconds between scrub scheduler ticks (each resumes the due groups).
     #[arg(long, default_value_t = 60)]
     scrub_tick_secs: u64,
-    /// Shards per `ScrubShards` request.
+    /// Shards per `ScrubShards` request (upper bound).
     #[arg(long, default_value_t = 256)]
     scrub_page: u32,
+    /// Payload MiB per `ScrubShards` request: the burst a scrub puts on a
+    /// device between two pacing sleeps (0 = unbounded).
+    #[arg(long, default_value_t = 8)]
+    scrub_page_mib: u64,
     /// Scrub read budget in MiB per second across groups (0 = unpaced).
     #[arg(long, default_value_t = 32)]
     scrub_rate_mib: u64,
@@ -501,6 +505,9 @@ enum IntegrityCommand {
         /// Shards per request when `--wait`.
         #[arg(long, default_value_t = 256)]
         page: u32,
+        /// Payload MiB per request when `--wait` (0 = unbounded).
+        #[arg(long, default_value_t = 8)]
+        page_mib: u64,
         /// Read budget in MiB per second when `--wait` (0 = unpaced).
         #[arg(long, default_value_t = 0)]
         rate_mib: u64,
@@ -923,6 +930,7 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.cache_repair_chunks_per_pass = args.cache_repair_chunks_per_pass;
     cfg.scrub = arca_lake_controller::integrity::ScrubOptions {
         page: args.scrub_page,
+        page_bytes: args.scrub_page_mib << 20,
         rate_bytes_per_s: args.scrub_rate_mib << 20,
         interval_ms: args.scrub_interval_secs * 1000,
         concurrency: args.scrub_concurrency,
@@ -1205,6 +1213,7 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
             group,
             wait,
             page,
+            page_mib,
             rate_mib,
             rpc,
         } => {
@@ -1227,6 +1236,7 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
             let coders = arca_lake_controller::integrity::coders();
             let opts = arca_lake_controller::integrity::ScrubOptions {
                 page,
+                page_bytes: page_mib << 20,
                 rate_bytes_per_s: rate_mib << 20,
                 interval_ms: 1,
                 concurrency: 1,

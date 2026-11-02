@@ -44,6 +44,14 @@ pub struct TestNode {
     handle: Option<NodeHandle>,
 }
 
+impl TestNode {
+    /// The node's counters, if it is running.
+    #[must_use]
+    pub fn handle_stats(&self) -> Option<arca_lake_storage_node::NodeStatsSnapshot> {
+        self.handle.as_ref().map(|h| h.service().stats())
+    }
+}
+
 /// The cluster.
 pub struct TestCluster<S: KvStore + 'static = MemKv> {
     /// Metadata store.

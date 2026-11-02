@@ -60,18 +60,21 @@ echo "objects=$OBJECTS size=$SIZE data_bytes=$DATA_BYTES shard_bytes=$SHARD_BYTE
 snapshot sa "$OUT/a-before-scrub.txt"; snapshot sb "$OUT/b-before-scrub.txt"
 nb0=$(node_scrub_bytes)
 t0=$(date +%s.%N)
-sa "/usr/bin/time -f 'admin_cpu_user %U admin_cpu_sys %S' $ADMIN integrity scrub --group 1 --wait --rate-mib 0 --page 256" > "$OUT/scrub-unpaced.txt" 2>&1
+sa "/usr/bin/time -f 'admin_cpu_user %U admin_cpu_sys %S' $ADMIN integrity scrub --group 1 --wait --rate-mib 0 --page 256 --page-mib 0" > "$OUT/scrub-unpaced.txt" 2>&1
 t1=$(date +%s.%N)
 nb1=$(node_scrub_bytes)
 snapshot sa "$OUT/a-after-scrub.txt"; snapshot sb "$OUT/b-after-scrub.txt"
 SCRUB_SECS=$(echo "$t1 - $t0" | bc)
 SCRUB_BYTES=$((nb1 - nb0))
 
-# 2. Scrub at the default budget (32 MiB/s): the pass must take about
-#    shard_bytes / 32 MiB seconds.
+# 2. Scrub at the default budget (32 MiB/s, 8 MiB pages): the pass must
+#    take about shard_bytes / 32 MiB seconds; CPU and disk are sampled
+#    around this pass (long enough for whole-second CPU accounting).
+snapshot sa "$OUT/a-before-paced.txt"; snapshot sb "$OUT/b-before-paced.txt"
 t0=$(date +%s.%N)
-sa "$ADMIN integrity scrub --group 1 --wait --rate-mib 32 --page 256" > "$OUT/scrub-paced.txt" 2>&1
+sa "$ADMIN integrity scrub --group 1 --wait --rate-mib 32 --page 256 --page-mib 8" > "$OUT/scrub-paced.txt" 2>&1
 t1=$(date +%s.%N)
+snapshot sa "$OUT/a-after-paced.txt"; snapshot sb "$OUT/b-after-paced.txt"
 PACED_SECS=$(echo "$t1 - $t0" | bc)
 
 # 3. Repair after a wiped device: stop d2 on B, wipe it, restart it, let
@@ -79,19 +82,20 @@ PACED_SECS=$(echo "$t1 - $t0" | bc)
 sb "kill \$(cat $RUN_DIR/d2.pid); sleep 1; rm -rf $RUN_DIR/d2; mkdir -p $RUN_DIR/d2"
 sb "cd $RUN_DIR && { nohup $BIN storage-node --listen $ADDR_B:9100 --dir $RUN_DIR/d2 --metrics-listen 127.0.0.1:9910 > $RUN_DIR/logs/d2.log 2>&1 < /dev/null & echo \$! > $RUN_DIR/d2.pid; }"
 sleep 2
-sa "$ADMIN integrity scrub --group 1 --wait --rate-mib 0 --page 256" > "$OUT/scrub-after-wipe.txt" 2>&1
-sa "$ADMIN integrity status" | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g' > "$OUT/status-queued.txt"
-QUEUED=$(awk '/repair queue depth/ {print $4}' "$OUT/status-queued.txt")
+# The worker starts on the tasks as soon as the scrub queues them, so the
+# window opens before the scrub and closes when the queue is empty.
 snapshot sa "$OUT/a-before-repair.txt"; snapshot sb "$OUT/b-before-repair.txt"
 m0="$(ctl_metrics)"
 r0=$(metric "$m0" arca_controller_stripe_repairs_succeeded_total)
 b0=$(metric "$m0" arca_controller_repair_bytes_total)
 t0=$(date +%s.%N)
+sa "$ADMIN integrity scrub --group 1 --wait --rate-mib 0 --page 256 --page-mib 0" > "$OUT/scrub-after-wipe.txt" 2>&1
+QUEUED=$(awk '/enqueued/ {for (i=1;i<=NF;i++) if ($i=="enqueued") print $(i+1)}' "$OUT/scrub-after-wipe.txt" | head -1)
 for _ in $(seq 1 900); do
   m="$(ctl_metrics)"
   r=$(metric "$m" arca_controller_stripe_repairs_succeeded_total)
   depth=$(metric "$m" arca_controller_repair_queue_depth)
-  if [ "${depth:-1}" = 0 ] && [ $((r - r0)) -ge "${QUEUED:-1}" ]; then break; fi
+  if [ "${depth:-1}" = 0 ] && [ $((r - r0)) -ge 1 ]; then break; fi
   sleep 1
 done
 t1=$(date +%s.%N)
@@ -105,7 +109,7 @@ printf '%s\n' "$m1" | grep -E '^arca_controller_(scrub|integrity|repair|stripe|s
 
 # 4. Verify: every object reads back, a final scrub is clean.
 sb "$S3LOAD --endpoint $EP --bucket bench --op get --objects $OBJECTS --size $SIZE --concurrency 4 --verify --label verify" > "$OUT/verify-get.jsonl"
-sa "$ADMIN integrity scrub --group 1 --wait --rate-mib 0 --page 256" > "$OUT/scrub-final.txt" 2>&1
+sa "$ADMIN integrity scrub --group 1 --wait --rate-mib 0 --page 256 --page-mib 0" > "$OUT/scrub-final.txt" 2>&1
 sa "$ADMIN integrity status" | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g' > "$OUT/status-final.txt"
 bash "$TH" teardown > /dev/null 2>&1 || true
 
@@ -143,6 +147,8 @@ admin_cpu = (float(m.group(1)) + float(m.group(2))) if m else None
 scrub_disk = delta('a-before-scrub.txt', 'a-after-scrub.txt', 'disk_read_bytes') + delta('b-before-scrub.txt', 'b-after-scrub.txt', 'disk_read_bytes')
 scrub_net = delta('a-before-scrub.txt', 'a-after-scrub.txt', 'net_tx_bytes') + delta('b-before-scrub.txt', 'b-after-scrub.txt', 'net_tx_bytes')
 node_cpu_scrub = sum(delta('a-before-scrub.txt', 'a-after-scrub.txt', f'cpu_{n}') for n in ('d0', 'd1')) + delta('b-before-scrub.txt', 'b-after-scrub.txt', 'cpu_d2')
+node_cpu_paced = sum(delta('a-before-paced.txt', 'a-after-paced.txt', f'cpu_{n}') for n in ('d0', 'd1')) + delta('b-before-paced.txt', 'b-after-paced.txt', 'cpu_d2')
+paced_disk = delta('a-before-paced.txt', 'a-after-paced.txt', 'disk_read_bytes') + delta('b-before-paced.txt', 'b-after-paced.txt', 'disk_read_bytes')
 rep_disk_r = delta('a-before-repair.txt', 'a-after-repair.txt', 'disk_read_bytes') + delta('b-before-repair.txt', 'b-after-repair.txt', 'disk_read_bytes')
 rep_disk_w = delta('a-before-repair.txt', 'a-after-repair.txt', 'disk_write_bytes') + delta('b-before-repair.txt', 'b-after-repair.txt', 'disk_write_bytes')
 rep_net = delta('a-before-repair.txt', 'a-after-repair.txt', 'net_tx_bytes') + delta('b-before-repair.txt', 'b-after-repair.txt', 'net_tx_bytes')
@@ -159,6 +165,8 @@ summary = {
         'net_tx_bytes_per_byte': round(scrub_net / scrub_bytes, 3) if scrub_bytes else None,
         'paced_32mib_seconds': round(float(env['PACED_SECS']), 2),
         'paced_expected_seconds': round(shard_bytes / (32 << 20), 2),
+        'paced_node_cpu_s_per_gib': round(node_cpu_paced / (shard_bytes / gib), 2),
+        'paced_disk_read_amplification': round(paced_disk / shard_bytes, 3),
     },
     'repair': {
         'queued': int(env['QUEUED'] or 0), 'repaired': int(env['REPAIRED']), 'failed': int(env['FAILED'] or 0),
