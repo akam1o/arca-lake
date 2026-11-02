@@ -51,7 +51,9 @@ pub struct ClusterConfig {
     /// `read_parallelism` chunks (RFC-009 §9).
     pub read_parallelism: usize,
     /// Cache populations waiting in the gateway's queue at most; beyond
-    /// that a miss is served without populating (RFC-006 §5.3).
+    /// that a miss is served without populating (RFC-006 §5.3.1). A
+    /// queued population holds its chunk's bytes: memory is bounded by
+    /// this times the chunk size.
     pub population_queue_depth: usize,
     /// Cache populations one node receives from this gateway at once.
     pub populations_per_node: usize,

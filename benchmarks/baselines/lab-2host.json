@@ -1,0 +1,21 @@
+{
+  "env": "lab-2host",
+  "metrics": {
+    "results_dir": "repeat-zerocopy",
+    "cores": 4,
+    "durable_config": "durable-c4",
+    "put_mib_s": 339.65680042435577,
+    "get_warm_mib_s": 695.4328442207448,
+    "get_warm_p50_ms": 78.308705,
+    "get_warm_p95_ms": 94.300496,
+    "get_warm_p99_ms": 99.895657,
+    "cpu_s_per_gib_gateway_host": 4.639733333333333,
+    "cpu_s_per_gib_node_host": 2.1938666666666666,
+    "rss_mib": 109.7265625,
+    "meta_txn_per_s": 148.59985018565564,
+    "repetitions": 3,
+    "cache_config": "none-c4",
+    "hit_ratio": 0.9322916666666666,
+    "population_chunks_per_s": 69.8691078652141
+  }
+}

@@ -108,8 +108,10 @@ struct CacheArgs {
     #[arg(long = "cache-max-populations", default_value_t = 8)]
     cache_max_populations: u32,
     /// Cache populations waiting in this gateway's queue at most; beyond
-    /// that a miss is served without populating.
-    #[arg(long = "cache-population-queue-depth", default_value_t = 32)]
+    /// that a miss is served without populating. A queued population
+    /// holds its chunk's bytes, so memory is bounded by this times the
+    /// chunk size.
+    #[arg(long = "cache-population-queue-depth", default_value_t = 8)]
     cache_population_queue_depth: usize,
     /// Cache populations one node receives from this gateway at once.
     #[arg(long = "cache-populations-per-node", default_value_t = 2)]

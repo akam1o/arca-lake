@@ -869,7 +869,47 @@ throughput is total bytes over the longest gateway's run.
 
 ### 6.19 Phase 2.3: regression check baseline
 
-<!-- REGRESS-BASELINE -->
+Three repetitions in shuffled order on the two-host layout after the
+frame pass-through, the write pipeline and the population queue
+(`results/repeat-zerocopy`; the Phase 2.2 figures are §6.10 and §6.12,
+measured after the no-delay fix):
+
+| Configuration | Phase | Phase 2.2 MiB/s (p50 / p95 ms) | Phase 2.3 MiB/s (p50 / p95 ms) | Phase 2.2 → 2.3 CPU-s/GiB, gateway host / node host |
+| --- | --- | --- | --- | --- |
+| durable, concurrency 1 | GET warm | 420 (29 / 32) | 472 (24 / 28) | 4.6 → 3.5 / 2.8 → 2.2 |
+| durable, concurrency 4 | GET warm | 585 (96 / 121) | 695 (78 / 94) | 6.0 → 4.6 / 3.4 → 2.2 |
+| durable, concurrency 4 | PUT | 214–251 (sd 35–66) | 340 (180–372, sd 84) | 10.7 → 10.5 / 8.2 → 6.6 |
+| none, concurrency 1 | GET all hits | 474 (25 / 29) | 451 (26 / 29) | 4.4 → 4.3 / 1.6 → 1.9 |
+| none, concurrency 4 | GET pass 1 (populating) | 441 (125 / 166) | 514 (106 / 139) | 8.8 → 7.4 / 6.2 → 4.4 |
+| none, concurrency 4 | GET pass 3 | 668 at 97 % hits (80 / 107) | 703 at 93 % hits (73 / 103) | 5.5 → 5.2 / 2.3 → 1.6 |
+
+What changed on two hosts:
+
+- **The durable read is 12–20 % faster and costs the gateway host 23 %
+  less CPU per GiB** (6.0 → 4.6 CPU-s/GiB at concurrency 4), and the
+  node host 35 % less (3.4 → 2.2): the gateway's three post-decode copies
+  are gone, and the node, which keeps its one file copy, benefits from
+  fewer retransmission-free bursts (its share of the work was partly the
+  gateway's back-pressure). The cache hit, which only had one
+  concatenation to lose, is within noise.
+- **PUT at concurrency 4 reached 340 MiB/s** (the Phase 2.2 median was
+  214–251 with the same spread); the pipeline's effect is the subject
+  of §6.16 and the spread is the environment's.
+- **Memory.** The largest `arca-lake` process was 96–110 MiB in the
+  durable runs and 105 MiB with the cache at concurrency 1, but 213 MiB
+  with the cache at concurrency 4 (133 in Phase 2.2): a queued
+  population holds its 4 MiB chunk, and the queue depth was 32 in that
+  run. The default is now 8 (32 MiB at this chunk size); the bound is
+  documented in RFC-006 §5.3.1.
+
+The regression baseline for this environment (`benchmarks/baselines/lab-2host.json`,
+label `lab-2host`) was recorded from this run: PUT 340 MiB/s,
+warm GET 695 MiB/s (p50 78, p95 94, p99 100 ms),
+4.6 / 2.2 CPU-s/GiB on the gateway / node host, RSS 110 MiB,
+hit ratio 0.93, population 70 chunks/s, 149 metadata transactions/s
+during PUT. `compare.py` applies its tolerances only to later runs with
+that label (`docs/verification/performance-regression.md`).
+
 
 ## 7. Interpretation
 

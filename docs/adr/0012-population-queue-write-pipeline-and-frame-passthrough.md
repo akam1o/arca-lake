@@ -44,6 +44,7 @@ the storage node and the store (RFC-009 §6.14) before changing anything.
 - `ClusterConfig` gains `write_pipeline`, `population_queue_depth`,
   `populations_per_node`; the CLI exposes them.
 - The gateway's memory per PUT grows by one chunk plus its shards at the
-  default pipeline depth.
+  default pipeline depth; the population queue holds one chunk per
+  queued entry (8 × chunk size at the default depth).
 - `GetShard` callers that need a contiguous buffer concatenate once
   (`concat_frames`); `read_chunk` returns frames.

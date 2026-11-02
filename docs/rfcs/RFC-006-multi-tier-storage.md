@@ -180,9 +180,12 @@ population queue and returns; the GET never waits for it and a failed
 population only counts. The queue bounds the work three ways:
 
 - **bounded FIFO** (`population_queue_depth`, CLI
-  `--cache-population-queue-depth`, default 32): when full, the
+  `--cache-population-queue-depth`, default 8): when full, the
   population is dropped and counted as skipped, which is the
-  backpressure signal to the miss path;
+  backpressure signal to the miss path. A queued population holds its
+  chunk's bytes, so the queue's memory is bounded by its depth times the
+  chunk size (32 MiB at the defaults; a depth of 32 showed as +80 MiB
+  of gateway RSS in RFC-009 §6.19);
 - **workers** (`max_populations_in_flight`): at most that many
   populations run at once per gateway;
 - **per-node permits** (`populations_per_node`, CLI
