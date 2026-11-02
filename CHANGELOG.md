@@ -146,6 +146,51 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     CI and `deploy/dev/fdb-test.sh`), `tiering.rs` (5).
   - RFC-006 Multi-Tier Storage draft with Phase 2 status; ADR-0009;
     Phase 2 roadmap page; risks R-41–R-45.
+- Phase 3.2 data integrity and repair hardening (RFC-008 §8, ADR-0015):
+  - Storage engine: durable sidecar quarantine (`quarantine.log`, append
+    + fsync, replayed by re-scan); records whose payload fails CRC or that
+    extend past the segment are quarantined on read and at open instead
+    of being dropped or hiding the rest of the segment; recovery
+    resynchronises after a corrupt header; `Store::verify`; compaction
+    purges quarantined records.
+  - Storage node / protocol: `ScrubShards` (deep verification with
+    per-shard classification OK / checksum mismatch / invalid header /
+    truncated / quarantined / I/O error), `ListShards.include_quarantined`,
+    `DATA_LOSS` for reads of quarantined shards, one scrub in flight per
+    node, quarantine and scrub counters in `Health` and `/metrics`.
+  - Metadata: scrub cursors per group and stripe repair tasks per
+    `(group, chunk)` with the eight corruption classes; multipart
+    manifest verification (roots, references, part generations, chunk
+    coverage, checksums, layout).
+  - Controller: paced background scrub (`--scrub-interval-secs`,
+    `--scrub-rate-mib`, `--scrub-page`, `--scrub-concurrency`,
+    `--scrub-tick-secs`) with the cursor persisted after every page;
+    stripe repair worker (`--stripe-repair-*`): Classify, Plan,
+    Reconstruct from a verifying `k`-subset, write under the planned
+    epoch, read-back Verify, Commit, with back-off and `Failed` /
+    `Unrecoverable` states, never deleting; reconciliation treats
+    quarantined and wrong-index shards as orphans; integrity metrics
+    (`arca_controller_scrub_*`, `_integrity_findings_total{class}`,
+    `_repair_*`, `_stripe_repairs_*`, `_data_integrity_status`,
+    `_manifest_*`); `admin integrity status|scrub|enqueue|list|
+    verify-manifests`; `storage-node quarantine-list` and the hidden
+    `corrupt-shard` drill tool.
+  - Gateway: degraded and unreadable durable reads are counted and
+    reported to the repair queue (deduplicated per chunk);
+    `arca_gateway_degraded_reads_total` and friends; audit records carry
+    the claimed access key id for refused keys and `anonymous` for
+    unsigned requests.
+  - Tests: `storage/tests/quarantine.rs`; testkit `integrity.rs` (13
+    scenarios: corruption classes, quarantine over restart and GC,
+    single and multiple missing shards, unrecoverable stripes, node down
+    as a retry, concurrent detections and workers, repair under
+    GET/PUT/DELETE, a fenced member rejecting the repair write, scrub
+    cursor resume, controller processes with leader failover and
+    metrics), `multipart_integrity.rs`, `security.rs` (corrupt stored
+    policy, unsupported elements, audit-log secret scan, credential
+    rotation under concurrent requests, tenant isolation); the
+    FoundationDB failover test covers multipart (RFC-007 A10) and waits
+    for a committed write after a process loss (R-50).
 - Phase 3.1 S3 surface, metadata foundation and security controls:
   - Metadata: record version 2 with version-1 decoders (bucket owner and
     policy, generation kind and checksum), schema version constant and

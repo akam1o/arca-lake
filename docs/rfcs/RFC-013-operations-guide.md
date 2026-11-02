@@ -177,7 +177,13 @@ exported series is listed.
 | `arca_controller_gc_passes_total`, `_gc_collected_total`, `_shards_deleted_total`, `_gc_skipped_referenced_total` | counter | controller | GC; `skipped_referenced > 0` is an invariant violation |
 | `arca_controller_repairs_started_total`, `_completed_total`, `_chunks_reconstructed_total`, `_task_errors_total` | counter | controller | repair |
 | `arca_controller_cache_usage_bytes`, `_cache_over_watermark`, `_cache_evicted_total`, `_chunks_promoted_total`, `_chunks_demoted_total`, `_cache_repairs_*` | mixed | controller | cache tier |
-| `arca_controller_scrub_*` (Phase 3.2) | counter | controller | shards verified / corrupt / repaired / unrecoverable |
+| `arca_controller_scrub_passes_total`, `_scrub_shards_verified_total`, `_scrub_bytes_total`, `_scrub_errors_total` | counter | controller | background scrub progress and errors (RFC-008 §8.3) |
+| `arca_controller_scrub_groups_overdue` | gauge | controller | groups past `--scrub-interval-secs` at the last tick |
+| `arca_controller_integrity_findings_total{class}` | counter | controller | findings by class; `class` has eight values (RFC-008 §8.4) |
+| `arca_controller_repair_queue_depth`, `_repair_tasks_unrecoverable`, `_repair_tasks_failed`, `_data_integrity_status` | gauge | controller | stripe repair queue; status 0 = clean, 1 = repairs pending or failed, 2 = unrecoverable stripes |
+| `arca_controller_stripe_repairs_succeeded_total`, `_stripe_repairs_failed_total`, `_shards_rewritten_total`, `_repair_bytes_total` | counter | controller | stripe repair outcomes (RFC-008 §8.5) |
+| `arca_controller_manifest_roots_verified_total`, `_manifest_findings_total`, `_manifest_findings` | counter, gauge | controller | multipart manifest scrub (RFC-008 §8.6) |
+| `arca_gateway_degraded_reads_total`, `_unreadable_reads_total`, `_integrity_reports_total`, `_integrity_reports_dropped_total` | counter | gateway | read-path integrity reports (RFC-008 §8.7) |
 | `arca_gateway_cache_*_total` (25 series, RFC-006 §5.3) | counter | gateway | hit accounting |
 | `arca_gateway_node_rpc_{stalled,deadline_exceeded,unary_timeouts,retries,exhausted}_total` | counter | gateway | ADR-0011 |
 | `arca_gateway_put_phase_seconds{phase}`, `arca_gateway_put_in_flight` | histogram, gauge | gateway | RFC-009 §6.14 |
@@ -186,7 +192,8 @@ exported series is listed.
 | `arca_gateway_s3_requests_total{op,status}`, `arca_gateway_s3_request_seconds{op}`, `arca_gateway_s3_bytes_total{dir}` (Phase 3.1) | counter, histogram | gateway | request accounting (no key or principal labels) |
 | `arca_gateway_auth_failures_total{reason}`, `_rate_limited_total`, `_over_budget_total`, `_credentials_reload_failures_total`, `_tls_cert_not_after_seconds` (Phase 3.1) | counter, gauge | gateway | RFC-012 |
 | `arca_node_phase_seconds{phase}`, `arca_node_put_in_flight` | histogram, gauge | node | RFC-009 §6.14 |
-| `arca_node_live_shards`, `_live_bytes`, `_segment_bytes`, `_quarantined_total`, `_corrupt_reads_total`, `_scrub_*` (Phase 3.2) | gauge, counter | node | capacity and integrity |
+| `arca_node_quarantined_shards`, `_quarantined_bytes` | gauge | node | durable quarantine (RFC-008 §8.2) |
+| `arca_node_corrupt_reads_total`, `_scrub_shards_total`, `_scrub_bytes_total`, `_scrub_corrupt_total` | counter | node | node-side detections and `ScrubShards` work |
 
 Labels never carry addresses, host names, key ids, bucket names or
 object keys (`docs/security/public-artifacts.md` applies to exported
@@ -272,15 +279,42 @@ errors on a member; `repair_cursor` static. Action: check member health;
 if a member is dead, `admin replace-member` with another target; the
 cursor makes a restart resume.
 
-### 10.6 Unrecoverable chunk reported (Phase 3.2)
+### 10.6 Unrecoverable stripe reported (Phase 3.2)
 
-Fewer than `k` shards verify. Action: `admin inspect-chunk` lists
-members and their status; if a member is merely offline, bring it back
-(repair resumes); if data is truly lost, the object is marked
-`Unreadable` in listing output (`x-amz-meta-arca-integrity: unreadable`
-on HEAD) and GET returns `500 InternalError` with a specific message
-rather than bytes. Restore from a client-side copy; never un-mark
-without verification.
+`arca_controller_data_integrity_status` is 2, or `admin integrity
+status` lists a task in `Unrecoverable { have, need }`. Fewer than `k`
+shards of a live chunk verified when the worker classified it; GET of
+the object returns `500 InternalError` ("chunk unreadable ... data
+integrity error") and never bytes (RFC-008 I15). Action: a member that
+is merely unreachable is reported as a retry (`last_error: members
+unavailable`), not as unrecoverable; bring it back and the task
+completes. For a real unrecoverable task, `storage-node
+quarantine-list --dir <dir> --scan` on each member shows which records
+failed and why; the bytes are still on the device until compaction and
+can be examined. The task is re-checked every hour and clears itself
+when `k` good shards are found again (a returned node, a restored
+device). Otherwise restore the object from a client-side copy (a new
+PUT supersedes the generation; GC retires the damaged one). Never
+delete the task by hand: it is the record that the data is missing.
+
+### 10.6a Repair task stuck in `Failed` (Phase 3.2)
+
+`arca_controller_repair_tasks_failed > 0`. The worker gave up after
+`--stripe-repair-max-attempts`; `admin integrity list` shows
+`last_error` (a node rejecting writes, a read-back mismatch, a
+placement epoch ahead of the group). Fix the cause; the task is retried
+at `next_attempt_ms` and by the next scrub pass of its group.
+
+### 10.6b Quarantined shards on a node (Phase 3.2)
+
+`arca_node_quarantined_shards > 0`. The node found records whose header
+or block CRCs fail; they are absent to readers and repair, the
+controller's next scrub pass (or a degraded read) queues their
+stripes, and a successful repair releases the entries (`cause=superseded`
+in `quarantine.log`). A node that keeps quarantining new records has a
+failing device: replace it (§5.5). The log and the bytes are evidence;
+`quarantine.log` may be deleted after investigation (recovery
+re-derives the state by re-scanning).
 
 ### 10.7 Node refuses writes: epoch rejected
 

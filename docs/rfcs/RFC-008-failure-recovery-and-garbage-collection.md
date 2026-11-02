@@ -379,7 +379,12 @@ controller failover and node restarts (nodes keep no scrub state).
   gap on a live, placed chunk is `MissingShard` (enqueued); a chunk with
   fewer than `k` holders is `UnrecoverableStripe` (recorded, §8.5); a
   chunk nobody references is `UnexpectedShard` (counted; reconciliation
-  decides, §6.3).
+  decides, §6.3). A member whose listing failed is unreachable, not
+  empty: its shards are neither present nor missing (the error is
+  counted), and a stripe the shard phase already queued (its shard is
+  quarantined, hence absent from the listing) is not counted a second
+  time. Findings count shards, not stripes: every shard checked against
+  a stale chunk record is one `StalePlacementEpoch` finding.
 - Scheduling: a group is scrubbed when `now − finished_ms ≥
   --scrub-interval` (default 24 h; 0 disables); `--scrub-concurrency`
   groups at a time (default 1); the pass is paced by a byte budget
@@ -507,14 +512,19 @@ label is the class (eight values, §8.4).
 
 ### 8.9 Operator interface
 
-`arca-lake admin integrity status` (scrub cursors per group, queue depth,
-unrecoverable and failed tasks with chunk ids and the objects that
-reference them), `admin scrub run --group <id>` (reset the cursor so the
-next pass starts now), `admin repair enqueue --group --chunk`, `admin
-repair list`, `arca-lake storage-node quarantine list --dir <dir>`
-(offline listing of the quarantine log and the last open report), and
-`storage-node corrupt-shard` (test-only, hidden: flips bytes in a
-record on a stopped node for drills).
+`arca-lake admin integrity status` (scrub cursors per group, queue
+depth, data integrity status, unrecoverable and failed tasks with chunk
+ids), `admin integrity scrub --group <id> [--wait]` (reset the cursor
+so the leader's next tick starts the pass, or run it from the admin
+process), `admin integrity enqueue --group --chunk`, `admin integrity
+list`, `admin integrity verify-manifests` (§8.6; exit code 2 when there
+are findings), `arca-lake storage-node quarantine-list --dir <dir>
+[--scan]` (offline listing of the quarantine log and, with `--scan`,
+the open report and live entries), and `storage-node corrupt-shard`
+(test-only, hidden: flips a byte of a record's payload or header on a
+stopped node for drills). Mapping the objects that reference an
+unrecoverable chunk is a follow-up (the chunk id's generation prefix
+identifies the generation; the listing does not resolve it to a key).
 
 ## 9. Alternatives considered
 
@@ -559,12 +569,12 @@ Implemented / Not Verified).
 | # | Criterion | Status |
 | --- | --- | --- |
 | G1 | All tests named in §5 pass on both backends in CI; the model test covers I1–I5; the controller schedules GC, reconciliation and repair | Verified (Phase 2) |
-| G2 | Durable quarantine: a corrupt shard found on read or scrub is absent to readers and repair after a node restart, its bytes remain until compaction, the quarantine log records it, and a repair write releases it (I13) | Designed |
-| G3 | Open recovery skips a record with a corrupt payload and resynchronises after a corrupt header; the records after it are indexed | Designed |
-| G4 | `ScrubShards` classifies OK / checksum / header / truncated / quarantined / I/O error and never quarantines on I/O error | Designed |
-| G5 | Controller scrub: cursor persisted per page, resumes after leader failover and node restart; rate and concurrency limits observable; every class of §8.4 is produced by a test that injects it | Designed |
-| G6 | Stripe repair: single missing, several missing, corrupt, metadata/data mismatch, unrecoverable (no write, GET error), concurrent detections converge to one task, repair during GET/PUT/DELETE, epoch change mid-repair restarts at Classify, leader failover mid-repair resumes; every reconstructed shard verified before and after the write (I11, I12) | Designed |
-| G7 | Multipart: manifest scrub covers roots, references, parts, chunk placement, part and full-object checksums; GC after Complete never removes a referenced part (I-MP1) under scrub and repair | Designed |
-| G8 | FoundationDB failover during multipart operations (RFC-007 A10) | Designed |
-| G9 | Metrics of §8.8 exported with bounded cardinality | Designed |
-| G10 | Scrubbing at the default rate costs less than 15 % of PUT and GET throughput on the validation hosts | Designed (hypothesis) |
+| G2 | Durable quarantine: a corrupt shard found on read or scrub is absent to readers and repair after a node restart, its bytes remain until compaction, the quarantine log records it, and a repair write releases it (I13) | Implemented, Verified (`storage/tests/quarantine.rs`; `integrity.rs::quarantine_survives_a_node_restart_…`, `…scrub_detects_checksum_mismatch_…`) |
+| G3 | Open recovery skips a record with a corrupt payload and resynchronises after a corrupt header; the records after it are indexed | Implemented, Verified (`quarantine.rs::corrupt_header_is_a_hole_…`, `…corrupt_payload_is_quarantined_durably_…`) |
+| G4 | `ScrubShards` classifies OK / checksum / header / truncated / quarantined / I/O error and never quarantines on I/O error | Implemented; Verified for OK / checksum / header / truncated / quarantined (`integrity.rs::every_corruption_class_is_classified`); the I/O-error path is Not Verified (no fault injection below the storage engine) |
+| G5 | Controller scrub: cursor persisted per page, resumes after leader failover and node restart; rate and concurrency limits observable; every class of §8.4 is produced by a test that injects it | Implemented, Verified (`integrity.rs::scrub_cursor_resumes_…`, `…scrub_skips_a_member_that_is_down_…`, `…every_corruption_class_is_classified`, `…controller_processes_scrub_and_repair_and_a_leader_failover_…`); the byte budget is exercised by the resume test (a 1 B/s pass sleeps after its first page), its throughput effect by the host run (§G10) |
+| G6 | Stripe repair: single missing, several missing, corrupt, metadata/data mismatch, unrecoverable (no write, GET error), concurrent detections converge to one task, repair during GET/PUT/DELETE, epoch change mid-repair restarts at Classify, leader failover mid-repair resumes; every reconstructed shard verified before and after the write (I11, I12) | Implemented, Verified (`integrity.rs`: `missing_shards_single_and_multiple_…`, `scrub_detects_checksum_mismatch_…`, `every_corruption_class_…`, `unrecoverable_stripe_…`, `a_member_that_is_down_is_a_retry_…`, `concurrent_detections_and_workers_converge_…`, `repair_runs_safely_under_concurrent_get_put_and_delete`, `a_fenced_member_rejects_the_repair_write_…`, `controller_processes_…_leader_failover_…`); the epoch case is verified through a node fenced ahead of the plan (the write is rejected, the task re-plans after the membership change completes), not through a hook inside the worker |
+| G7 | Multipart: manifest scrub covers roots, references, parts, chunk placement, part and full-object checksums; GC after Complete never removes a referenced part (I-MP1) under scrub and repair | Implemented, Verified (`multipart_integrity.rs`: clean verification, part-chunk scrub and repair, GC and sweep after Complete, overwrite collection, versioned roots and delete markers, dangling and mismatched references with no partial read). Full-object checksum verification through the read path (`admin verify-object`) is Not Implemented; the stored checksum is verified on every GET by RFC-007's checksum response path instead |
+| G8 | FoundationDB failover during multipart operations (RFC-007 A10) | Implemented (`fdb_failover.rs` step 4b); status per RFC-007 §11 |
+| G9 | Metrics of §8.8 exported with bounded cardinality | Implemented, Verified (`integrity.rs::controller_processes_…` reads the controller's `/metrics`); the one label is the eight-value class |
+| G10 | Scrubbing at the default rate costs less than 15 % of PUT and GET throughput on the validation hosts | see `docs/verification/performance-regression.md` (Phase 3.2 run) |

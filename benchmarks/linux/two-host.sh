@@ -133,7 +133,9 @@ cmd_setup() {
   if [ "$mode" != durable ]; then
     cache_args="--cache-tier fast --cache-capacity-bytes $CACHE_CAPACITY --cache-high-watermark 0.9 --cache-low-watermark 0.8 --cache-max-populations ${CACHE_MAX_POPULATIONS:-8}"
   fi
-  start sa controller "$BIN controller --cluster-file $CLUSTER_FILE --id ctl-a --http 127.0.0.1:9901 --failure-domain node --evict-interval-secs 2 --gc-interval-secs 10 --gc-grace-secs 30 $cache_args"
+  # CONTROLLER_EXTRA_ARGS: e.g. continuous scrubbing for the Phase 3.2
+  # "GET/PUT during scrub" measurement.
+  start sa controller "$BIN controller --cluster-file $CLUSTER_FILE --id ctl-a --http 127.0.0.1:9901 --failure-domain node --evict-interval-secs 2 --gc-interval-secs 10 --gc-grace-secs 30 $cache_args ${CONTROLLER_EXTRA_ARGS:-}"
   start sg gateway "$BIN gateway --backend cluster --cluster-file $CLUSTER_FILE --allow-anonymous --listen $ADDR_G:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node $cache_args ${GW_EXTRA_ARGS:-}"
   # GATEWAYS=2|3: more gateways on the other hosts (multi-gateway runs,
   # Phase 2.3 §7); the load generator on each host drives its own.
