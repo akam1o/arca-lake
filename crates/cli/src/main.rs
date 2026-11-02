@@ -518,6 +518,9 @@ enum IntegrityCommand {
     },
     /// List every stripe repair task.
     List,
+    /// Verify every committed multipart root against its part generations
+    /// (RFC-008 §8.6) and print the findings.
+    VerifyManifests,
 }
 
 #[tokio::main]
@@ -1270,6 +1273,22 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
                 Ok(false) => {
                     println!("task already exists");
                     ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        IntegrityCommand::VerifyManifests => {
+            match arca_lake_controller::integrity::verify_manifests(meta.as_ref()).await {
+                Ok((roots, findings)) => {
+                    for (root, f) in &findings {
+                        println!("finding root {} {f:?}", hex(root));
+                    }
+                    println!("roots {roots} findings {}", findings.len());
+                    if findings.is_empty() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(2)
+                    }
                 }
                 Err(e) => fail(e),
             }

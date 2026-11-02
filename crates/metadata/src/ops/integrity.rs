@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::kv::{KeyRange, KvStore, Txn};
 use crate::ops::{read, write};
-use crate::records::{Record, decode};
+use crate::records::{GenId, Record, decode};
 use crate::{keys, transact};
 
 /// Corruption classes of RFC-008 §8.4, in table order. The index is used
@@ -410,4 +410,243 @@ pub async fn queue_summary<S: KvStore>(store: &S) -> Result<(u64, u64, u64)> {
         .filter(|(_, _, t)| matches!(t.state, RepairState::Failed { .. }))
         .count() as u64;
     Ok((all.len() as u64, unrecoverable, failed))
+}
+
+// ---- multipart manifest scrub (RFC-008 §8.6) --------------------------------
+
+/// What a manifest check found wrong with one multipart root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManifestFinding {
+    /// A part reference names a generation that does not exist or is not
+    /// `Committed`: the byte range is unrecoverable (I15, I-MP1 violated).
+    Dangling {
+        /// Part number.
+        part_number: u32,
+    },
+    /// The part generation disagrees with its reference (kind, upload,
+    /// size, chunk count or checksum), or the chunk records do not cover
+    /// the part's size.
+    Mismatch {
+        /// Part number.
+        part_number: u32,
+        /// What differs.
+        what: String,
+    },
+    /// The references do not tile the root (offsets, sizes, count).
+    Layout {
+        /// What differs.
+        what: String,
+    },
+}
+
+/// Result of verifying multipart roots.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManifestReport {
+    /// Committed multipart roots examined.
+    pub roots: u64,
+    /// Part references examined.
+    pub parts: u64,
+    /// Findings, with the root generation.
+    pub findings: Vec<(GenId, ManifestFinding)>,
+    /// Cursor for the next page (`None` when every root was examined).
+    pub next: Option<GenId>,
+}
+
+/// Verify every committed multipart root after `after` (at most `limit`
+/// generations scanned per transaction page; the walk continues until the
+/// end or `max_roots` roots were examined): each part reference must name
+/// a `Committed` generation of kind `Part` for the same upload and part
+/// number whose header size, chunk count and checksum equal the
+/// reference's and whose chunk records cover exactly its size; the
+/// references must tile the root contiguously and their count must equal
+/// the root's `part_count`.
+///
+/// # Errors
+///
+/// Backend errors.
+#[allow(clippy::too_many_lines)]
+pub async fn verify_manifests<S: KvStore>(
+    store: &S,
+    after: Option<GenId>,
+    max_roots: usize,
+) -> Result<ManifestReport> {
+    use crate::records::{GenKind, GenState, GenerationHeader, PartRef};
+    let mut report = ManifestReport::default();
+    let mut cursor = after;
+    loop {
+        // One page of generation keys (headers, chunk records, part
+        // references, ...): the headers are examined, the last generation
+        // seen is the next cursor.
+        let (page, last): (Vec<(GenId, GenerationHeader)>, Option<GenId>) =
+            transact(store, cursor, |tx, cur| {
+                Box::pin(async move {
+                    let begin = match cur {
+                        Some(g) => keys::gen_range(g).end,
+                        None => keys::all_generations_range().begin,
+                    };
+                    let range = KeyRange::new(begin, keys::all_generations_range().end);
+                    let mut out = Vec::new();
+                    let mut last = None;
+                    for (k, v) in tx.get_range(&range, 512, false).await? {
+                        let Some(g) = keys::gen_from_gen_key(&k) else {
+                            continue;
+                        };
+                        last = Some(g);
+                        if k == keys::gen_header(&g) {
+                            out.push((g, decode::<GenerationHeader>(&v)?));
+                        }
+                    }
+                    Ok((out, last))
+                })
+            })
+            .await?;
+        let Some(last) = last else {
+            report.next = None;
+            return Ok(report);
+        };
+        for (root, header) in page {
+            let GenKind::MultipartRoot {
+                upload_id,
+                part_count,
+            } = &header.kind
+            else {
+                continue;
+            };
+            if header.state != GenState::Committed {
+                continue;
+            }
+            report.roots += 1;
+            let refs: Vec<PartRef> = transact(store, root, |tx, g| {
+                Box::pin(async move {
+                    let mut out = Vec::new();
+                    for (_, v) in tx
+                        .get_range(&keys::part_refs_range(g), usize::MAX, false)
+                        .await?
+                    {
+                        out.push(decode::<PartRef>(&v)?);
+                    }
+                    Ok(out)
+                })
+            })
+            .await?;
+            if refs.len() != *part_count as usize {
+                report.findings.push((
+                    root,
+                    ManifestFinding::Layout {
+                        what: format!("{} references, part_count {part_count}", refs.len()),
+                    },
+                ));
+            }
+            let mut offset = 0u64;
+            for r in &refs {
+                report.parts += 1;
+                if r.offset != offset {
+                    report.findings.push((
+                        root,
+                        ManifestFinding::Layout {
+                            what: format!(
+                                "part {} at offset {}, expected {offset}",
+                                r.part_number, r.offset
+                            ),
+                        },
+                    ));
+                }
+                offset = r.offset.saturating_add(r.size);
+                let part = transact(store, r.generation, |tx, g| {
+                    Box::pin(async move {
+                        let header: Option<GenerationHeader> =
+                            read(tx, &keys::gen_header(g)).await?;
+                        let mut covered = 0u64;
+                        let mut chunks = 0u32;
+                        for (_, v) in tx
+                            .get_range(&keys::gen_chunks_range(g), usize::MAX, false)
+                            .await?
+                        {
+                            let c = decode::<crate::records::ChunkRecord>(&v)?;
+                            covered += u64::from(c.len);
+                            chunks += 1;
+                        }
+                        Ok((header, covered, chunks))
+                    })
+                })
+                .await?;
+                let (Some(ph), covered, chunks) = part else {
+                    report.findings.push((
+                        root,
+                        ManifestFinding::Dangling {
+                            part_number: r.part_number,
+                        },
+                    ));
+                    continue;
+                };
+                if ph.state != GenState::Committed {
+                    report.findings.push((
+                        root,
+                        ManifestFinding::Dangling {
+                            part_number: r.part_number,
+                        },
+                    ));
+                    continue;
+                }
+                let mut what = Vec::new();
+                match &ph.kind {
+                    GenKind::Part {
+                        upload_id: u,
+                        part_number: n,
+                    } => {
+                        if u != upload_id {
+                            what.push("upload id".to_string());
+                        }
+                        if *n != r.part_number {
+                            what.push(format!("part number {n}"));
+                        }
+                    }
+                    other => what.push(format!("kind {other:?}")),
+                }
+                if ph.size != r.size {
+                    what.push(format!("size {} vs reference {}", ph.size, r.size));
+                }
+                if ph.chunk_count != r.chunk_count {
+                    what.push(format!(
+                        "chunk_count {} vs reference {}",
+                        ph.chunk_count, r.chunk_count
+                    ));
+                }
+                if ph.checksum != r.checksum {
+                    what.push("checksum".to_string());
+                }
+                if chunks != ph.chunk_count {
+                    what.push(format!("{chunks} chunk records, header {}", ph.chunk_count));
+                }
+                if covered != ph.size {
+                    what.push(format!(
+                        "chunk records cover {covered} bytes, size {}",
+                        ph.size
+                    ));
+                }
+                if !what.is_empty() {
+                    report.findings.push((
+                        root,
+                        ManifestFinding::Mismatch {
+                            part_number: r.part_number,
+                            what: what.join("; "),
+                        },
+                    ));
+                }
+            }
+            if offset != header.size {
+                report.findings.push((
+                    root,
+                    ManifestFinding::Layout {
+                        what: format!("references cover {offset} bytes, root size {}", header.size),
+                    },
+                ));
+            }
+            if usize::try_from(report.roots).unwrap_or(usize::MAX) >= max_roots {
+                report.next = Some(root);
+                return Ok(report);
+            }
+        }
+        cursor = Some(last);
+    }
 }

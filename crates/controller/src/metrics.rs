@@ -84,6 +84,12 @@ pub struct Metrics {
     /// 0 = no open findings; 1 = repairs pending or failed; 2 = unrecoverable
     /// stripes present.
     pub data_integrity_status: AtomicU64,
+    /// Multipart roots verified by the manifest scrub (RFC-008 §8.6).
+    pub manifest_roots_verified_total: AtomicU64,
+    /// Manifest findings (dangling references, mismatches, layout).
+    pub manifest_findings_total: AtomicU64,
+    /// Manifest findings of the last manifest scrub.
+    pub manifest_findings: AtomicU64,
 }
 
 /// Metric label of each finding class, in `Finding::ALL` order.
@@ -221,6 +227,14 @@ impl Metrics {
                 "arca_controller_repair_bytes_total",
                 &self.repair_bytes_total,
             ),
+            (
+                "arca_controller_manifest_roots_verified_total",
+                &self.manifest_roots_verified_total,
+            ),
+            (
+                "arca_controller_manifest_findings_total",
+                &self.manifest_findings_total,
+            ),
         ] {
             out += &c(name, v.load(Ordering::Relaxed));
         }
@@ -253,6 +267,7 @@ impl Metrics {
                 "arca_controller_data_integrity_status",
                 &self.data_integrity_status,
             ),
+            ("arca_controller_manifest_findings", &self.manifest_findings),
         ] {
             out += &g(name, v.load(Ordering::Relaxed));
         }

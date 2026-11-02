@@ -20,7 +20,7 @@ use arca_lake_common::split_chunk_id;
 use arca_lake_ec::ErasureCoder;
 use arca_lake_ec::StripeLayout;
 use arca_lake_metadata::ops::integrity::{
-    self, Finding, RepairState, RepairTask, ScrubCursor, ScrubPhase,
+    self, Finding, ManifestFinding, RepairState, RepairTask, ScrubCursor, ScrubPhase,
 };
 use arca_lake_metadata::ops::{cluster, gc};
 use arca_lake_metadata::records::{ChunkRecord, GroupRecord, GroupRole, NodeRecord};
@@ -97,6 +97,10 @@ pub struct ScrubReport {
     pub enqueued: u64,
     /// Node or metadata errors (the pass continues).
     pub errors: u64,
+    /// Multipart roots verified by the manifest scrub of this pass.
+    pub manifest_roots: u64,
+    /// Manifest findings of this pass (RFC-008 §8.6).
+    pub manifest_findings: Vec<(arca_lake_metadata::records::GenId, ManifestFinding)>,
 }
 
 impl ScrubReport {
@@ -250,10 +254,57 @@ pub async fn scrub_pass<S: KvStore>(
             Err(e) => return Err(e),
         }
     }
+    // Manifest scrub (RFC-008 §8.6): whenever a group pass completed, every
+    // committed multipart root is checked against its part generations.
+    if report.groups_completed > 0 {
+        let (roots, findings) = verify_manifests(meta).await?;
+        report.manifest_roots = roots;
+        if let Some(m) = metrics {
+            m.manifest_roots_verified_total
+                .fetch_add(roots, Ordering::Relaxed);
+            m.manifest_findings_total
+                .fetch_add(findings.len() as u64, Ordering::Relaxed);
+            m.manifest_findings
+                .store(findings.len() as u64, Ordering::Relaxed);
+        }
+        report.manifest_findings = findings;
+    }
     if let Some(m) = metrics {
         m.scrub_passes_total.fetch_add(1, Ordering::Relaxed);
     }
     Ok(report)
+}
+
+/// Verify every committed multipart root (RFC-008 §8.6); findings are
+/// logged with the root generation. Returns `(roots verified, findings)`.
+///
+/// # Errors
+///
+/// Metadata errors.
+pub async fn verify_manifests<S: KvStore>(
+    meta: &S,
+) -> Result<
+    (
+        u64,
+        Vec<(arca_lake_metadata::records::GenId, ManifestFinding)>,
+    ),
+    ControlError,
+> {
+    let mut roots = 0u64;
+    let mut findings = Vec::new();
+    let mut after = None;
+    loop {
+        let r = integrity::verify_manifests(meta, after, 256).await?;
+        roots += r.roots;
+        for (root, f) in r.findings {
+            warn!(root = %hex(&root), finding = ?f, "multipart manifest finding (RFC-008 §8.6)");
+            findings.push((root, f));
+        }
+        match r.next {
+            Some(n) => after = Some(n),
+            None => return Ok((roots, findings)),
+        }
+    }
 }
 
 /// Byte budget per second: sleeps so that bytes verified so far fit it.
