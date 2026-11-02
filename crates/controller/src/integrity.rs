@@ -1,0 +1,1098 @@
+//! Background scrubbing, corruption classification and stripe repair
+//! (RFC-008 §8, ADR-0015).
+//!
+//! The scrub pass deep-verifies every shard of a group on its node
+//! (`ScrubShards`), classifies each one against the metadata (RFC-008
+//! §8.4), walks the merged member listings for missing shards, and
+//! records what it finds as repair tasks. The stripe repair worker drives
+//! each task through Classify → Plan → Reconstruct → Verify → Commit
+//! (RFC-008 §8.5): it writes only bytes that decode to the chunk whose
+//! CRC-32C and length match the chunk record (I11), under the epoch of
+//! the group record it planned with (I12), and never deletes anything
+//! (I16). Scrub progress and task state live in metadata, so a controller
+//! failover resumes where the previous leader stopped.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use arca_lake_common::split_chunk_id;
+use arca_lake_ec::ErasureCoder;
+use arca_lake_ec::StripeLayout;
+use arca_lake_metadata::ops::integrity::{
+    self, Finding, RepairState, RepairTask, ScrubCursor, ScrubPhase,
+};
+use arca_lake_metadata::ops::{cluster, gc};
+use arca_lake_metadata::records::{ChunkRecord, GroupRecord, GroupRole, NodeRecord};
+use arca_lake_metadata::{KvStore, MetaError};
+use arca_lake_protocol::client::{NodeClients, ShardRef, ShardStatus};
+use arca_lake_tiering::durable::{Coders, encode_chunk};
+use bytes::Bytes;
+use tracing::{info, warn};
+
+use crate::ControlError;
+use crate::metrics::Metrics;
+use crate::walk::GroupWalker;
+
+/// Scrub scheduler options (RFC-008 §8.3).
+#[derive(Debug, Clone)]
+pub struct ScrubOptions {
+    /// Shards per `ScrubShards` RPC.
+    pub page: u32,
+    /// Byte budget per second across groups (0 = unpaced).
+    pub rate_bytes_per_s: u64,
+    /// A group is due when its last pass finished longer ago than this
+    /// (milliseconds); 0 disables scheduled scrubbing.
+    pub interval_ms: u64,
+    /// Groups scrubbed per pass invocation.
+    pub concurrency: usize,
+}
+
+impl Default for ScrubOptions {
+    fn default() -> Self {
+        Self {
+            page: 256,
+            rate_bytes_per_s: 32 << 20,
+            interval_ms: 24 * 3600 * 1000,
+            concurrency: 1,
+        }
+    }
+}
+
+/// Stripe repair worker options (RFC-008 §8.5).
+#[derive(Debug, Clone)]
+pub struct RepairWorkerOptions {
+    /// Tasks processed per pass.
+    pub tasks_per_pass: usize,
+    /// Attempts before a task is `Failed`.
+    pub max_attempts: u32,
+    /// Milliseconds before an `Unrecoverable` task is re-checked.
+    pub recheck_ms: u64,
+}
+
+impl Default for RepairWorkerOptions {
+    fn default() -> Self {
+        Self {
+            tasks_per_pass: 64,
+            max_attempts: 8,
+            recheck_ms: 3600 * 1000,
+        }
+    }
+}
+
+/// What one scrub pass did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScrubReport {
+    /// Groups whose pass completed.
+    pub groups_completed: usize,
+    /// Groups whose pass advanced but did not complete (budget or error).
+    pub groups_in_progress: usize,
+    /// Shards verified.
+    pub verified: u64,
+    /// Bytes read on nodes.
+    pub bytes: u64,
+    /// Findings by class ([`Finding::ALL`] order).
+    pub findings: [u64; 8],
+    /// Repair tasks created.
+    pub enqueued: u64,
+    /// Node or metadata errors (the pass continues).
+    pub errors: u64,
+}
+
+impl ScrubReport {
+    /// Findings of one class.
+    #[must_use]
+    pub fn count(&self, f: Finding) -> u64 {
+        self.findings[f.index()]
+    }
+}
+
+/// What one repair worker pass did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepairWorkerReport {
+    /// Tasks examined.
+    pub examined: usize,
+    /// Tasks removed because the stripe was repaired (or already healthy).
+    pub succeeded: usize,
+    /// Shards rewritten.
+    pub shards_rewritten: usize,
+    /// Bytes written to nodes.
+    pub bytes_written: u64,
+    /// Tasks now `Unrecoverable`.
+    pub unrecoverable: usize,
+    /// Tasks that failed this pass (retried later).
+    pub failed: usize,
+    /// Tasks removed because their generation is no longer live.
+    pub dropped: usize,
+    /// Tasks deferred (not due, or epoch changed and re-planned).
+    pub deferred: usize,
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+fn shard_ref(group: &GroupRecord, chunk_id: [u8; 16], i: usize) -> ShardRef {
+    ShardRef {
+        group_id: group.id,
+        chunk_id,
+        shard_index: u16::try_from(i).unwrap_or(u16::MAX),
+    }
+}
+
+/// Expected shard length of a chunk record in `group`.
+fn expected_shard_len(record: &ChunkRecord, group: &GroupRecord, coder: &dyn ErasureCoder) -> u64 {
+    let layout = StripeLayout::new(
+        usize::try_from(record.len).unwrap_or(0),
+        usize::from(group.data_shards),
+        coder.shard_alignment(),
+    );
+    layout.shard_len() as u64
+}
+
+fn is_deferrable(e: &MetaError) -> bool {
+    matches!(
+        e,
+        MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(_)) | MetaError::TooManyRetries
+    )
+}
+
+// ---- scrub ----------------------------------------------------------------
+
+/// One scrub pass: scrub up to `opts.concurrency` due groups (resuming
+/// cursors), paced by the byte budget.
+///
+/// # Errors
+///
+/// Metadata errors that are not deferrable (node errors are counted).
+pub async fn scrub_pass<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    coders: &Coders,
+    opts: &ScrubOptions,
+    metrics: Option<&Metrics>,
+    now_ms: u64,
+) -> Result<ScrubReport, ControlError> {
+    let mut report = ScrubReport::default();
+    if opts.interval_ms == 0 {
+        return Ok(report);
+    }
+    let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .map(|n| (n.id, n))
+        .collect();
+    let groups = cluster::list_groups(meta).await?;
+    let cursors: HashMap<u64, ScrubCursor> =
+        integrity::scrub_cursors(meta).await?.into_iter().collect();
+    // In-progress groups first, then the longest-unscrubbed.
+    let mut due: Vec<(u64, &GroupRecord)> = Vec::new();
+    for g in groups.iter().filter(|g| g.role == GroupRole::Durable) {
+        match cursors.get(&g.id) {
+            Some(c) if !c.is_done() => due.push((0, g)),
+            Some(c) if now_ms.saturating_sub(c.finished_ms) >= opts.interval_ms => {
+                due.push((c.finished_ms, g));
+            }
+            Some(_) => {}
+            None => due.push((0, g)),
+        }
+    }
+    due.sort_by_key(|(t, g)| (*t, g.id));
+    if let Some(m) = metrics {
+        m.scrub_groups_overdue
+            .store(due.len() as u64, Ordering::Relaxed);
+    }
+    let mut budget = Pacer::new(opts.rate_bytes_per_s);
+    for (_, group) in due.into_iter().take(opts.concurrency.max(1)) {
+        let cursor = match cursors.get(&group.id) {
+            Some(c) if !c.is_done() => c.clone(),
+            Some(c) => ScrubCursor::start(c.pass + 1, c.finished_ms, now_ms),
+            None => ScrubCursor::start(1, 0, now_ms),
+        };
+        match scrub_group(
+            meta,
+            clients,
+            coders,
+            &nodes,
+            group,
+            cursor,
+            opts,
+            &mut budget,
+            metrics,
+            now_ms,
+        )
+        .await
+        {
+            Ok((done, part)) => {
+                report.verified += part.verified;
+                report.bytes += part.bytes;
+                for (i, n) in part.findings.iter().enumerate() {
+                    report.findings[i] += n;
+                }
+                report.enqueued += part.enqueued;
+                report.errors += part.errors;
+                if done {
+                    report.groups_completed += 1;
+                } else {
+                    report.groups_in_progress += 1;
+                }
+            }
+            Err(ControlError::Meta(e)) if is_deferrable(&e) => {
+                report.errors += 1;
+                report.groups_in_progress += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if let Some(m) = metrics {
+        m.scrub_passes_total.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(report)
+}
+
+/// Byte budget per second: sleeps so that bytes verified so far fit it.
+struct Pacer {
+    rate: u64,
+    started: std::time::Instant,
+    bytes: u64,
+}
+
+impl Pacer {
+    fn new(rate: u64) -> Self {
+        Self {
+            rate,
+            started: std::time::Instant::now(),
+            bytes: 0,
+        }
+    }
+
+    async fn account(&mut self, bytes: u64) {
+        self.bytes += bytes;
+        if self.rate == 0 {
+            return;
+        }
+        let allowed = std::time::Duration::from_millis(self.bytes.saturating_mul(1000) / self.rate);
+        let elapsed = self.started.elapsed();
+        if allowed > elapsed {
+            tokio::time::sleep(allowed.saturating_sub(elapsed)).await;
+        }
+    }
+}
+
+/// Scrub one group from its cursor until the pass completes or a page
+/// fails. Returns `(done, report)`; the cursor is persisted after every
+/// page.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn scrub_group<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    coders: &Coders,
+    nodes: &HashMap<u64, NodeRecord>,
+    group: &GroupRecord,
+    mut cursor: ScrubCursor,
+    opts: &ScrubOptions,
+    pacer: &mut Pacer,
+    metrics: Option<&Metrics>,
+    now_ms: u64,
+) -> Result<(bool, ScrubReport), ControlError> {
+    let mut report = ScrubReport::default();
+    let coder = coders
+        .for_group(group)
+        .map_err(|e| ControlError::Other(e.to_string()))?;
+    let k = usize::from(group.data_shards);
+    let finding = |cursor: &mut ScrubCursor, report: &mut ScrubReport, f: Finding| {
+        cursor.findings[f.index()] += 1;
+        report.findings[f.index()] += 1;
+        if let Some(m) = metrics {
+            m.integrity_findings_total[f.index()].fetch_add(1, Ordering::Relaxed);
+        }
+    };
+    loop {
+        match cursor.phase.clone() {
+            ScrubPhase::Shards { member, after } => {
+                let Some(m) = group.members.get(usize::from(member)) else {
+                    cursor.phase = ScrubPhase::Presence { after: None };
+                    integrity::set_scrub_cursor(meta, group.id, &cursor).await?;
+                    continue;
+                };
+                let Some(node) = nodes.get(&m.node_id) else {
+                    // Unknown node: skip the member this pass.
+                    report.errors += 1;
+                    cursor.errors += 1;
+                    cursor.phase = ScrubPhase::Shards {
+                        member: member + 1,
+                        after: None,
+                    };
+                    integrity::set_scrub_cursor(meta, group.id, &cursor).await?;
+                    continue;
+                };
+                let after_ref = after.map(|c| ShardRef {
+                    group_id: group.id,
+                    chunk_id: c,
+                    shard_index: u16::MAX,
+                });
+                let page = match clients
+                    .scrub_shards_page(&node.address, group.id, after_ref, opts.page)
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(status) => {
+                        warn!(group = group.id, member, code = ?status.code(), "scrub page failed; member skipped this pass");
+                        report.errors += 1;
+                        cursor.errors += 1;
+                        if let Some(mm) = metrics {
+                            mm.scrub_errors_total.fetch_add(1, Ordering::Relaxed);
+                        }
+                        cursor.phase = ScrubPhase::Shards {
+                            member: member + 1,
+                            after: None,
+                        };
+                        integrity::set_scrub_cursor(meta, group.id, &cursor).await?;
+                        continue;
+                    }
+                };
+                let mut last = after;
+                for sh in &page.shards {
+                    last = Some(sh.shard.chunk_id);
+                    // Only the member's own shard index is its responsibility;
+                    // other indexes on it are unexpected copies.
+                    if usize::from(sh.shard.shard_index) != usize::from(member) {
+                        finding(&mut cursor, &mut report, Finding::UnexpectedShard);
+                        continue;
+                    }
+                    let status = match sh.status {
+                        // A shard quarantined earlier keeps the class of the
+                        // failure that quarantined it.
+                        ShardStatus::Quarantined if sh.reason.contains("truncated") => {
+                            ShardStatus::Truncated
+                        }
+                        ShardStatus::Quarantined if sh.reason == "payload block crc mismatch" => {
+                            ShardStatus::ChecksumMismatch
+                        }
+                        ShardStatus::Quarantined => ShardStatus::InvalidHeader,
+                        other => other,
+                    };
+                    match status {
+                        ShardStatus::Ok => {}
+                        ShardStatus::ChecksumMismatch | ShardStatus::Quarantined => {
+                            finding(&mut cursor, &mut report, Finding::ChecksumMismatch);
+                            if integrity::enqueue(
+                                meta,
+                                group.id,
+                                sh.shard.chunk_id,
+                                Finding::ChecksumMismatch,
+                                &[member],
+                                now_ms,
+                            )
+                            .await?
+                            {
+                                report.enqueued += 1;
+                            }
+                            continue;
+                        }
+                        ShardStatus::Truncated => {
+                            finding(&mut cursor, &mut report, Finding::TruncatedShard);
+                            if integrity::enqueue(
+                                meta,
+                                group.id,
+                                sh.shard.chunk_id,
+                                Finding::TruncatedShard,
+                                &[member],
+                                now_ms,
+                            )
+                            .await?
+                            {
+                                report.enqueued += 1;
+                            }
+                            continue;
+                        }
+                        ShardStatus::InvalidHeader => {
+                            finding(&mut cursor, &mut report, Finding::InvalidHeader);
+                            if integrity::enqueue(
+                                meta,
+                                group.id,
+                                sh.shard.chunk_id,
+                                Finding::InvalidHeader,
+                                &[member],
+                                now_ms,
+                            )
+                            .await?
+                            {
+                                report.enqueued += 1;
+                            }
+                            continue;
+                        }
+                        ShardStatus::IoError => {
+                            report.errors += 1;
+                            cursor.errors += 1;
+                            continue;
+                        }
+                    }
+                    cursor.verified += 1;
+                    report.verified += 1;
+                    // L3: metadata agreement.
+                    let (prefix, index) = split_chunk_id(&sh.shard.chunk_id);
+                    match gc::attribute_shard(meta, &prefix, index, group.id).await? {
+                        gc::ShardAttribution::Referenced => {}
+                        gc::ShardAttribution::NoGeneration | gc::ShardAttribution::Unreferenced => {
+                            finding(&mut cursor, &mut report, Finding::UnexpectedShard);
+                            continue;
+                        }
+                    }
+                    if let Some(record) =
+                        gc::chunk_record_in_group(meta, &prefix, index, group.id).await?
+                    {
+                        if record.placement.epoch > group.epoch {
+                            finding(&mut cursor, &mut report, Finding::StalePlacementEpoch);
+                            continue;
+                        }
+                        if sh.payload_len != expected_shard_len(&record, group, coder.as_ref()) {
+                            finding(&mut cursor, &mut report, Finding::MetadataDataMismatch);
+                            if integrity::enqueue(
+                                meta,
+                                group.id,
+                                sh.shard.chunk_id,
+                                Finding::MetadataDataMismatch,
+                                &[member],
+                                now_ms,
+                            )
+                            .await?
+                            {
+                                report.enqueued += 1;
+                            }
+                        }
+                    }
+                }
+                cursor.bytes += page.bytes_read;
+                report.bytes += page.bytes_read;
+                if let Some(mm) = metrics {
+                    mm.scrub_shards_verified_total
+                        .fetch_add(page.shards.len() as u64, Ordering::Relaxed);
+                    mm.scrub_bytes_total
+                        .fetch_add(page.bytes_read, Ordering::Relaxed);
+                }
+                cursor.phase = match page.next {
+                    Some(_) => ScrubPhase::Shards {
+                        member,
+                        after: last,
+                    },
+                    None => ScrubPhase::Shards {
+                        member: member + 1,
+                        after: None,
+                    },
+                };
+                integrity::set_scrub_cursor(meta, group.id, &cursor).await?;
+                pacer.account(page.bytes_read).await;
+            }
+            ScrubPhase::Presence { after } => {
+                let mut walker = GroupWalker::new(clients, nodes, group, after, opts.page);
+                let mut seen = 0u32;
+                let mut last = after;
+                while let Some(chunk) = walker.next().await? {
+                    last = Some(chunk.chunk_id);
+                    seen += 1;
+                    let (prefix, index) = split_chunk_id(&chunk.chunk_id);
+                    let Some(record) =
+                        gc::chunk_record_in_group(meta, &prefix, index, group.id).await?
+                    else {
+                        // Pending generation (no record yet) or garbage:
+                        // reconciliation's domain.
+                        continue;
+                    };
+                    let holders: Vec<usize> = chunk.holders().collect();
+                    // A member whose listing failed is unreachable, not
+                    // empty: its shards are neither present nor missing.
+                    let unreachable = walker.unavailable();
+                    let missing: Vec<u16> = (0..group.members.len())
+                        .filter(|i| !holders.contains(i) && !unreachable.contains(i))
+                        .map(|i| u16::try_from(i).unwrap_or(u16::MAX))
+                        .collect();
+                    if missing.is_empty() {
+                        continue;
+                    }
+                    let class = if holders.len() + unreachable.len() < k {
+                        Finding::UnrecoverableStripe
+                    } else {
+                        Finding::MissingShard
+                    };
+                    let _ = record;
+                    // A stripe the shard phase already queued (its shard is
+                    // quarantined, hence absent here) is not counted twice.
+                    if integrity::enqueue(meta, group.id, chunk.chunk_id, class, &missing, now_ms)
+                        .await?
+                    {
+                        finding(&mut cursor, &mut report, class);
+                        report.enqueued += 1;
+                    }
+                    if seen >= opts.page {
+                        break;
+                    }
+                }
+                let unavailable = walker.unavailable();
+                if !unavailable.is_empty() {
+                    report.errors += unavailable.len() as u64;
+                    cursor.errors += unavailable.len() as u64;
+                }
+                if seen >= opts.page {
+                    cursor.phase = ScrubPhase::Presence { after: last };
+                    integrity::set_scrub_cursor(meta, group.id, &cursor).await?;
+                    continue;
+                }
+                cursor.phase = ScrubPhase::Done;
+                cursor.finished_ms = now_ms;
+                integrity::set_scrub_cursor(meta, group.id, &cursor).await?;
+                info!(
+                    group = group.id,
+                    pass = cursor.pass,
+                    verified = cursor.verified,
+                    bytes = cursor.bytes,
+                    findings = ?cursor.findings,
+                    errors = cursor.errors,
+                    "scrub pass complete"
+                );
+                return Ok((true, report));
+            }
+            ScrubPhase::Done => return Ok((true, report)),
+        }
+    }
+}
+
+// ---- stripe repair ----------------------------------------------------------
+
+/// One repair worker pass over due tasks (RFC-008 §8.5).
+///
+/// # Errors
+///
+/// Metadata errors that are not deferrable.
+pub async fn repair_pass<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    coders: &Coders,
+    opts: &RepairWorkerOptions,
+    metrics: Option<&Metrics>,
+    now_ms: u64,
+) -> Result<RepairWorkerReport, ControlError> {
+    let mut report = RepairWorkerReport::default();
+    let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .map(|n| (n.id, n))
+        .collect();
+    let tasks = integrity::tasks(meta, usize::MAX).await?;
+    for (group_id, chunk_id, task) in tasks.into_iter().take(opts.tasks_per_pass) {
+        if task.next_attempt_ms > now_ms {
+            report.deferred += 1;
+            continue;
+        }
+        report.examined += 1;
+        let outcome = repair_one(
+            meta, clients, coders, &nodes, group_id, chunk_id, task, opts, now_ms,
+        )
+        .await;
+        match outcome {
+            Ok(o) => match o {
+                Outcome::Repaired { shards, bytes } => {
+                    report.succeeded += 1;
+                    report.shards_rewritten += shards;
+                    report.bytes_written += bytes;
+                    if let Some(m) = metrics {
+                        m.stripe_repairs_succeeded_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        m.shards_rewritten_total
+                            .fetch_add(shards as u64, Ordering::Relaxed);
+                        m.repair_bytes_total.fetch_add(bytes, Ordering::Relaxed);
+                    }
+                }
+                Outcome::Healthy => report.succeeded += 1,
+                Outcome::Dropped => report.dropped += 1,
+                Outcome::Unrecoverable => report.unrecoverable += 1,
+                Outcome::Failed => {
+                    report.failed += 1;
+                    if let Some(m) = metrics {
+                        m.stripe_repairs_failed_total
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Outcome::Replanned => report.deferred += 1,
+            },
+            Err(ControlError::Meta(e)) if is_deferrable(&e) => report.deferred += 1,
+            Err(e) => return Err(e),
+        }
+    }
+    if let Some(m) = metrics {
+        let (total, unrecoverable, failed) = integrity::queue_summary(meta).await?;
+        m.repair_queue_depth.store(total, Ordering::Relaxed);
+        m.repair_tasks_unrecoverable
+            .store(unrecoverable, Ordering::Relaxed);
+        m.repair_tasks_failed.store(failed, Ordering::Relaxed);
+        let status = if unrecoverable > 0 {
+            2
+        } else {
+            u64::from(total > 0)
+        };
+        m.data_integrity_status.store(status, Ordering::Relaxed);
+    }
+    Ok(report)
+}
+
+enum Outcome {
+    Repaired { shards: usize, bytes: u64 },
+    Healthy,
+    Dropped,
+    Unrecoverable,
+    Failed,
+    Replanned,
+}
+
+/// A member's shard as the node reports it at Classify.
+#[derive(Debug)]
+enum Source {
+    Good(Vec<u8>),
+    Bad(&'static str),
+}
+
+/// Drive one task through the stages of RFC-008 §8.5.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn repair_one<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    coders: &Coders,
+    nodes: &HashMap<u64, NodeRecord>,
+    group_id: u64,
+    chunk_id: [u8; 16],
+    mut task: RepairTask,
+    opts: &RepairWorkerOptions,
+    now_ms: u64,
+) -> Result<Outcome, ControlError> {
+    let cid = hex(&chunk_id);
+    // ---- Classify: fresh group record, chunk record, every member's shard.
+    let group = match cluster::get_group(meta, group_id).await {
+        Ok(g) => g,
+        Err(MetaError::NoSuchGroup(_)) => {
+            integrity::remove_task(meta, group_id, &chunk_id).await?;
+            return Ok(Outcome::Dropped);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let (prefix, index) = split_chunk_id(&chunk_id);
+    let Some(record) = gc::chunk_record_in_group(meta, &prefix, index, group_id).await? else {
+        if gc::generation_is_live(meta, &prefix).await? {
+            // Pending generation: its record may still arrive. Try later.
+            task.next_attempt_ms = now_ms + 60_000;
+            task.updated_ms = now_ms;
+            integrity::set_task(meta, group_id, &chunk_id, &task).await?;
+            return Ok(Outcome::Replanned);
+        }
+        integrity::remove_task(meta, group_id, &chunk_id).await?;
+        return Ok(Outcome::Dropped);
+    };
+    if record.placement.epoch > group.epoch {
+        // Metadata ahead of the group (RFC-015): never write under a stale
+        // epoch; the restore procedure reconciles epochs first.
+        return fail(
+            meta,
+            group_id,
+            &chunk_id,
+            task,
+            opts,
+            now_ms,
+            "placement epoch ahead of the group epoch",
+        )
+        .await;
+    }
+    let coder = coders
+        .for_group(&group)
+        .map_err(|e| ControlError::Other(e.to_string()))?;
+    let k = usize::from(group.data_shards);
+    let n = group.members.len();
+    let shard_len = expected_shard_len(&record, &group, coder.as_ref());
+    let mut sources: Vec<Source> = Vec::with_capacity(n);
+    for (i, m) in group.members.iter().enumerate() {
+        let Some(node) = nodes.get(&m.node_id) else {
+            sources.push(Source::Bad("unknown node"));
+            continue;
+        };
+        match clients
+            .get_shard(&node.address, shard_ref(&group, chunk_id, i), 0, 0)
+            .await
+        {
+            Ok(b) if b.len() as u64 == shard_len => sources.push(Source::Good(b.to_vec())),
+            Ok(_) => sources.push(Source::Bad("length mismatch")),
+            Err(s) if s.code() == tonic::Code::NotFound => sources.push(Source::Bad("missing")),
+            Err(s) if s.code() == tonic::Code::DataLoss => sources.push(Source::Bad("corrupt")),
+            Err(_) => sources.push(Source::Bad("unavailable")),
+        }
+    }
+    let good: Vec<usize> = (0..n)
+        .filter(|i| matches!(sources[*i], Source::Good(_)))
+        .collect();
+    // ---- Plan.
+    if good.len() < k {
+        let unavailable = sources
+            .iter()
+            .filter(|s| matches!(s, Source::Bad("unavailable" | "unknown node")))
+            .count();
+        if unavailable > 0 && good.len() + unavailable >= k {
+            // Not enough answers, not a verdict: a node is down. Retry.
+            return fail(
+                meta,
+                group_id,
+                &chunk_id,
+                task,
+                opts,
+                now_ms,
+                "members unavailable",
+            )
+            .await;
+        }
+        return unrecoverable(meta, group_id, &chunk_id, task, good.len(), k, now_ms).await;
+    }
+    // ---- Reconstruct from a verifying k-subset of the good shards (I11).
+    let Some((verified_set, shards)) =
+        reconstruct_verified(coder.as_ref(), &sources, &good, k, n, &record)
+    else {
+        return unrecoverable(meta, group_id, &chunk_id, task, 0, k, now_ms).await;
+    };
+    let targets: Vec<usize> = (0..n).filter(|i| !verified_set.contains(i)).collect();
+    if targets.is_empty() {
+        integrity::remove_task(meta, group_id, &chunk_id).await?;
+        return Ok(Outcome::Healthy);
+    }
+    task.state = RepairState::Planned {
+        targets: targets
+            .iter()
+            .map(|i| u16::try_from(*i).unwrap_or(u16::MAX))
+            .collect(),
+        epoch: group.epoch,
+    };
+    task.updated_ms = now_ms;
+    integrity::set_task(meta, group_id, &chunk_id, &task).await?;
+    // ---- Write under the planned epoch (I12), verifying the node's CRC.
+    let mut bytes_written = 0u64;
+    for &i in &targets {
+        let Some(node) = nodes.get(&group.members[i].node_id) else {
+            return fail(
+                meta,
+                group_id,
+                &chunk_id,
+                task,
+                opts,
+                now_ms,
+                "target node unknown",
+            )
+            .await;
+        };
+        let expected = arca_lake_storage::format::crc32c(&shards[i]);
+        match clients
+            .put_shard(
+                &node.address,
+                shard_ref(&group, chunk_id, i),
+                group.epoch,
+                shards[i].clone(),
+                256 << 10,
+            )
+            .await
+        {
+            Ok(r) if r.crc32c == expected => bytes_written += shards[i].len() as u64,
+            Ok(r) => {
+                return fail(
+                    meta,
+                    group_id,
+                    &chunk_id,
+                    task,
+                    opts,
+                    now_ms,
+                    &format!("node stored crc {:08x}, expected {expected:08x}", r.crc32c),
+                )
+                .await;
+            }
+            Err(s) if NodeClients::is_epoch_rejected(&s) => {
+                // Membership changed: re-plan from fresh reads next pass.
+                task.state = RepairState::Detected;
+                task.next_attempt_ms = now_ms;
+                task.updated_ms = now_ms;
+                task.last_error = Some("epoch changed during repair; re-planned".into());
+                integrity::set_task(meta, group_id, &chunk_id, &task).await?;
+                return Ok(Outcome::Replanned);
+            }
+            Err(s) => {
+                return fail(
+                    meta,
+                    group_id,
+                    &chunk_id,
+                    task,
+                    opts,
+                    now_ms,
+                    &format!("write failed: {}", s.code()),
+                )
+                .await;
+            }
+        }
+    }
+    // ---- Verify: read back every target (the node verifies block CRCs).
+    for &i in &targets {
+        let Some(node) = nodes.get(&group.members[i].node_id) else {
+            return fail(
+                meta,
+                group_id,
+                &chunk_id,
+                task,
+                opts,
+                now_ms,
+                "target node unknown",
+            )
+            .await;
+        };
+        match clients
+            .get_shard(&node.address, shard_ref(&group, chunk_id, i), 0, 0)
+            .await
+        {
+            Ok(b) if b.as_ref() == shards[i].as_ref() => {}
+            Ok(_) => {
+                return fail(
+                    meta,
+                    group_id,
+                    &chunk_id,
+                    task,
+                    opts,
+                    now_ms,
+                    "read-back differs",
+                )
+                .await;
+            }
+            Err(s) => {
+                return fail(
+                    meta,
+                    group_id,
+                    &chunk_id,
+                    task,
+                    opts,
+                    now_ms,
+                    &format!("read-back failed: {}", s.code()),
+                )
+                .await;
+            }
+        }
+    }
+    // ---- Commit.
+    integrity::remove_task(meta, group_id, &chunk_id).await?;
+    info!(group = group_id, chunk = %cid, targets = ?targets, reason = ?task.reason, "stripe repaired");
+    Ok(Outcome::Repaired {
+        shards: targets.len(),
+        bytes: bytes_written,
+    })
+}
+
+/// Find a `k`-subset of the good shards from which the chunk decodes to
+/// the recorded length and CRC; return it with the full re-encoded shard
+/// vector. Tries the first `k` good shards, then (bounded) other subsets.
+fn reconstruct_verified(
+    coder: &dyn ErasureCoder,
+    sources: &[Source],
+    good: &[usize],
+    k: usize,
+    n: usize,
+    record: &ChunkRecord,
+) -> Option<(Vec<usize>, Vec<Bytes>)> {
+    let try_subset = |subset: &[usize]| -> Option<Vec<Bytes>> {
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; n];
+        for &i in subset {
+            if let Source::Good(b) = &sources[i] {
+                shards[i] = Some(b.clone());
+            }
+        }
+        coder.reconstruct(&mut shards).ok()?;
+        let layout = StripeLayout::new(
+            usize::try_from(record.len).unwrap_or(0),
+            k,
+            coder.shard_alignment(),
+        );
+        let data: Vec<&[u8]> = shards[..k]
+            .iter()
+            .map(|s| s.as_deref().unwrap_or(&[]))
+            .collect();
+        let joined = layout.join(&data);
+        if joined.len() as u64 != u64::from(record.len)
+            || arca_lake_storage::format::crc32c(&joined) != record.crc32c
+        {
+            return None;
+        }
+        // Re-encode from the verified chunk so that every target gets bytes
+        // derived from the verified data, not from a possibly wrong parity.
+        let (_, encoded) = encode_chunk(coder, k, &joined).ok()?;
+        Some(encoded)
+    };
+    // Fast path: the first k good shards.
+    if let Some(enc) = try_subset(&good[..k]) {
+        // Members whose current bytes equal the re-encoded ones need no write.
+        let keep: Vec<usize> = (0..n)
+            .filter(|&i| matches!(&sources[i], Source::Good(b) if b.as_slice() == enc[i].as_ref()))
+            .collect();
+        return Some((keep, enc));
+    }
+    // Some good-looking shard carries wrong bytes: search other subsets
+    // (bounded; n ≤ 16 keeps C(n,k) small for realistic profiles).
+    if good.len() > 16 {
+        return None;
+    }
+    for subset in combinations(good, k) {
+        if let Some(enc) = try_subset(&subset) {
+            let keep: Vec<usize> = (0..n)
+                .filter(
+                    |&i| matches!(&sources[i], Source::Good(b) if b.as_slice() == enc[i].as_ref()),
+                )
+                .collect();
+            return Some((keep, enc));
+        }
+    }
+    None
+}
+
+fn combinations(items: &[usize], k: usize) -> Vec<Vec<usize>> {
+    let mut out = Vec::new();
+    let mut idx: Vec<usize> = (0..k).collect();
+    if k > items.len() {
+        return out;
+    }
+    loop {
+        out.push(idx.iter().map(|&i| items[i]).collect());
+        // Advance.
+        let mut i = k;
+        loop {
+            if i == 0 {
+                return out;
+            }
+            i -= 1;
+            if idx[i] != i + items.len() - k {
+                break;
+            }
+            if i == 0 {
+                return out;
+            }
+        }
+        idx[i] += 1;
+        for j in i + 1..k {
+            idx[j] = idx[j - 1] + 1;
+        }
+        if out.len() > 4096 {
+            return out;
+        }
+    }
+}
+
+async fn unrecoverable<S: KvStore>(
+    meta: &S,
+    group_id: u64,
+    chunk_id: &[u8; 16],
+    mut task: RepairTask,
+    have: usize,
+    need: usize,
+    now_ms: u64,
+) -> Result<Outcome, ControlError> {
+    let since = match task.state {
+        RepairState::Unrecoverable { since_ms, .. } => since_ms,
+        _ => now_ms,
+    };
+    task.state = RepairState::Unrecoverable {
+        have: u16::try_from(have).unwrap_or(u16::MAX),
+        need: u16::try_from(need).unwrap_or(u16::MAX),
+        since_ms: since,
+    };
+    task.next_attempt_ms = now_ms + 3600 * 1000;
+    task.updated_ms = now_ms;
+    integrity::set_task(meta, group_id, chunk_id, &task).await?;
+    warn!(group = group_id, chunk = %hex(chunk_id), have, need, "stripe unrecoverable (I15): readers get an integrity error");
+    Ok(Outcome::Unrecoverable)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fail<S: KvStore>(
+    meta: &S,
+    group_id: u64,
+    chunk_id: &[u8; 16],
+    mut task: RepairTask,
+    opts: &RepairWorkerOptions,
+    now_ms: u64,
+    why: &str,
+) -> Result<Outcome, ControlError> {
+    task.attempts += 1;
+    task.last_error = Some(why.to_string());
+    task.updated_ms = now_ms;
+    if task.attempts >= opts.max_attempts {
+        task.state = RepairState::Failed {
+            attempts: task.attempts,
+        };
+        task.next_attempt_ms = now_ms + opts.recheck_ms;
+    } else {
+        task.state = RepairState::Detected;
+        let backoff = 30_000u64.saturating_mul(1u64 << task.attempts.min(7));
+        task.next_attempt_ms = now_ms + backoff.min(3600 * 1000);
+    }
+    integrity::set_task(meta, group_id, chunk_id, &task).await?;
+    warn!(group = group_id, chunk = %hex(chunk_id), attempts = task.attempts, why, "stripe repair attempt failed");
+    Ok(Outcome::Failed)
+}
+
+/// Reset a group's scrub cursor so that the next pass starts now
+/// (`admin scrub run`).
+///
+/// # Errors
+///
+/// Metadata errors.
+pub async fn request_scrub<S: KvStore>(
+    meta: &S,
+    group_id: u64,
+    now_ms: u64,
+) -> Result<(), ControlError> {
+    let cursor = match integrity::scrub_cursor(meta, group_id).await? {
+        Some(c) => ScrubCursor::start(c.pass + 1, 0, now_ms),
+        None => ScrubCursor::start(1, 0, now_ms),
+    };
+    integrity::set_scrub_cursor(meta, group_id, &cursor).await?;
+    Ok(())
+}
+
+/// Scrub one group to completion regardless of its interval (tests and
+/// `admin scrub run --wait`). Returns the report of the pass.
+///
+/// # Errors
+///
+/// Metadata errors.
+pub async fn scrub_group_now<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    coders: &Coders,
+    group_id: u64,
+    opts: &ScrubOptions,
+    now_ms: u64,
+) -> Result<ScrubReport, ControlError> {
+    let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .map(|n| (n.id, n))
+        .collect();
+    let group = cluster::get_group(meta, group_id).await?;
+    let cursor = match integrity::scrub_cursor(meta, group_id).await? {
+        Some(c) if !c.is_done() => c,
+        Some(c) => ScrubCursor::start(c.pass + 1, c.finished_ms, now_ms),
+        None => ScrubCursor::start(1, 0, now_ms),
+    };
+    let mut pacer = Pacer::new(opts.rate_bytes_per_s);
+    let (_, report) = scrub_group(
+        meta, clients, coders, &nodes, &group, cursor, opts, &mut pacer, None, now_ms,
+    )
+    .await?;
+    Ok(report)
+}
+
+/// Shared coders for the controller (one cache per process).
+#[must_use]
+pub fn coders() -> Arc<Coders> {
+    Arc::new(Coders::default())
+}

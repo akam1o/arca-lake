@@ -7,6 +7,7 @@
 
 pub mod gc;
 pub mod groups;
+pub mod integrity;
 pub mod metrics;
 pub mod process;
 pub mod repair;

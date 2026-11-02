@@ -451,14 +451,18 @@ pub async fn reconcile_node<S: KvStore>(
     let mut report = ReconcileReport::default();
     let mut after = None;
     loop {
+        // Quarantined shards are listed too (RFC-008 §8.2): one that no
+        // generation references is an orphan like any other and its
+        // tombstone releases the quarantine entry; a referenced one is
+        // kept for stripe repair to rewrite.
         let page = clients
-            .list_shards_page(node_addr, group.id, after, page_size)
+            .list_shards_page_with(node_addr, group.id, after, page_size, true)
             .await
             .map_err(|status| ControlError::Node {
                 addr: node_addr.to_string(),
                 status,
             })?;
-        for (shard, _) in &page.entries {
+        for (shard, _) in page.entries.iter().chain(&page.quarantined) {
             reconcile_shard(
                 meta,
                 clients,
@@ -510,6 +514,15 @@ async fn reconcile_shard<S: KvStore>(
         }
         delete_one(clients, node_addr, shard, current.epoch).await?;
         report.former_member_deleted += 1;
+        return Ok(());
+    }
+    // A member holds exactly the shard index of its position; a copy under
+    // another index is a misdirected write that no reader or repair uses
+    // (RFC-008 §8.4, Unexpected Shard).
+    let position = group.members.iter().position(|m| m.node_id == node_id);
+    if position.is_some_and(|p| usize::from(shard.shard_index) != p) {
+        delete_one(clients, node_addr, shard, group.epoch).await?;
+        report.orphans_deleted += 1;
         return Ok(());
     }
     let (prefix, index) = split_chunk_id(&shard.chunk_id);

@@ -214,6 +214,24 @@ pub async fn read_chunk(
     chunk: &ChunkRecord,
     coder: &dyn ErasureCoder,
 ) -> Result<Vec<Bytes>, TierError> {
+    read_chunk_detailed(clients, group, addr_of, chunk, coder)
+        .await
+        .map(|r| r.parts)
+}
+
+/// [`read_chunk`], also reporting which members' shards were missing or
+/// unusable (a degraded read, RFC-008 §8.7).
+///
+/// # Errors
+///
+/// As [`read_chunk`].
+pub async fn read_chunk_detailed(
+    clients: &NodeClients,
+    group: &GroupRecord,
+    addr_of: AddrOf<'_>,
+    chunk: &ChunkRecord,
+    coder: &dyn ErasureCoder,
+) -> Result<CodedRead, TierError> {
     if usize::from(chunk.data_shards) != usize::from(group.data_shards)
         || usize::from(chunk.parity_shards) != usize::from(group.parity_shards)
     {
@@ -236,7 +254,6 @@ pub async fn read_chunk(
         coder,
     )
     .await
-    .map(|r| r.parts)
 }
 
 /// Encode a chunk into `k + m` shards.

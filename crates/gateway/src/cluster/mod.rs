@@ -8,7 +8,8 @@ mod read;
 mod write;
 
 pub use backend::{
-    CacheStatsSnapshot, ClusterBackend, ClusterConfig, FaultPoint, PutStats, PutStatsSnapshot,
+    CacheStatsSnapshot, ClusterBackend, ClusterConfig, FaultPoint, IntegrityStats,
+    IntegrityStatsSnapshot, PutStats, PutStatsSnapshot,
 };
 pub use map::ClusterMap;
 pub use popqueue::{PopQueueStats, PopQueueStatsSnapshot, PopulationQueue};

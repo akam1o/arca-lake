@@ -251,17 +251,56 @@ struct GatewayArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(subcommand_negates_reqs = true)]
 struct StorageNodeArgs {
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:9100")]
     listen: SocketAddr,
     /// Device directory.
-    #[arg(long)]
-    dir: PathBuf,
+    #[arg(long, required = true)]
+    dir: Option<PathBuf>,
     /// Serve node timing counters in the Prometheus text format
     /// (`GET /metrics`).
     #[arg(long)]
     metrics_listen: Option<SocketAddr>,
+    #[command(subcommand)]
+    command: Option<StorageNodeCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum StorageNodeCommand {
+    /// Offline inspection of a device's quarantine state (RFC-008 §8.2):
+    /// prints `quarantine.log`, and with `--scan` opens the store and
+    /// prints the open report (the node must not be running on the device).
+    QuarantineList {
+        /// Device directory.
+        #[arg(long)]
+        dir: PathBuf,
+        /// Open the store and print its recovery report and live quarantine
+        /// entries.
+        #[arg(long)]
+        scan: bool,
+    },
+    /// Test-only: flip bytes of a stored shard on a stopped node so that
+    /// scrubbing and repair can be exercised (RFC-008 §8.9).
+    #[command(hide = true)]
+    CorruptShard {
+        /// Device directory.
+        #[arg(long)]
+        dir: PathBuf,
+        /// Group id.
+        #[arg(long)]
+        group: u64,
+        /// Chunk id, 32 hex digits.
+        #[arg(long)]
+        chunk: String,
+        /// Shard index.
+        #[arg(long)]
+        index: u16,
+        /// Corrupt the record header instead of the payload.
+        #[arg(long)]
+        header: bool,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -330,6 +369,31 @@ struct ControllerArgs {
     /// Chunks a cache-group repair may reconstruct per pass (0 = unlimited).
     #[arg(long, default_value_t = 256)]
     cache_repair_chunks_per_pass: usize,
+    /// Scrub a group when its last pass finished this many seconds ago
+    /// (RFC-008 §8.3); 0 disables background scrubbing.
+    #[arg(long, default_value_t = 86_400)]
+    scrub_interval_secs: u64,
+    /// Seconds between scrub scheduler ticks (each resumes the due groups).
+    #[arg(long, default_value_t = 60)]
+    scrub_tick_secs: u64,
+    /// Shards per `ScrubShards` request.
+    #[arg(long, default_value_t = 256)]
+    scrub_page: u32,
+    /// Scrub read budget in MiB per second across groups (0 = unpaced).
+    #[arg(long, default_value_t = 32)]
+    scrub_rate_mib: u64,
+    /// Groups scrubbed per tick.
+    #[arg(long, default_value_t = 1)]
+    scrub_concurrency: usize,
+    /// Seconds between stripe repair worker passes (RFC-008 §8.5).
+    #[arg(long, default_value_t = 15)]
+    stripe_repair_interval_secs: u64,
+    /// Stripe repair tasks examined per pass.
+    #[arg(long, default_value_t = 64)]
+    stripe_repair_tasks_per_pass: usize,
+    /// Attempts before a stripe repair task is marked failed.
+    #[arg(long, default_value_t = 8)]
+    stripe_repair_max_attempts: u32,
     #[command(flatten)]
     rpc: NodeRpcArgs,
 }
@@ -411,6 +475,49 @@ enum AdminCommand {
     },
     /// Print nodes, groups, and the leader record.
     Status,
+    /// Data integrity: scrub progress and stripe repair tasks (RFC-008 §8.9).
+    Integrity {
+        #[command(subcommand)]
+        command: IntegrityCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IntegrityCommand {
+    /// Scrub cursors per group, repair queue summary, and every task that
+    /// is unrecoverable or failed.
+    Status,
+    /// Start a scrub pass of a group now: resets its cursor so the leader's
+    /// next tick picks it up, or runs the pass from this process with
+    /// `--wait` (the group's nodes must be reachable from here).
+    Scrub {
+        /// Group id.
+        #[arg(long)]
+        group: u64,
+        /// Run the pass to completion from this process and print the
+        /// report.
+        #[arg(long)]
+        wait: bool,
+        /// Shards per request when `--wait`.
+        #[arg(long, default_value_t = 256)]
+        page: u32,
+        /// Read budget in MiB per second when `--wait` (0 = unpaced).
+        #[arg(long, default_value_t = 0)]
+        rate_mib: u64,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
+    /// Enqueue a stripe repair task for one chunk.
+    Enqueue {
+        /// Group id.
+        #[arg(long)]
+        group: u64,
+        /// Chunk id, 32 hex digits.
+        #[arg(long)]
+        chunk: String,
+    },
+    /// List every stripe repair task.
+    List,
 }
 
 #[tokio::main]
@@ -578,6 +685,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 );
                 render_put_stats(&mut out, &stats_backend.put_stats());
                 render_queue_and_txn_stats(&mut out, &stats_backend.population_queue_stats());
+                render_integrity_stats(&mut out, &stats_backend.integrity_stats());
                 out
             }));
         }
@@ -621,15 +729,21 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
 }
 
 async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
-    if let Err(e) = std::fs::create_dir_all(&args.dir) {
-        return fail(format!("cannot create {}: {e}", args.dir.display()));
+    if let Some(command) = args.command {
+        return run_storage_node_command(command);
     }
-    let cfg = arca_lake_storage_node::NodeConfig::new(args.listen, &args.dir);
+    let Some(dir) = args.dir else {
+        return fail("--dir is required");
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return fail(format!("cannot create {}: {e}", dir.display()));
+    }
+    let cfg = arca_lake_storage_node::NodeConfig::new(args.listen, &dir);
     let node = match arca_lake_storage_node::serve(cfg).await {
         Ok(n) => n,
         Err(e) => return fail(format!("cannot start the storage node: {e}")),
     };
-    tracing::info!(addr = %node.local_addr, dir = %args.dir.display(), "storage node listening");
+    tracing::info!(addr = %node.local_addr, dir = %dir.display(), "storage node listening");
     if let Some(addr) = args.metrics_listen {
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => l,
@@ -645,6 +759,130 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
     tracing::info!("shutting down");
     node.shutdown().await;
     ExitCode::SUCCESS
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_storage_node_command(command: StorageNodeCommand) -> ExitCode {
+    match command {
+        StorageNodeCommand::QuarantineList { dir, scan } => {
+            match std::fs::read_to_string(dir.join("quarantine.log")) {
+                Ok(text) => {
+                    for line in text.lines() {
+                        println!("{line}");
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    println!("no quarantine log");
+                }
+                Err(e) => return fail(format!("cannot read quarantine.log: {e}")),
+            }
+            if scan {
+                let cfg = arca_lake_storage_node::NodeConfig::new(
+                    "127.0.0.1:0".parse().expect("literal"),
+                    &dir,
+                )
+                .store;
+                match arca_lake_storage_node::Store::open(cfg) {
+                    Ok((store, report)) => {
+                        println!(
+                            "open segments {} live_shards {} superseded {} truncated_bytes {} corrupt_segments {:?} quarantined {:?} holes {:?}",
+                            report.segments,
+                            report.live_shards,
+                            report.superseded_records,
+                            report.truncated_bytes,
+                            report.corrupt_segments,
+                            report.quarantined,
+                            report.holes
+                        );
+                        for (k, q) in store.quarantined() {
+                            println!(
+                                "quarantined group {} chunk {} index {} segment {} offset {} sequence {} len {} reason {:?} since_ms {}",
+                                k.group_id,
+                                hex(&k.chunk_id),
+                                k.shard_index,
+                                q.location.segment_id,
+                                q.location.offset,
+                                q.location.sequence,
+                                q.location.payload_len,
+                                q.reason,
+                                q.since_unix_ms
+                            );
+                        }
+                    }
+                    Err(e) => return fail(format!("cannot open the store: {e}")),
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        StorageNodeCommand::CorruptShard {
+            dir,
+            group,
+            chunk,
+            index,
+            header,
+        } => {
+            use std::os::unix::fs::FileExt as _;
+            let chunk_id = match parse_chunk_id(&chunk) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            let cfg = arca_lake_storage_node::NodeConfig::new(
+                "127.0.0.1:0".parse().expect("literal"),
+                &dir,
+            )
+            .store;
+            let (store, _) = match arca_lake_storage_node::Store::open(cfg) {
+                Ok(s) => s,
+                Err(e) => return fail(format!("cannot open the store: {e}")),
+            };
+            let key = arca_lake_storage_node::ShardKey {
+                group_id: group,
+                chunk_id,
+                shard_index: index,
+            };
+            let Some(loc) = store.locate(&key) else {
+                return fail("shard is not live on this device");
+            };
+            let path = store
+                .dir()
+                .join(format!("seg-{:016x}.arca", loc.segment_id));
+            let pos = if header {
+                loc.offset + 8
+            } else {
+                loc.payload_offset() + u64::from(loc.payload_len) / 2
+            };
+            drop(store);
+            let f = match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+            {
+                Ok(f) => f,
+                Err(e) => return fail(format!("cannot open {}: {e}", path.display())),
+            };
+            let mut b = [0u8; 1];
+            if let Err(e) = f.read_exact_at(&mut b, pos) {
+                return fail(format!("read: {e}"));
+            }
+            if let Err(e) = f.write_all_at(&[b[0] ^ 0x5a], pos) {
+                return fail(format!("write: {e}"));
+            }
+            if let Err(e) = f.sync_all() {
+                return fail(format!("sync: {e}"));
+            }
+            println!(
+                "flipped one byte of {} at offset {pos} (segment {} record offset {})",
+                if header {
+                    "the record header"
+                } else {
+                    "the payload"
+                },
+                loc.segment_id,
+                loc.offset
+            );
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 async fn run_controller(args: ControllerArgs) -> ExitCode {
@@ -680,6 +918,19 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     }
     cfg.tiering_interval = Duration::from_secs(args.tiering_interval_secs);
     cfg.cache_repair_chunks_per_pass = args.cache_repair_chunks_per_pass;
+    cfg.scrub = arca_lake_controller::integrity::ScrubOptions {
+        page: args.scrub_page,
+        rate_bytes_per_s: args.scrub_rate_mib << 20,
+        interval_ms: args.scrub_interval_secs * 1000,
+        concurrency: args.scrub_concurrency,
+    };
+    cfg.scrub_tick = Duration::from_secs(args.scrub_tick_secs.max(1));
+    cfg.stripe_repair = arca_lake_controller::integrity::RepairWorkerOptions {
+        tasks_per_pass: args.stripe_repair_tasks_per_pass,
+        max_attempts: args.stripe_repair_max_attempts,
+        ..Default::default()
+    };
+    cfg.stripe_repair_interval = Duration::from_secs(args.stripe_repair_interval_secs.max(1));
     cfg.node_timeout = Duration::from_secs(args.rpc.node_timeout_secs.max(1));
     cfg.rpc_policy = Some(args.rpc.policy());
     let handle = match arca_lake_controller::process::spawn(meta, cfg).await {
@@ -817,6 +1068,7 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 Err(e) => fail(e),
             }
         }
+        AdminCommand::Integrity { command } => run_admin_integrity(meta, command, now).await,
         AdminCommand::Status => {
             let nodes = arca_lake_metadata::ops::cluster::list_nodes(meta.as_ref()).await;
             let groups = arca_lake_metadata::ops::cluster::list_groups(meta.as_ref()).await;
@@ -859,6 +1111,187 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 ),
             }
         }
+    }
+}
+
+fn parse_chunk_id(s: &str) -> Result<[u8; 16], String> {
+    let s = s.trim();
+    if s.len() != 32 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("chunk id must be 32 hex digits".into());
+    }
+    let mut out = [0u8; 16];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
+    meta: Arc<S>,
+    command: IntegrityCommand,
+    now: u64,
+) -> ExitCode {
+    use arca_lake_metadata::ops::integrity::{self, RepairState};
+    match command {
+        IntegrityCommand::Status => {
+            let cursors = match integrity::scrub_cursors(meta.as_ref()).await {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            for (g, c) in cursors {
+                println!(
+                    "scrub group {g} pass {} phase {:?} started_ms {} finished_ms {} verified {} bytes {} findings {:?} errors {}",
+                    c.pass,
+                    c.phase,
+                    c.started_ms,
+                    c.finished_ms,
+                    c.verified,
+                    c.bytes,
+                    c.findings,
+                    c.errors
+                );
+            }
+            let tasks = match integrity::tasks(meta.as_ref(), usize::MAX).await {
+                Ok(t) => t,
+                Err(e) => return fail(e),
+            };
+            let unrecoverable = tasks
+                .iter()
+                .filter(|(_, _, t)| matches!(t.state, RepairState::Unrecoverable { .. }))
+                .count();
+            let failed = tasks
+                .iter()
+                .filter(|(_, _, t)| matches!(t.state, RepairState::Failed { .. }))
+                .count();
+            println!(
+                "repair queue depth {} unrecoverable {unrecoverable} failed {failed} status {}",
+                tasks.len(),
+                if unrecoverable > 0 {
+                    2
+                } else {
+                    i32::from(!tasks.is_empty())
+                }
+            );
+            for (g, c, t) in tasks.iter().filter(|(_, _, t)| {
+                matches!(
+                    t.state,
+                    RepairState::Unrecoverable { .. } | RepairState::Failed { .. }
+                )
+            }) {
+                println!(
+                    "task group {g} chunk {} reason {:?} state {:?} attempts {} last_error {:?}",
+                    hex(c),
+                    t.reason,
+                    t.state,
+                    t.attempts,
+                    t.last_error
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        IntegrityCommand::Scrub {
+            group,
+            wait,
+            page,
+            rate_mib,
+            rpc,
+        } => {
+            if !wait {
+                return match arca_lake_controller::integrity::request_scrub(
+                    meta.as_ref(),
+                    group,
+                    now,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        println!("scrub of group {group} requested");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => fail(e),
+                };
+            }
+            let clients = arca_lake_protocol::client::NodeClients::with_policy(rpc.policy());
+            let coders = arca_lake_controller::integrity::coders();
+            let opts = arca_lake_controller::integrity::ScrubOptions {
+                page,
+                rate_bytes_per_s: rate_mib << 20,
+                interval_ms: 1,
+                concurrency: 1,
+            };
+            match arca_lake_controller::integrity::scrub_group_now(
+                meta.as_ref(),
+                &clients,
+                &coders,
+                group,
+                &opts,
+                now,
+            )
+            .await
+            {
+                Ok(r) => {
+                    println!(
+                        "scrub group {group} verified {} bytes {} findings {:?} enqueued {} errors {}",
+                        r.verified, r.bytes, r.findings, r.enqueued, r.errors
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        IntegrityCommand::Enqueue { group, chunk } => {
+            let chunk_id = match parse_chunk_id(&chunk) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            match integrity::enqueue(
+                meta.as_ref(),
+                group,
+                chunk_id,
+                integrity::Finding::MissingShard,
+                &[],
+                now,
+            )
+            .await
+            {
+                Ok(true) => {
+                    println!("task created");
+                    ExitCode::SUCCESS
+                }
+                Ok(false) => {
+                    println!("task already exists");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        IntegrityCommand::List => match integrity::tasks(meta.as_ref(), usize::MAX).await {
+            Ok(tasks) => {
+                for (g, c, t) in tasks {
+                    println!(
+                        "task group {g} chunk {} reason {:?} state {:?} attempts {} next_attempt_ms {} created_ms {} last_error {:?}",
+                        hex(&c),
+                        t.reason,
+                        t.state,
+                        t.attempts,
+                        t.next_attempt_ms,
+                        t.created_ms,
+                        t.last_error
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e),
+        },
     }
 }
 
@@ -976,6 +1409,24 @@ fn render_cache_stats(
     out
 }
 
+fn render_integrity_stats(
+    out: &mut String,
+    s: &arca_lake_gateway::cluster::IntegrityStatsSnapshot,
+) {
+    use std::fmt::Write as _;
+    for (name, value) in [
+        ("arca_gateway_degraded_reads_total", s.degraded_reads),
+        ("arca_gateway_unreadable_reads_total", s.unreadable_reads),
+        ("arca_gateway_integrity_reports_total", s.integrity_reports),
+        (
+            "arca_gateway_integrity_reports_dropped_total",
+            s.integrity_reports_dropped,
+        ),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
+    }
+}
+
 fn render_put_stats(out: &mut String, p: &arca_lake_gateway::cluster::PutStatsSnapshot) {
     use std::fmt::Write as _;
     let _ = writeln!(
@@ -1056,6 +1507,20 @@ fn render_node_stats(
         "# TYPE arca_node_put_in_flight gauge\narca_node_put_in_flight {}",
         n.puts_in_flight
     );
+    for (name, value) in [
+        ("arca_node_quarantined_shards", n.quarantined_shards),
+        ("arca_node_quarantined_bytes", n.quarantined_bytes),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} gauge\n{name} {value}");
+    }
+    for (name, value) in [
+        ("arca_node_corrupt_reads_total", n.corrupt_reads),
+        ("arca_node_scrub_shards_total", n.scrub_shards),
+        ("arca_node_scrub_bytes_total", n.scrub_bytes),
+        ("arca_node_scrub_corrupt_total", n.scrub_corrupt),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
+    }
     let _ = writeln!(out, "# TYPE arca_node_phase_seconds histogram");
     for (phase, h) in [
         ("put_recv", &n.put_recv),

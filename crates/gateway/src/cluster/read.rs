@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use arca_lake_metadata::KvStore;
+use arca_lake_metadata::ops::integrity::Finding;
 use arca_lake_metadata::ops::object::{self, Manifest, ManifestFound};
 use arca_lake_metadata::records::{
     CachePlacement, Checksum, ChecksumAlgorithm, ChunkRecord, GenId, GenKind, GroupRecord, PartRef,
@@ -626,21 +627,86 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .coders
             .get(&chunk.scheme, chunk.data_shards, chunk.parity_shards)
             .map_err(|e| s3_error!(InternalError, "{e}"))?;
-        arca_lake_tiering::durable::read_chunk(
+        let r = arca_lake_tiering::durable::read_chunk_detailed(
             &self.clients,
             group,
             &addr_of(map),
             chunk,
             coder.as_ref(),
         )
-        .await
-        .map_err(|e| match e {
-            TierError::Unreadable { have, need } => s3_error!(
-                InternalError,
-                "chunk unreadable: only {have} of {need} required shards available (data integrity error)"
-            ),
-            other => s3_error!(InternalError, "{other}"),
-        })
+        .await;
+        match r {
+            Ok(r) => {
+                if !r.missing.is_empty() {
+                    self.integrity
+                        .stats
+                        .degraded_reads
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.report_integrity(chunk, Finding::MissingShard, &r.missing);
+                }
+                Ok(r.parts)
+            }
+            Err(TierError::Unreadable { have, need }) => {
+                self.integrity
+                    .stats
+                    .unreadable_reads
+                    .fetch_add(1, Ordering::Relaxed);
+                self.report_integrity(chunk, Finding::UnrecoverableStripe, &[]);
+                Err(s3_error!(
+                    InternalError,
+                    "chunk unreadable: only {have} of {need} required shards available (data integrity error)"
+                ))
+            }
+            Err(other) => Err(s3_error!(InternalError, "{other}")),
+        }
+    }
+
+    /// Report a degraded or unreadable chunk to the stripe repair queue
+    /// (RFC-008 §8.7), deduplicated per chunk and off the GET's path. A
+    /// second detection of a chunk that already has a task is a no-op in
+    /// metadata, so this is safe to race with the scrubber.
+    fn report_integrity(&self, chunk: &ChunkRecord, reason: Finding, missing: &[usize]) {
+        if !self.integrity.should_report(chunk.chunk_id, now_ms()) {
+            self.integrity
+                .stats
+                .integrity_reports_dropped
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let backend = self.clone();
+        let group_id = chunk.placement.group_id;
+        let chunk_id = chunk.chunk_id;
+        let hints: Vec<u16> = missing
+            .iter()
+            .map(|i| u16::try_from(*i).unwrap_or(u16::MAX))
+            .collect();
+        tokio::spawn(async move {
+            match arca_lake_metadata::ops::integrity::enqueue(
+                backend.meta.as_ref(),
+                group_id,
+                chunk_id,
+                reason,
+                &hints,
+                now_ms(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    backend
+                        .integrity
+                        .stats
+                        .integrity_reports
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    backend
+                        .integrity
+                        .stats
+                        .integrity_reports_dropped
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
     }
 
     /// A cache hit (clean or degraded), or `None` after invalidating a copy

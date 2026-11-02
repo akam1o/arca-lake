@@ -55,12 +55,55 @@ pub struct Metrics {
     pub cache_repairs_completed_total: AtomicU64,
     /// Cache shards reconstructed by the controller.
     pub cache_chunks_reconstructed_total: AtomicU64,
+    /// Scrub passes completed (RFC-008 §8.8).
+    pub scrub_passes_total: AtomicU64,
+    /// Shards deep-verified by scrubbing.
+    pub scrub_shards_verified_total: AtomicU64,
+    /// Bytes read by scrubbing.
+    pub scrub_bytes_total: AtomicU64,
+    /// Node or metadata errors during scrubbing.
+    pub scrub_errors_total: AtomicU64,
+    /// Groups past their scrub interval at the last pass.
+    pub scrub_groups_overdue: AtomicU64,
+    /// Integrity findings by class (`Finding::ALL` order; 8 classes).
+    pub integrity_findings_total: [AtomicU64; 8],
+    /// Stripe repair tasks in metadata.
+    pub repair_queue_depth: AtomicU64,
+    /// Tasks in `Unrecoverable`.
+    pub repair_tasks_unrecoverable: AtomicU64,
+    /// Tasks in `Failed`.
+    pub repair_tasks_failed: AtomicU64,
+    /// Stripe repairs that committed.
+    pub stripe_repairs_succeeded_total: AtomicU64,
+    /// Stripe repair attempts that failed.
+    pub stripe_repairs_failed_total: AtomicU64,
+    /// Shards rewritten by stripe repair.
+    pub shards_rewritten_total: AtomicU64,
+    /// Bytes written by stripe repair.
+    pub repair_bytes_total: AtomicU64,
+    /// 0 = no open findings; 1 = repairs pending or failed; 2 = unrecoverable
+    /// stripes present.
+    pub data_integrity_status: AtomicU64,
 }
+
+/// Metric label of each finding class, in `Finding::ALL` order.
+pub const FINDING_LABELS: [&str; 8] = [
+    "missing_shard",
+    "checksum_mismatch",
+    "truncated_shard",
+    "invalid_header",
+    "unexpected_shard",
+    "stale_placement_epoch",
+    "metadata_data_mismatch",
+    "unrecoverable_stripe",
+];
 
 impl Metrics {
     /// Prometheus text exposition.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn render(&self) -> String {
+        use std::fmt::Write as _;
         let g = |n: &str, v: u64| format!("# TYPE {n} gauge\n{n} {v}\n");
         let c = |n: &str, v: u64| format!("# TYPE {n} counter\n{n} {v}\n");
         let mut out = String::new();
@@ -148,6 +191,71 @@ impl Metrics {
             self.cache_chunks_reconstructed_total
                 .load(Ordering::Relaxed),
         );
+        for (name, v) in [
+            (
+                "arca_controller_scrub_passes_total",
+                &self.scrub_passes_total,
+            ),
+            (
+                "arca_controller_scrub_shards_verified_total",
+                &self.scrub_shards_verified_total,
+            ),
+            ("arca_controller_scrub_bytes_total", &self.scrub_bytes_total),
+            (
+                "arca_controller_scrub_errors_total",
+                &self.scrub_errors_total,
+            ),
+            (
+                "arca_controller_stripe_repairs_succeeded_total",
+                &self.stripe_repairs_succeeded_total,
+            ),
+            (
+                "arca_controller_stripe_repairs_failed_total",
+                &self.stripe_repairs_failed_total,
+            ),
+            (
+                "arca_controller_shards_rewritten_total",
+                &self.shards_rewritten_total,
+            ),
+            (
+                "arca_controller_repair_bytes_total",
+                &self.repair_bytes_total,
+            ),
+        ] {
+            out += &c(name, v.load(Ordering::Relaxed));
+        }
+        out += "# TYPE arca_controller_integrity_findings_total counter\n";
+        for (label, v) in FINDING_LABELS.iter().zip(&self.integrity_findings_total) {
+            let _ = writeln!(
+                out,
+                "arca_controller_integrity_findings_total{{class=\"{label}\"}} {}",
+                v.load(Ordering::Relaxed)
+            );
+        }
+        for (name, v) in [
+            (
+                "arca_controller_scrub_groups_overdue",
+                &self.scrub_groups_overdue,
+            ),
+            (
+                "arca_controller_repair_queue_depth",
+                &self.repair_queue_depth,
+            ),
+            (
+                "arca_controller_repair_tasks_unrecoverable",
+                &self.repair_tasks_unrecoverable,
+            ),
+            (
+                "arca_controller_repair_tasks_failed",
+                &self.repair_tasks_failed,
+            ),
+            (
+                "arca_controller_data_integrity_status",
+                &self.data_integrity_status,
+            ),
+        ] {
+            out += &g(name, v.load(Ordering::Relaxed));
+        }
         out
     }
 

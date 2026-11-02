@@ -78,6 +78,15 @@ pub struct ControllerConfig {
     /// Chunks a cache-group repair may reconstruct per pass before yielding
     /// (RFC-006 §5.9); 0 = unlimited.
     pub cache_repair_chunks_per_pass: usize,
+    /// Background scrubbing (RFC-008 §8.3); `interval_ms = 0` disables it.
+    pub scrub: crate::integrity::ScrubOptions,
+    /// Interval between scrub scheduler invocations (each resumes or starts
+    /// the due groups).
+    pub scrub_tick: Duration,
+    /// Stripe repair worker (RFC-008 §8.5).
+    pub stripe_repair: crate::integrity::RepairWorkerOptions,
+    /// Interval between stripe repair worker passes.
+    pub stripe_repair_interval: Duration,
 }
 
 impl ControllerConfig {
@@ -107,6 +116,10 @@ impl ControllerConfig {
             tiering: None,
             tiering_interval: Duration::from_mins(5),
             cache_repair_chunks_per_pass: 256,
+            scrub: crate::integrity::ScrubOptions::default(),
+            scrub_tick: Duration::from_secs(60),
+            stripe_repair: crate::integrity::RepairWorkerOptions::default(),
+            stripe_repair_interval: Duration::from_secs(15),
         }
     }
 }
@@ -271,6 +284,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
         NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
             arca_lake_protocol::client::RpcPolicy::from_timeout(cfg.node_timeout)
         }));
+    let coders = crate::integrity::coders();
     vec![
         tokio::spawn(scheduler(
             "gc",
@@ -370,6 +384,57 @@ fn start_leader_tasks<S: KvStore + 'static>(
         tokio::spawn(scheduler(
             "repair",
             cfg.repair_interval,
+            stop.clone(),
+            Arc::clone(metrics),
+            {
+                let metrics = Arc::clone(metrics);
+                let meta = Arc::clone(meta);
+                let clients = clients.clone();
+                let cfg = cfg.clone();
+                move || {
+                    let meta = Arc::clone(&meta);
+                    let clients = clients.clone();
+                    let cfg = cfg.clone();
+                    let metrics = Arc::clone(&metrics);
+                    async move { repair_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
+                }
+            },
+        )),
+        tokio::spawn(scheduler(
+            "scrub",
+            cfg.scrub_tick,
+            stop.clone(),
+            Arc::clone(metrics),
+            {
+                let metrics = Arc::clone(metrics);
+                let meta = Arc::clone(meta);
+                let clients = clients.clone();
+                let cfg = cfg.clone();
+                let coders = Arc::clone(&coders);
+                move || {
+                    let meta = Arc::clone(&meta);
+                    let clients = clients.clone();
+                    let cfg = cfg.clone();
+                    let metrics = Arc::clone(&metrics);
+                    let coders = Arc::clone(&coders);
+                    async move {
+                        crate::integrity::scrub_pass(
+                            meta.as_ref(),
+                            &clients,
+                            &coders,
+                            &cfg.scrub,
+                            Some(&metrics),
+                            now_ms(),
+                        )
+                        .await
+                        .map(|_| ())
+                    }
+                }
+            },
+        )),
+        tokio::spawn(scheduler(
+            "stripe-repair",
+            cfg.stripe_repair_interval,
             stop,
             Arc::clone(metrics),
             {
@@ -381,7 +446,19 @@ fn start_leader_tasks<S: KvStore + 'static>(
                     let clients = clients.clone();
                     let cfg = cfg.clone();
                     let metrics = Arc::clone(&metrics);
-                    async move { repair_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
+                    let coders = Arc::clone(&coders);
+                    async move {
+                        crate::integrity::repair_pass(
+                            meta.as_ref(),
+                            &clients,
+                            &coders,
+                            &cfg.stripe_repair,
+                            Some(&metrics),
+                            now_ms(),
+                        )
+                        .await
+                        .map(|_| ())
+                    }
                 }
             },
         )),

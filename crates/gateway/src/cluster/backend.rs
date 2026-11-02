@@ -114,6 +114,79 @@ pub struct ClusterBackend<S> {
     pub(super) cache_state: Arc<CacheState>,
     pub(super) put_stats: Arc<PutStats>,
     pub(super) pop_queue: Arc<PopulationQueue>,
+    pub(super) integrity: Arc<IntegrityState>,
+}
+
+/// Read-path integrity counters (RFC-008 §8.7).
+#[derive(Debug, Default)]
+pub struct IntegrityStats {
+    /// Durable reads that needed parity (a shard was missing or unusable).
+    pub degraded_reads: std::sync::atomic::AtomicU64,
+    /// Durable reads that failed for lack of `k` usable shards.
+    pub unreadable_reads: std::sync::atomic::AtomicU64,
+    /// Repair tasks reported to the controller's queue.
+    pub integrity_reports: std::sync::atomic::AtomicU64,
+    /// Reports suppressed by deduplication or the bounded map.
+    pub integrity_reports_dropped: std::sync::atomic::AtomicU64,
+}
+
+/// A copy of [`IntegrityStats`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IntegrityStatsSnapshot {
+    /// See [`IntegrityStats::degraded_reads`].
+    pub degraded_reads: u64,
+    /// See [`IntegrityStats::unreadable_reads`].
+    pub unreadable_reads: u64,
+    /// See [`IntegrityStats::integrity_reports`].
+    pub integrity_reports: u64,
+    /// See [`IntegrityStats::integrity_reports_dropped`].
+    pub integrity_reports_dropped: u64,
+}
+
+/// Deduplicating report state: one report per chunk per
+/// [`REPORT_INTERVAL_MS`], at most [`REPORT_CAP`] chunks remembered.
+#[derive(Debug, Default)]
+pub struct IntegrityState {
+    /// Counters.
+    pub stats: IntegrityStats,
+    reported: Mutex<HashMap<[u8; 16], u64>>,
+}
+
+/// Minimum interval between two reports of the same chunk.
+const REPORT_INTERVAL_MS: u64 = 10 * 60 * 1000;
+/// Chunks remembered for deduplication.
+const REPORT_CAP: usize = 10_000;
+
+impl IntegrityState {
+    /// Whether a report for `chunk_id` should be sent now.
+    pub(super) fn should_report(&self, chunk_id: [u8; 16], now: u64) -> bool {
+        let mut m = self.reported.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(&last) = m.get(&chunk_id)
+            && now.saturating_sub(last) < REPORT_INTERVAL_MS
+        {
+            return false;
+        }
+        if m.len() >= REPORT_CAP && !m.contains_key(&chunk_id) {
+            m.retain(|_, t| now.saturating_sub(*t) < REPORT_INTERVAL_MS);
+            if m.len() >= REPORT_CAP {
+                return false;
+            }
+        }
+        m.insert(chunk_id, now);
+        true
+    }
+
+    /// Snapshot of the counters.
+    #[must_use]
+    pub fn snapshot(&self) -> IntegrityStatsSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        IntegrityStatsSnapshot {
+            degraded_reads: self.stats.degraded_reads.load(Relaxed),
+            unreadable_reads: self.stats.unreadable_reads.load(Relaxed),
+            integrity_reports: self.stats.integrity_reports.load(Relaxed),
+            integrity_reports_dropped: self.stats.integrity_reports_dropped.load(Relaxed),
+        }
+    }
 }
 
 /// Where a PUT spends its time in this gateway (R-48 profiling). Chunk
@@ -426,6 +499,7 @@ impl<S> Clone for ClusterBackend<S> {
         Self {
             put_stats: Arc::clone(&self.put_stats),
             pop_queue: Arc::clone(&self.pop_queue),
+            integrity: Arc::clone(&self.integrity),
             meta: Arc::clone(&self.meta),
             clients: self.clients.clone(),
             map: Arc::clone(&self.map),
@@ -489,6 +563,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             coders: Arc::new(Coders::default()),
             fault: Arc::new(Mutex::new(None)),
             cache_stats: Arc::new(CacheStats::default()),
+            integrity: Arc::new(IntegrityState::default()),
             put_stats: Arc::new(PutStats::default()),
             cache_state: Arc::new(CacheState::with_population_permits(permits)),
         })
@@ -559,6 +634,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     #[must_use]
     pub fn put_stats(&self) -> PutStatsSnapshot {
         self.put_stats.snapshot()
+    }
+
+    /// Read-path integrity counters of this gateway (RFC-008 §8.7).
+    #[must_use]
+    pub fn integrity_stats(&self) -> IntegrityStatsSnapshot {
+        self.integrity.snapshot()
     }
 
     /// Counters of the population queue.
