@@ -154,6 +154,34 @@ where
     })
 }
 
+/// The access key id named by a SigV4 `Authorization` header or a presigned
+/// URL's `X-Amz-Credential`, if any. Only the id is taken: the credential
+/// scope, signed headers and signature are left behind.
+fn claimed_key_id(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
+    let from_header = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split("Credential=").nth(1))
+        .and_then(|v| v.split('/').next());
+    let from_query = uri.query().and_then(|q| {
+        q.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == "X-Amz-Credential").then(|| {
+                v.split("%2F")
+                    .next()
+                    .unwrap_or(v)
+                    .split('/')
+                    .next()
+                    .unwrap_or(v)
+            })
+        })
+    });
+    from_header
+        .or(from_query)
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .map(str::to_string)
+}
+
 /// Wraps the `s3s` service: creates the audit record, hands it to the
 /// authorizer and the backend through the request extensions, stamps
 /// `x-amz-request-id` on the response, and emits the record once the
@@ -172,6 +200,18 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
 
     fn call(&self, mut req: http::Request<hyper::body::Incoming>) -> Self::Future {
         let record = AuditRecord::new(self.peer);
+        // The access key id the request claims (never the signature), so
+        // that a refused key is still attributable (RFC-012 S-A9); the
+        // authorizer overwrites the principal once it resolves the key.
+        let claimed = claimed_key_id(req.headers(), req.uri());
+        record.with(|f| {
+            f.key_id.clone_from(&claimed);
+            f.principal = if claimed.is_some() {
+                String::new()
+            } else {
+                "anonymous".to_string()
+            };
+        });
         let request_id = record.fields().request_id;
         let bytes_in = req
             .headers()

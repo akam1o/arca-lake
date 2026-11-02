@@ -114,6 +114,10 @@ pub struct ClusterOptions {
     /// Extra principals `(access key, secret key, name)` besides the
     /// cluster's default credentials (principal `tenant-a`).
     pub principals: Vec<(String, String, String)>,
+    /// Use this credential store instead of one built from `principals`
+    /// (a file-backed store for rotation tests); the cluster's generated
+    /// `credentials` are then not registered anywhere.
+    pub credential_store: Option<Arc<CredentialStore>>,
 }
 
 /// The cache tier name used by test clusters.
@@ -171,6 +175,7 @@ impl ClusterOptions {
             multipart_min_part_bytes: 1024,
             authorize: false,
             principals: Vec::new(),
+            credential_store: None,
         }
     }
 }
@@ -329,7 +334,10 @@ impl<S: KvStore + 'static> TestCluster<S> {
         for (ak, sk, name) in &opts.principals {
             keys.push((ak, sk, name));
         }
-        let store = Arc::new(CredentialStore::from_keys(&keys));
+        let store = opts
+            .credential_store
+            .clone()
+            .unwrap_or_else(|| Arc::new(CredentialStore::from_keys(&keys)));
         let cfg = GatewayConfig {
             listen: SocketAddr::from(([127, 0, 0, 1], 0)),
             credentials: None,

@@ -303,6 +303,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tonic",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
