@@ -348,7 +348,7 @@ Evaluated against the ETag and `last_modified` (commit time, second
 precision for the HTTP date comparison) of the version the request
 resolves to. Strong comparison only; a weak ETag in `If-Match` fails the
 precondition, in `If-None-Match` it is compared by opaque-tag equality
-as RFC 9110 §8.8.3.2 allows. Precedence follows RFC 9110 §13.2.2:
+as RFC 9110 §8.8.3 (weak comparison) allows. Precedence follows RFC 9110 §13.2.2:
 `If-Match` is evaluated before `If-Unmodified-Since` (which is ignored
 when `If-Match` is present), `If-None-Match` before `If-Modified-Since`
 (ignored when `If-None-Match` is present). AWS's documented combination
