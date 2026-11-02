@@ -1,0 +1,2 @@
+scrub group 1 pass 8 phase Done started_ms 1793650065846 finished_ms 1793650065846 verified 23644 bytes 49585061888 findings [0, 2, 0, 0, 898, 0, 0, 0] errors 0
+repair queue depth 0 unrecoverable 0 failed 0 status 0

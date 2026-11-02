@@ -1,0 +1,191 @@
+20:56:36 round 1
+20:56:37 fault: restart storage node d2
+20:56:48 round 2
+20:56:51 fault: controller leader failover (kill ctl-a, restart later)
+20:57:05 round 3
+20:57:10 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-0000000000000000.arca
+20:57:17 round 4
+20:57:22 fault: restart cache node c2
+20:57:31 round 5
+20:57:34 fault: restart controller ctl-a (follower rejoin)
+20:57:38 round 6
+20:57:41 fault: restart storage node d2
+20:57:53 round 7
+20:57:56 fault: controller leader failover (kill ctl-a, restart later)
+20:58:10 round 8
+20:58:12 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-0000000000000001.arca
+20:58:19 round 9
+20:58:23 fault: restart cache node c2
+20:58:33 round 10
+20:58:38 fault: restart controller ctl-a (follower rejoin)
+20:58:41 round 11
+20:58:45 fault: restart storage node d2
+20:58:57 round 12
+20:59:00 fault: controller leader failover (kill ctl-a, restart later)
+20:59:15 round 13
+20:59:18 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-0000000000000002.arca
+20:59:26 round 14
+20:59:29 fault: restart cache node c2
+20:59:38 round 15
+20:59:41 fault: restart controller ctl-a (follower rejoin)
+20:59:45 round 16
+20:59:52 fault: restart storage node d2
+21:00:05 round 17
+21:00:10 fault: controller leader failover (kill ctl-a, restart later)
+21:00:24 round 18
+21:00:27 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-0000000000000003.arca
+21:00:36 round 19
+21:00:39 fault: restart cache node c2
+21:00:48 round 20
+21:00:50 fault: restart controller ctl-a (follower rejoin)
+21:00:54 round 21
+21:00:58 fault: restart storage node d2
+21:01:11 round 22
+21:01:13 fault: controller leader failover (kill ctl-a, restart later)
+21:01:28 round 23
+21:01:31 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-0000000000000004.arca
+21:01:38 round 24
+21:01:42 fault: restart cache node c2
+21:01:51 round 25
+21:01:54 fault: restart controller ctl-a (follower rejoin)
+21:01:58 round 26
+21:02:00 fault: restart storage node d2
+21:02:13 round 27
+21:02:16 fault: controller leader failover (kill ctl-a, restart later)
+21:02:32 round 28
+21:02:36 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-0000000000000005.arca
+21:02:47 round 29
+21:02:52 fault: restart cache node c2
+21:03:02 round 30
+21:03:04 fault: restart controller ctl-a (follower rejoin)
+21:03:08 round 31
+21:03:11 fault: restart storage node d2
+21:03:24 round 32
+21:03:28 fault: controller leader failover (kill ctl-a, restart later)
+21:03:43 round 33
+21:03:45 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-0000000000000006.arca
+21:03:56 round 34
+21:03:58 fault: restart cache node c2
+21:04:08 round 35
+21:04:11 fault: restart controller ctl-a (follower rejoin)
+21:04:15 round 36
+21:04:20 fault: restart storage node d2
+21:04:34 round 37
+21:04:38 fault: controller leader failover (kill ctl-a, restart later)
+21:04:53 round 38
+21:04:57 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-0000000000000007.arca
+21:05:11 round 39
+21:05:16 fault: restart cache node c2
+21:05:26 round 40
+21:05:28 fault: restart controller ctl-a (follower rejoin)
+21:05:32 round 41
+21:05:36 fault: restart storage node d2
+21:05:50 round 42
+21:05:55 fault: controller leader failover (kill ctl-a, restart later)
+21:06:08 round 43
+21:06:11 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-0000000000000008.arca
+21:06:22 round 44
+21:06:25 fault: restart cache node c2
+21:06:35 round 45
+21:06:39 fault: restart controller ctl-a (follower rejoin)
+21:06:42 round 46
+21:06:45 fault: restart storage node d2
+21:07:02 round 47
+21:07:05 fault: controller leader failover (kill ctl-a, restart later)
+21:07:19 round 48
+21:07:22 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-0000000000000009.arca
+21:07:37 round 49
+21:07:40 fault: restart cache node c2
+21:07:50 round 50
+21:07:53 fault: restart controller ctl-a (follower rejoin)
+21:07:57 round 51
+21:08:00 fault: restart storage node d2
+21:08:18 round 52
+21:08:22 fault: controller leader failover (kill ctl-a, restart later)
+21:08:35 round 53
+21:08:38 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000a.arca
+21:08:51 round 54
+21:08:54 fault: restart cache node c2
+21:09:04 round 55
+21:09:08 fault: restart controller ctl-a (follower rejoin)
+21:09:11 round 56
+21:09:14 fault: restart storage node d2
+21:09:29 round 57
+21:09:34 fault: controller leader failover (kill ctl-a, restart later)
+21:09:47 round 58
+21:09:50 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000b.arca
+21:10:03 round 59
+21:10:06 fault: restart cache node c2
+21:10:17 round 60
+21:10:20 fault: restart controller ctl-a (follower rejoin)
+21:10:24 round 61
+21:10:28 fault: restart storage node d2
+21:10:45 round 62
+21:10:48 fault: controller leader failover (kill ctl-a, restart later)
+21:11:02 round 63
+21:11:05 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000c.arca
+21:11:20 round 64
+21:11:24 fault: restart cache node c2
+21:11:35 round 65
+21:11:38 fault: restart controller ctl-a (follower rejoin)
+21:11:42 round 66
+21:11:45 fault: restart storage node d2
+21:12:01 round 67
+21:12:07 fault: controller leader failover (kill ctl-a, restart later)
+21:12:20 round 68
+21:12:25 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000d.arca
+21:12:39 round 69
+21:12:44 fault: restart cache node c2
+21:12:54 round 70
+21:12:59 fault: restart controller ctl-a (follower rejoin)
+21:13:05 round 71
+21:13:08 fault: restart storage node d2
+21:13:21 round 72
+21:13:27 fault: controller leader failover (kill ctl-a, restart later)
+21:13:28 round 72: 16 overwrite PUTs failed explicitly (fault window); reading r71 without body verification
+21:13:40 round 73
+21:13:43 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000e.arca
+21:13:54 round 74
+21:13:59 fault: restart cache node c2
+21:14:12 round 75
+21:14:15 fault: restart controller ctl-a (follower rejoin)
+21:14:18 round 76
+21:14:21 fault: restart storage node d2
+21:14:36 round 77
+21:14:43 fault: controller leader failover (kill ctl-a, restart later)
+21:14:44 round 77: 16 overwrite PUTs failed explicitly (fault window); reading r76 without body verification
+21:14:56 round 78
+21:15:00 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000e.arca
+21:15:15 round 79
+21:15:18 fault: restart cache node c2
+21:15:28 round 80
+21:15:34 fault: restart controller ctl-a (follower rejoin)
+21:15:37 round 81
+21:15:40 fault: restart storage node d2
+21:15:54 round 82
+21:16:00 fault: controller leader failover (kill ctl-a, restart later)
+21:16:01 round 82: 16 overwrite PUTs failed explicitly (fault window); reading r81 without body verification
+21:16:14 round 83
+21:16:16 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000f.arca
+21:16:28 round 84
+21:16:33 fault: restart cache node c2
+21:16:43 settling: full scrub, then drain the repair queue
+scrub group 1 verified 15831 bytes 33200013312 findings [0, 15, 0, 0, 583, 0, 0, 0] enqueued 15 errors 0
+scrub group 1 verified 14851 bytes 31144804352 findings [0, 3, 0, 0, 575, 0, 0, 0] enqueued 3 errors 0

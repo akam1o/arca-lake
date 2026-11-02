@@ -1,0 +1,71 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 49.19s
+    Finished `release` profile [optimized + debuginfo] target(s) in 1m 09s
+== baseline2 (scrub off, same storage state as scrub8) Mon Nov  2 20:21:24 UTC 2026
+== repetition 1: durable-c4-r1
+== repetition 2: durable-c4-r2
+== repetition 3: durable-c4-r3
+done: benchmarks/linux/results/phase32-20261103-0340/baseline2
+== integrity-perf Mon Nov  2 20:25:22 UTC 2026
+{
+  "objects": 64,
+  "size": 16777216,
+  "shard_bytes": 1610612736,
+  "scrub": {
+    "bytes": 1610612736,
+    "seconds": 6.36,
+    "mib_s": 241.4,
+    "admin_cpu_s_per_gib": 1.77,
+    "node_cpu_s_per_gib": 0.67,
+    "disk_read_amplification": 0.0,
+    "net_tx_bytes_per_byte": 0.0,
+    "paced_32mib_seconds": 49.05,
+    "paced_expected_seconds": 48.0,
+    "paced_node_cpu_s_per_gib": 0.0,
+    "paced_disk_read_amplification": 0.0
+  },
+  "repair": {
+    "queued": 256,
+    "repaired": 256,
+    "failed": 0,
+    "bytes_written": 536870912,
+    "seconds": 22.57,
+    "mib_s": 22.7,
+    "controller_cpu_s_per_gib": 18.0,
+    "node_cpu_s_per_gib": 12.0,
+    "disk_read_bytes_per_repaired_byte": 0.0,
+    "disk_write_bytes_per_repaired_byte": 2.121,
+    "net_tx_bytes_per_repaired_byte": 2.006
+  }
+}
+== soak Mon Nov  2 20:27:28 UTC 2026
+20:45:33 round 77
+20:45:39 fault: controller leader failover (kill ctl-a, restart later)
+20:45:39 round 77: 12 overwrite PUTs failed explicitly (fault window); reading r76 without body verification
+20:45:52 round 78
+20:45:56 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000e.arca
+20:46:08 round 79
+20:46:13 fault: restart cache node c2
+20:46:19 round 79: 8 overwrite PUTs failed explicitly (fault window); reading r78 without body verification
+20:46:23 round 80
+20:46:29 fault: restart controller ctl-a (follower rejoin)
+20:46:32 round 81
+20:46:35 fault: restart storage node d2
+20:46:50 round 82
+20:46:56 fault: controller leader failover (kill ctl-a, restart later)
+20:47:09 round 83
+20:47:12 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000f.arca
+20:47:24 round 84
+20:47:28 fault: restart cache node c2
+20:47:38 round 85
+20:47:43 fault: restart controller ctl-a (follower rejoin)
+20:47:47 round 86
+20:47:51 fault: restart storage node d2
+20:48:06 settling: full scrub, then drain the repair queue
+2026-11-02T20:49:01.341165Z  INFO arca_lake_controller::integrity: scrub pass complete group=1 pass=6 verified=24328 bytes=51019513856 findings=[0, 19, 0, 0, 1392, 0, 0, 0] errors=0
+2026-11-02T20:49:51.282228Z  INFO arca_lake_controller::integrity: scrub pass complete group=1 pass=6 verified=24342 bytes=51048873984 findings=[0, 5, 0, 0, 1392, 0, 0, 0] errors=0
+20:51:09 BODY MISMATCH in final-r86: {"label":"final-r86","op":"get","pass":1,"objects":16,"size":8388608,"concurrency":4,"range_bytes":0,"verify":true,"order":"sequential","duration_s":0.373591205,"ops":16,"bytes":134217728,"errors":0,"mismatches":16,"missing":0,"ops_per_s":42.82756067557854,"mib_per_s":342.6204854046283,"lat_ms_mean":83.60356781249999,"lat_ms_p50":78.76586400000001,"lat_ms_p90":128.193523,"lat_ms_p95":128.193523,"lat_ms_p99":129.08920500000002,"lat_ms_max":129.08920500000002}
+cat: /home/<user>/arca-run/controller2.pid: No such file or directory
+rounds=86 minutes=20 body_mismatch_labels=1 unreadable_reads=0 unrecoverable=0 failed_tasks=0 manifest_findings=0 failures=1
+== done Mon Nov  2 20:51:17 UTC 2026

@@ -72,6 +72,10 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   log "round $round"
   # Write: fresh objects, multipart objects, overwrite of the previous round.
   s3 "r$round-put" --op put --prefix "r$round" --objects $N --size $SIZE --concurrency 4
+  # A single PUT that failed explicitly leaves no object: later reads of
+  # that round accept 404.
+  put_errors=$(tail -1 "$OUT/rounds.txt" | sed -E 's/.*errors=([0-9]+).*/\1/')
+  if [ "${put_errors:-0}" = 0 ]; then echo "r$round ok" >> "$OUT/puts.txt"; else echo "r$round partial" >> "$OUT/puts.txt"; fi
   s3 "r$round-mpput" --op multipart-put --prefix "m$round" --objects $MP_N --size $MP_SIZE --part-size $((8 << 20)) --concurrency 2
   # A multipart PUT that failed explicitly (fault window) leaves no object:
   # later reads of that round's multipart prefix accept 404.
@@ -104,7 +108,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # Verified reads: this round (whole bodies), the multipart objects, and
   # a random-order pass over the previous rounds (cache hits, populations,
   # evictions). Objects deleted two rounds ago are allowed to be missing.
-  s3 "r$round-get" --op get --prefix "r$round" --objects $N --size $SIZE --concurrency 4 --verify --passes 2 --order random
+  put_allow=""; [ "${put_errors:-0}" = 0 ] || put_allow="--allow-missing"
+  s3 "r$round-get" --op get --prefix "r$round" --objects $N --size $SIZE --concurrency 4 --verify --passes 2 --order random $put_allow
   mp_allow=""; [ "${mp_errors:-0}" = 0 ] || mp_allow="--allow-missing"
   s3 "r$round-mpget" --op get --prefix "m$round" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify $mp_allow
   # A failed overwrite PUT leaves the previous version in place (atomic
@@ -144,6 +149,7 @@ sa "$ADMIN integrity verify-manifests" | strip_addr > "$OUT/manifests-final.txt"
 # Final verified read of everything that should exist.
 for r in $(seq 1 $round); do
   if [ $r -le $((round-2)) ]; then allow="--allow-missing"; else allow=""; fi
+  grep -q "^r$r ok" "$OUT/puts.txt" || allow="--allow-missing"
   seed=$(awk -v k="r$r" '$1==k {s=$2} END{print s}' "$OUT/seeds.txt")
   if [ "$seed" = mixed ]; then
     s3 "final-r$r-noverify" --op get --prefix "r$r" --objects $N --size $SIZE --concurrency 4 $allow
@@ -158,7 +164,7 @@ for h in sa sb; do $h "grep -h -i 'unrecoverable\|panic\|invariant' $RUN_DIR/log
 mkdir -p "$OUT/logs"
 sa "cd $RUN_DIR/logs && tar czf - controller.log d0.log d1.log 2>/dev/null" | tar xzf - -C "$OUT/logs" 2>/dev/null || true
 sb "cd $RUN_DIR/logs && tar czf - controller2.log d2.log gateway.log 2>/dev/null" | tar xzf - -C "$OUT/logs" 2>/dev/null || true
-sed -i -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g' "$OUT"/logs/*.log 2>/dev/null || true
+python3 -I benchmarks/linux/sanitize.py "$OUT/logs" > /dev/null 2>&1 || true
 sa "for d in d0 d1; do echo \"== \$d\"; cat $RUN_DIR/\$d/quarantine.log 2>/dev/null; done" > "$OUT/quarantine-logs.txt" 2>/dev/null || true
 sb "echo '== d2'; cat $RUN_DIR/d2/quarantine.log 2>/dev/null" >> "$OUT/quarantine-logs.txt" 2>/dev/null || true
 bash "$TH" teardown > /dev/null 2>&1 || true

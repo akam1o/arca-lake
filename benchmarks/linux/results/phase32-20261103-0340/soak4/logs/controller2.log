@@ -1,0 +1,608 @@
+2026-11-02T20:56:35.826769Z  INFO arca_lake: controller metrics endpoint addr=127.0.0.1:9901
+2026-11-02T20:56:35.832888Z  INFO arca_lake_controller::process: acquired leadership controller=ctl-b token=1
+2026-11-02T20:56:35.841692Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:56:35.844857Z  INFO arca_lake_controller::process: reconcile pass deleted=0 unreachable=0
+2026-11-02T20:56:35.861385Z  INFO arca_lake_controller::integrity: scrub pass complete group=1 pass=1 verified=0 bytes=0 findings=[0, 0, 0, 0, 0, 0, 0, 0] errors=0
+2026-11-02T20:56:45.847692Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:56:48.025861Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 264241152, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:56:50.179203Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:56:52.289923Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 226492416, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:56:54.431812Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:56:55.858284Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:57:05.917296Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:57:13.438701Z  INFO arca_lake_controller::integrity: scrub pass complete group=1 pass=2 verified=504 bytes=1056964608 findings=[0, 0, 0, 0, 0, 0, 0, 0] errors=2
+2026-11-02T20:57:15.940226Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:57:16.465050Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0d2b5f77c4885e966500000001 targets=[1] reason=MissingShard
+2026-11-02T20:57:16.895106Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0d30f07543834fe65c00000000 targets=[1] reason=MissingShard
+2026-11-02T20:57:18.081247Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:57:20.589808Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:57:21.955117Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0ced6977bcbf6e9b0100000001 targets=[1] reason=MissingShard
+2026-11-02T20:57:25.971165Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:57:29.095305Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:57:31.321520Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:57:35.986772Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:57:37.632673Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:57:39.797875Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 213909504, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:57:46.012323Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:57:51.995275Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:57:54.082890Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:57:56.030839Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:57:58.332819Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:58:00.414977Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:58:06.049414Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:58:07.064846Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0cbcea73508f69af1900000001 targets=[1] reason=ChecksumMismatch
+2026-11-02T20:58:07.100701Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0cea517531affbc1d400000000 targets=[1] reason=ChecksumMismatch
+2026-11-02T20:58:12.175029Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0cf1387130a740413200000000 targets=[1] reason=ChecksumMismatch
+2026-11-02T20:58:13.409226Z  WARN arca_lake_controller::integrity: scrub page failed; member skipped this pass group=1 member=1 code=Unavailable
+2026-11-02T20:58:16.064834Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:58:17.258900Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0e295f72d3b37d26bb00000000 targets=[1] reason=MissingShard
+2026-11-02T20:58:18.643907Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 226492416, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:58:21.052947Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:58:22.336069Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0dea7d7591896cdbd300000000 targets=[1] reason=MissingShard
+2026-11-02T20:58:22.408618Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0e2cc372bca9608d9000000001 targets=[1] reason=MissingShard
+2026-11-02T20:58:26.092060Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:58:31.900859Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:58:34.460536Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:58:36.168065Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:58:41.034366Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:58:43.449825Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:58:46.158893Z  WARN arca_lake_controller::integrity: scrub page failed; member skipped this pass group=1 member=2 code=Unavailable
+2026-11-02T20:58:46.192569Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:58:47.372530Z  INFO arca_lake_controller::integrity: scrub pass complete group=1 pass=3 verified=1400 bytes=2936012800 findings=[3, 3, 0, 0, 0, 0, 0, 0] errors=5
+2026-11-02T20:58:47.749680Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0db3a9779593907b0800000000 attempts=1 why="members unavailable"
+2026-11-02T20:58:48.065136Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0de694740a8cc4937400000001 attempts=1 why="members unavailable"
+2026-11-02T20:58:48.377100Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0deda77049a277146100000001 attempts=1 why="members unavailable"
+2026-11-02T20:58:55.618698Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 226492416, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:58:56.212245Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:58:57.700885Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:59:01.951078Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:59:04.098349Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 245366784, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:59:06.173206Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 245366784, usage_after: 213909504, evicted: 5, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:59:06.263620Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:59:16.288591Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:59:24.471682Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:59:24.788251Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0f28f9709da6cbf65000000000 targets=[1] reason=MissingShard
+2026-11-02T20:59:26.307264Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:59:26.544386Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:59:30.053819Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0ee71473a5997dcbb200000001 targets=[1] reason=MissingShard
+2026-11-02T20:59:30.093104Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0f2cc176238e385eb900000001 targets=[1] reason=MissingShard
+2026-11-02T20:59:36.402399Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:59:38.833189Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:59:43.378877Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:59:46.059363Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T20:59:46.454826Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T20:59:48.561881Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 257949696, usage_after: 213909504, evicted: 7, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T20:59:50.238935Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0db3a9779593907b0800000000 targets=[1] reason=MissingShard
+2026-11-02T20:59:50.342748Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0de694740a8cc4937400000001 targets=[1] reason=MissingShard
+2026-11-02T20:59:50.514357Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0deda77049a277146100000001 targets=[1] reason=MissingShard
+2026-11-02T20:59:56.534931Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:00:03.228994Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:00:06.639192Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:00:07.014019Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:00:09.383931Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:00:11.798873Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:00:13.984124Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:00:16.854286Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 4, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:00:26.887108Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:00:32.869934Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:00:35.006450Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:00:35.650574Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0ff54f73dcac855f1400000000 targets=[1] reason=MissingShard
+2026-11-02T21:00:36.462989Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1036d573a1add90c0900000000 targets=[1] reason=MissingShard
+2026-11-02T21:00:36.567395Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e103bb4778e9859c1c000000000 targets=[1] reason=MissingShard
+2026-11-02T21:00:36.941111Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:00:37.117871Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:00:46.976153Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:00:47.369360Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:00:49.496117Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:00:51.788287Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 251658240, usage_after: 264241152, evicted: 6, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:00:53.982744Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 239075328, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:00:57.081762Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:01:07.126175Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:01:08.346632Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:01:11.100912Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:01:13.341579Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:01:15.524790Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 245366784, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:01:17.159301Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:01:17.599169Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:01:27.186991Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:01:31.605910Z  WARN arca_lake_controller::integrity: scrub page failed; member skipped this pass group=1 member=1 code=Unavailable
+2026-11-02T21:01:35.815858Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:01:37.223349Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:01:38.234510Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e11309472c2887c402f00000001 targets=[1] reason=MissingShard
+2026-11-02T21:01:38.317990Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1133ec71e79679207a00000000 targets=[1] reason=MissingShard
+2026-11-02T21:01:38.700451Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:01:41.122258Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:01:43.365492Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e10f08f75449d7e7c8f00000000 targets=[1] reason=MissingShard
+2026-11-02T21:01:47.141905Z  INFO arca_lake_controller::process: reconcile pass deleted=0 unreachable=2
+2026-11-02T21:01:47.311770Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:01:53.299044Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:01:55.494550Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 251658240, usage_after: 257949696, evicted: 6, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:01:57.350727Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:01:57.710433Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:01:59.847517Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:02:01.355743Z  WARN arca_lake_controller::integrity: scrub page failed; member skipped this pass group=1 member=2 code=Unavailable
+2026-11-02T21:02:03.719970Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0ead3b7633b959817d00000001 attempts=1 why="members unavailable"
+2026-11-02T21:02:04.033532Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0ee3f876b1aa16f4cb00000001 attempts=1 why="members unavailable"
+2026-11-02T21:02:04.345838Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0eea76748184fc52c600000001 attempts=1 why="members unavailable"
+2026-11-02T21:02:05.282561Z  INFO arca_lake_controller::integrity: scrub pass complete group=1 pass=4 verified=3020 bytes=6333399040 findings=[9, 0, 0, 0, 8, 0, 0, 0] errors=7
+2026-11-02T21:02:07.405809Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:02:09.670364Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0fb11c7395acc23cb300000001 attempts=1 why="members unavailable"
+2026-11-02T21:02:10.090325Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0feff774ebbb190ed300000001 attempts=1 why="members unavailable"
+2026-11-02T21:02:10.511643Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0ff98c76958c76694400000000 attempts=1 why="members unavailable"
+2026-11-02T21:02:10.853197Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e10b811713a9cd5589400000000 attempts=1 why="members unavailable"
+2026-11-02T21:02:11.335867Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e10ed3a7616b9ed21c400000001 attempts=1 why="members unavailable"
+2026-11-02T21:02:11.729959Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e10f34d7530bbf0a85c00000001 attempts=1 why="members unavailable"
+2026-11-02T21:02:12.395208Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:02:14.581798Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:02:17.467842Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:02:18.845350Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:02:21.196080Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:02:27.631743Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:02:37.710901Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:02:42.288969Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:02:42.486339Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e12286577ba88c1670300000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:02:43.167263Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e12286577ba88c1670300000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:02:43.926052Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1228667311b496e5f500000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:02:44.576749Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1228667311b496e5f500000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:02:44.767643Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 245366784, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:02:45.238020Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e12286771e6b2b3648300000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:02:47.008259Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:02:47.829698Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:02:49.257856Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:02:52.052846Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e11e345757891d5d07800000000 targets=[1] reason=MissingShard
+2026-11-02T21:02:52.132472Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e11e575776081f63eef00000001 targets=[1] reason=MissingShard
+2026-11-02T21:02:52.321918Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e122c1f7755845fce7c00000000 targets=[1] reason=MissingShard
+2026-11-02T21:02:53.315241Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e122faf70188e0011e500000000 targets=[1] reason=MissingShard
+2026-11-02T21:02:57.865314Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:03:03.375852Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:03:07.526705Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:03:07.901212Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:03:08.399157Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0ead3b7633b959817d00000001 targets=[1] reason=MissingShard
+2026-11-02T21:03:08.444831Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0ee3f876b1aa16f4cb00000001 targets=[1] reason=MissingShard
+2026-11-02T21:03:08.497563Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0eea76748184fc52c600000001 targets=[1] reason=MissingShard
+2026-11-02T21:03:09.606803Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 213909504, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:03:13.819910Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0fb11c7395acc23cb300000001 attempts=2 why="members unavailable"
+2026-11-02T21:03:14.135767Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0feff774ebbb190ed300000001 attempts=2 why="members unavailable"
+2026-11-02T21:03:14.451004Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e0ff98c76958c76694400000000 attempts=2 why="members unavailable"
+2026-11-02T21:03:14.764226Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e10b811713a9cd5589400000000 attempts=2 why="members unavailable"
+2026-11-02T21:03:15.081728Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e10ed3a7616b9ed21c400000001 attempts=2 why="members unavailable"
+2026-11-02T21:03:15.404505Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e10f34d7530bbf0a85c00000001 attempts=2 why="members unavailable"
+2026-11-02T21:03:17.962093Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:03:22.740866Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:03:24.954819Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:03:28.026053Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:03:31.763274Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:03:33.838569Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:03:38.088412Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 4, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:03:48.136577Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:03:50.476003Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:03:51.303679Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e133d8f7037974ea48200000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:03:51.947990Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e133d8f7037974ea48200000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:03:52.598128Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e133d8f7037974ea48300000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:03:53.118071Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 251658240, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:03:53.323339Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e133d8f7037974ea48300000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:03:53.855853Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e133d8f7037974ea48400000000 targets=[1] reason=MissingShard
+2026-11-02T21:03:55.433791Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:03:57.556818Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:03:58.221626Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:03:59.934764Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e12fa34727eaf0cbc6800000001 targets=[1] reason=MissingShard
+2026-11-02T21:03:59.998830Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e13404c74138786398d00000001 targets=[1] reason=MissingShard
+2026-11-02T21:04:00.768411Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e13426f77d8a7770bef00000001 targets=[1] reason=MissingShard
+2026-11-02T21:04:08.386294Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:04:09.657684Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:04:13.794430Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:04:15.965942Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:04:18.447276Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:04:28.511792Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:04:30.917458Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:04:33.682232Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:04:35.830925Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:04:38.560917Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:04:39.964375Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 239075328, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:04:42.448053Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:04:48.855469Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 15, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:04:50.915985Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e133d8f7037974ea48200000000 targets=[1] reason=MissingShard
+2026-11-02T21:04:59.073995Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:05:03.138504Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:05:06.238696Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:05:06.861582Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1451da7003a4cadf7300000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:05:07.636255Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1451da7003a4cadf7300000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:05:08.505121Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1451db70f28bc538fe00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:05:09.043300Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 264241152, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:05:09.266780Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1451db70f28bc538fe00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:05:09.314462Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:05:09.800371Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1451dd7108a8ee95bb00000000 targets=[1] reason=MissingShard
+2026-11-02T21:05:11.228262Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 220200960, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:05:18.165032Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0fb11c7395acc23cb300000001 targets=[1] reason=MissingShard
+2026-11-02T21:05:18.204362Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0feff774ebbb190ed300000001 targets=[1] reason=MissingShard
+2026-11-02T21:05:18.243548Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e0ff98c76958c76694400000000 targets=[1] reason=MissingShard
+2026-11-02T21:05:18.278364Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e10b811713a9cd5589400000000 targets=[1] reason=MissingShard
+2026-11-02T21:05:18.312946Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e10ed3a7616b9ed21c400000001 targets=[1] reason=MissingShard
+2026-11-02T21:05:18.348529Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e10f34d7530bbf0a85c00000001 targets=[1] reason=MissingShard
+2026-11-02T21:05:19.595885Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:05:27.396754Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:05:29.652717Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:05:31.497970Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 220200960, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:05:33.640929Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:05:39.865998Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:05:49.911903Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:05:50.420195Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:05:52.697484Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:05:58.784682Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:06:00.006624Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:06:10.267746Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 22, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:06:19.762570Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:06:20.268249Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e15766172778602fef200000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:06:20.397359Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:06:20.918060Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e15766172778602fef200000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:06:21.651751Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e15766172778602fef500000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:06:22.212739Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 232783872, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:06:22.297791Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e15766172778602fef500000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:06:23.009250Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e15766172778602fef600000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:06:30.483141Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:06:38.552781Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:06:40.543519Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:06:40.967145Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:06:43.045579Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:06:50.617900Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:06:55.421943Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:06:58.517278Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 257949696, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:06:59.265760Z  INFO arca_lake_controller::process: reconcile pass deleted=3 unreachable=2
+2026-11-02T21:07:00.678330Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:07:01.262469Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:07:07.391148Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:07:09.461912Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:07:10.735080Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:07:20.800806Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:07:22.471418Z  WARN arca_lake_controller::integrity: scrub page failed; member skipped this pass group=1 member=1 code=Unavailable
+2026-11-02T21:07:27.302363Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1689717454b32d8e2d00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:27.973782Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1689717454b32d8e2d00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:28.032991Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:07:28.625835Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1689717454b32d8e2f00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:29.368560Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1689717454b32d8e2f00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:30.065523Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e16897475d28dc8a02500000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:30.774460Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e16897475d28dc8a02500000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:30.856635Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:07:31.609981Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e16897475d28dc8a02600000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:32.459591Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e16897475d28dc8a02600000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:32.593979Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:07:33.329200Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1689dc77e79d9e23b600000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:34.220880Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1689dc77e79d9e23b600000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:34.969828Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1689e6703a88018ef000000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:35.681696Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1689e6703a88018ef000000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:36.570311Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1689ea76c78919ad8a00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:37.340764Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1689ea76c78919ad8a00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:07:37.430912Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:07:38.052677Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1689ec73d0bf3833b900000000 targets=[1] reason=MissingShard
+2026-11-02T21:07:38.292629Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e168a5470afa9c68b8500000000 targets=[1] reason=MissingShard
+2026-11-02T21:07:39.501815Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:07:40.912718Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:07:43.929438Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e164ce17085b1c8d7a100000000 targets=[1] reason=MissingShard
+2026-11-02T21:07:44.385585Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e164e6f72a8917c181c00000001 targets=[1] reason=MissingShard
+2026-11-02T21:07:44.732399Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e168ced70228cd2c4da00000001 targets=[1] reason=MissingShard
+2026-11-02T21:07:50.748329Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e168f8c72cf97ef0dd300000001 targets=[1] reason=MissingShard
+2026-11-02T21:07:50.987248Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:07:51.716498Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 226492416, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:07:55.968834Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:07:58.188527Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:08:00.470874Z  WARN arca_lake_controller::integrity: scrub page failed; member skipped this pass group=1 member=2 code=Unavailable
+2026-11-02T21:08:01.252631Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:08:06.098511Z  INFO arca_lake_controller::integrity: scrub pass complete group=1 pass=5 verified=5592 bytes=11727273984 findings=[4, 0, 0, 0, 90, 0, 0, 0] errors=7
+2026-11-02T21:08:07.317147Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e11ab3773d3994afe1e00000001 attempts=1 why="members unavailable"
+2026-11-02T21:08:07.631200Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e11e8047539a18ac67700000001 attempts=1 why="members unavailable"
+2026-11-02T21:08:07.941725Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e12fdc173868dde9d7b00000000 attempts=1 why="members unavailable"
+2026-11-02T21:08:08.255861Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1650e477009520d5de00000001 attempts=1 why="members unavailable"
+2026-11-02T21:08:11.326915Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:08:12.873246Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:08:15.790319Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:08:21.381502Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:08:23.930928Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:08:25.998326Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:08:31.564504Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 18, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:08:41.619435Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:08:44.288973Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e17b49873cba993a00f00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:08:44.341501Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:08:45.042822Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e17b49873cba993a00f00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:08:45.783842Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e17b49873cba993a01000000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:08:46.445987Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e17b49873cba993a01000000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:08:47.115234Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e17b49971d0b66a59d500000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:08:47.390308Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:08:47.882522Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e17b49971d0b66a59d500000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:08:48.587231Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e17b49971d0b66a59d700000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:08:49.234364Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e17b49971d0b66a59d700000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:08:49.994765Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e17b50872dbaeaf858800000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:08:50.317486Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:08:50.655678Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e17b50872dbaeaf858800000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:08:50.999681Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e17b50f766281c35aee00000000 targets=[1] reason=MissingShard
+2026-11-02T21:08:51.373116Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e17b5d170e38ad8731100000001 targets=[1] reason=MissingShard
+2026-11-02T21:08:51.701265Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:08:52.438423Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:08:56.767815Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e177b077778ade7d8c500000000 targets=[1] reason=MissingShard
+2026-11-02T21:08:57.633191Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e17b8a87783b2ee26e600000001 targets=[1] reason=MissingShard
+2026-11-02T21:09:01.836638Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:09:03.400623Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e17bacd73b98b51c2ec00000001 targets=[1] reason=MissingShard
+2026-11-02T21:09:08.557718Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:09:09.523716Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e11ab3773d3994afe1e00000001 targets=[1] reason=MissingShard
+2026-11-02T21:09:09.577121Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e11e8047539a18ac67700000001 targets=[1] reason=MissingShard
+2026-11-02T21:09:09.642246Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e12fdc173868dde9d7b00000000 targets=[1] reason=MissingShard
+2026-11-02T21:09:09.763347Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1650e477009520d5de00000001 targets=[1] reason=MissingShard
+2026-11-02T21:09:10.693110Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:09:11.930428Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:09:12.761484Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:09:21.994021Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:09:25.240177Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:09:27.942630Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:09:32.075160Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:09:37.083205Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:09:39.472906Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:09:42.364061Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 16, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:09:44.929760Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e17b49873cba993a01000000001 targets=[1] reason=MissingShard
+2026-11-02T21:09:52.447106Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 2, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:09:55.756343Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e18cc39772989ccefb600000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:09:56.045821Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:09:56.547983Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e18cc39772989ccefb600000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:09:57.205853Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e18cc39772989ccefb700000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:09:57.868849Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e18cc39772989ccefb700000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:09:58.549587Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e18cc39772989ccefb800000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:09:59.071228Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:09:59.304083Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e18cc39772989ccefb800000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:10:00.093501Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e18cc39772989ccefb900000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:10:00.745011Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e18cc39772989ccefb900000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:10:01.300436Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:10:01.387364Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e18cc9e775198964e9700000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:10:02.033837Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e18cc9e775198964e9700000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:10:02.518845Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:10:02.690341Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e18cca576cbb7f2629e00000000 targets=[1] reason=MissingShard
+2026-11-02T21:10:03.419160Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e18cd8b73d8b66e9f4800000001 targets=[1] reason=MissingShard
+2026-11-02T21:10:03.419457Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:10:08.506572Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1893957250b4f3fa2f00000000 targets=[1] reason=MissingShard
+2026-11-02T21:10:09.074293Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e18d08274349352ccae00000000 targets=[1] reason=MissingShard
+2026-11-02T21:10:09.681686Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e18d307772789140fa800000000 targets=[1] reason=MissingShard
+2026-11-02T21:10:12.618422Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:10:19.531845Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:10:21.674249Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:10:22.751406Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:10:23.851467Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:10:32.882887Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:10:40.414617Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:10:42.648904Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:10:42.976718Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:10:50.822455Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:10:52.891593Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:10:53.080755Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:10:56.133600Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e18cc39772989ccefb900000001 targets=[1] reason=MissingShard
+2026-11-02T21:11:03.332569Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 12, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:11:11.570183Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:11:11.853476Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f1ff775c848618b600000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:12.511998Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f1ff775c848618b600000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:13.176200Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f2017641b712714b00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:13.417296Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:11:13.881804Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f2017641b712714b00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:14.745990Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f2017641b712714d00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:15.154785Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:11:15.634878Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f2017641b712714d00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:16.398855Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f203732b8bc8010900000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:17.154838Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f203732b8bc8010900000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:17.973287Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f26e752ba7d09c7400000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:18.817967Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f26e752ba7d09c7400000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:19.674519Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f2747011bd6199d800000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:20.426981Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f2747011bd6199d800000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:20.523129Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:11:21.170094Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f27b76309cafa25000000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:21.836693Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e19f27b76309cafa25000000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:11:22.524746Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e19f27d76eb84c4602000000000 targets=[1] reason=MissingShard
+2026-11-02T21:11:22.619865Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:11:23.513845Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:11:28.908926Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e19b6a776f697b0e9dd00000000 targets=[1] reason=MissingShard
+2026-11-02T21:11:28.965975Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e19f4c173a69217702d00000000 targets=[1] reason=MissingShard
+2026-11-02T21:11:33.695376Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 12, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:11:34.709338Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e19f6187416834a2c9800000001 targets=[1] reason=MissingShard
+2026-11-02T21:11:35.550615Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e19f88e74a4b098b17000000001 targets=[1] reason=MissingShard
+2026-11-02T21:11:38.880119Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:11:41.119432Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:11:43.284616Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:11:43.782350Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:11:53.942461Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:11:56.587781Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:11:59.743803Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 264241152, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:12:01.985163Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:12:04.043995Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:12:10.196155Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:12:12.836126Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e19f2747011bd6199d800000000 targets=[1] reason=MissingShard
+2026-11-02T21:12:14.212606Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 16, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:12:24.284194Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:12:24.881629Z  INFO arca_lake_controller::process: reconcile pass deleted=32 unreachable=0
+2026-11-02T21:12:31.483223Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:12:33.597835Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b229f7311bb48e0d300000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:34.334568Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b229f7311bb48e0d300000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:34.385823Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:12:34.453839Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:12:35.071964Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b229f7311bb48e0d500000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:35.797427Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b229f7311bb48e0d500000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:36.466279Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b229f7311bb48e0d700000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:37.195682Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b229f7311bb48e0d700000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:37.887785Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b22a1732aa7aa1e6800000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:38.199608Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:12:38.551981Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b22a1732aa7aa1e6800000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:39.204100Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b2318772f922aa19d00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:39.845569Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b2318772f922aa19d00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:40.591645Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b231f77f39e23271a00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:41.046281Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:12:41.236636Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1b231f77f39e23271a00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:12:42.215956Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1b24d875dbac78769400000001 targets=[1] reason=MissingShard
+2026-11-02T21:12:42.901529Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1b295d70dbbe183f2c00000000 targets=[1] reason=MissingShard
+2026-11-02T21:12:44.563087Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:12:49.226137Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1b2bc27425accc553600000001 targets=[1] reason=MissingShard
+2026-11-02T21:12:55.325587Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1b2eff767b951672cc00000001 targets=[1] reason=MissingShard
+2026-11-02T21:12:55.556970Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 16, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:12:59.358704Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:13:01.854419Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:13:04.412633Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 226492416, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:13:05.637759Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:13:15.714244Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:13:18.925330Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:13:21.336310Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:13:25.793734Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:13:29.496366Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:13:31.569436Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:13:36.125318Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 34, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:13:37.146223Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1b229f7311bb48e0d500000001 targets=[1] reason=MissingShard
+2026-11-02T21:13:46.259785Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 4, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:13:48.248428Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5a5e746787d77bf000000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:48.377087Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:13:48.916672Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5a5e746787d77bf000000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:49.678036Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5a5e746787d77bf200000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:50.335990Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5a5e746787d77bf200000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:51.013542Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:13:51.029832Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5ad372009c51a1f900000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:51.688456Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5ad372009c51a1f900000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:52.355526Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5ad372009c51a1fb00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:53.117323Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5ad372009c51a1fb00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:53.813210Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5ad67236a5310f3200000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:53.997559Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 264241152, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:13:54.512784Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5ad67236a5310f3200000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:55.158773Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5ad67236a5310f3400000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:55.810592Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5ad67236a5310f3400000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:56.359755Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:13:56.359763Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:13:56.506762Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5b4975cc9838d30300000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:57.176334Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5b4975cc9838d30300000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:13:57.842140Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1c5b4d7585a819017500000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:14:03.861372Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1c5d89740da54a860400000001 targets=[1] reason=MissingShard
+2026-11-02T21:14:04.169470Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1c5e5c7234942dfcb900000000 targets=[1] reason=MissingShard
+2026-11-02T21:14:04.433233Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1c5ef97049b6b2fe6500000000 targets=[1] reason=MissingShard
+2026-11-02T21:14:04.593526Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1c60757368aee3496400000000 targets=[1] reason=MissingShard
+2026-11-02T21:14:06.689263Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 12, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:14:10.199326Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1c60fc70f28112e1ad00000000 targets=[1] reason=MissingShard
+2026-11-02T21:14:10.591773Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1c6169776d85fb1d2800000001 targets=[1] reason=MissingShard
+2026-11-02T21:14:12.640949Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:14:16.788099Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:14:16.893607Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 8, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:14:18.984307Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:14:27.061678Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:14:35.989835Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:14:37.161197Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:14:40.014155Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:14:46.837267Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:14:47.282856Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 4, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:14:49.019052Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:14:57.840510Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 34, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:15:05.829761Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:15:07.277218Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d851470e28c4b5c5a00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:07.940143Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d851470e28c4b5c5a00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:07.943706Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:15:08.620959Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d8515742a9c71bb0000000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:08.852165Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:15:09.281918Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d8515742a9c71bb0000000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:09.974983Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d8516735a9d33fecf00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:10.612731Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d8516735a9d33fecf00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:11.084186Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:15:11.253477Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d851777bc80827d7e00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:12.005783Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d851777bc80827d7e00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:12.684857Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d859e70558b7e4ab200000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:13.330848Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d859e70558b7e4ab200000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:13.480661Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:15:13.976306Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d859e70558b7e4ab300000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:14.614112Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1d859e70558b7e4ab300000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:15:15.387013Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1d86cf7256bd238a5300000001 targets=[1] reason=MissingShard
+2026-11-02T21:15:18.072485Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:15:28.178348Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:15:33.744015Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:15:35.991062Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:15:38.066038Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:15:38.291511Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:15:48.512402Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:15:50.961842Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:15:53.900628Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 232783872, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:15:58.584870Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:16:03.988582Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:16:08.802363Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 23, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:16:18.971450Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 15, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:16:22.521310Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:16:23.397839Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb27b733598473a0e00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:24.059746Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb27b733598473a0e00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:24.716276Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb27b733598473a0f00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:25.079810Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:16:25.389717Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb27b733598473a0f00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:26.104970Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb27b733598473a1000000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:26.820971Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb27b733598473a1000000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:27.544766Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb27b733598473a1100000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:28.142599Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 264241152, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:16:28.210611Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb27b733598473a1100000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:28.854751Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb2e6736ca81bdf4600000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:29.057018Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:16:29.555316Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb2e6736ca81bdf4600000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:30.232366Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb2ec762db2e3457600000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:30.631552Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:16:30.877484Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb2ec762db2e3457600000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:31.519843Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb2ed741fbd58413f00000000 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:32.154556Z  WARN arca_lake_controller::integrity: stripe repair attempt failed group=1 chunk=01a19e1eb2ed741fbd58413f00000001 attempts=1 why="write failed: The service is currently unavailable"
+2026-11-02T21:16:32.835438Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1eb2ee74d9aedc98aa00000000 targets=[1] reason=MissingShard
+2026-11-02T21:16:38.456157Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1eb5b9749ba9e2d1c200000001 targets=[1] reason=MissingShard
+2026-11-02T21:16:39.240854Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:16:48.809199Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:16:49.565298Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 22, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:16:59.656183Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:17:01.846722Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e177da473d8b7c532ce00000000 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:01.889424Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1895e07606be10b4a200000000 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:07.057488Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e19b8e375fc9098067b00000000 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:07.173763Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1aea5e741c8fd8e25b00000001 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:07.251558Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1c9d6b71fca98109db00000001 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:07.382059Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1cd7147039a1cd7bcc00000001 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:07.517230Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1cde15742bb0b9fa4f00000001 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:07.589845Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1cf36f705f85c4109100000000 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:09.737331Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:17:13.131715Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1dd3eb71dbba1167e600000001 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:13.395094Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1e0c627051a2044eb800000000 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:13.593915Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1e2567779ebf679bc000000000 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:13.692520Z  INFO arca_lake_controller::integrity: stripe repaired group=1 chunk=01a19e1e2b6572c1b60bc03800000000 targets=[1] reason=ChecksumMismatch
+2026-11-02T21:17:19.819228Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:17:29.922626Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:17:40.057840Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:17:50.194225Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:17:55.223449Z  INFO arca_lake_controller::process: reconcile pass deleted=16 unreachable=0
+2026-11-02T21:18:00.298880Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:18:10.395180Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:18:20.483501Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:18:30.633498Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:18:37.104008Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 220200960, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:18:39.179429Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:18:40.737601Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:18:41.512314Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:18:43.589058Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:18:45.772476Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 245366784, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:18:48.478069Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 257949696, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:18:50.901319Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:18:51.138203Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:18:53.217324Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:18:55.540812Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:18:57.615359Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:18:59.829532Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:01.133796Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:19:01.965999Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 245366784, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:04.043309Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 213909504, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:19:06.297908Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 257949696, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:08.394037Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 226492416, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:10.537400Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 226492416, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:11.237815Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:19:12.703163Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:14.895681Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 245366784, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:17.851377Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:20.752547Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:21.354324Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:19:23.695957Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:25.775496Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:19:27.941656Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:30.012270Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:19:31.512385Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:19:32.242133Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 226492416, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:34.396742Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 264241152, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:36.471036Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 213909504, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:19:38.756027Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 251658240, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:41.502793Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:41.692400Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-02T21:19:44.220473Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 257949696, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:46.499157Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 251658240, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:48.609015Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 264241152, usage_after: 245366784, evicted: 8, skipped_pinned: 0, delete_failures: 0, over_watermark: true }
+2026-11-02T21:19:50.688082Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 270532608, usage_after: 213909504, evicted: 9, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-02T21:19:51.780019Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }

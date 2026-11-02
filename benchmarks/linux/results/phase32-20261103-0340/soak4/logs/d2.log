@@ -1,0 +1,2 @@
+2026-11-02T21:16:01.804880Z  INFO arca_lake: storage node listening addr=<addr>:9100 dir=/home/<user>/arca-run/d2
+2026-11-02T21:16:01.804961Z  INFO arca_lake: storage node metrics endpoint addr=127.0.0.1:9910

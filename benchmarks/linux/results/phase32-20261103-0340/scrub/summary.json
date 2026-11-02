@@ -1,0 +1,15 @@
+{
+  "results_dir": "scrub",
+  "cores": 4,
+  "durable_config": "durable-c4",
+  "put_mib_s": 166.90434805674832,
+  "get_warm_mib_s": 442.21395551151704,
+  "get_warm_p50_ms": 125.79975900000001,
+  "get_warm_p95_ms": 156.62525499999998,
+  "get_warm_p99_ms": 177.97722199999998,
+  "cpu_s_per_gib_gateway_host": 7.1504,
+  "cpu_s_per_gib_node_host": 4.990666666666666,
+  "rss_mib": 134.94140625,
+  "meta_txn_per_s": 73.0206522748274,
+  "repetitions": 3
+}

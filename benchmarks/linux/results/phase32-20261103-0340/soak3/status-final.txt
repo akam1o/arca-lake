@@ -1,0 +1,2 @@
+scrub group 1 pass 6 phase Shards { member: 1, after: Some([1, 161, 157, 246, 2, 59, 112, 216, 159, 251, 232, 97, 0, 0, 0, 1]) } started_ms 1793651963638 finished_ms 1793651619115 verified 10056 bytes 21088960512 findings [0, 0, 0, 0, 686, 0, 0, 0] errors 0
+repair queue depth 0 unrecoverable 0 failed 0 status 0

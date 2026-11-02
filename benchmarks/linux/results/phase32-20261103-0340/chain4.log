@@ -1,0 +1,22 @@
+== soak4 Mon Nov  2 20:56:17 UTC 2026
+flipped 6 bytes in seg-000000000000000e.arca
+21:15:15 round 79
+21:15:18 fault: restart cache node c2
+21:15:28 round 80
+21:15:34 fault: restart controller ctl-a (follower rejoin)
+21:15:37 round 81
+21:15:40 fault: restart storage node d2
+21:15:54 round 82
+21:16:00 fault: controller leader failover (kill ctl-a, restart later)
+21:16:01 round 82: 16 overwrite PUTs failed explicitly (fault window); reading r81 without body verification
+21:16:14 round 83
+21:16:16 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000f.arca
+21:16:28 round 84
+21:16:33 fault: restart cache node c2
+21:16:43 settling: full scrub, then drain the repair queue
+2026-11-02T21:17:43.134862Z  INFO arca_lake_controller::integrity: scrub pass complete group=1 pass=6 verified=24015 bytes=50363105280 findings=[0, 15, 0, 0, 1137, 0, 0, 0] errors=0
+2026-11-02T21:18:33.892796Z  INFO arca_lake_controller::integrity: scrub pass complete group=1 pass=6 verified=24019 bytes=50371493888 findings=[0, 3, 0, 0, 1129, 0, 0, 0] errors=0
+cat: /home/<user>/arca-run/controller2.pid: No such file or directory
+rounds=84 minutes=20 body_mismatch_labels=0 unreadable_reads=0 unrecoverable=0 failed_tasks=0 manifest_findings=0 failures=0
+== done Mon Nov  2 21:19:57 UTC 2026

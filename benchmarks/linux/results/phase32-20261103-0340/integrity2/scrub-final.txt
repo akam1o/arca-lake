@@ -1,0 +1,2 @@
+scrub group 1 verified 576 bytes 1207959552 findings [0, 0, 0, 0, 0, 0, 0, 0] enqueued 0 errors 0
+2026-11-02T19:46:13.306721Z  INFO arca_lake_controller::integrity: scrub pass complete group=1 pass=4 verified=576 bytes=1207959552 findings=[0, 0, 0, 0, 0, 0, 0, 0] errors=0

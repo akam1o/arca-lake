@@ -132,7 +132,7 @@ a wrong repair window (it waited for a metric gauge that is refreshed
 only at the end of a worker pass) and is kept for the scrub figures
 only.
 
-### Bounded integrity soak (`soak.sh`, 20 minutes, `soak3`)
+### Bounded integrity soak (`soak.sh`, 20 minutes, `soak4`)
 
 Layout: durable `2+1` plus a coded cache tier (256 MiB, eviction every
 2 s), versioning on, two controllers (leader failover every fifth
@@ -146,21 +146,23 @@ restart, controller rejoin.
 
 | outcome | value |
 | --- | --- |
-| rounds | 86 (≈ 2 300 single PUTs, 500 multipart PUTs, 1 400 overwrites, 1 300 deletes, 5 500 verified GETs) |
-| body mismatches on verified reads | 0 attributable to the system (one label, `final-r86`, was the harness verifying the last round against the wrong seed; fixed in `0b3bae0`, re-run below) |
+| rounds | 84 (≈ 2 200 single PUTs, 500 multipart PUTs, 1 300 overwrites, 1 300 deletes, 5 400 verified GETs) |
+| body mismatches on verified reads | 0 |
 | unreadable reads (`arca_gateway_unreadable_reads_total`) | 0 |
-| degraded reads served correctly with parity | 1 587 (1 290 reported to the repair queue, 297 deduplicated) |
-| byte flips quarantined on the node (`quarantine.log`, d1) | 192 entries over 17 flip rounds; 85 released by repair (`cause=superseded`), the rest by GC tombstones of overwritten or deleted versions |
-| stripe repairs | 88 succeeded (71 missing-shard, 17 checksum-mismatch), 138 attempts failed explicitly and were retried (116 `write failed: unavailable` and 22 `members unavailable`, all inside the node-restart windows), 0 unrecoverable, 0 left failed |
-| final scrub after settling | two passes: findings `[0, 19, 0, 0, 1392, 0, 0, 0]` then `[0, 5, …]` (checksum mismatches queued and repaired between the passes; the 1 392 "unexpected" findings are shards of versions GC had retired but not yet collected, which reconciliation removes, never scrub) |
-| manifest scrub | 470 roots, 0 findings; repair queue empty; `data_integrity_status 0` |
-| cache | 1 708 populations, 1 668 evictions, hits served including 89 degraded cache hits repaired in the background |
-| explicit request failures during fault windows | 59 labels; every one a PUT, multipart PUT or overwrite that failed with an error while a node or the leader was restarting, and never a partially visible object: a failed overwrite left the previous version readable, a failed multipart upload left no object |
+| degraded reads served correctly with parity | 1 623 (1 344 reported to the repair queue, 279 deduplicated) |
+| byte flips quarantined on the node (`quarantine.log`, d1) | 171 entries over 17 flip rounds; 87 released by repair (`cause=superseded`), the rest by GC tombstones of overwritten or deleted versions |
+| stripe repairs | 94 succeeded (79 missing-shard, 15 checksum-mismatch), 141 attempts failed explicitly and were retried (119 `write failed: unavailable` and 22 `members unavailable`, all inside node-restart windows), 0 unrecoverable, 0 left failed |
+| final scrub after settling | two passes: findings `[0, 15, 0, 0, 1137, 0, 0, 0]` then `[0, 3, …]` (checksum mismatches queued and repaired between the passes; the "unexpected" findings are shards of versions GC had retired but not yet collected, which reconciliation removes, never scrub) |
+| manifest scrub | 466 roots, 0 findings; repair queue empty; `data_integrity_status 0` |
+| cache | 1 770 populations, 1 736 evictions, 92 degraded cache hits repaired in the background |
+| explicit request failures during fault windows | 26 labels; every one a PUT, multipart PUT or overwrite that failed with an error while a node or the leader was restarting, and never a partially visible object: a failed overwrite left the previous version readable, a failed upload left no object (the final verification of the last round counted those absent objects as errors, not mismatches; the harness now accepts 404 for rounds whose PUTs failed) |
 | controller failover | 17 leader kills; the follower took over each time and resumed the persisted scrub cursor and repair tasks |
 
-The first two soaks (`soak`, `soak2`) are kept: `soak` reported five
-"mismatch" labels that were the harness expecting the new content of
-overwrites that had failed explicitly (the previous version was, as
-designed, still served), and `soak2` one label from the seed error above.
-No run reported an unreadable read, an unrecoverable stripe, a failed
-task left behind or a manifest finding.
+The three earlier soaks (`soak`, `soak2`, `soak3`) are kept with their
+harness false positives explained: `soak` reported five "mismatch"
+labels where the harness expected the new content of overwrites that had
+failed explicitly (the previous version was, as designed, still served);
+`soak2` and `soak3` one label each where the last round was verified
+against the wrong seed (`0b3bae0`). No run reported an unreadable read,
+an unrecoverable stripe, a failed task left behind or a manifest
+finding.

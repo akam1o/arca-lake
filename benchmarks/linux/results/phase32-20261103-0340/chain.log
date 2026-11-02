@@ -1,0 +1,82 @@
+== baseline (scrub off) Mon Nov  2 18:40:36 UTC 2026
+== repetition 1: durable-c4-r1
+== repetition 2: durable-c4-r2
+== repetition 3: durable-c4-r3
+done: benchmarks/linux/results/phase32-20261103-0340/baseline
+== scrub on Mon Nov  2 18:44:44 UTC 2026
+== repetition 1: durable-c4-r1
+== repetition 2: durable-c4-r2
+== repetition 3: durable-c4-r3
+done: benchmarks/linux/results/phase32-20261103-0340/scrub
+== integrity-perf Mon Nov  2 18:49:18 UTC 2026
+{
+  "objects": 64,
+  "size": 16777216,
+  "shard_bytes": 1610612736,
+  "scrub": {
+    "bytes": 1610612736,
+    "seconds": 1.98,
+    "mib_s": 774.5,
+    "admin_cpu_s_per_gib": 0.42,
+    "node_cpu_s_per_gib": 0.0,
+    "disk_read_amplification": 0.0,
+    "net_tx_bytes_per_byte": 0.0,
+    "paced_32mib_seconds": 48.45,
+    "paced_expected_seconds": 48.0
+  },
+  "repair": {
+    "queued": 256,
+    "repaired": 237,
+    "failed": 0,
+    "bytes_written": 497025024,
+    "seconds": 1129.28,
+    "mib_s": 0.4,
+    "controller_cpu_s_per_gib": 17.28,
+    "node_cpu_s_per_gib": 6.48,
+    "disk_read_bytes_per_repaired_byte": 0.004,
+    "disk_write_bytes_per_repaired_byte": 3.458,
+    "net_tx_bytes_per_repaired_byte": 2.118
+  }
+}
+== soak Mon Nov  2 19:09:36 UTC 2026
+19:26:03 fault: restart storage node d2
+19:26:17 round 72
+19:26:22 fault: controller leader failover (kill ctl-a, restart later)
+19:26:24 BODY MISMATCH in r72-prevget: {"label":"r72-prevget","op":"get","pass":1,"objects":16,"size":8388608,"concurrency":4,"range_bytes":0,"verify":true,"order":"random","duration_s":0.255381465,"ops":16,"bytes":134217728,"errors":0,"mismatches":8,"missing":0,"ops_per_s":62.65137526719099,"mib_per_s":501.21100213752794,"lat_ms_mean":51.396209125,"lat_ms_p50":50.406523,"lat_ms_p90":63.854886,"lat_ms_p95":63.854886,"lat_ms_p99":74.08659300000001,"lat_ms_max":74.08659300000001}
+19:26:36 round 73
+19:26:40 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000d.arca
+19:26:52 round 74
+19:26:57 fault: restart cache node c2
+19:27:04 BODY MISMATCH in r74-prevget: {"label":"r74-prevget","op":"get","pass":1,"objects":16,"size":8388608,"concurrency":4,"range_bytes":0,"verify":true,"order":"random","duration_s":0.544761949,"ops":16,"bytes":134217728,"errors":0,"mismatches":4,"missing":0,"ops_per_s":29.37062698554961,"mib_per_s":234.96501588439688,"lat_ms_mean":84.67122018750001,"lat_ms_p50":62.979495,"lat_ms_p90":328.846967,"lat_ms_p95":328.846967,"lat_ms_p99":330.193715,"lat_ms_max":330.193715}
+19:27:06 round 75
+19:27:12 fault: restart controller ctl-a (follower rejoin)
+19:27:15 round 76
+19:27:19 fault: restart storage node d2
+19:27:34 round 77
+19:27:39 fault: controller leader failover (kill ctl-a, restart later)
+19:27:53 round 78
+19:27:55 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000e.arca
+19:28:09 round 79
+19:28:13 fault: restart cache node c2
+19:28:22 round 80
+19:28:32 fault: restart controller ctl-a (follower rejoin)
+19:28:36 round 81
+19:28:40 fault: restart storage node d2
+19:28:53 round 82
+19:28:59 fault: controller leader failover (kill ctl-a, restart later)
+19:29:01 BODY MISMATCH in r82-prevget: {"label":"r82-prevget","op":"get","pass":1,"objects":16,"size":8388608,"concurrency":4,"range_bytes":0,"verify":true,"order":"random","duration_s":0.253649545,"ops":16,"bytes":134217728,"errors":0,"mismatches":16,"missing":0,"ops_per_s":63.07915908147993,"mib_per_s":504.63327265183943,"lat_ms_mean":53.08556706249999,"lat_ms_p50":52.679177,"lat_ms_p90":60.770401,"lat_ms_p95":60.770401,"lat_ms_p99":61.101688,"lat_ms_max":61.101688}
+19:29:12 round 83
+19:29:16 fault: byte flips on a stopped device (d1)
+flipped 6 bytes in seg-000000000000000f.arca
+19:29:27 round 84
+19:29:32 fault: restart cache node c2
+19:29:45 round 85
+19:29:47 fault: restart controller ctl-a (follower rejoin)
+19:29:51 round 86
+19:29:54 fault: restart storage node d2
+19:30:08 settling
+cat: /home/<user>/arca-run/controller2.pid: No such file or directory
+rounds=86 minutes=20 body_mismatch_labels=5 unreadable_reads=0 unrecoverable=0 failed_tasks=0 manifest_findings=0 failures=5
+== done Mon Nov  2 19:31:38 UTC 2026

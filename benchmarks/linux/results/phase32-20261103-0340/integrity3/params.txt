@@ -1,0 +1,1 @@
+objects=64 size=16777216 data_bytes=1073741824 shard_bytes=1610612736

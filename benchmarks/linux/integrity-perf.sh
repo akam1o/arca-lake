@@ -116,7 +116,7 @@ sa "$ADMIN integrity status" | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g
 mkdir -p "$OUT/logs"
 sa "cd $RUN_DIR/logs && tar czf - controller.log d0.log d1.log 2>/dev/null" | tar xzf - -C "$OUT/logs" 2>/dev/null || true
 sb "cd $RUN_DIR/logs && tar czf - d2.log gateway.log 2>/dev/null" | tar xzf - -C "$OUT/logs" 2>/dev/null || true
-sed -i -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g' "$OUT"/logs/*.log 2>/dev/null || true
+python3 -I benchmarks/linux/sanitize.py "$OUT/logs" > /dev/null 2>&1 || true
 bash "$TH" teardown > /dev/null 2>&1 || true
 
 cat > "$OUT/env.txt" <<EOF

@@ -1,0 +1,31 @@
+{
+  "objects": 64,
+  "size": 16777216,
+  "shard_bytes": 1610612736,
+  "scrub": {
+    "bytes": 0,
+    "seconds": 0.46,
+    "mib_s": 0.0,
+    "admin_cpu_s_per_gib": null,
+    "node_cpu_s_per_gib": null,
+    "disk_read_amplification": null,
+    "net_tx_bytes_per_byte": null,
+    "paced_32mib_seconds": 48.44,
+    "paced_expected_seconds": 48.0,
+    "paced_node_cpu_s_per_gib": 0.67,
+    "paced_disk_read_amplification": 0.0
+  },
+  "repair": {
+    "queued": 256,
+    "repaired": 31,
+    "failed": 0,
+    "bytes_written": 65011712,
+    "seconds": 5.22,
+    "mib_s": 11.9,
+    "controller_cpu_s_per_gib": 0.0,
+    "node_cpu_s_per_gib": 16.52,
+    "disk_read_bytes_per_repaired_byte": 0.0,
+    "disk_write_bytes_per_repaired_byte": 3.001,
+    "net_tx_bytes_per_repaired_byte": 2.526
+  }
+}
