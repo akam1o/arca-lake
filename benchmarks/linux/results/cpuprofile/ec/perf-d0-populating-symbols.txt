@@ -1,0 +1,16 @@
+    24.48%  tokio-rt-worker  [kernel.kallsyms]  [k] rep_movs_alternative
+     8.55%  tokio-rt-worker  arca-lake          [.] crc32c::hw_x86_64::crc_u64_parallel3
+     7.74%  tokio-rt-worker  [kernel.kallsyms]  [k] kernel_init_pages
+     4.45%  tokio-rt-worker  libc.so.6          [.] 0x0000000000198489
+     3.37%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197ba4
+     3.36%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bae
+     2.30%  tokio-rt-worker  [kernel.kallsyms]  [k] memset_orig
+     1.50%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bca
+     1.12%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bc5
+     1.05%  tokio-rt-worker  [kernel.kallsyms]  [k] __rmqueue_pcplist
+     1.03%  tokio-rt-worker  arca-lake          [.] crc32c::hw_x86_64::crc_u64_append
+     0.96%  tokio-rt-worker  libc.so.6          [.] 0x0000000000198493
+     0.94%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bc0
+     0.78%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bb3
+     0.77%  tokio-rt-worker  [kernel.kallsyms]  [k] tcp_sendmsg_locked
+     0.72%  tokio-rt-worker  [kernel.kallsyms]  [k] __pv_queued_spin_lock_slowpath

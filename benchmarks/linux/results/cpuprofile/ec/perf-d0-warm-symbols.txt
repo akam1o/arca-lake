@@ -1,0 +1,8 @@
+    32.24%  tokio-rt-worker  libc.so.6          [.] writev
+    26.09%  tokio-rt-worker  arca-lake          [.] <h2::proto::streams::recv::Recv>::poll_trailers
+    19.93%  tokio-rt-worker  [kernel.kallsyms]  [k] __wake_up_common
+    16.30%  tokio-rt-worker  arca-lake          [.] <hashbrown::map::HashMap<core::any::TypeId, alloc::boxed::Box<dyn http::extensions::AnyClone + core::marker::Send + core::marker::Sync>, core::hash::BuildHasherDefault<http::extensions::IdHasher>>>::insert
+     1.63%  tokio-rt-worker  [kernel.kallsyms]  [k] __sys_recvfrom
+     1.34%  tokio-rt-worker  arca-lake          [.] <h2::proto::connection::Connection<hyper::common::io::compat::Compat<hyper_util::common::rewind::Rewind<hyper_util::rt::tokio::TokioIo<tonic::transport::server::service::io::ServerIo<tokio::net::tcp::stream::TcpStream>>>>, h2::server::Peer, hyper::proto::h2::SendBuf<bytes::bytes::Bytes>>>::poll
+     1.13%  tokio-rt-worker  [kernel.kallsyms]  [k] native_read_msr
+     1.07%  tokio-rt-worker  libc.so.6          [.] recv

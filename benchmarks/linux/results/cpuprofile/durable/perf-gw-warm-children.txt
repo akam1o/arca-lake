@@ -1,0 +1,60 @@
+    31.68%     0.11%  tokio-rt-worker  [kernel.kallsyms]     [.] entry_SYSCALL_64_after_hwframe
+    31.56%     0.14%  tokio-rt-worker  [kernel.kallsyms]     [.] do_syscall_64
+    31.01%     0.03%  tokio-rt-worker  [kernel.kallsyms]     [.] x64_sys_call
+    27.50%     0.00%  tokio-rt-worker  libc.so.6             [.] 0x0000714d728ac802
+    13.99%     0.02%  tokio-rt-worker  libc.so.6             [.] writev
+    13.99%     0.00%  tokio-rt-worker  arca-lake             [.] poll_io<usize, tokio::io::poll_evented::{impl#6}::poll_write_vectored::{closure_env#0}<mio::net::tcp::stream::TcpStream>> (inlined)
+    13.97%     0.00%  tokio-rt-worker  arca-lake             [.] {closure#0}<mio::net::tcp::stream::TcpStream> (inlined)
+    13.97%     0.00%  tokio-rt-worker  arca-lake             [.] write_vectored (inlined)
+    13.97%     0.00%  tokio-rt-worker  arca-lake             [.] do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#4}::write_vectored::{closure_env#0}, usize> (inlined)
+    13.97%     0.00%  tokio-rt-worker  arca-lake             [.] {closure#0} (inlined)
+    13.97%     0.00%  tokio-rt-worker  arca-lake             [.] cvt<isize> (inlined)
+    13.97%     0.00%  tokio-rt-worker  arca-lake             [.] is_minus_one (inlined)
+    13.85%     0.00%  tokio-rt-worker  [kernel.kallsyms]     [.] __x64_sys_writev
+    13.85%     0.01%  tokio-rt-worker  [kernel.kallsyms]     [.] do_writev
+    13.83%     0.03%  tokio-rt-worker  [kernel.kallsyms]     [.] vfs_writev
+    13.74%     0.00%  tokio-rt-worker  [kernel.kallsyms]     [.] do_iter_readv_writev
+    13.74%     0.00%  tokio-rt-worker  [kernel.kallsyms]     [.] sock_write_iter
+    13.73%     0.01%  tokio-rt-worker  [kernel.kallsyms]     [.] inet_sendmsg
+    13.72%     0.00%  tokio-rt-worker  [kernel.kallsyms]     [.] tcp_sendmsg
+    13.63%     0.09%  tokio-rt-worker  [kernel.kallsyms]     [.] tcp_sendmsg_locked
+    12.83%     0.00%  tokio-rt-worker  [unknown]             [k] 0x00005e42636b5680
+    12.75%     0.00%  tokio-rt-worker  arca-lake             [.] poll_read_priv (inlined)
+    12.73%     0.04%  tokio-rt-worker  libc.so.6             [.] recv
+    12.73%     0.00%  tokio-rt-worker  arca-lake             [.] poll_read<mio::net::tcp::stream::TcpStream> (inlined)
+    12.70%     0.00%  tokio-rt-worker  arca-lake             [.] read (inlined)
+    12.70%     0.00%  tokio-rt-worker  arca-lake             [.] do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#2}::read::{closure_env#0}, usize> (inlined)
+    12.70%     0.00%  tokio-rt-worker  arca-lake             [.] {closure#0} (inlined)
+    12.70%     0.00%  tokio-rt-worker  arca-lake             [.] recv_with_flags (inlined)
+    12.70%     0.00%  tokio-rt-worker  arca-lake             [.] cvt<isize> (inlined)
+    12.70%     0.00%  tokio-rt-worker  arca-lake             [.] is_minus_one (inlined)
+    12.05%     0.02%  tokio-rt-worker  [kernel.kallsyms]     [.] __x64_sys_recvfrom
+    11.98%     0.19%  tokio-rt-worker  [kernel.kallsyms]     [.] __sys_recvfrom
+    11.69%     0.04%  tokio-rt-worker  [kernel.kallsyms]     [.] sock_recvmsg
+    11.62%    11.33%  tokio-rt-worker  [kernel.kallsyms]     [k] rep_movs_alternative
+    11.48%     0.00%  tokio-rt-worker  [kernel.kallsyms]     [k] inet_recvmsg
+    11.44%     0.07%  tokio-rt-worker  [kernel.kallsyms]     [.] tcp_recvmsg
+    10.41%     0.39%  tokio-rt-worker  [kernel.kallsyms]     [.] tcp_recvmsg_locked
+    10.17%     0.08%  tokio-rt-worker  [kernel.kallsyms]     [.] alloc_pages_mpol
+    10.03%     0.19%  tokio-rt-worker  [kernel.kallsyms]     [k] __alloc_frozen_pages_noprof
+     9.99%     0.78%  tokio-rt-worker  [kernel.kallsyms]     [.] asm_exc_page_fault
+     9.78%     0.22%  tokio-rt-worker  [kernel.kallsyms]     [.] get_page_from_freelist
+     9.21%     0.07%  tokio-rt-worker  [kernel.kallsyms]     [.] exc_page_fault
+     9.14%     0.00%  tokio-rt-worker  arca-lake             [.] finish_grow<alloc::alloc::Global> (inlined)
+     9.13%     0.00%  tokio-rt-worker  arca-lake             [.] map_err<core::ptr::non_null::NonNull<[u8]>, core::alloc::AllocError, alloc::collections::TryReserveError, alloc::raw_vec::{impl#7}::finish_grow::{closure_env#0}<alloc::alloc::Global>> (inlined)
+     8.95%     0.13%  tokio-rt-worker  [kernel.kallsyms]     [.] do_user_addr_fault
+     8.48%     0.11%  tokio-rt-worker  [kernel.kallsyms]     [.] handle_mm_fault
+     8.36%     0.11%  tokio-rt-worker  libc.so.6             [.] realloc
+     8.25%     0.19%  tokio-rt-worker  [kernel.kallsyms]     [.] __handle_mm_fault
+     8.03%     0.06%  tokio-rt-worker  [kernel.kallsyms]     [.] handle_pte_fault
+     7.87%     0.05%  tokio-rt-worker  [kernel.kallsyms]     [.] post_alloc_hook
+     7.85%     7.69%  tokio-rt-worker  [kernel.kallsyms]     [k] kernel_init_pages
+     7.70%     0.17%  tokio-rt-worker  [kernel.kallsyms]     [.] do_anonymous_page
+     7.30%     0.01%  tokio-rt-worker  [kernel.kallsyms]     [.] skb_copy_datagram_iter
+     7.28%     0.44%  tokio-rt-worker  [kernel.kallsyms]     [.] __skb_datagram_iter
+     6.84%     0.02%  tokio-rt-worker  [kernel.kallsyms]     [.] simple_copy_to_iter
+     6.31%     0.00%  tokio-rt-worker  arca-lake             [.] crc_u64_parallel3 (inlined)
+     6.31%     0.00%  tokio-rt-worker  arca-lake             [.] fold<core::slice::iter::Chunks<crc32c::util::U64Le>, u64, crc32c::hw_x86_64::crc_u64_parallel3::{closure_env#0}> (inlined)
+     6.31%     0.00%  tokio-rt-worker  arca-lake             [.] {closure#0} (inlined)
+     6.28%     0.10%  tokio-rt-worker  [kernel.kallsyms]     [.] alloc_anon_folio
+     6.10%     6.10%  tokio-rt-worker  arca-lake             [.] crc32c::hw_x86_64::crc_u64_parallel3

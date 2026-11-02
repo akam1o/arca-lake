@@ -1,0 +1,5 @@
+    60.28%  [kernel.kallsyms]
+    20.38%  libc.so.6        
+    19.06%  arca-lake        
+     0.27%  libm.so.6        
+     0.00%  [vdso]           

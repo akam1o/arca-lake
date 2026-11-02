@@ -348,6 +348,37 @@ cmd_all() {
 
 # The R-47 matrix: the ten conditions of Phase 2.2 §1, run against the
 # gateway policy given in GW_EXTRA_ARGS at setup time.
+# CPU profile of the gateway (and one durable node) while it serves GET
+# (Phase 2.3 §4): perf record on the running processes during long GET
+# passes. With a cache mode: a populating phase (misses, then hits as
+# the cache fills) and a warm phase (hits only); with durable: warm reads.
+# Output: $RUN/results/cpuprofile-<mode>/.
+cmd_cpuprofile() {
+  local mode; mode="$(cat "$RUN/mode")"
+  local out="$RUN/results/cpuprofile-$mode"; mkdir -p "$out"
+  local gwpid d0pid; gwpid="$(cat "$RUN/gateway.pid")"; d0pid="$(cat "$RUN/d0.pid")"
+  local size=$((16 << 20))
+  load "$out/put.jsonl" --op put --prefix cpu --objects 96 --size $size --concurrency 4 --label cpu-put
+  local phases="warm"; [ "$mode" != durable ] && phases="populating warm"
+  for phase in $phases; do
+    in2 curl -s 127.0.0.1:9900/metrics > "$out/metrics-before-$phase.txt" || true
+    ( sleep 4; sudo -n perf record -F 499 -g -p "$gwpid" -o "$RUN/perf-gw-$phase.data" -- sleep 20 >/dev/null 2>&1 ) &
+    local p1=$!
+    ( sleep 4; sudo -n perf record -F 499 -g -p "$d0pid" -o "$RUN/perf-d0-$phase.data" -- sleep 20 >/dev/null 2>&1 ) &
+    local p2=$!
+    load "$out/get-$phase.jsonl" --op get --prefix cpu --objects 96 --size $size --concurrency 4 --passes 8 --label cpu-get-$phase
+    wait $p1 $p2 || true
+    in2 curl -s 127.0.0.1:9900/metrics > "$out/metrics-after-$phase.txt" || true
+    for who in gw d0; do
+      sudo -n perf report -i "$RUN/perf-$who-$phase.data" --no-children --percent-limit 0.7 --stdio 2>/dev/null | grep -vE '^#|^$' | grep -E '^ +[0-9]+\.[0-9]+%' | head -60 > "$out/perf-$who-$phase-symbols.txt" || true
+      sudo -n perf report -i "$RUN/perf-$who-$phase.data" --no-children --sort dso --stdio 2>/dev/null | grep -E '^ +[0-9]+\.[0-9]+%' | head -15 > "$out/perf-$who-$phase-dso.txt" || true
+      sudo -n perf report -i "$RUN/perf-$who-$phase.data" --children --percent-limit 2 --stdio 2>/dev/null | grep -E '^ +[0-9]+\.[0-9]+%' | head -60 > "$out/perf-$who-$phase-children.txt" || true
+    done
+  done
+  sudo -n rm -f "$RUN"/perf-*.data
+  echo "cpuprofile done: $out"
+}
+
 cmd_r47() {
   for s in loss0 loss2 loss5 loss10 delay-nojitter delay reset partition slow-node stalled-node; do
     cmd_scenario "$s"
@@ -369,6 +400,7 @@ case "${1:-}" in
   scenario) shift; cmd_scenario "$@" ;;
   all) cmd_all ;;
   r47) cmd_r47 ;;
+  cpuprofile) cmd_cpuprofile ;;
   teardown) cmd_teardown ;;
   *) echo "usage: $0 setup [mode] | scenario <name> | all | teardown" >&2; exit 2 ;;
 esac

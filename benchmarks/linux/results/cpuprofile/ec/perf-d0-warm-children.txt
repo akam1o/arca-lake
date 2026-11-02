@@ -1,0 +1,60 @@
+    52.16%    32.24%  tokio-rt-worker  libc.so.6          [.] writev
+    26.09%    26.09%  tokio-rt-worker  arca-lake          [.] <h2::proto::streams::recv::Recv>::poll_trailers
+    26.09%     0.00%  tokio-rt-worker  arca-lake          [.] poll_trailers (inlined)
+    21.56%     0.00%  tokio-rt-worker  libc.so.6          [.] 0x000073a1dccac802
+    21.56%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] entry_SYSCALL_64_after_hwframe
+    21.56%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] do_syscall_64
+    21.56%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] x64_sys_call
+    19.93%    19.93%  tokio-rt-worker  [kernel.kallsyms]  [k] __wake_up_common
+    19.93%     0.00%  tokio-rt-worker  arca-lake          [.] poll_io<usize, tokio::io::poll_evented::{impl#6}::poll_write_vectored::{closure_env#0}<mio::net::tcp::stream::TcpStream>> (inlined)
+    19.93%     0.00%  tokio-rt-worker  arca-lake          [.] {closure#0}<mio::net::tcp::stream::TcpStream> (inlined)
+    19.93%     0.00%  tokio-rt-worker  arca-lake          [.] write_vectored (inlined)
+    19.93%     0.00%  tokio-rt-worker  arca-lake          [.] do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#4}::write_vectored::{closure_env#0}, usize> (inlined)
+    19.93%     0.00%  tokio-rt-worker  arca-lake          [.] {closure#0} (inlined)
+    19.93%     0.00%  tokio-rt-worker  arca-lake          [.] cvt<isize> (inlined)
+    19.93%     0.00%  tokio-rt-worker  arca-lake          [.] is_minus_one (inlined)
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __x64_sys_writev
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] do_writev
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] vfs_writev
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] do_iter_readv_writev
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] sock_write_iter
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] inet_sendmsg
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_sendmsg
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_sendmsg_locked
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_push
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __tcp_push_pending_frames
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_write_xmit
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __tcp_transmit_skb
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_queue_xmit
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __ip_queue_xmit
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_local_out
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_output
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_finish_output
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __ip_finish_output
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_finish_output2
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] neigh_hh_output
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __dev_queue_xmit
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __local_bh_enable_ip
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] do_softirq.part.0
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __do_softirq
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] handle_softirqs
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] net_rx_action
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __napi_poll
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] process_backlog
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __netif_receive_skb
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __netif_receive_skb_one_core
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_rcv
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_local_deliver
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_local_deliver_finish
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_protocol_deliver_rcu
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_v4_rcv
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_v4_do_rcv
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_rcv_established
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_data_queue
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_data_ready
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] sock_def_readable
+    19.93%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __wake_up_sync_key
+    16.30%    16.30%  tokio-rt-worker  arca-lake          [.] <hashbrown::map::HashMap<core::any::TypeId, alloc::boxed::Box<dyn http::extensions::AnyClone + core::marker::Send + core::marker::Sync>, core::hash::BuildHasherDefault<http::extensions::IdHasher>>>::insert
+    16.30%     0.00%  tokio-rt-worker  arca-lake          [.] insert<core::any::TypeId, alloc::boxed::Box<(dyn http::extensions::AnyClone + core::marker::Send + core::marker::Sync), alloc::alloc::Global>, core::hash::BuildHasherDefault<http::extensions::IdHasher>, alloc::alloc::Global> (inlined)
+    16.30%     0.00%  tokio-rt-worker  arca-lake          [.] insert_at_index<(core::any::TypeId, alloc::boxed::Box<(dyn http::extensions::AnyClone + core::marker::Send + core::marker::Sync), alloc::alloc::Global>), alloc::alloc::Global> (inlined)
+    16.30%     0.00%  tokio-rt-worker  arca-lake          [.] insert_tagged_at_index<(core::any::TypeId, alloc::boxed::Box<(dyn http::extensions::AnyClone + core::marker::Send + core::marker::Sync), alloc::alloc::Global>), alloc::alloc::Global> (inlined)
