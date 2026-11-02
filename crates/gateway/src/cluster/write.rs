@@ -49,6 +49,37 @@ struct Placed {
     record: ChunkRecord,
 }
 
+/// Chunk placements in flight: `(index, started, task)` in chunk order.
+type Pipeline = std::collections::VecDeque<(
+    u32,
+    std::time::Instant,
+    tokio::task::JoinHandle<Result<Placed, S3Error>>,
+)>;
+
+/// Owns the pipeline and aborts whatever is still in flight on drop.
+struct PipelineGuard(Pipeline);
+
+impl Drop for PipelineGuard {
+    fn drop(&mut self) {
+        for (_, _, h) in &self.0 {
+            h.abort();
+        }
+    }
+}
+
+impl std::ops::Deref for PipelineGuard {
+    type Target = Pipeline;
+    fn deref(&self) -> &Pipeline {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for PipelineGuard {
+    fn deref_mut(&mut self) -> &mut Pipeline {
+        &mut self.0
+    }
+}
+
 /// Decrements a gauge when dropped (PUTs in flight).
 struct InFlightGuard<'a>(&'a std::sync::atomic::AtomicU64);
 
@@ -208,6 +239,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let mut batch: Vec<(u32, ChunkRecord)> = Vec::new();
         let mut buf = BytesMut::with_capacity(max_chunk.min(8 << 20));
         let mut finished = false;
+        // Placements in flight; dropped (on any early return or if this
+        // future is dropped) they are aborted, and a cancelled shard stream
+        // stores nothing (ADR-0011).
+        let mut pipeline = PipelineGuard(std::collections::VecDeque::new());
 
         // Read the first chunk to learn whether this is a small object.
         let mut first = true;
@@ -242,27 +277,33 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             let small = first && finished && self.cfg.profile.is_small_object(chunk.len() as u64);
             first = false;
             md5.update(&chunk);
-            // Shard uploads on a lossy link can outlast the lease on their
-            // own; renew while they are still being attempted (a stalled
-            // stream fails within the RPC policy's progress timeout and
-            // retry budget, after which renewal stops and the lease runs
-            // out).
-            let shard_started = std::time::Instant::now();
-            let placed = self
-                .renewing(
+            let chunk_len = chunk.len();
+            // Chunk placements are pipelined: up to `write_pipeline` chunks
+            // have their shards in flight while the next chunk's body is
+            // read and encoded, so that one slow group commit on a node
+            // does not idle the whole PUT (R-48). Records are collected in
+            // chunk order; the first failure aborts the rest.
+            let placing = {
+                let backend = self.clone();
+                let offset = size;
+                tokio::spawn(async move {
+                    backend
+                        .place_chunk(generation, index, chunk, offset, small)
+                        .await
+                })
+            };
+            pipeline.push_back((index, std::time::Instant::now(), placing));
+            size += chunk_len as u64;
+            index += 1;
+            if pipeline.len() >= self.cfg.write_pipeline.max(1) {
+                self.collect_placement(
+                    &mut pipeline,
+                    &mut batch,
                     generation,
                     lease_ms,
                     &mut last_renewal,
-                    self.place_chunk(generation, index, chunk.clone(), size, small),
                 )
-                .await??;
-            self.put_stats.shard_write.observe(shard_started.elapsed());
-            size += chunk.len() as u64;
-            batch.push((placed.index, placed.record));
-            index += 1;
-
-            if self.take_fault(FaultPoint::AfterShardsBeforeManifest) {
-                return Err(s3_error!(InternalError, "injected crash after shards").into());
+                .await?;
             }
             if batch.len() >= self.cfg.chunk_batch {
                 let t = std::time::Instant::now();
@@ -278,9 +319,19 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 self.put_stats.append.observe(t.elapsed());
                 batch.clear();
             }
-            if chunk.len() < max_chunk {
+            if chunk_len < max_chunk {
                 break;
             }
+        }
+        while !pipeline.is_empty() {
+            self.collect_placement(
+                &mut pipeline,
+                &mut batch,
+                generation,
+                lease_ms,
+                &mut last_renewal,
+            )
+            .await?;
         }
         if !batch.is_empty() {
             let t = std::time::Instant::now();
@@ -369,6 +420,37 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 }
             }
         }
+    }
+
+    /// Await the oldest pipelined placement (renewing the lease meanwhile),
+    /// record its chunk, and abort the rest on failure.
+    async fn collect_placement(
+        &self,
+        pipeline: &mut Pipeline,
+        batch: &mut Vec<(u32, ChunkRecord)>,
+        generation: GenId,
+        lease_ms: u64,
+        last_renewal: &mut std::time::Instant,
+    ) -> Result<(), WriteFailure> {
+        let Some((_, started, handle)) = pipeline.pop_front() else {
+            return Ok(());
+        };
+        let joined = self
+            .renewing(generation, lease_ms, last_renewal, handle)
+            .await?;
+        let placed = match joined {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(e) => {
+                return Err(s3_error!(InternalError, "chunk placement task failed: {e}").into());
+            }
+        };
+        self.put_stats.shard_write.observe(started.elapsed());
+        batch.push((placed.index, placed.record));
+        if self.take_fault(FaultPoint::AfterShardsBeforeManifest) {
+            return Err(s3_error!(InternalError, "injected crash after shards").into());
+        }
+        Ok(())
     }
 
     /// Encode one chunk and write its shards to a stripe group, retrying

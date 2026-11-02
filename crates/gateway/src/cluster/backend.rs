@@ -55,6 +55,9 @@ pub struct ClusterConfig {
     pub population_queue_depth: usize,
     /// Cache populations one node receives from this gateway at once.
     pub populations_per_node: usize,
+    /// Chunk placements of one PUT in flight at once (bounded memory:
+    /// that many chunks plus their shards per PUT).
+    pub write_pipeline: usize,
 }
 
 /// Fault-injection points in the write path (tests only).

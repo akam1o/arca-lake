@@ -216,6 +216,10 @@ struct GatewayArgs {
     /// bounds buffered bytes per GET to about this many chunks.
     #[arg(long, default_value_t = 4)]
     read_parallelism: usize,
+    /// Chunk placements of one PUT in flight at once (memory: that many
+    /// chunks plus their shards per PUT).
+    #[arg(long = "write-pipeline", default_value_t = 2)]
+    write_pipeline: usize,
     /// Serve gateway cache counters as Prometheus text on this address
     /// (`GET /metrics`); cluster backend only.
     #[arg(long)]
@@ -490,6 +494,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 read_parallelism: args.read_parallelism,
                 population_queue_depth: args.cache.cache_population_queue_depth,
                 populations_per_node: args.cache.cache_populations_per_node,
+                write_pipeline: args.write_pipeline,
             },
         )
         .await

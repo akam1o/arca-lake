@@ -100,6 +100,8 @@ pub struct ClusterOptions {
     pub population_queue_depth: usize,
     /// Populations per node (see `ClusterConfig::populations_per_node`).
     pub populations_per_node: usize,
+    /// Chunk placements in flight per PUT (see `ClusterConfig::write_pipeline`).
+    pub write_pipeline: usize,
 }
 
 /// The cache tier name used by test clusters.
@@ -150,6 +152,7 @@ impl ClusterOptions {
             read_parallelism: 3,
             population_queue_depth: 64,
             populations_per_node: 4,
+            write_pipeline: 2,
         }
     }
 }
@@ -293,6 +296,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 read_parallelism: opts.read_parallelism,
                 population_queue_depth: opts.population_queue_depth,
                 populations_per_node: opts.populations_per_node,
+                write_pipeline: opts.write_pipeline,
             },
         )
         .await
