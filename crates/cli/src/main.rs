@@ -107,6 +107,13 @@ struct CacheArgs {
     /// without populating.
     #[arg(long = "cache-max-populations", default_value_t = 8)]
     cache_max_populations: u32,
+    /// Cache populations waiting in this gateway's queue at most; beyond
+    /// that a miss is served without populating.
+    #[arg(long = "cache-population-queue-depth", default_value_t = 32)]
+    cache_population_queue_depth: usize,
+    /// Cache populations one node receives from this gateway at once.
+    #[arg(long = "cache-populations-per-node", default_value_t = 2)]
+    cache_populations_per_node: usize,
 }
 
 impl CacheArgs {
@@ -456,6 +463,10 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
         listen: args.listen,
         credentials,
     };
+    let mut queue_shutdown: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    )> = None;
     let server = if args.backend == "cluster" {
         let Some(path) = args.cluster_file.as_deref() else {
             return fail("--backend cluster needs --cluster-file");
@@ -477,6 +488,8 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 rpc_policy: Some(args.rpc.policy()),
                 cache,
                 read_parallelism: args.read_parallelism,
+                population_queue_depth: args.cache.cache_population_queue_depth,
+                populations_per_node: args.cache.cache_populations_per_node,
             },
         )
         .await
@@ -497,9 +510,18 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                     &stats_backend.node_clients().stats(),
                 );
                 render_put_stats(&mut out, &stats_backend.put_stats());
+                render_queue_and_txn_stats(&mut out, &stats_backend.population_queue_stats());
                 out
             }));
         }
+        let queue_backend = backend.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        // Drain the population queue once the HTTP server has stopped.
+        let drain = tokio::spawn(async move {
+            let _ = rx.await;
+            queue_backend.shutdown().await;
+        });
+        queue_shutdown = Some((tx, drain));
         arca_lake_gateway::serve(cfg, backend).await
     } else {
         arca_lake_gateway::serve(cfg, arca_lake_gateway::memory::MemoryBackend::new()).await
@@ -512,6 +534,10 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
     wait_for_shutdown().await;
     tracing::info!("shutting down");
     server.shutdown().await;
+    if let Some((tx, drain)) = queue_shutdown {
+        let _ = tx.send(());
+        let _ = drain.await;
+    }
     ExitCode::SUCCESS
 }
 
@@ -893,6 +919,50 @@ fn render_put_stats(out: &mut String, p: &arca_lake_gateway::cluster::PutStatsSn
             "arca_gateway_put_phase_seconds",
             &format!("phase=\"{phase}\""),
         );
+    }
+}
+
+fn render_queue_and_txn_stats(
+    out: &mut String,
+    q: &arca_lake_gateway::cluster::PopQueueStatsSnapshot,
+) {
+    use std::fmt::Write as _;
+    for (name, value) in [
+        ("arca_gateway_population_queue_enqueued_total", q.enqueued),
+        (
+            "arca_gateway_population_queue_dropped_full_total",
+            q.dropped_full,
+        ),
+        (
+            "arca_gateway_population_queue_dropped_shutdown_total",
+            q.dropped_shutdown,
+        ),
+        ("arca_gateway_population_queue_completed_total", q.completed),
+        ("arca_gateway_population_queue_retries_total", q.retries),
+        (
+            "arca_gateway_population_queue_deferred_for_reads_total",
+            q.deferred_for_reads,
+        ),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
+    }
+    for (name, value) in [
+        ("arca_gateway_population_queue_queued", q.queued),
+        ("arca_gateway_population_queue_running", q.running),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} gauge\n{name} {value}");
+    }
+    let t = arca_lake_metadata::kv::transact_stats();
+    for (name, value) in [
+        ("arca_gateway_meta_txn_attempts_total", t.attempts),
+        ("arca_gateway_meta_txn_conflicts_total", t.conflicts),
+        (
+            "arca_gateway_meta_txn_unknown_retries_total",
+            t.unknown_retries,
+        ),
+        ("arca_gateway_meta_txn_exhausted_total", t.exhausted),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
     }
 }
 

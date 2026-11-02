@@ -96,6 +96,10 @@ pub struct ClusterOptions {
     /// Test clusters default to 3 so that every suite exercises ordered
     /// parallel delivery.
     pub read_parallelism: usize,
+    /// Population queue depth (see `ClusterConfig::population_queue_depth`).
+    pub population_queue_depth: usize,
+    /// Populations per node (see `ClusterConfig::populations_per_node`).
+    pub populations_per_node: usize,
 }
 
 /// The cache tier name used by test clusters.
@@ -144,6 +148,8 @@ impl ClusterOptions {
             cache_protection: CacheProtection::None,
             cache_groups: 1,
             read_parallelism: 3,
+            population_queue_depth: 64,
+            populations_per_node: 4,
         }
     }
 }
@@ -285,6 +291,8 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 rpc_policy: None,
                 cache,
                 read_parallelism: opts.read_parallelism,
+                population_queue_depth: opts.population_queue_depth,
+                populations_per_node: opts.populations_per_node,
             },
         )
         .await

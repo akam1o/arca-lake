@@ -269,6 +269,51 @@ where
     transact_inner(store, env, body, true).await
 }
 
+/// Process-wide counters of [`transact`] outcomes (hot-key analysis).
+#[derive(Debug, Default)]
+pub struct TransactStats {
+    /// Transactions started (attempts, including retries).
+    pub attempts: std::sync::atomic::AtomicU64,
+    /// Attempts that failed with a conflict and were retried.
+    pub conflicts: std::sync::atomic::AtomicU64,
+    /// Attempts re-run after an unknown commit outcome.
+    pub unknown_retries: std::sync::atomic::AtomicU64,
+    /// Transactions given up after [`MAX_ATTEMPTS`] conflicts.
+    pub exhausted: std::sync::atomic::AtomicU64,
+}
+
+/// A copy of [`TransactStats`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransactStatsSnapshot {
+    /// See [`TransactStats::attempts`].
+    pub attempts: u64,
+    /// See [`TransactStats::conflicts`].
+    pub conflicts: u64,
+    /// See [`TransactStats::unknown_retries`].
+    pub unknown_retries: u64,
+    /// See [`TransactStats::exhausted`].
+    pub exhausted: u64,
+}
+
+static TRANSACT_STATS: TransactStats = TransactStats {
+    attempts: std::sync::atomic::AtomicU64::new(0),
+    conflicts: std::sync::atomic::AtomicU64::new(0),
+    unknown_retries: std::sync::atomic::AtomicU64::new(0),
+    exhausted: std::sync::atomic::AtomicU64::new(0),
+};
+
+/// Snapshot of the process-wide transaction counters.
+#[must_use]
+pub fn transact_stats() -> TransactStatsSnapshot {
+    use std::sync::atomic::Ordering::Relaxed;
+    TransactStatsSnapshot {
+        attempts: TRANSACT_STATS.attempts.load(Relaxed),
+        conflicts: TRANSACT_STATS.conflicts.load(Relaxed),
+        unknown_retries: TRANSACT_STATS.unknown_retries.load(Relaxed),
+        exhausted: TRANSACT_STATS.exhausted.load(Relaxed),
+    }
+}
+
 async fn transact_inner<S, D, T, F>(
     store: &S,
     env: D,
@@ -280,24 +325,32 @@ where
     D: Send + Sync,
     F: for<'a> FnMut(&'a mut S::Tx, &'a D) -> TxFuture<'a, T>,
 {
+    use std::sync::atomic::Ordering::Relaxed;
     let mut unknown = 0;
     for _ in 0..MAX_ATTEMPTS {
+        TRANSACT_STATS.attempts.fetch_add(1, Relaxed);
         let mut tx = store.begin().await?;
         match body(&mut tx, &env).await {
             Ok(value) => match tx.commit().await {
                 Ok(_) => return Ok(value),
-                Err(KvError::Conflict) => {}
+                Err(KvError::Conflict) => {
+                    TRANSACT_STATS.conflicts.fetch_add(1, Relaxed);
+                }
                 Err(KvError::CommitUnknown(_))
                     if retry_unknown && unknown < MAX_UNKNOWN_RETRIES =>
                 {
                     unknown += 1;
+                    TRANSACT_STATS.unknown_retries.fetch_add(1, Relaxed);
                 }
                 Err(e) => return Err(e.into()),
             },
-            Err(MetaError::Kv(KvError::Conflict)) => {}
+            Err(MetaError::Kv(KvError::Conflict)) => {
+                TRANSACT_STATS.conflicts.fetch_add(1, Relaxed);
+            }
             Err(e) => return Err(e),
         }
     }
+    TRANSACT_STATS.exhausted.fetch_add(1, Relaxed);
     Err(MetaError::TooManyRetries)
 }
 

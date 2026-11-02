@@ -265,6 +265,9 @@ pub struct NodeClients {
     policy: RpcPolicy,
     stats: Arc<RpcStats>,
     hook: Arc<Mutex<Option<FaultHook>>>,
+    /// `GetShard` RPCs in flight per node address (durable-read priority
+    /// for cache populations).
+    reads_in_flight: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
 }
 
 impl std::fmt::Debug for NodeClients {
@@ -290,7 +293,28 @@ impl NodeClients {
             policy,
             stats: Arc::default(),
             hook: Arc::default(),
+            reads_in_flight: Arc::default(),
         }
+    }
+
+    /// `GetShard` RPCs currently in flight to `addr` from this pool.
+    #[must_use]
+    pub fn reads_in_flight(&self, addr: &str) -> u64 {
+        self.reads_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(addr)
+            .map_or(0, |c| c.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn read_counter(&self, addr: &str) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.reads_in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(addr.to_string())
+                .or_default(),
+        )
     }
 
     /// The policy in force.
@@ -632,10 +656,15 @@ impl NodeClients {
             shard: Some(shard),
             group_id: Some(shard.group_id),
         };
-        self.with_retry(ctx, |fault| {
-            self.get_shard_raw(addr, shard, offset, len, fault)
-        })
-        .await
+        let counter = self.read_counter(addr);
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let r = self
+            .with_retry(ctx, |fault| {
+                self.get_shard_raw(addr, shard, offset, len, fault)
+            })
+            .await;
+        counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        r
     }
 
     async fn get_shard_raw(

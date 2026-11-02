@@ -23,6 +23,7 @@ use s3s::dto::{
 use s3s::{S3, S3Request, S3Response, S3Result, s3_error};
 
 use super::map::ClusterMap;
+use super::popqueue::{PopQueueStatsSnapshot, PopulationQueue};
 
 /// Gateway-side cluster configuration.
 #[derive(Debug, Clone)]
@@ -49,6 +50,11 @@ pub struct ClusterConfig {
     /// sequential). Bounds the gateway's buffered bytes per GET to about
     /// `read_parallelism` chunks (RFC-009 §9).
     pub read_parallelism: usize,
+    /// Cache populations waiting in the gateway's queue at most; beyond
+    /// that a miss is served without populating (RFC-006 §5.3).
+    pub population_queue_depth: usize,
+    /// Cache populations one node receives from this gateway at once.
+    pub populations_per_node: usize,
 }
 
 /// Fault-injection points in the write path (tests only).
@@ -81,6 +87,7 @@ pub struct ClusterBackend<S> {
     pub(super) cache_stats: Arc<CacheStats>,
     pub(super) cache_state: Arc<CacheState>,
     pub(super) put_stats: Arc<PutStats>,
+    pub(super) pop_queue: Arc<PopulationQueue>,
 }
 
 /// Where a PUT spends its time in this gateway (R-48 profiling). Chunk
@@ -298,8 +305,6 @@ pub struct CacheState {
     access: Mutex<HashMap<GenId, (u64, u64)>>,
     /// Concurrency limit of read-triggered cache repairs (RFC-006 §5.9).
     pub(super) repair_permits: Arc<tokio::sync::Semaphore>,
-    /// Concurrency limit of populations (RFC-006 §5.3).
-    pub(super) populate_permits: Arc<tokio::sync::Semaphore>,
 }
 
 /// Read-triggered cache repairs in flight at once, per gateway.
@@ -312,14 +317,13 @@ impl Default for CacheState {
 }
 
 impl CacheState {
-    pub(super) fn with_population_permits(n: usize) -> Self {
+    pub(super) fn with_population_permits(_workers: usize) -> Self {
         Self {
             populating: Mutex::default(),
             misses: Mutex::default(),
             touched: Mutex::default(),
             access: Mutex::default(),
             repair_permits: Arc::new(tokio::sync::Semaphore::new(CACHE_REPAIR_PERMITS)),
-            populate_permits: Arc::new(tokio::sync::Semaphore::new(n.max(1))),
         }
     }
 }
@@ -395,6 +399,7 @@ impl<S> Clone for ClusterBackend<S> {
     fn clone(&self) -> Self {
         Self {
             put_stats: Arc::clone(&self.put_stats),
+            pop_queue: Arc::clone(&self.pop_queue),
             meta: Arc::clone(&self.meta),
             clients: self.clients.clone(),
             map: Arc::clone(&self.map),
@@ -440,11 +445,19 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .cache
             .as_ref()
             .map_or(8, CacheTierConfig::population_permits);
+        let clients = NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
+            arca_lake_protocol::client::RpcPolicy::from_timeout(cfg.node_timeout)
+        }));
+        let pop_queue = Arc::new(PopulationQueue::new(
+            clients.clone(),
+            permits,
+            cfg.population_queue_depth,
+            cfg.populations_per_node,
+        ));
         Ok(Self {
             meta,
-            clients: NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
-                arca_lake_protocol::client::RpcPolicy::from_timeout(cfg.node_timeout)
-            })),
+            clients,
+            pop_queue,
             map: Arc::new(RwLock::new(Arc::new(map))),
             cfg: Arc::new(cfg),
             coders: Arc::new(Coders::default()),
@@ -520,6 +533,18 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     #[must_use]
     pub fn put_stats(&self) -> PutStatsSnapshot {
         self.put_stats.snapshot()
+    }
+
+    /// Counters of the population queue.
+    #[must_use]
+    pub fn population_queue_stats(&self) -> PopQueueStatsSnapshot {
+        self.pop_queue.stats()
+    }
+
+    /// Stop the population queue: running populations finish, queued ones
+    /// are dropped and counted. Call after the HTTP server has stopped.
+    pub async fn shutdown(&self) {
+        self.pop_queue.shutdown().await;
     }
 }
 

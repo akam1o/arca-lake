@@ -405,72 +405,86 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         else {
             return;
         };
-        let Ok(permit) = Arc::clone(&self.cache_state.populate_permits).try_acquire_owned() else {
-            self.cache_stats
-                .populations_skipped
-                .fetch_add(1, Ordering::Relaxed);
-            return;
-        };
         if !self.cache_state.begin_populate(generation, index) {
             self.cache_stats
                 .populations_deduplicated
                 .fetch_add(1, Ordering::Relaxed);
             return;
         }
+        let nodes: Vec<String> = group
+            .members
+            .iter()
+            .filter_map(|m| map.node_addr(m.node_id).map(str::to_string))
+            .collect();
         let backend = self.clone();
         let cfg = cfg.clone();
         let map = Arc::clone(map);
-        tokio::spawn(async move {
-            let _permit = permit;
-            let r = tcache::populate(
-                backend.meta.as_ref(),
-                &backend.clients,
-                &backend.coders,
-                &cfg,
-                &group,
-                &addr_of(&map),
-                &generation,
-                index,
-                bytes,
-                now_ms(),
-            )
-            .await;
-            backend.cache_state.end_populate(generation, index);
+        let group = Arc::new(group);
+        let attempt: super::popqueue::Attempt = Arc::new(move || {
+            let backend = backend.clone();
+            let cfg = cfg.clone();
+            let map = Arc::clone(&map);
+            let group = Arc::clone(&group);
+            let bytes = bytes.clone();
+            Box::pin(async move {
+                tcache::populate(
+                    backend.meta.as_ref(),
+                    &backend.clients,
+                    &backend.coders,
+                    &cfg,
+                    &group,
+                    &addr_of(&map),
+                    &generation,
+                    index,
+                    bytes,
+                    now_ms(),
+                )
+                .await
+            })
+        });
+        self.pop_queue.enqueue(super::popqueue::Job {
+            nodes,
+            attempt,
+            done: self.population_done(generation, index),
+        });
+    }
+
+    /// The completion callback of a queued population: releases the dedup
+    /// marker and counts the outcome.
+    fn population_done(&self, generation: GenId, index: u32) -> super::popqueue::Done {
+        let done_backend = self.clone();
+        Box::new(move |r| {
+            done_backend.cache_state.end_populate(generation, index);
+            let stats = &done_backend.cache_stats;
             match r {
-                Ok(tcache::PopulateOutcome::Inserted) => {
-                    backend
-                        .cache_stats
-                        .populated
-                        .fetch_add(1, Ordering::Relaxed);
+                None => {
+                    stats.populations_skipped.fetch_add(1, Ordering::Relaxed);
                 }
-                Ok(tcache::PopulateOutcome::AlreadyPresent) => {}
-                Ok(tcache::PopulateOutcome::Rejected(why)) => {
-                    backend
-                        .cache_stats
-                        .admissions_rejected
-                        .fetch_add(1, Ordering::Relaxed);
+                Some(Ok(tcache::PopulateOutcome::Inserted)) => {
+                    stats.populated.fetch_add(1, Ordering::Relaxed);
+                }
+                Some(Ok(tcache::PopulateOutcome::AlreadyPresent)) => {}
+                Some(Ok(tcache::PopulateOutcome::Rejected(why))) => {
+                    stats.admissions_rejected.fetch_add(1, Ordering::Relaxed);
                     let counter = if why == "over capacity" {
-                        &backend.cache_stats.admission_rejected_capacity
+                        &stats.admission_rejected_capacity
                     } else {
-                        &backend.cache_stats.admission_rejected_generation
+                        &stats.admission_rejected_generation
                     };
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     tracing::debug!(error = %e, index, "cache population failed");
-                    backend
-                        .cache_stats
-                        .population_failures
-                        .fetch_add(1, Ordering::Relaxed);
+                    stats.population_failures.fetch_add(1, Ordering::Relaxed);
                     let counter = match e {
-                        TierError::Node { .. } => &backend.cache_stats.population_failures_node,
-                        TierError::Corrupt(_) => &backend.cache_stats.population_failures_corrupt,
-                        _ => &backend.cache_stats.population_failures_meta,
+                        TierError::Node { .. } => &stats.population_failures_node,
+                        TierError::Corrupt(_) => &stats.population_failures_corrupt,
+                        _ => &stats.population_failures_meta,
                     };
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
             }
-        });
+        })
     }
 
     /// Coalesced access record for automatic tiering (RFC-006 §5.8).

@@ -3,6 +3,7 @@
 
 mod backend;
 mod map;
+mod popqueue;
 mod read;
 mod write;
 
@@ -10,4 +11,5 @@ pub use backend::{
     CacheStatsSnapshot, ClusterBackend, ClusterConfig, FaultPoint, PutStats, PutStatsSnapshot,
 };
 pub use map::ClusterMap;
+pub use popqueue::{PopQueueStats, PopQueueStatsSnapshot, PopulationQueue};
 pub use write::Committed;
