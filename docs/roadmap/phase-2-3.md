@@ -22,7 +22,36 @@ RFC-009 §6.14–§6.19.
 
 ## Results
 
-<!-- PHASE-2-3-RESULTS -->
+Numbers are in RFC-009; the summaries here are the decisions they support.
+
+- **R-48 (§6.14)**: the PUT variance is the write latency of the shared
+  virtual storage. In a slow repetition every disk-touching phase (node
+  fdatasync 55 ms mean against 6–10, FoundationDB commit, metadata
+  append) was slower at once on both hosts while the gateway's own
+  phases were unchanged, and a synchronous write load on a different VM
+  reproduced it (fdatasync 8–21 → 24–33 ms, PUT 198–281 → 137–184
+  MiB/s). Not a code defect; the code's sensitivity to it was.
+- **Pipelined chunk placement (§6.16)**: under the same neighbouring
+  write load, depth 2 delivers a median 218 MiB/s against 148 for the
+  serial PUT (+47 %); at single-digit fdatasync latency every depth hits
+  the gateway's CPU ceiling (300–330 MiB/s). Depth 2 is the default;
+  depth 4 costs memory and slows each stream for no further gain.
+- **GET CPU (§6.15)**: perf put 37–43 % of the gateway's GET CPU in
+  memcpy and 7–8 % in page zeroing; erasure decoding is absent on a
+  healthy read. Passing the shard frames through to the HTTP body
+  (no concatenation) drops the memcpy share to 19–21 % and raises
+  single-host GET throughput by about 30 % for durable reads and 5–10 %
+  for cache hits; CRC-32C (10 %) and the kernel's socket copies are what
+  remain.
+- **Metadata hot keys (§6.17)**: zero transaction conflicts in every
+  cell up to 32 tasks, with an evictor, and with two processes on one
+  tier; the single FoundationDB process's commit latency is the limit
+  (about 8,300 placement transactions per second from one process).
+  Sharded counters are not needed; the capacity guarantee is unchanged.
+- **Population queue (RFC-006 §5.3.1)**: bounded, node-aware, yields to
+  reads, retries node errors, drains at shutdown; five test cases.
+
+<!-- PHASE-2-3-RESULTS-2 -->
 
 ## Not verified
 
