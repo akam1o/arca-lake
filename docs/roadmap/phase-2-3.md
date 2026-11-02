@@ -55,4 +55,24 @@ Numbers are in RFC-009; the summaries here are the decisions they support.
 
 ## Not verified
 
-<!-- PHASE-2-3-NOT-VERIFIED -->
+- Profiles, the hot-key matrix and the multi-gateway runs are single
+  runs per cell; the PUT profiles and the two-host repeat have three
+  repetitions. PUT numbers on this environment move with the shared
+  storage's write latency (R-48) and are compared only at like
+  fdatasync latency.
+- R-49 (TCP retransmissions on the gateway host under PUT) is observed,
+  not explained; it is a virtual-network observation for the hypervisor
+  owner.
+- Metadata contention was measured against one FoundationDB process
+  with up to two client processes; a multi-process cluster and many
+  gateways were not measured.
+- GET CPU after the frame pass-through was profiled on one host; the
+  two-host CPU-seconds per GiB (§6.19) are the production-shaped number.
+- The regression check has one baseline (`lab-2host`, recorded from
+  §6.19) and has not yet caught a regression; its tolerances are a first
+  choice to be tightened with history.
+- CI is functional only, on self-hosted Linux runners; macOS is a
+  development platform without CI coverage; GitHub-hosted runners remain
+  refused for billing reasons on this account.
+- The storage node's read path (buffer per shard, file-to-user copy) and
+  CRC placement are unchanged (RFC-009 §9).

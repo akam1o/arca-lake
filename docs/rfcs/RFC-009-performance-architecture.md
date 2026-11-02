@@ -991,6 +991,29 @@ bars):
   budget. Small objects are bound by the per-object metadata
   transactions (259 PUT/s, 1130–1180 GET/s), not by any device.
 
+*Phase 2.3 revisions* (§6.14–§6.19):
+
+- **R-48 was the environment, and the code's sensitivity to it.** PUT
+  throughput tracked the storage nodes' fdatasync latency one to one;
+  that latency is set by what the other VMs on the same physical storage
+  are doing (§6.14). Pipelining chunk placements halves the sensitivity
+  (§6.16); the ceiling stays the gateway host's CPU.
+- **The GET path's CPU was copies, not coding.** Three post-decode copies
+  and the allocations behind them were 37–43 % of the gateway's CPU;
+  passing frames through removed them, and the two-host durable read
+  now costs 4.6 CPU-s/GiB on the gateway host instead of 6.0 (§6.15,
+  §6.19). What remains is the kernel's socket copies and CRC-32C.
+- **Metadata contention is not a bound.** Zero conflicts in every
+  hot-key cell; the single FoundationDB process saturates at about
+  8,300 placement transactions per second, two orders of magnitude above
+  the rates the data path produces (§6.17).
+- **Populations are now bounded per node and yield to reads** without
+  measurable cost to the hit ratio at the default settings (§6.19: 93 %
+  at pass 3 against 97 % with the unbounded semaphore and a larger
+  queue; the smaller queue is a memory bound, RFC-006 §5.3.1).
+
+<!-- INTERP-MULTIGW -->
+
 *Hypotheses* (not measured): a dedicated gateway host would move the PUT
 bound from CPU to the network; on hosts whose durable tier is HDD-bound
 the cache's latency benefit would be larger than measured here.
@@ -1014,8 +1037,16 @@ the cache's latency benefit would be larger than measured here.
 | Effect of `TCP_NODELAY` on accepted storage-node sockets | measured before/after on a veth link and between hosts | §6.11, `results/nagle/` |
 | Variance across runs | measured: three repetitions, shuffled order, warm-up separated (GET 1–13 %, PUT up to 2.7×) | §6.12, `results/repeat-c4/` |
 | Disk-bound behaviour: 24 GiB set, sequential and random GET, small objects, concurrent PUT/GET, with device reads per GiB | measured, one run; data came from disk, the device was not the bound on this hardware | §6.13, `results/diskbound/` |
+| Where a PUT waits: per-phase timing on gateway, node and store, aligned with per-second system counters; cause of R-48 reproduced with a neighbouring write load | measured (3 + 3 + 3 repetitions) | §6.14, `results/putprofile*` |
+| GET CPU profile before and after the frame pass-through | measured (perf, one host; two-host CPU-s/GiB in §6.19) | §6.15, `results/cpuprofile*` |
+| Pipelined chunk placement, depths 1 / 2 / 4, idle and under a neighbouring write load | measured, 3 repetitions per cell | §6.16 |
+| Metadata hot keys: conflicts and throughput up to 32 tasks, evictor, two processes, two tiers | measured, one run per cell, one FoundationDB process | §6.17, `results/metabench/` |
+| Multi-gateway aggregate throughput, 1 / 2 / 3 gateways | measured, one run per cell | §6.18, `results/multigw/` |
+| Two-host repeat after Phase 2.3; regression baseline `lab-2host` | measured, 3 repetitions | §6.19, `results/repeat-zerocopy/` |
 | Disk-bound behaviour on HDD or slower devices; small-object set larger than the page cache | not measured | §6.13 |
-| Cause of the PUT run-to-run variance (R-48) | not identified | §6.12, §9 |
+| Cause of the PUT run-to-run variance (R-48) | identified: fdatasync latency on shared virtual storage; mitigated by the write pipeline | §6.14, §6.16 |
+| TCP retransmissions on the gateway host under PUT (R-49) | observed, not root-caused | §6.14 |
+| Multi-process FoundationDB; metadata contention across many gateways | not measured (one process, up to two client processes) | §6.17 |
 | Multi-gateway scaling, more than one FoundationDB process | not measured | §3 |
 | Any number on other hardware | not claimed | — |
 
@@ -1025,16 +1056,24 @@ Done in Phase 2.2 (measured above): parallel chunk fetch (§6.10), the
 progress-based shard-stream policy with retries and lease renewal
 (§6.8, ADR-0011), an atomic cache usage counter instead of the hot
 read-modify-write key (§6.9, R-42), and `TCP_NODELAY` on accepted
-storage-node sockets (§6.11).
+storage-node sockets (§6.11). Done in Phase 2.3: pipelined chunk
+placement (§6.16), frame pass-through on GET (§6.15), the population
+queue (RFC-006 §5.3.1), permanent phase timing (§6.14).
 
 Still hypotheses (not measured):
 
-- **The PUT stall** (§6.12): PUT throughput varies up to 2.7× between
-  repetitions with p95 latencies of 0.2–0.8 s in every configuration,
-  including durable-only. Candidates: the per-chunk metadata commit
-  batching, FoundationDB commit latency spikes on the shared host,
-  storage-node fsync grouping. First step is a PUT with per-phase
-  timing exported as counters (R-48).
+- **Storage-node read path**: the node still allocates a fresh buffer
+  per shard read and copies file to user space (§6.15: 20 % copy, 9 %
+  page zeroing on the node); a reused buffer or `sendfile`-style path
+  would remove the zeroing.
+- **CRC-32C is now the gateway's largest user-space cost** (10 %,
+  §6.15); it could move to the storage node's read (which already
+  computes it on write) with the gateway verifying only on the slow
+  path, at the cost of trusting the node's CRC on a healthy read.
+- **fdatasync batching across PUTs**: the group commit already
+  coalesces concurrent writers; a bounded delay before a sync (a few
+  ms) would widen the batch under high fdatasync latency at the cost of
+  that delay on an idle node. Measure on the shared storage first.
 - **Population write batching and a per-node population queue** (the
   permit count is a global bound today; §6.9 shows the bound, not the
   node, limiting coverage).
