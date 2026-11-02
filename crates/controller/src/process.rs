@@ -95,7 +95,7 @@ impl ControllerConfig {
             unhealthy_after: Duration::from_secs(60),
             auto_repair: false,
             gc_grace: Duration::from_mins(10),
-            multipart_expiry: Duration::from_days(7),
+            multipart_expiry: Duration::from_hours(7 * 24),
             min_orphan_age: Duration::from_mins(15),
             failure_domain: "host".into(),
             page_size: 0,
