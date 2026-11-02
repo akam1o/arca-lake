@@ -15,6 +15,7 @@ members = [
     "crates/cli",
     "benchmarks/transfer",
     "benchmarks/s3load",
+    "benchmarks/metabench",
 ]
 
 [workspace.package]
