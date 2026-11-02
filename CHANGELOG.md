@@ -146,6 +146,25 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     CI and `deploy/dev/fdb-test.sh`), `tiering.rs` (5).
   - RFC-006 Multi-Tier Storage draft with Phase 2 status; ADR-0009;
     Phase 2 roadmap page; risks R-41–R-45.
+- Phase 3.0 production-hardening design (documents only, under review):
+  - `docs/security/threat-model.md`; RFC-012 Security Architecture
+    (SigV4 via s3s with a reloadable multi-key store, bucket ownership and
+    a bucket-policy subset, mTLS service identity with role-scoped RPC
+    authorization, audit records, limits and budgets, supply-chain and
+    runner rules); RFC-007 S3 Gateway Compatibility (compatibility
+    matrix, multipart by part-generation adoption, versioning exposure,
+    conditional requests, CopyObject, checksums, DeleteObjects,
+    lifecycle subset); RFC-013 Operations and Observability (deployment,
+    node add/remove, device replacement, failover, metric registry,
+    alert rules, runbooks, public-repository CI checklist); RFC-014
+    Rolling Upgrade and Compatibility (adjacent-version window, protocol
+    negotiation, format write gate, layout version and migrations,
+    finalize and downgrade policy); RFC-015 Backup, Restore and Disaster
+    Recovery (FoundationDB backup, restore classification of orphan /
+    missing / stale-epoch state, `verification_pending` gate, epoch
+    catch-up, recovery objectives); ADR-0013.
+  - CI: DCO check on direct pushes; FoundationDB failover job waits for a
+    healthy cluster (R-50).
 - Phase 2.3 performance stabilization and scalability:
   - `benchmarks/linux/sanitize.py` and `docs/security/public-artifacts.md`:
     a policy for what committed measurement artifacts may contain, a

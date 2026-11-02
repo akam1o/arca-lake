@@ -16,3 +16,4 @@ Short, immutable records of decisions. Use [the template](0000-template.md).
 | [0010](0010-cache-protection.md) | Cache protection: group roles, coded cache copies, subordinate cache repair | accepted |
 | [0011](0011-rpc-policy-and-parallel-reads.md) | Progress-based shard stream deadlines, retries, and bounded parallel reads | accepted |
 | [0012](0012-population-queue-write-pipeline-and-frame-passthrough.md) | Population queue, pipelined chunk placement, frame pass-through on GET, permanent phase timing | accepted |
+| [0013](0013-phase-3-0-design-decisions.md) | Phase 3.0 cross-cutting decisions: authentication and authorization model, service identity, multipart, compatibility window, backup unit, post-restore safety | proposed |
