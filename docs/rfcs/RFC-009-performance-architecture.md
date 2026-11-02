@@ -651,7 +651,48 @@ FoundationDB status digest once per second, and `s3load --progress`
 writes the bytes completed per second; `summarize_putprofile.py` aligns
 the series.
 
-<!-- R48-PROFILE -->
+Three repetitions on the two-host layout (`results/putprofile`), then
+three more with nothing else running on the validation hosts
+(`results/putprofile-quiet`) and three with a synchronous write load
+(`dd … oflag=dsync` in a loop) running on a *different* VM of the same
+hypervisor (`results/putprofile-noisy`):
+
+| Run | PUT MiB/s | p50 / p95 ms | Gateway shard_write mean ms | Gateway append mean ms | Gateway commit mean ms | Node put_store mean ms | Node fdatasync mean / max ms | FoundationDB commit probe s | Disk await ms (node host) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| first set, repetition 1 (CI build and package installs running on other VMs) | 87 | 755 / 1100 | 124 | 57 | 61 | 98 | 55 / 244 | 0.095 | 14.7 |
+| first set, repetition 2 | 293 | 190 / 320 | 34 | 11 | 11 | 17 | 10 / 33 | 0.010 | 2.2 |
+| first set, repetition 3 | 349 | 180 / 207 | 27 | 7 | 8 | 9 | 6 / 19 | 0.007 | 1.2 |
+| quiet, repetitions 1–3 | 198 / 281 / 225 | 290–284 / 322–547 | 53 / 35 / 44 | 23 / 12 / 14 | 21 / 12 / 17 | 34 / 17 / 14 | 21 / 10 / 9 | — | 5.2 / 2.2 / 1.7 |
+| noisy (write load on another VM), repetitions 1–3 | 172 / 184 / 137 | 365–465 / 392–563 | 59 / 56 / 74 | 28 / 26 / 37 | 27 / 24 / 43 | 39 / 38 / 52 | 25 / 24 / 33 | — | 4.9 / 4.9 / 6.9 |
+
+What the series show:
+
+- **The slow repetition is slow everywhere that touches a disk, and
+  nowhere else.** In the 87 MiB/s run the node's `fdatasync` mean was
+  55 ms against 6–10 ms, the FoundationDB commit probe 0.095 s against
+  0.007–0.010, metadata append 57 ms against 7–11, on both hosts at
+  once; the gateway's own phases (body read 1.5–1.9 ms, encode
+  3.5–4.3 ms per chunk) did not change. The node's queue wait
+  (`put_queue`) stayed at 0.1 ms: the blocking pool was not the
+  bottleneck. Context switches and CPU idle were unremarkable; TCP
+  retransmissions (R-49) did not correlate with the slow seconds.
+- **Disk latency, not disk saturation.** In the slow run the node host's
+  disk reported 14.7 ms average wait at 88 % utilization while writing
+  82 MB/s; in the fast runs 1.2–2.2 ms at 50–65 % while writing
+  300–358 MB/s. The device was slow, not full.
+- **A write load on another VM reproduces it.** With `dd` syncing on
+  host A, the nodes' fdatasync on hosts B and C rose from 8–21 ms to
+  24–33 ms and PUT fell from 198–281 to 137–184 MiB/s. The virtual disks
+  share physical storage; PUT throughput tracked fdatasync latency one
+  to one because a PUT waited for each chunk's group commit before
+  reading the next chunk (§6.16 is the mitigation).
+- Even the quiet set varies 198–281 MiB/s with fdatasync 9–21 ms; the
+  first quiet repetition followed the teardown of the previous run,
+  whose deleted gigabytes the file system was still freeing. The
+  environment's floor of variance is a few tens of percent; the 2.7×
+  of Phase 2.2 was neighbouring load (the Phase 2.2 runs overlapped the
+  fault matrix on host A and CI builds).
+
 
 ### 6.15 Phase 2.3: GET CPU profile and frame pass-through
 
@@ -660,7 +701,43 @@ gateway and one durable node for 20 s of an 8-pass GET at concurrency 4,
 96 × 16 MiB objects; durable-only, and the cache tier populating and
 warm). Before and after the frame pass-through (ADR-0012).
 
-<!-- GET-CPU-PROFILE -->
+One host, everything (gateway, three durable nodes, cache nodes,
+FoundationDB, load generator) on 4 vCPUs, so the absolute throughput is
+below the two-host numbers and the shares are what matter. Gateway
+process, 20 s samples at 499 Hz (`results/cpuprofile`,
+`results/cpuprofile-zerocopy`):
+
+| Phase | GET MiB/s before, median of 8 passes (min–max) | after | libc (memcpy) share | kernel share | arca-lake share | page zeroing (`kernel_init_pages`) | CRC-32C |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| durable, warm | 697 (479–796) | 909 (495–959) | 37 % → 19 % | 45 % → 52 % | 15 % → 24 % | 7.7 % → 7.1 % | 7.1 % → 12.2 % |
+| cache ec 2+1, populating | 648 (484–740) | 574 (513–783) | 41 % → 24 % | 37 % → 47 % | 18 % → 24 % | 5.5 % → 6.5 % | 8.4 % → 10.0 % |
+| cache ec 2+1, all hits | 673 (657–707) | 695 (606–761) | 43 % → 21 % | 37 % → 48 % | 16 % → 25 % | 5.2 % → 7.1 % | 7.8 % → 12.6 % |
+
+What the profile showed before the change (every phase alike): the
+libc share is `__memmove_avx_unaligned_erms` (the offsets resolve to the
+AVX copy loop), the largest kernel symbol is the socket copy
+(`rep_movs_alternative`, 11–12 %), and `kernel_init_pages` is the
+kernel zeroing freshly mapped pages: multi-MiB buffers were allocated
+and unmapped per chunk. Erasure decoding does not appear at all (a
+healthy read uses the data shards as they are); CRC-32C is 6–7 %. The
+storage node has the same shape (file-to-user copy 20 %, page zeroing
+9 %, CRC 9.5 %).
+
+The copies were counted in the read path: frames concatenated into a
+shard, the shard copied into a `Vec`, the data shards joined into the
+chunk — three user-space copies of every byte after the transport's
+own decode, each into a fresh allocation. Passing the frames through
+(ADR-0012) removes all three on the healthy path: the libc share falls
+from 37–43 % to 19–21 %, the arca-lake share rises because CRC is now
+the largest user-space cost (10 %), and the kernel share rises in
+relative terms because the socket copies are what remains. Page zeroing
+stays at 7 %: the storage node still allocates a fresh buffer per shard
+read and the gateway still allocates the populate and repair copies;
+that is the next item (§9). GET throughput on this host rose by about
+30 % for the durable read (two shards per chunk, two concatenations
+saved) and by 5–10 % for the cache hit (one shard, one copy saved);
+the two-host CPU-seconds per GiB are in §6.19.
+
 
 ### 6.16 Phase 2.3: pipelined chunk placement
 

@@ -1,0 +1,3 @@
+    72.52%  arca-lake        
+    26.69%  [kernel.kallsyms]
+     0.79%  libc.so.6        

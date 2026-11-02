@@ -1,0 +1,60 @@
+    53.58%     0.06%  tokio-rt-worker  [kernel.kallsyms]  [.] entry_SYSCALL_64_after_hwframe
+    53.47%     0.06%  tokio-rt-worker  [kernel.kallsyms]  [.] do_syscall_64
+    53.06%     0.06%  tokio-rt-worker  [kernel.kallsyms]  [.] x64_sys_call
+    50.80%     0.00%  tokio-rt-worker  libc.so.6          [.] 0x00007c01a12ac802
+    35.63%     0.05%  tokio-rt-worker  libc.so.6          [.] writev
+    35.59%     0.00%  tokio-rt-worker  arca-lake          [.] poll_io<usize, tokio::io::poll_evented::{impl#6}::poll_write_vectored::{closure_env#0}<mio::net::tcp::stream::TcpStream>> (inlined)
+    35.59%     0.00%  tokio-rt-worker  arca-lake          [.] {closure#0}<mio::net::tcp::stream::TcpStream> (inlined)
+    35.59%     0.00%  tokio-rt-worker  arca-lake          [.] write_vectored (inlined)
+    35.59%     0.00%  tokio-rt-worker  arca-lake          [.] do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#4}::write_vectored::{closure_env#0}, usize> (inlined)
+    35.59%     0.00%  tokio-rt-worker  arca-lake          [.] {closure#0} (inlined)
+    35.59%     0.00%  tokio-rt-worker  arca-lake          [.] cvt<isize> (inlined)
+    35.59%     0.00%  tokio-rt-worker  arca-lake          [.] is_minus_one (inlined)
+    34.96%     0.05%  tokio-rt-worker  [kernel.kallsyms]  [.] __x64_sys_writev
+    34.91%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] do_writev
+    34.62%     0.11%  tokio-rt-worker  [kernel.kallsyms]  [.] vfs_writev
+    34.13%     0.12%  tokio-rt-worker  [kernel.kallsyms]  [.] do_iter_readv_writev
+    34.01%     0.11%  tokio-rt-worker  [kernel.kallsyms]  [k] sock_write_iter
+    33.62%     0.22%  tokio-rt-worker  [kernel.kallsyms]  [.] inet_sendmsg
+    33.40%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_sendmsg
+    32.13%     0.19%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_sendmsg_locked
+    21.97%    21.47%  tokio-rt-worker  [kernel.kallsyms]  [k] rep_movs_alternative
+    14.44%     0.00%  tokio-rt-worker  libc.so.6          [.] __libc_pread
+    14.39%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __x64_sys_pread64
+    14.39%     0.05%  tokio-rt-worker  [kernel.kallsyms]  [.] vfs_read
+    14.17%     0.00%  tokio-rt-worker  arca-lake          [.] read_exact_at<std::fs::File> (inlined)
+    14.17%     0.00%  tokio-rt-worker  arca-lake          [.] read_at (inlined)
+    14.17%     0.00%  tokio-rt-worker  arca-lake          [.] cvt<isize> (inlined)
+    14.15%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] ext4_file_read_iter
+    14.15%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] generic_file_read_iter
+    14.15%     0.22%  tokio-rt-worker  [kernel.kallsyms]  [.] filemap_read
+    13.64%     0.12%  tokio-rt-worker  [kernel.kallsyms]  [.] copy_page_to_iter
+    10.94%     0.00%  tokio-rt-worker  arca-lake          [.] crc_u64_parallel3 (inlined)
+    10.94%     0.00%  tokio-rt-worker  arca-lake          [.] fold<core::slice::iter::Chunks<crc32c::util::U64Le>, u64, crc32c::hw_x86_64::crc_u64_parallel3::{closure_env#0}> (inlined)
+    10.94%     0.00%  tokio-rt-worker  arca-lake          [.] {closure#0} (inlined)
+    10.48%    10.48%  tokio-rt-worker  arca-lake          [.] crc32c::hw_x86_64::crc_u64_parallel3
+    10.47%     0.00%  tokio-rt-worker  [unknown]          [.] 0000000000000000
+    10.07%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] alloc_pages_mpol
+    10.06%     0.11%  tokio-rt-worker  [kernel.kallsyms]  [.] __alloc_frozen_pages_noprof
+     9.90%     0.04%  tokio-rt-worker  [kernel.kallsyms]  [.] get_page_from_freelist
+     9.53%     0.10%  tokio-rt-worker  [kernel.kallsyms]  [.] skb_do_copy_data_nocache
+     9.41%     0.05%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_push
+     9.36%     0.04%  tokio-rt-worker  [kernel.kallsyms]  [.] __tcp_push_pending_frames
+     9.26%     0.15%  tokio-rt-worker  [kernel.kallsyms]  [.] tcp_write_xmit
+     9.24%     0.10%  tokio-rt-worker  [kernel.kallsyms]  [.] skb_page_frag_refill
+     9.24%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] sk_page_frag_refill
+     9.14%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] alloc_pages_noprof
+     9.04%     0.05%  tokio-rt-worker  [kernel.kallsyms]  [.] post_alloc_hook
+     9.00%     8.84%  tokio-rt-worker  [kernel.kallsyms]  [k] kernel_init_pages
+     7.84%     0.15%  tokio-rt-worker  [kernel.kallsyms]  [.] __tcp_transmit_skb
+     7.65%     0.06%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_queue_xmit
+     7.54%     0.09%  tokio-rt-worker  [kernel.kallsyms]  [.] __ip_queue_xmit
+     7.27%     0.05%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_local_out
+     7.19%     0.11%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_output
+     6.90%     0.15%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_finish_output
+     6.75%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] __ip_finish_output
+     6.61%     0.07%  tokio-rt-worker  [kernel.kallsyms]  [.] ip_finish_output2
+     6.53%     0.24%  tokio-rt-worker  [kernel.kallsyms]  [.] __dev_queue_xmit
+     6.53%     0.00%  tokio-rt-worker  [kernel.kallsyms]  [.] neigh_hh_output
+     5.71%     0.09%  tokio-rt-worker  [kernel.kallsyms]  [.] __local_bh_enable_ip
+     5.63%     0.14%  tokio-rt-worker  [kernel.kallsyms]  [.] do_softirq.part.0

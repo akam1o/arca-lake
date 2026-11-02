@@ -1,0 +1,73 @@
+Linux 7.0.0-38-generic (<host>) 	11/02/26 	_x86_64_	(4 CPU)
+
+01:26:33        CPU     %user     %nice   %system   %iowait    %steal     %idle
+01:26:34        all      9.60      0.00     12.88      8.33      0.25     68.94
+
+01:26:33       proc/s   cswch/s
+01:26:34        18.00   6495.00
+
+01:26:33    kbmemfree   kbavail kbmemused  %memused kbbuffers  kbcached  kbcommit   %commit  kbactive   kbinact   kbdirty
+01:26:34      5307592   7468236    279020      3.43     83812   2302520    582224      7.16   1072084   1498360      1952
+
+01:26:33          DEV       tps     rkB/s     wkB/s     dkB/s   areq-sz    aqu-sz     await     %util
+01:26:34        loop0      0.00      0.00      0.00      0.00      0.00      0.00      0.00      0.00
+01:26:34          sda    405.00      4.00 206064.00     56.00    508.95      0.56      1.14     29.90
+01:26:34          sr0      0.00      0.00      0.00      0.00      0.00      0.00      0.00      0.00
+
+01:26:33        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:26:34           lo     72.00     72.00     46.91     46.91      0.00      0.00      0.00      0.00
+01:26:34         net0   5160.00   2340.00 205355.64    191.09      0.00      0.00      0.00      0.00
+
+01:26:34        CPU     %user     %nice   %system   %iowait    %steal     %idle
+01:26:35        all     17.39      0.00     20.97     13.55      0.26     47.83
+
+01:26:34       proc/s   cswch/s
+01:26:35         8.00  10461.00
+
+01:26:34    kbmemfree   kbavail kbmemused  %memused kbbuffers  kbcached  kbcommit   %commit  kbactive   kbinact   kbdirty
+01:26:35      4938528   7468516    278740      3.43     83824   2671852    592736      7.29   1071080   1867704      2524
+
+01:26:34          DEV       tps     rkB/s     wkB/s     dkB/s   areq-sz    aqu-sz     await     %util
+01:26:35        loop0      0.00      0.00      0.00      0.00      0.00      0.00      0.00      0.00
+01:26:35          sda    705.00     12.00 372352.00      0.00    528.18      1.01      1.14     50.50
+01:26:35          sr0      0.00      0.00      0.00      0.00      0.00      0.00      0.00      0.00
+
+01:26:34        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:26:35           lo     89.00     89.00     35.01     35.01      0.00      0.00      0.00      0.00
+01:26:35         net0   9891.00   4457.00 369666.18    355.61      0.00      0.00      0.00      0.00
+
+01:26:35        CPU     %user     %nice   %system   %iowait    %steal     %idle
+01:26:36        all     17.69      0.00     22.05     12.56      0.51     47.18
+
+01:26:35       proc/s   cswch/s
+01:26:36        13.86  11148.51
+
+01:26:35    kbmemfree   kbavail kbmemused  %memused kbbuffers  kbcached  kbcommit   %commit  kbactive   kbinact   kbdirty
+01:26:36      4542444   7421548    321520      3.96     83836   3016768    602432      7.41   1064668   2212632      2104
+
+01:26:35          DEV       tps     rkB/s     wkB/s     dkB/s   areq-sz    aqu-sz     await     %util
+01:26:36        loop0      0.00      0.00      0.00      0.00      0.00      0.00      0.00      0.00
+01:26:36          sda    674.26     11.88 350233.66      0.00    519.45      0.95      1.15     49.80
+01:26:36          sr0      0.00      0.00      0.00      0.00      0.00      0.00      0.00      0.00
+
+01:26:35        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:26:36           lo     65.35     65.35     45.34     45.34      0.00      0.00      0.00      0.00
+01:26:36         net0   9420.79   4351.49 341637.31    347.90      0.00      0.00      0.00      0.00
+
+01:26:36        CPU     %user     %nice   %system   %iowait    %steal     %idle
+01:26:37        all     18.04      0.00     22.16     14.69      0.00     45.10
+
+01:26:36       proc/s   cswch/s
+01:26:37         8.00  10027.00
+
+01:26:36    kbmemfree   kbavail kbmemused  %memused kbbuffers  kbcached  kbcommit   %commit  kbactive   kbinact   kbdirty
+01:26:37      4160004   7421556    316668      3.90     83844   3394368    604896      7.44   1071556   2590236      6300
+
+01:26:36          DEV       tps     rkB/s     wkB/s     dkB/s   areq-sz    aqu-sz     await     %util
+01:26:37        loop0      0.00      0.00      0.00      0.00      0.00      0.00      0.00      0.00
+01:26:37          sda    696.00      8.00 378416.00      0.00    543.71      1.05      1.22     51.60
+01:26:37          sr0      0.00      0.00      0.00      0.00      0.00      0.00      0.00      0.00
+
+01:26:36        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:26:37           lo     56.00     56.00     27.38     27.38      0.00      0.00      0.00      0.00
+01:26:37         net0  10220.00   4620.00 381733.05    368.67      0.00      0.00      0.00      0.00

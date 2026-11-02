@@ -1,0 +1,17 @@
+    21.47%  tokio-rt-worker  [kernel.kallsyms]  [k] rep_movs_alternative
+    10.48%  tokio-rt-worker  arca-lake          [.] crc32c::hw_x86_64::crc_u64_parallel3
+     8.84%  tokio-rt-worker  [kernel.kallsyms]  [k] kernel_init_pages
+     2.59%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197ba4
+     2.08%  tokio-rt-worker  libc.so.6          [.] 0x0000000000198489
+     2.06%  tokio-rt-worker  libc.so.6          [.] 0x0000000000198493
+     1.84%  tokio-rt-worker  [kernel.kallsyms]  [k] memset_orig
+     1.53%  tokio-rt-worker  libc.so.6          [.] 0x000000000019848e
+     1.40%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bc0
+     1.39%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bb3
+     1.29%  tokio-rt-worker  arca-lake          [.] crc32c::hw_x86_64::crc_u64_append
+     1.28%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bbb
+     1.23%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197ba9
+     1.21%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bca
+     1.13%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bae
+     1.09%  tokio-rt-worker  libc.so.6          [.] 0x0000000000198484
+     1.04%  tokio-rt-worker  libc.so.6          [.] 0x0000000000197bc5

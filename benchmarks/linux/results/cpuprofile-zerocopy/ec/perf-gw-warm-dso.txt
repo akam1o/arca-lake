@@ -1,0 +1,7 @@
+    48.36%  [kernel.kallsyms]   
+    24.98%  arca-lake           
+    20.67%  libc.so.6           
+     5.51%  libfdb_c.so         
+     0.25%  [vdso]              
+     0.15%  libm.so.6           
+     0.07%  ld-linux-x86-64.so.2
