@@ -20,8 +20,9 @@ use std::time::Duration;
 use arca_lake_common::{EcProfile, SmallObjectPolicy};
 use arca_lake_controller::groups::CacheProtection;
 use arca_lake_controller::{gc, groups, repair};
+use arca_lake_gateway::auth::{Authorizer, BucketCreation, CredentialStore};
 use arca_lake_gateway::cluster::{ClusterBackend, ClusterConfig};
-use arca_lake_gateway::{GatewayConfig, ServerHandle, serve};
+use arca_lake_gateway::{GatewayConfig, ServerHandle, serve, serve_with_access};
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::fault::FaultKv;
 use arca_lake_metadata::mem::MemKv;
@@ -55,8 +56,10 @@ pub struct TestCluster<S: KvStore + 'static = MemKv> {
     pub gateway: Option<ServerHandle>,
     /// Gateway address.
     pub gateway_addr: SocketAddr,
-    /// Credentials accepted by the gateway.
+    /// Credentials accepted by the gateway (principal [`DEFAULT_PRINCIPAL`]).
     pub credentials: (String, String),
+    /// The gateway's credential store (keys of every principal).
+    pub store: Arc<CredentialStore>,
     /// Node clients.
     pub clients: NodeClients,
     /// EC profile in use.
@@ -102,10 +105,22 @@ pub struct ClusterOptions {
     pub populations_per_node: usize,
     /// Chunk placements in flight per PUT (see `ClusterConfig::write_pipeline`).
     pub write_pipeline: usize,
+    /// Minimum multipart part size (see `ClusterConfig::multipart_min_part_bytes`);
+    /// test clusters default to 1 KiB so that small parts are usable.
+    pub multipart_min_part_bytes: u64,
+    /// Install the RFC-012 authorizer (bucket owner + policy). Off by
+    /// default: most suites create buckets directly on the backend.
+    pub authorize: bool,
+    /// Extra principals `(access key, secret key, name)` besides the
+    /// cluster's default credentials (principal `tenant-a`).
+    pub principals: Vec<(String, String, String)>,
 }
 
 /// The cache tier name used by test clusters.
 pub const CACHE_TIER: &str = "fast";
+
+/// Principal name of the cluster's default credentials.
+pub const DEFAULT_PRINCIPAL: &str = "tenant-a";
 
 impl ClusterOptions {
     /// Default cache tier configuration for tests: unlimited capacity,
@@ -153,6 +168,9 @@ impl ClusterOptions {
             population_queue_depth: 64,
             populations_per_node: 4,
             write_pipeline: 2,
+            multipart_min_part_bytes: 1024,
+            authorize: false,
+            principals: Vec::new(),
         }
     }
 }
@@ -297,6 +315,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 population_queue_depth: opts.population_queue_depth,
                 populations_per_node: opts.populations_per_node,
                 write_pipeline: opts.write_pipeline,
+                multipart_min_part_bytes: opts.multipart_min_part_bytes,
             },
         )
         .await
@@ -305,15 +324,33 @@ impl<S: KvStore + 'static> TestCluster<S> {
             format!("ARCATEST{}", uuid::Uuid::new_v4().simple()),
             uuid::Uuid::new_v4().simple().to_string(),
         );
-        let gateway = serve(
-            GatewayConfig {
-                listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-                credentials: Some(credentials.clone()),
-            },
-            backend.clone(),
-        )
-        .await
-        .unwrap();
+        let mut keys: Vec<(&str, &str, &str)> =
+            vec![(&credentials.0, &credentials.1, DEFAULT_PRINCIPAL)];
+        for (ak, sk, name) in &opts.principals {
+            keys.push((ak, sk, name));
+        }
+        let store = Arc::new(CredentialStore::from_keys(&keys));
+        let cfg = GatewayConfig {
+            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+            credentials: None,
+            store: Some(Arc::clone(&store)),
+            audit: true,
+        };
+        let gateway = if opts.authorize {
+            serve_with_access(
+                cfg,
+                backend.clone(),
+                Some(Authorizer::new(
+                    Arc::clone(&meta),
+                    Arc::clone(&store),
+                    BucketCreation::Authenticated,
+                )),
+            )
+            .await
+            .unwrap()
+        } else {
+            serve(cfg, backend.clone()).await.unwrap()
+        };
         let gateway_addr = gateway.local_addr;
         Self {
             meta,
@@ -322,6 +359,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             gateway: Some(gateway),
             gateway_addr,
             credentials,
+            store,
             clients,
             profile: opts.profile,
             durable_nodes: opts.nodes,
@@ -578,6 +616,16 @@ impl<S: KvStore + 'static> TestCluster<S> {
             endpoint: format!("http://{}", self.gateway_addr),
             access_key: self.credentials.0.clone(),
             secret_key: self.credentials.1.clone(),
+        }
+    }
+
+    /// AWS CLI runner signing with other credentials.
+    #[must_use]
+    pub fn aws_cli_as(&self, access_key: &str, secret_key: &str) -> s3::AwsCli {
+        s3::AwsCli {
+            endpoint: format!("http://{}", self.gateway_addr),
+            access_key: access_key.to_string(),
+            secret_key: secret_key.to_string(),
         }
     }
 

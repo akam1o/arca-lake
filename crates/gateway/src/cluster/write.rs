@@ -1,11 +1,22 @@
-//! Write path (RFC-003 §5.3, RFC-004 §5.5).
+//! Write path (RFC-003 §5.3, RFC-004 §5.5, RFC-007 §5.3 and §5.7).
+//!
+//! One streaming pipeline serves PutObject, UploadPart and the destination
+//! of CopyObject: the body is chunked, erasure coded and placed with up to
+//! `write_pipeline` chunks in flight, chunk records are appended in
+//! batches, MD5 and the requested checksum are computed in the same pass,
+//! and the generation is then published (object commit) or sealed (part).
+//! A checksum mismatch aborts the generation before anything is published.
 
 use std::collections::HashMap;
 use std::future::Future;
 
 use arca_lake_common::chunk_id;
+use arca_lake_metadata::ops::multipart::{self, PartInfo};
 use arca_lake_metadata::ops::object::{self, CommitInfo, CommitOutcome, Precondition};
-use arca_lake_metadata::records::{ChunkRecord, DurablePlacement, GenId, GroupRecord};
+use arca_lake_metadata::records::{
+    Checksum, ChecksumAlgorithm, ChecksumType, ChunkRecord, DurablePlacement, GenId, GroupRecord,
+    MultipartState, UploadId,
+};
 use arca_lake_metadata::{KvError, KvStore, MetaError};
 use arca_lake_placement::WritableGroup;
 use arca_lake_protocol::client::{NodeClients, ShardRef};
@@ -17,6 +28,7 @@ use s3s::{S3Error, s3_error};
 
 use super::backend::{ClusterBackend, FaultPoint, meta_err, now_ms};
 use super::map::ClusterMap;
+use crate::checksum::{self, Hasher};
 
 /// Result of a committed write.
 #[derive(Debug, Clone)]
@@ -27,6 +39,71 @@ pub struct Committed {
     pub etag: String,
     /// Size.
     pub size: u64,
+    /// Version id assigned (`null` on unversioned buckets).
+    pub version_id: String,
+    /// Stored checksum, if one was requested.
+    pub checksum: Option<Checksum>,
+}
+
+/// Result of a sealed part.
+#[derive(Debug, Clone)]
+pub struct SealedPart {
+    /// Part ETag (hex MD5).
+    pub etag: String,
+    /// Size.
+    pub size: u64,
+    /// Stored part checksum, if one was requested.
+    pub checksum: Option<Checksum>,
+}
+
+/// Checksum the client asked for on an upload (RFC-007 §5.7): the
+/// algorithm and, when known before the body is read, the expected value.
+/// With `aws-chunked` trailers the value arrives after the body; it is read
+/// from `trailing` once the body is consumed.
+#[derive(Debug, Clone, Default)]
+pub struct RequestChecksum {
+    /// Algorithm to compute.
+    pub algorithm: Option<ChecksumAlgorithm>,
+    /// Expected value from a header, if any.
+    pub expected: Option<Vec<u8>>,
+    /// Trailing headers of an `aws-chunked` body.
+    pub trailing: Option<s3s::TrailingHeaders>,
+}
+
+impl RequestChecksum {
+    /// Resolve the expected value after the body was consumed: the header
+    /// value, else the trailer.
+    fn expected_value(&self) -> Result<Option<Vec<u8>>, S3Error> {
+        if let Some(v) = &self.expected {
+            return Ok(Some(v.clone()));
+        }
+        let Some(algo) = self.algorithm else {
+            return Ok(None);
+        };
+        let name = format!("x-amz-checksum-{}", algo.name().to_ascii_lowercase());
+        let Some(t) = &self.trailing else {
+            return Ok(None);
+        };
+        let raw = t.read(|h| {
+            h.get(&name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        });
+        match raw {
+            Some(Some(s)) => checksum::decode_b64(algo, &s)
+                .map(Some)
+                .ok_or_else(|| s3_error!(InvalidRequest, "malformed {name} trailer")),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// What the stream produced.
+struct Streamed {
+    size: u64,
+    etag: String,
+    chunk_count: u32,
+    checksum: Option<(ChecksumAlgorithm, Vec<u8>)>,
 }
 
 /// A failed write and whether the generation should be aborted. After a
@@ -89,9 +166,36 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
+/// Verify the streamed checksum against the client's expectation and build
+/// the stored record. A mismatch is `BadDigest`; nothing is published.
+fn verify_checksum(
+    streamed: &Streamed,
+    req: &RequestChecksum,
+) -> Result<Option<Checksum>, S3Error> {
+    let Some((algo, value)) = &streamed.checksum else {
+        return Ok(None);
+    };
+    if let Some(expected) = req.expected_value()?
+        && expected != *value
+    {
+        return Err(s3_error!(
+            BadDigest,
+            "the {} you specified did not match the calculated checksum",
+            algo.name()
+        ));
+    }
+    Ok(Some(Checksum {
+        algorithm: *algo,
+        kind: ChecksumType::FullObject,
+        value: value.clone(),
+        parts: None,
+    }))
+}
+
 impl<S: KvStore + 'static> ClusterBackend<S> {
     /// Full PUT: begin a generation, stream the body into chunks, erasure
     /// code and place each chunk, append manifest entries, commit.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn write_object(
         &self,
         bucket: &str,
@@ -100,9 +204,8 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         content_type: Option<String>,
         user_metadata: Option<HashMap<String, String>>,
         pre: &Precondition,
+        checksum: &RequestChecksum,
     ) -> Result<Committed, S3Error> {
-        let profile = &self.cfg.profile;
-        let max_chunk = usize::try_from(profile.max_chunk_bytes).unwrap_or(usize::MAX);
         let now = now_ms();
         let put_started = std::time::Instant::now();
         self.put_stats
@@ -115,16 +218,48 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .map_err(meta_err)?;
         let generation = pending.generation;
 
-        let result = self
-            .write_generation(
-                generation,
-                &mut body,
-                max_chunk,
+        let result = async {
+            let streamed = self
+                .stream_generation(generation, &mut body, checksum.algorithm)
+                .await?;
+            let stored = verify_checksum(&streamed, checksum)?;
+            if self.take_fault(FaultPoint::BeforeCommit) {
+                return Err(s3_error!(InternalError, "injected crash before commit").into());
+            }
+            if self.take_fault(FaultPoint::DieBeforeCommit) {
+                return Err(WriteFailure {
+                    error: s3_error!(InternalError, "injected gateway death before commit"),
+                    abort: false,
+                });
+            }
+            let info = CommitInfo {
+                size: streamed.size,
+                etag: streamed.etag.clone(),
                 content_type,
-                user_metadata,
-                pre,
-            )
-            .await;
+                user_metadata: user_metadata
+                    .map(|m| m.into_iter().collect())
+                    .unwrap_or_default(),
+                chunk_count: streamed.chunk_count,
+                checksum: stored.clone(),
+            };
+            let t = std::time::Instant::now();
+            let version_id = self.commit_resolving(generation, &info, pre).await?;
+            self.put_stats.commit.observe(t.elapsed());
+            if self.take_fault(FaultPoint::AfterCommit) {
+                return Err(WriteFailure {
+                    error: s3_error!(InternalError, "injected crash after commit"),
+                    abort: false,
+                });
+            }
+            Ok(Committed {
+                generation,
+                etag: streamed.etag,
+                size: streamed.size,
+                version_id,
+                checksum: stored,
+            })
+        }
+        .await;
         match result {
             Ok(c) => {
                 self.put_stats.total.observe(put_started.elapsed());
@@ -143,29 +278,100 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }
     }
 
+    /// UploadPart: a pending part generation, streamed like an object, then
+    /// sealed as part `part_number` of the upload (RFC-007 §5.3.2).
+    pub(super) async fn write_part(
+        &self,
+        bucket: &str,
+        key: &str,
+        upload_id: &UploadId,
+        part_number: u32,
+        mut body: StreamingBlob,
+        checksum: &RequestChecksum,
+    ) -> Result<SealedPart, S3Error> {
+        let now = now_ms();
+        self.put_stats
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _in_flight = InFlightGuard(&self.put_stats.in_flight);
+        let lease_ms = u64::try_from(self.cfg.lease.as_millis()).unwrap_or(u64::MAX);
+        let pending = multipart::begin_part(
+            self.meta.as_ref(),
+            bucket,
+            key,
+            upload_id,
+            part_number,
+            now,
+            lease_ms,
+        )
+        .await
+        .map_err(meta_err)?;
+        let generation = pending.generation;
+        let result = async {
+            let streamed = self
+                .stream_generation(generation, &mut body, checksum.algorithm)
+                .await?;
+            let stored = verify_checksum(&streamed, checksum)?;
+            if self.take_fault(FaultPoint::BeforeCommit) {
+                return Err(s3_error!(InternalError, "injected crash before seal").into());
+            }
+            if self.take_fault(FaultPoint::DieBeforeCommit) {
+                return Err(WriteFailure {
+                    error: s3_error!(InternalError, "injected gateway death before seal"),
+                    abort: false,
+                });
+            }
+            let info = PartInfo {
+                size: streamed.size,
+                etag: streamed.etag.clone(),
+                checksum: stored.clone(),
+                chunk_count: streamed.chunk_count,
+            };
+            let t = std::time::Instant::now();
+            self.seal_resolving(generation, bucket, key, upload_id, &info)
+                .await?;
+            self.put_stats.commit.observe(t.elapsed());
+            Ok(SealedPart {
+                etag: streamed.etag,
+                size: streamed.size,
+                checksum: stored,
+            })
+        }
+        .await;
+        match result {
+            Ok(p) => Ok(p),
+            Err(WriteFailure { error, abort }) => {
+                if abort {
+                    let _ = object::abort_put(self.meta.as_ref(), &generation, now_ms()).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Commit, resolving an unknown outcome (RFC-003 §5.8). A lost reply is
     /// decided by re-reading the generation: committed means success; still
     /// pending means the commit is retried a bounded number of times, after
     /// which the generation is aborted so that a late commit is rejected by
     /// the store. If the abort finds the generation committed, the PUT
-    /// succeeded after all.
+    /// succeeded after all. Returns the version id published.
     async fn commit_resolving(
         &self,
         generation: GenId,
         info: &CommitInfo,
         pre: &Precondition,
-    ) -> Result<(), WriteFailure> {
+    ) -> Result<String, WriteFailure> {
         const MAX_COMMIT_ATTEMPTS: usize = 4;
         let meta = self.meta.as_ref();
         let mut reason = String::new();
         for attempt in 1..=MAX_COMMIT_ATTEMPTS {
             match object::commit_put(meta, &generation, info, pre, now_ms()).await {
-                Ok(_) => return Ok(()),
+                Ok(c) => return Ok(c.version_id),
                 Err(MetaError::Kv(KvError::CommitUnknown(r))) => reason = r,
                 Err(e) => return Err(meta_err(e).into()),
             }
             match object::resolve_commit(meta, &generation, now_ms()).await {
-                Ok(CommitOutcome::Committed(_)) => return Ok(()),
+                Ok(CommitOutcome::Committed(_)) => return Ok(self.version_of(generation).await),
                 Ok(CommitOutcome::Pending) if attempt < MAX_COMMIT_ATTEMPTS => {}
                 Ok(CommitOutcome::Pending | CommitOutcome::PendingExpired) => break,
                 Ok(CommitOutcome::Retiring | CommitOutcome::Missing) => {
@@ -182,6 +388,99 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         error: s3_error!(
                             ServiceUnavailable,
                             "commit outcome unknown ({reason}) and unresolved ({e}); the write stays pending until its lease expires"
+                        ),
+                        abort: false,
+                    });
+                }
+            }
+        }
+        self.fence_unknown(generation, &reason).await?;
+        Ok(self.version_of(generation).await)
+    }
+
+    /// Version id of a committed generation (the pointer's, or its version
+    /// record's; `null` when unknown).
+    async fn version_of(&self, generation: GenId) -> String {
+        let Ok(h) = object::get_generation(self.meta.as_ref(), &generation).await else {
+            return "null".into();
+        };
+        match object::head_version(
+            self.meta.as_ref(),
+            &self.bucket_name(h.bucket_id).await,
+            &h.key,
+            None,
+        )
+        .await
+        {
+            Ok(object::Found::Object(i)) if i.pointer.generation == generation => {
+                i.pointer.version_id
+            }
+            _ => "null".into(),
+        }
+    }
+
+    /// Bucket name of a bucket id (for resolution paths only).
+    async fn bucket_name(&self, bucket_id: u64) -> String {
+        multipart::bucket_of(self.meta.as_ref(), bucket_id)
+            .await
+            .map(|b| b.name)
+            .unwrap_or_default()
+    }
+
+    /// Seal a part, resolving an unknown outcome (RFC-007 §5.3.2): sealed
+    /// means success; pending and leased is retried; retiring while the
+    /// upload is still open means a concurrent re-upload of the same part
+    /// number superseded this one, which is success for the client.
+    async fn seal_resolving(
+        &self,
+        generation: GenId,
+        bucket: &str,
+        key: &str,
+        upload_id: &UploadId,
+        info: &PartInfo,
+    ) -> Result<(), WriteFailure> {
+        const MAX_ATTEMPTS: usize = 4;
+        let meta = self.meta.as_ref();
+        let mut reason = String::new();
+        for attempt in 1..=MAX_ATTEMPTS {
+            match multipart::seal_part(meta, &generation, info, now_ms()).await {
+                Ok(_) => return Ok(()),
+                Err(MetaError::Kv(KvError::CommitUnknown(r))) => reason = r,
+                Err(e) => return Err(meta_err(e).into()),
+            }
+            match object::resolve_commit(meta, &generation, now_ms()).await {
+                Ok(CommitOutcome::Committed(_)) => return Ok(()),
+                Ok(CommitOutcome::Pending) if attempt < MAX_ATTEMPTS => {}
+                Ok(CommitOutcome::Pending | CommitOutcome::PendingExpired) => break,
+                Ok(CommitOutcome::Retiring) => {
+                    let open = multipart::get_upload(meta, bucket, key, upload_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|u| u.state == MultipartState::Open);
+                    if open {
+                        // Superseded by a later upload of the same part.
+                        return Ok(());
+                    }
+                    return Err(WriteFailure {
+                        error: s3_error!(NoSuchUpload),
+                        abort: false,
+                    });
+                }
+                Ok(CommitOutcome::Missing) => {
+                    return Err(WriteFailure {
+                        error: s3_error!(
+                            InternalError,
+                            "seal outcome unknown ({reason}) and the part is gone"
+                        ),
+                        abort: false,
+                    });
+                }
+                Err(e) => {
+                    return Err(WriteFailure {
+                        error: s3_error!(
+                            ServiceUnavailable,
+                            "seal outcome unknown ({reason}) and unresolved ({e})"
                         ),
                         abort: false,
                     });
@@ -222,17 +521,19 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }
     }
 
+    /// Stream `body` into chunks of `generation`: encode, place, append
+    /// manifest entries; compute MD5 and the requested checksum in the same
+    /// pass. Does not commit.
     #[allow(clippy::too_many_lines)]
-    async fn write_generation(
+    async fn stream_generation(
         &self,
         generation: GenId,
         body: &mut StreamingBlob,
-        max_chunk: usize,
-        content_type: Option<String>,
-        user_metadata: Option<HashMap<String, String>>,
-        pre: &Precondition,
-    ) -> Result<Committed, WriteFailure> {
+        algorithm: Option<ChecksumAlgorithm>,
+    ) -> Result<Streamed, WriteFailure> {
+        let max_chunk = usize::try_from(self.cfg.profile.max_chunk_bytes).unwrap_or(usize::MAX);
         let mut md5 = Md5::new();
+        let mut hasher = algorithm.map(Hasher::new);
         let mut size = 0u64;
         let mut index = 0u32;
         let lease_ms = u64::try_from(self.cfg.lease.as_millis()).unwrap_or(u64::MAX);
@@ -277,6 +578,9 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             let small = first && finished && self.cfg.profile.is_small_object(chunk.len() as u64);
             first = false;
             md5.update(&chunk);
+            if let Some(h) = &mut hasher {
+                h.update(&chunk);
+            }
             let chunk_len = chunk.len();
             // Chunk placements are pipelined: up to `write_pipeline` chunks
             // have their shards in flight while the next chunk's body is
@@ -346,40 +650,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .map_err(meta_err)?;
             self.put_stats.append.observe(t.elapsed());
         }
-        if self.take_fault(FaultPoint::BeforeCommit) {
-            return Err(s3_error!(InternalError, "injected crash before commit").into());
-        }
-        if self.take_fault(FaultPoint::DieBeforeCommit) {
-            return Err(WriteFailure {
-                error: s3_error!(InternalError, "injected gateway death before commit"),
-                abort: false,
-            });
-        }
-
-        let etag = hex(md5.finalize().as_ref());
-        let info = CommitInfo {
+        Ok(Streamed {
             size,
-            etag: etag.clone(),
-            content_type,
-            user_metadata: user_metadata
-                .map(|m| m.into_iter().collect())
-                .unwrap_or_default(),
+            etag: checksum::hex(md5.finalize().as_ref()),
             chunk_count: index,
-            checksum: None,
-        };
-        let t = std::time::Instant::now();
-        self.commit_resolving(generation, &info, pre).await?;
-        self.put_stats.commit.observe(t.elapsed());
-        if self.take_fault(FaultPoint::AfterCommit) {
-            return Err(WriteFailure {
-                error: s3_error!(InternalError, "injected crash after commit"),
-                abort: false,
-            });
-        }
-        Ok(Committed {
-            generation,
-            etag,
-            size,
+            checksum: hasher.map(|h| (h.algorithm(), h.finalize())),
         })
     }
 
@@ -662,14 +937,4 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
 enum WriteError {
     StaleEpoch,
     Failed(String),
-}
-
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }

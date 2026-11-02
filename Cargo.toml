@@ -77,6 +77,8 @@ libc = "0.2"
 reed-solomon-erasure = { version = "6", default-features = false }
 reed-solomon-simd = "3.1"
 proptest = "1.12"
+base64 = "0.22"
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]

@@ -7,23 +7,41 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use arca_lake_common::EcProfile;
 use arca_lake_common::timing::{Histogram, HistogramSnapshot};
 use arca_lake_metadata::ops::object::Precondition;
-use arca_lake_metadata::ops::{bucket, list, object};
-use arca_lake_metadata::records::{GenId, Versioning};
+use arca_lake_metadata::ops::{bucket, list, multipart, object};
+use arca_lake_metadata::records::{
+    Checksum, ChecksumAlgorithm, ChecksumType, GenId, UploadId, Versioning, new_gen_id,
+    upload_id_from_str, upload_id_to_string,
+};
 use arca_lake_metadata::{KvStore, MetaError};
 use arca_lake_protocol::client::NodeClients;
 use arca_lake_tiering::cache::CacheTierConfig;
 use arca_lake_tiering::durable::Coders;
 use s3s::dto::{
-    Bucket, CommonPrefix, CreateBucketInput, CreateBucketOutput, DeleteBucketInput,
-    DeleteBucketOutput, DeleteObjectInput, DeleteObjectOutput, ETag, GetObjectInput,
+    AbortMultipartUploadInput, AbortMultipartUploadOutput, Bucket, BucketVersioningStatus,
+    CommonPrefix, CompleteMultipartUploadInput, CompleteMultipartUploadOutput, CopyObjectInput,
+    CopyObjectOutput, CopyObjectResult, CopyPartResult, CopySource, CreateBucketInput,
+    CreateBucketOutput, CreateMultipartUploadInput, CreateMultipartUploadOutput, DeleteBucketInput,
+    DeleteBucketOutput, DeleteBucketPolicyInput, DeleteBucketPolicyOutput, DeleteMarkerEntry,
+    DeleteObjectInput, DeleteObjectOutput, DeleteObjectsInput, DeleteObjectsOutput, DeletedObject,
+    ETag, ETagCondition, GetBucketLocationInput, GetBucketLocationOutput, GetBucketPolicyInput,
+    GetBucketPolicyOutput, GetBucketVersioningInput, GetBucketVersioningOutput, GetObjectInput,
     GetObjectOutput, HeadBucketInput, HeadBucketOutput, HeadObjectInput, HeadObjectOutput,
-    ListBucketsInput, ListBucketsOutput, ListObjectsV2Input, ListObjectsV2Output, Object,
-    PutObjectInput, PutObjectOutput, Timestamp,
+    Initiator, ListBucketsInput, ListBucketsOutput, ListMultipartUploadsInput,
+    ListMultipartUploadsOutput, ListObjectVersionsInput, ListObjectVersionsOutput,
+    ListObjectsV2Input, ListObjectsV2Output, ListPartsInput, ListPartsOutput, MetadataDirective,
+    MultipartUpload, Object, ObjectVersion, Owner, Part, PutBucketPolicyInput,
+    PutBucketPolicyOutput, PutBucketVersioningInput, PutBucketVersioningOutput, PutObjectInput,
+    PutObjectOutput, Timestamp, UploadPartCopyInput, UploadPartCopyOutput, UploadPartInput,
+    UploadPartOutput,
 };
-use s3s::{S3, S3Request, S3Response, S3Result, s3_error};
+use s3s::{S3, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, s3_error};
 
 use super::map::ClusterMap;
 use super::popqueue::{PopQueueStatsSnapshot, PopulationQueue};
+use super::write::RequestChecksum;
+use crate::auth::Principal;
+use crate::checksum;
+use crate::policy::Policy;
 
 /// Gateway-side cluster configuration.
 #[derive(Debug, Clone)]
@@ -60,6 +78,9 @@ pub struct ClusterConfig {
     /// Chunk placements of one PUT in flight at once (bounded memory:
     /// that many chunks plus their shards per PUT).
     pub write_pipeline: usize,
+    /// Minimum size of every multipart part but the last (AWS: 5 MiB;
+    /// smaller values are a documented non-AWS extension for labs).
+    pub multipart_min_part_bytes: u64,
 }
 
 /// Fault-injection points in the write path (tests only).
@@ -570,11 +591,23 @@ pub(super) fn meta_err(e: MetaError) -> s3s::S3Error {
         MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r)) => {
             s3_error!(ServiceUnavailable, "metadata commit outcome unknown: {r}")
         }
+        MetaError::NoSuchUpload => s3_error!(NoSuchUpload),
+        MetaError::NoSuchVersion => s3_error!(NoSuchVersion),
+        MetaError::InvalidPart(n) => s3_error!(
+            InvalidPart,
+            "one or more of the specified parts could not be found or its ETag or checksum did not match (part {n})"
+        ),
+        MetaError::InvalidPartOrder => s3_error!(InvalidPartOrder),
+        MetaError::EntityTooSmall(n) => s3_error!(
+            EntityTooSmall,
+            "part {n} is smaller than the minimum allowed size"
+        ),
+        MetaError::TooManyRetries => s3_error!(SlowDown, "metadata transaction conflicts; retry"),
         other => s3_error!(InternalError, "metadata: {other}"),
     }
 }
 
-fn ms_to_timestamp(ms: u64) -> Timestamp {
+pub(super) fn ms_to_timestamp(ms: u64) -> Timestamp {
     Timestamp::from(UNIX_EPOCH + Duration::from_millis(ms))
 }
 
@@ -598,16 +631,245 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Principal of a request, as recorded by the authorizer (`""` when the
+/// gateway runs without one).
+fn principal_of<T>(req: &S3Request<T>) -> String {
+    req.extensions
+        .get::<Principal>()
+        .map(|p| p.0.clone())
+        .unwrap_or_default()
+}
+
+/// Translate the `x-amz-checksum-*` inputs of an upload (RFC-007 §5.7).
+#[allow(clippy::too_many_arguments)]
+fn request_checksum(
+    algorithm: Option<&s3s::dto::ChecksumAlgorithm>,
+    crc32: Option<&str>,
+    crc32c: Option<&str>,
+    crc64nvme: Option<&str>,
+    sha1: Option<&str>,
+    sha256: Option<&str>,
+    unsupported: bool,
+    trailing: Option<s3s::TrailingHeaders>,
+) -> S3Result<RequestChecksum> {
+    if unsupported {
+        return Err(s3_error!(
+            NotImplemented,
+            "only CRC32, CRC32C, CRC64NVME, SHA1 and SHA256 checksums are supported"
+        ));
+    }
+    let headers = [
+        (ChecksumAlgorithm::Crc32, crc32),
+        (ChecksumAlgorithm::Crc32c, crc32c),
+        (ChecksumAlgorithm::Crc64Nvme, crc64nvme),
+        (ChecksumAlgorithm::Sha1, sha1),
+        (ChecksumAlgorithm::Sha256, sha256),
+    ];
+    let present: Vec<_> = headers.iter().filter(|(_, v)| v.is_some()).collect();
+    if present.len() > 1 {
+        return Err(s3_error!(
+            InvalidRequest,
+            "expecting a single x-amz-checksum-* header"
+        ));
+    }
+    let mut out = RequestChecksum {
+        trailing,
+        ..Default::default()
+    };
+    if let Some((algo, Some(v))) = present.first() {
+        let decoded = checksum::decode_b64(*algo, v).ok_or_else(|| {
+            s3_error!(
+                InvalidRequest,
+                "value for x-amz-checksum-{} header is invalid",
+                algo.name().to_ascii_lowercase()
+            )
+        })?;
+        out.algorithm = Some(*algo);
+        out.expected = Some(decoded);
+    }
+    if let Some(a) = algorithm {
+        let algo = ChecksumAlgorithm::parse(a.as_str()).ok_or_else(|| {
+            s3_error!(
+                NotImplemented,
+                "checksum algorithm {} is not supported",
+                a.as_str()
+            )
+        })?;
+        if out.algorithm.is_some_and(|x| x != algo) {
+            return Err(s3_error!(
+                InvalidRequest,
+                "x-amz-sdk-checksum-algorithm does not match the checksum header"
+            ));
+        }
+        out.algorithm = Some(algo);
+    }
+    Ok(out)
+}
+
+/// Conditional-write headers of PUT, Complete and CopyObject destinations.
+fn precondition(
+    if_match: Option<&ETagCondition>,
+    if_none_match: Option<&ETagCondition>,
+) -> S3Result<Precondition> {
+    let mut pre = Precondition::default();
+    if let Some(c) = if_none_match {
+        if !c.is_any() {
+            return Err(s3_error!(
+                NotImplemented,
+                "If-None-Match with an ETag is not supported"
+            ));
+        }
+        pre.if_none_match_any = true;
+    }
+    if let Some(c) = if_match {
+        match c.as_etag() {
+            Some(ETag::Strong(s)) => pre.if_match = Some(s.clone()),
+            Some(ETag::Weak(_)) => return Err(s3_error!(PreconditionFailed)),
+            None => return Err(s3_error!(NotImplemented, "If-Match: * is not supported")),
+        }
+    }
+    Ok(pre)
+}
+
+fn etag_str(e: Option<&ETag>) -> String {
+    match e {
+        Some(ETag::Strong(s) | ETag::Weak(s)) => s.trim_matches('"').to_string(),
+        None => String::new(),
+    }
+}
+
+fn parse_upload_id(s: &str) -> S3Result<UploadId> {
+    upload_id_from_str(s).ok_or_else(|| s3_error!(NoSuchUpload))
+}
+
+fn owner_of(name: &str) -> Owner {
+    Owner {
+        display_name: Some(name.to_string()),
+        id: Some(name.to_string()),
+    }
+}
+
+/// Checksum output fields of a stored checksum as a tuple for the
+/// repetitive output structs.
+fn cs(c: Option<&Checksum>) -> super::read::ChecksumFields {
+    super::read::checksum_fields(c)
+}
+
+/// Validate the announced `(algorithm, type)` pair of a multipart upload
+/// (RFC-007 §5.7).
+fn multipart_checksum_spec(
+    algorithm: Option<&s3s::dto::ChecksumAlgorithm>,
+    kind: Option<&s3s::dto::ChecksumType>,
+) -> S3Result<(Option<ChecksumAlgorithm>, Option<ChecksumType>)> {
+    let algo = match algorithm {
+        None => None,
+        Some(a) => Some(ChecksumAlgorithm::parse(a.as_str()).ok_or_else(|| {
+            s3_error!(
+                NotImplemented,
+                "checksum algorithm {} is not supported",
+                a.as_str()
+            )
+        })?),
+    };
+    let kind = match kind {
+        None => None,
+        Some(k) => Some(
+            ChecksumType::parse(k.as_str())
+                .ok_or_else(|| s3_error!(InvalidRequest, "unknown checksum type {}", k.as_str()))?,
+        ),
+    };
+    match (algo, kind) {
+        (None, Some(_)) => Err(s3_error!(
+            InvalidRequest,
+            "checksum type requires a checksum algorithm"
+        )),
+        (Some(a), Some(ChecksumType::FullObject)) if !a.combinable() => Err(s3_error!(
+            InvalidRequest,
+            "{} does not support full-object checksums for multipart uploads",
+            a.name()
+        )),
+        (Some(ChecksumAlgorithm::Crc64Nvme), Some(ChecksumType::Composite)) => Err(s3_error!(
+            InvalidRequest,
+            "CRC64NVME supports only full-object checksums"
+        )),
+        _ => Ok((algo, kind)),
+    }
+}
+
+/// `multipart::complete` errors to S3 errors.
+fn complete_err(e: MetaError) -> S3Error {
+    match e {
+        MetaError::InvalidArgument(m) if m.contains("checksum") => s3_error!(BadDigest, "{m}"),
+        other => meta_err(other),
+    }
+}
+
+/// Part records retired per transaction after Complete and Abort.
+const DISCARD_BATCH: usize = 256;
+
+impl<S: KvStore + 'static> ClusterBackend<S> {
+    /// Retire the parts an upload no longer needs (unlisted after Complete,
+    /// all after Abort), bounded per transaction. Best effort: the
+    /// controller sweep finishes whatever a dying gateway leaves.
+    async fn discard_all(&self, bucket_id: u64, key: &str, upload_id: &UploadId) {
+        loop {
+            match multipart::discard_parts(
+                self.meta.as_ref(),
+                bucket_id,
+                key,
+                upload_id,
+                DISCARD_BATCH,
+                now_ms(),
+            )
+            .await
+            {
+                Ok(n) if n >= DISCARD_BATCH => {}
+                _ => return,
+            }
+        }
+    }
+
+    /// Complete, resolving an unknown commit outcome by re-running: the
+    /// recipe returns the same result once it finds `Completed { root }`
+    /// for our root id (RFC-007 §5.3.2).
+    async fn complete_resolving(
+        &self,
+        bucket: &str,
+        key: &str,
+        upload_id: &UploadId,
+        req: &multipart::CompleteRequest<'_>,
+    ) -> S3Result<multipart::Completed> {
+        let mut last = None;
+        for _ in 0..4 {
+            match multipart::complete(self.meta.as_ref(), bucket, key, upload_id, req, now_ms())
+                .await
+            {
+                Ok(c) => return Ok(c),
+                Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r))) => last = Some(r),
+                Err(e) => return Err(complete_err(e)),
+            }
+        }
+        Err(s3_error!(
+            ServiceUnavailable,
+            "complete outcome unknown: {}",
+            last.unwrap_or_default()
+        ))
+    }
+}
+
 #[async_trait::async_trait]
+#[allow(clippy::too_many_lines)]
 impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
     async fn create_bucket(
         &self,
         req: S3Request<CreateBucketInput>,
     ) -> S3Result<S3Response<CreateBucketOutput>> {
-        bucket::create_bucket(
+        let owner = principal_of(&req);
+        bucket::create_bucket_owned(
             self.meta.as_ref(),
             &req.input.bucket,
             Versioning::Disabled,
+            &owner,
             now_ms(),
         )
         .await
@@ -635,15 +897,29 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         Ok(S3Response::new(HeadBucketOutput::default()))
     }
 
+    async fn get_bucket_location(
+        &self,
+        req: S3Request<GetBucketLocationInput>,
+    ) -> S3Result<S3Response<GetBucketLocationOutput>> {
+        bucket::get_bucket(self.meta.as_ref(), &req.input.bucket)
+            .await
+            .map_err(meta_err)?;
+        Ok(S3Response::new(GetBucketLocationOutput::default()))
+    }
+
     async fn list_buckets(
         &self,
-        _req: S3Request<ListBucketsInput>,
+        req: S3Request<ListBucketsInput>,
     ) -> S3Result<S3Response<ListBucketsOutput>> {
+        // Owner-scoped (RFC-012 §5.3.2 rule 3): without an authorizer the
+        // principal is unknown and every bucket is listed.
+        let principal = req.extensions.get::<Principal>().map(|p| p.0.clone());
         let buckets = bucket::list_buckets(self.meta.as_ref())
             .await
             .map_err(meta_err)?;
         let list = buckets
             .into_iter()
+            .filter(|b| principal.as_ref().is_none_or(|p| b.owner == *p))
             .map(|b| Bucket {
                 name: Some(b.name),
                 creation_date: Some(ms_to_timestamp(b.created_ms)),
@@ -652,35 +928,127 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             .collect();
         Ok(S3Response::new(ListBucketsOutput {
             buckets: Some(list),
+            owner: principal.as_deref().map(owner_of),
             ..Default::default()
         }))
+    }
+
+    async fn get_bucket_versioning(
+        &self,
+        req: S3Request<GetBucketVersioningInput>,
+    ) -> S3Result<S3Response<GetBucketVersioningOutput>> {
+        let b = bucket::get_bucket(self.meta.as_ref(), &req.input.bucket)
+            .await
+            .map_err(meta_err)?;
+        let status = match b.versioning {
+            Versioning::Disabled => None,
+            Versioning::Enabled => Some(BucketVersioningStatus::from_static(
+                BucketVersioningStatus::ENABLED,
+            )),
+            Versioning::Suspended => Some(BucketVersioningStatus::from_static(
+                BucketVersioningStatus::SUSPENDED,
+            )),
+        };
+        Ok(S3Response::new(GetBucketVersioningOutput {
+            status,
+            ..Default::default()
+        }))
+    }
+
+    async fn put_bucket_versioning(
+        &self,
+        req: S3Request<PutBucketVersioningInput>,
+    ) -> S3Result<S3Response<PutBucketVersioningOutput>> {
+        let cfg = req.input.versioning_configuration;
+        if cfg.mfa_delete.is_some() || req.input.mfa.is_some() {
+            return Err(s3_error!(NotImplemented, "MFA delete is not supported"));
+        }
+        let versioning = match cfg
+            .status
+            .as_ref()
+            .map(s3s::dto::BucketVersioningStatus::as_str)
+        {
+            Some(BucketVersioningStatus::ENABLED) => Versioning::Enabled,
+            Some(BucketVersioningStatus::SUSPENDED) => Versioning::Suspended,
+            _ => {
+                return Err(s3_error!(
+                    MalformedXML,
+                    "Status must be Enabled or Suspended"
+                ));
+            }
+        };
+        bucket::set_versioning(self.meta.as_ref(), &req.input.bucket, versioning)
+            .await
+            .map_err(meta_err)?;
+        Ok(S3Response::new(PutBucketVersioningOutput::default()))
+    }
+
+    async fn get_bucket_policy(
+        &self,
+        req: S3Request<GetBucketPolicyInput>,
+    ) -> S3Result<S3Response<GetBucketPolicyOutput>> {
+        let b = bucket::get_bucket(self.meta.as_ref(), &req.input.bucket)
+            .await
+            .map_err(meta_err)?;
+        let Some(policy) = b.policy else {
+            return Err(s3_error!(NoSuchBucketPolicy));
+        };
+        Ok(S3Response::new(GetBucketPolicyOutput {
+            policy: Some(policy),
+        }))
+    }
+
+    async fn put_bucket_policy(
+        &self,
+        req: S3Request<PutBucketPolicyInput>,
+    ) -> S3Result<S3Response<PutBucketPolicyOutput>> {
+        // Rule 5: every unsupported element is rejected here, with its name.
+        Policy::parse(&req.input.bucket, &req.input.policy)
+            .map_err(|e| s3_error!(MalformedPolicy, "{}", e.0))?;
+        bucket::set_policy(
+            self.meta.as_ref(),
+            &req.input.bucket,
+            Some(&req.input.policy),
+        )
+        .await
+        .map_err(meta_err)?;
+        Ok(S3Response::new(PutBucketPolicyOutput::default()))
+    }
+
+    async fn delete_bucket_policy(
+        &self,
+        req: S3Request<DeleteBucketPolicyInput>,
+    ) -> S3Result<S3Response<DeleteBucketPolicyOutput>> {
+        bucket::set_policy(self.meta.as_ref(), &req.input.bucket, None)
+            .await
+            .map_err(meta_err)?;
+        Ok(S3Response::new(DeleteBucketPolicyOutput::default()))
     }
 
     async fn put_object(
         &self,
         req: S3Request<PutObjectInput>,
     ) -> S3Result<S3Response<PutObjectOutput>> {
+        let trailing = req.trailing_headers.clone();
         let input = req.input;
         let Some(body) = input.body else {
             return Err(s3_error!(IncompleteBody));
         };
-        let mut pre = Precondition::default();
-        if let Some(c) = &input.if_none_match {
-            if !c.is_any() {
-                return Err(s3_error!(
-                    NotImplemented,
-                    "If-None-Match with an ETag is not supported"
-                ));
-            }
-            pre.if_none_match_any = true;
-        }
-        if let Some(c) = &input.if_match {
-            match c.as_etag() {
-                Some(ETag::Strong(s)) => pre.if_match = Some(s.clone()),
-                Some(_) => return Err(s3_error!(PreconditionFailed)),
-                None => return Err(s3_error!(NotImplemented, "If-Match: * is not supported")),
-            }
-        }
+        let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref())?;
+        let checksum = request_checksum(
+            input.checksum_algorithm.as_ref(),
+            input.checksum_crc32.as_deref(),
+            input.checksum_crc32c.as_deref(),
+            input.checksum_crc64nvme.as_deref(),
+            input.checksum_sha1.as_deref(),
+            input.checksum_sha256.as_deref(),
+            input.checksum_sha512.is_some()
+                || input.checksum_md5.is_some()
+                || input.checksum_xxhash64.is_some()
+                || input.checksum_xxhash3.is_some()
+                || input.checksum_xxhash128.is_some(),
+            trailing,
+        )?;
         let committed = self
             .write_object(
                 &input.bucket,
@@ -689,10 +1057,20 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                 input.content_type,
                 input.metadata,
                 &pre,
+                &checksum,
             )
             .await?;
+        let (crc32, crc32c, crc64nvme, sha1, sha256, checksum_type) =
+            cs(committed.checksum.as_ref());
         Ok(S3Response::new(PutObjectOutput {
             e_tag: Some(ETag::Strong(committed.etag)),
+            version_id: (committed.version_id != "null").then_some(committed.version_id),
+            checksum_crc32: crc32,
+            checksum_crc32c: crc32c,
+            checksum_crc64nvme: crc64nvme,
+            checksum_sha1: sha1,
+            checksum_sha256: sha256,
+            checksum_type,
             ..Default::default()
         }))
     }
@@ -708,31 +1086,31 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<HeadObjectInput>,
     ) -> S3Result<S3Response<HeadObjectOutput>> {
-        let input = req.input;
-        let info = object::head_object(self.meta.as_ref(), &input.bucket, &input.key)
-            .await
-            .map_err(meta_err)?
-            .ok_or_else(|| s3_error!(NoSuchKey))?;
-        Ok(S3Response::new(HeadObjectOutput {
-            content_length: Some(i64::try_from(info.header.size).unwrap_or(i64::MAX)),
-            e_tag: Some(ETag::Strong(info.header.etag.clone())),
-            last_modified: Some(ms_to_timestamp(info.pointer.last_modified_ms)),
-            content_type: info.header.content_type.clone(),
-            metadata: (!info.header.user_metadata.is_empty())
-                .then(|| info.header.user_metadata.iter().cloned().collect()),
-            accept_ranges: Some("bytes".into()),
-            ..Default::default()
-        }))
+        self.head_object_impl(req.input).await
     }
 
     async fn delete_object(
         &self,
         req: S3Request<DeleteObjectInput>,
     ) -> S3Result<S3Response<DeleteObjectOutput>> {
-        let mut result = object::delete_object(
+        let input = req.input;
+        if let Some(v) = &input.version_id {
+            let d =
+                object::delete_version(self.meta.as_ref(), &input.bucket, &input.key, v, now_ms())
+                    .await
+                    .map_err(meta_err)?;
+            return Ok(S3Response::new(DeleteObjectOutput {
+                delete_marker: d.was_delete_marker.then_some(true),
+                version_id: Some(v.clone()),
+                ..Default::default()
+            }));
+        }
+        let pre = precondition(input.if_match.as_ref(), None)?;
+        let mut result = object::delete_object_if(
             self.meta.as_ref(),
-            &req.input.bucket,
-            &req.input.key,
+            &input.bucket,
+            &input.key,
+            &pre,
             now_ms(),
         )
         .await;
@@ -740,19 +1118,209 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             result,
             Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(_)))
         ) {
-            // Buckets created through this gateway are unversioned, where a
-            // repeated delete is idempotent (RFC-003 §5.8). A versioned
-            // bucket would need a resolution step before a second marker.
-            result = object::delete_object(
+            // Unversioned: idempotent. Versioned: a second marker may be
+            // created, which is harmless for visibility (RFC-007 §5.4).
+            result = object::delete_object_if(
                 self.meta.as_ref(),
-                &req.input.bucket,
-                &req.input.key,
+                &input.bucket,
+                &input.key,
+                &pre,
                 now_ms(),
             )
             .await;
         }
-        result.map_err(meta_err)?;
-        Ok(S3Response::new(DeleteObjectOutput::default()))
+        let d = result.map_err(meta_err)?;
+        Ok(S3Response::new(DeleteObjectOutput {
+            delete_marker: d.delete_marker_version.is_some().then_some(true),
+            version_id: d.delete_marker_version.filter(|v| v != "null"),
+            ..Default::default()
+        }))
+    }
+
+    async fn delete_objects(
+        &self,
+        req: S3Request<DeleteObjectsInput>,
+    ) -> S3Result<S3Response<DeleteObjectsOutput>> {
+        let input = req.input;
+        if input.delete.objects.len() > 1000 {
+            return Err(s3_error!(MalformedXML, "at most 1000 keys per request"));
+        }
+        let quiet = input.delete.quiet.unwrap_or(false);
+        let mut deleted = Vec::new();
+        let mut errors = Vec::new();
+        for o in input.delete.objects {
+            let r: S3Result<DeletedObject> = async {
+                if let Some(v) = &o.version_id {
+                    let d = object::delete_version(
+                        self.meta.as_ref(),
+                        &input.bucket,
+                        &o.key,
+                        v,
+                        now_ms(),
+                    )
+                    .await
+                    .map_err(meta_err)?;
+                    Ok(DeletedObject {
+                        key: Some(o.key.clone()),
+                        version_id: Some(v.clone()),
+                        delete_marker: d.was_delete_marker.then_some(true),
+                        delete_marker_version_id: None,
+                    })
+                } else {
+                    let d =
+                        object::delete_object(self.meta.as_ref(), &input.bucket, &o.key, now_ms())
+                            .await
+                            .map_err(meta_err)?;
+                    Ok(DeletedObject {
+                        key: Some(o.key.clone()),
+                        version_id: None,
+                        delete_marker: d.delete_marker_version.is_some().then_some(true),
+                        delete_marker_version_id: d.delete_marker_version,
+                    })
+                }
+            }
+            .await;
+            match r {
+                Ok(d) => {
+                    if !quiet {
+                        deleted.push(d);
+                    }
+                }
+                Err(e) => errors.push(s3s::dto::Error {
+                    code: Some(e.code().as_str().to_string()),
+                    key: Some(o.key),
+                    message: e.message().map(str::to_string),
+                    version_id: o.version_id,
+                }),
+            }
+        }
+        Ok(S3Response::new(DeleteObjectsOutput {
+            deleted: (!deleted.is_empty()).then_some(deleted),
+            errors: (!errors.is_empty()).then_some(errors),
+            ..Default::default()
+        }))
+    }
+
+    async fn copy_object(
+        &self,
+        req: S3Request<CopyObjectInput>,
+    ) -> S3Result<S3Response<CopyObjectOutput>> {
+        let input = req.input;
+        let CopySource::Bucket {
+            bucket: src_bucket,
+            key: src_key,
+            version_id: src_version,
+        } = &input.copy_source
+        else {
+            return Err(s3_error!(
+                NotImplemented,
+                "access point copy sources are not supported"
+            ));
+        };
+        let replace = match input
+            .metadata_directive
+            .as_ref()
+            .map(s3s::dto::MetadataDirective::as_str)
+        {
+            None | Some(MetadataDirective::COPY) => false,
+            Some(MetadataDirective::REPLACE) => true,
+            Some(_) => return Err(s3_error!(InvalidArgument, "unknown metadata directive")),
+        };
+        if **src_bucket == *input.bucket
+            && **src_key == *input.key
+            && src_version.is_none()
+            && !replace
+        {
+            return Err(s3_error!(
+                InvalidRequest,
+                "this copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes"
+            ));
+        }
+        // Source: fixed at this manifest read (RFC-007 §5.6); copy-source
+        // conditions all map to 412.
+        let conditions = super::read::Conditions {
+            if_match: input.copy_source_if_match.as_ref(),
+            if_none_match: input.copy_source_if_none_match.as_ref(),
+            if_modified_since: input.copy_source_if_modified_since.as_ref(),
+            if_unmodified_since: input.copy_source_if_unmodified_since.as_ref(),
+        };
+        let src = self
+            .describe(
+                src_bucket,
+                src_key,
+                src_version.as_deref(),
+                &conditions,
+                None,
+            )
+            .await
+            .map_err(|e| {
+                if e.code() == &S3ErrorCode::NotModified {
+                    s3_error!(PreconditionFailed)
+                } else {
+                    e
+                }
+            })?;
+        let src_manifest = src.manifest;
+        let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref())?;
+        let (content_type, metadata) = if replace {
+            (input.content_type, input.metadata)
+        } else {
+            (
+                src_manifest.header.content_type.clone(),
+                (!src_manifest.header.user_metadata.is_empty())
+                    .then(|| src_manifest.header.user_metadata.iter().cloned().collect()),
+            )
+        };
+        // The destination checksum is recomputed from the bytes copied: the
+        // requested algorithm, else the source's.
+        let algorithm = match input.checksum_algorithm.as_ref() {
+            Some(a) => Some(ChecksumAlgorithm::parse(a.as_str()).ok_or_else(|| {
+                s3_error!(
+                    NotImplemented,
+                    "checksum algorithm {} is not supported",
+                    a.as_str()
+                )
+            })?),
+            None => src_manifest.header.checksum.as_ref().map(|c| c.algorithm),
+        };
+        let checksum = RequestChecksum {
+            algorithm,
+            expected: None,
+            trailing: None,
+        };
+        let map = self.map_up_to_date().await.map_err(meta_err)?;
+        self.note_access(src_manifest.pointer.generation);
+        let body = self.stream_range(map, &src_manifest, 0, src_manifest.header.size);
+        let committed = self
+            .write_object(
+                &input.bucket,
+                &input.key,
+                body,
+                content_type,
+                metadata,
+                &pre,
+                &checksum,
+            )
+            .await?;
+        let (crc32, crc32c, crc64nvme, sha1, sha256, checksum_type) =
+            cs(committed.checksum.as_ref());
+        Ok(S3Response::new(CopyObjectOutput {
+            copy_object_result: Some(CopyObjectResult {
+                e_tag: Some(ETag::Strong(committed.etag)),
+                last_modified: Some(ms_to_timestamp(now_ms())),
+                checksum_crc32: crc32,
+                checksum_crc32c: crc32c,
+                checksum_crc64nvme: crc64nvme,
+                checksum_sha1: sha1,
+                checksum_sha256: sha256,
+                checksum_type,
+                ..Default::default()
+            }),
+            version_id: (committed.version_id != "null").then_some(committed.version_id),
+            copy_source_version_id: (src_manifest.pointer.version_id != "null")
+                .then(|| src_manifest.pointer.version_id.clone()),
+            ..Default::default()
+        }))
     }
 
     async fn list_objects_v2(
@@ -812,6 +1380,584 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             continuation_token: input.continuation_token,
             next_continuation_token: resp.next_continuation.map(|t| hex(&t)),
             start_after: input.start_after,
+            encoding_type: input.encoding_type,
+            ..Default::default()
+        }))
+    }
+
+    async fn list_object_versions(
+        &self,
+        req: S3Request<ListObjectVersionsInput>,
+    ) -> S3Result<S3Response<ListObjectVersionsOutput>> {
+        let input = req.input;
+        let max_keys = usize::try_from(input.max_keys.unwrap_or(1000))
+            .unwrap_or(1000)
+            .clamp(1, 1000);
+        let resp = list::list_versions(
+            self.meta.as_ref(),
+            &input.bucket,
+            &list::ListVersionsRequest {
+                prefix: input.prefix.clone().unwrap_or_default(),
+                delimiter: input.delimiter.clone(),
+                key_marker: input.key_marker.clone().filter(|k| !k.is_empty()),
+                version_id_marker: input.version_id_marker.clone().filter(|v| !v.is_empty()),
+                max_keys,
+            },
+        )
+        .await
+        .map_err(meta_err)?;
+        let mut versions = Vec::new();
+        let mut markers = Vec::new();
+        for v in resp.versions {
+            if v.delete_marker {
+                markers.push(DeleteMarkerEntry {
+                    is_latest: Some(v.is_latest),
+                    key: Some(v.key),
+                    last_modified: Some(ms_to_timestamp(v.last_modified_ms)),
+                    version_id: Some(v.version_id),
+                    owner: None,
+                });
+            } else {
+                versions.push(ObjectVersion {
+                    e_tag: Some(ETag::Strong(v.etag)),
+                    is_latest: Some(v.is_latest),
+                    key: Some(v.key),
+                    last_modified: Some(ms_to_timestamp(v.last_modified_ms)),
+                    size: Some(i64::try_from(v.size).unwrap_or(i64::MAX)),
+                    version_id: Some(v.version_id),
+                    ..Default::default()
+                });
+            }
+        }
+        let (next_key, next_version) = match (&resp.is_truncated, resp.next_markers) {
+            (true, Some((k, v))) => (Some(k), Some(v)),
+            _ => (None, None),
+        };
+        Ok(S3Response::new(ListObjectVersionsOutput {
+            name: Some(input.bucket),
+            prefix: input.prefix,
+            delimiter: input.delimiter,
+            max_keys: input.max_keys,
+            key_marker: input.key_marker,
+            version_id_marker: input.version_id_marker,
+            is_truncated: Some(resp.is_truncated),
+            versions: (!versions.is_empty()).then_some(versions),
+            delete_markers: (!markers.is_empty()).then_some(markers),
+            common_prefixes: (!resp.common_prefixes.is_empty()).then(|| {
+                resp.common_prefixes
+                    .into_iter()
+                    .map(|p| CommonPrefix { prefix: Some(p) })
+                    .collect()
+            }),
+            next_key_marker: next_key,
+            next_version_id_marker: next_version.filter(|v| !v.is_empty()),
+            encoding_type: input.encoding_type,
+            ..Default::default()
+        }))
+    }
+
+    async fn create_multipart_upload(
+        &self,
+        req: S3Request<CreateMultipartUploadInput>,
+    ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
+        let owner = principal_of(&req);
+        let input = req.input;
+        let (algorithm, kind) = multipart_checksum_spec(
+            input.checksum_algorithm.as_ref(),
+            input.checksum_type.as_ref(),
+        )?;
+        let rec = multipart::create_upload(
+            self.meta.as_ref(),
+            &input.bucket,
+            &input.key,
+            &multipart::UploadInfo {
+                owner,
+                content_type: input.content_type,
+                user_metadata: input
+                    .metadata
+                    .map(|m| m.into_iter().collect())
+                    .unwrap_or_default(),
+                checksum_algorithm: algorithm,
+                checksum_type: kind,
+            },
+            now_ms(),
+        )
+        .await
+        .map_err(meta_err)?;
+        Ok(S3Response::new(CreateMultipartUploadOutput {
+            bucket: Some(input.bucket),
+            key: Some(input.key),
+            upload_id: Some(upload_id_to_string(&rec.upload_id)),
+            checksum_algorithm: rec
+                .checksum_algorithm
+                .map(|a| s3s::dto::ChecksumAlgorithm::from(a.name().to_string())),
+            checksum_type: rec
+                .checksum_type
+                .or(rec.checksum_algorithm.map(|a| {
+                    if a == ChecksumAlgorithm::Crc64Nvme {
+                        ChecksumType::FullObject
+                    } else {
+                        ChecksumType::Composite
+                    }
+                }))
+                .map(|k| s3s::dto::ChecksumType::from(k.name().to_string())),
+            ..Default::default()
+        }))
+    }
+
+    async fn upload_part(
+        &self,
+        req: S3Request<UploadPartInput>,
+    ) -> S3Result<S3Response<UploadPartOutput>> {
+        let trailing = req.trailing_headers.clone();
+        let input = req.input;
+        let Some(body) = input.body else {
+            return Err(s3_error!(IncompleteBody));
+        };
+        let upload_id = parse_upload_id(&input.upload_id)?;
+        let part_number = u32::try_from(input.part_number)
+            .ok()
+            .filter(|n| (1..=multipart::MAX_PART_NUMBER).contains(n))
+            .ok_or_else(|| s3_error!(InvalidArgument, "part number must be between 1 and 10000"))?;
+        let checksum = request_checksum(
+            input.checksum_algorithm.as_ref(),
+            input.checksum_crc32.as_deref(),
+            input.checksum_crc32c.as_deref(),
+            input.checksum_crc64nvme.as_deref(),
+            input.checksum_sha1.as_deref(),
+            input.checksum_sha256.as_deref(),
+            input.checksum_sha512.is_some()
+                || input.checksum_md5.is_some()
+                || input.checksum_xxhash64.is_some()
+                || input.checksum_xxhash3.is_some()
+                || input.checksum_xxhash128.is_some(),
+            trailing,
+        )?;
+        let sealed = self
+            .write_part(
+                &input.bucket,
+                &input.key,
+                &upload_id,
+                part_number,
+                body,
+                &checksum,
+            )
+            .await?;
+        tracing::debug!(part = part_number, size = sealed.size, "part sealed");
+        let (crc32, crc32c, crc64nvme, sha1, sha256, _) = cs(sealed.checksum.as_ref());
+        Ok(S3Response::new(UploadPartOutput {
+            e_tag: Some(ETag::Strong(sealed.etag)),
+            checksum_crc32: crc32,
+            checksum_crc32c: crc32c,
+            checksum_crc64nvme: crc64nvme,
+            checksum_sha1: sha1,
+            checksum_sha256: sha256,
+            ..Default::default()
+        }))
+    }
+
+    async fn upload_part_copy(
+        &self,
+        req: S3Request<UploadPartCopyInput>,
+    ) -> S3Result<S3Response<UploadPartCopyOutput>> {
+        let input = req.input;
+        let CopySource::Bucket {
+            bucket: src_bucket,
+            key: src_key,
+            version_id: src_version,
+        } = &input.copy_source
+        else {
+            return Err(s3_error!(
+                NotImplemented,
+                "access point copy sources are not supported"
+            ));
+        };
+        let upload_id = parse_upload_id(&input.upload_id)?;
+        let part_number = u32::try_from(input.part_number)
+            .ok()
+            .filter(|n| (1..=multipart::MAX_PART_NUMBER).contains(n))
+            .ok_or_else(|| s3_error!(InvalidArgument, "part number must be between 1 and 10000"))?;
+        let conditions = super::read::Conditions {
+            if_match: input.copy_source_if_match.as_ref(),
+            if_none_match: input.copy_source_if_none_match.as_ref(),
+            if_modified_since: input.copy_source_if_modified_since.as_ref(),
+            if_unmodified_since: input.copy_source_if_unmodified_since.as_ref(),
+        };
+        let src = self
+            .describe(
+                src_bucket,
+                src_key,
+                src_version.as_deref(),
+                &conditions,
+                None,
+            )
+            .await
+            .map_err(|e| {
+                if e.code() == &S3ErrorCode::NotModified {
+                    s3_error!(PreconditionFailed)
+                } else {
+                    e
+                }
+            })?;
+        let m = src.manifest;
+        let (start, end) = match &input.copy_source_range {
+            None => (0, m.header.size),
+            Some(r) => {
+                let r = s3s::dto::Range::parse(r)
+                    .map_err(|_| s3_error!(InvalidArgument, "invalid x-amz-copy-source-range"))?
+                    .check(m.header.size)
+                    .map_err(|_| {
+                        s3_error!(
+                            InvalidArgument,
+                            "x-amz-copy-source-range is not satisfiable"
+                        )
+                    })?;
+                (r.start, r.end)
+            }
+        };
+        let upload =
+            multipart::get_upload(self.meta.as_ref(), &input.bucket, &input.key, &upload_id)
+                .await
+                .map_err(meta_err)?
+                .ok_or_else(|| s3_error!(NoSuchUpload))?;
+        let checksum = RequestChecksum {
+            algorithm: upload.checksum_algorithm,
+            expected: None,
+            trailing: None,
+        };
+        let map = self.map_up_to_date().await.map_err(meta_err)?;
+        let body = self.stream_range(map, &m, start, end);
+        let sealed = self
+            .write_part(
+                &input.bucket,
+                &input.key,
+                &upload_id,
+                part_number,
+                body,
+                &checksum,
+            )
+            .await?;
+        let (crc32, crc32c, crc64nvme, sha1, sha256, _) = cs(sealed.checksum.as_ref());
+        Ok(S3Response::new(UploadPartCopyOutput {
+            copy_part_result: Some(CopyPartResult {
+                e_tag: Some(ETag::Strong(sealed.etag)),
+                last_modified: Some(ms_to_timestamp(now_ms())),
+                checksum_crc32: crc32,
+                checksum_crc32c: crc32c,
+                checksum_crc64nvme: crc64nvme,
+                checksum_sha1: sha1,
+                checksum_sha256: sha256,
+                ..Default::default()
+            }),
+            copy_source_version_id: (m.pointer.version_id != "null")
+                .then(|| m.pointer.version_id.clone()),
+            ..Default::default()
+        }))
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        req: S3Request<CompleteMultipartUploadInput>,
+    ) -> S3Result<S3Response<CompleteMultipartUploadOutput>> {
+        let input = req.input;
+        let upload_id = parse_upload_id(&input.upload_id)?;
+        let Some(listed) = input.multipart_upload.and_then(|m| m.parts) else {
+            return Err(s3_error!(
+                MalformedXML,
+                "the XML you provided was not well-formed"
+            ));
+        };
+        if listed.is_empty() {
+            return Err(s3_error!(MalformedXML, "at least one part is required"));
+        }
+        let upload =
+            multipart::get_upload(self.meta.as_ref(), &input.bucket, &input.key, &upload_id)
+                .await
+                .map_err(meta_err)?
+                .ok_or_else(|| s3_error!(NoSuchUpload))?;
+        let algo = upload.checksum_algorithm;
+        let mut parts = Vec::with_capacity(listed.len());
+        let mut etags = Vec::with_capacity(listed.len());
+        for p in &listed {
+            let n = p
+                .part_number
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| s3_error!(InvalidPart, "part number missing"))?;
+            let etag = etag_str(p.e_tag.as_ref());
+            if etag.is_empty() {
+                return Err(s3_error!(InvalidPart, "ETag missing for part {n}"));
+            }
+            let value = match algo {
+                Some(ChecksumAlgorithm::Crc32) => p.checksum_crc32.as_deref(),
+                Some(ChecksumAlgorithm::Crc32c) => p.checksum_crc32c.as_deref(),
+                Some(ChecksumAlgorithm::Crc64Nvme) => p.checksum_crc64nvme.as_deref(),
+                Some(ChecksumAlgorithm::Sha1) => p.checksum_sha1.as_deref(),
+                Some(ChecksumAlgorithm::Sha256) => p.checksum_sha256.as_deref(),
+                None => None,
+            };
+            let checksum = match (algo, value) {
+                (Some(a), Some(v)) => Some(
+                    checksum::decode_b64(a, v)
+                        .ok_or_else(|| s3_error!(InvalidPart, "invalid checksum for part {n}"))?,
+                ),
+                _ => None,
+            };
+            etags.push(etag.clone());
+            parts.push(multipart::CompletePart {
+                part_number: n,
+                etag,
+                checksum,
+            });
+        }
+        let etag = checksum::composite_etag(&etags);
+        let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref())?;
+        // Expected object checksum from the request, if any.
+        let expected = match algo {
+            Some(a) => {
+                let raw = match a {
+                    ChecksumAlgorithm::Crc32 => input.checksum_crc32.as_deref(),
+                    ChecksumAlgorithm::Crc32c => input.checksum_crc32c.as_deref(),
+                    ChecksumAlgorithm::Crc64Nvme => input.checksum_crc64nvme.as_deref(),
+                    ChecksumAlgorithm::Sha1 => input.checksum_sha1.as_deref(),
+                    ChecksumAlgorithm::Sha256 => input.checksum_sha256.as_deref(),
+                };
+                match raw {
+                    Some(v) => {
+                        let (value, n) = checksum::parse_header_value(a, v).ok_or_else(|| {
+                            s3_error!(InvalidRequest, "invalid object checksum value")
+                        })?;
+                        Some(Checksum {
+                            algorithm: a,
+                            kind: if n.is_some() {
+                                ChecksumType::Composite
+                            } else {
+                                ChecksumType::FullObject
+                            },
+                            value,
+                            parts: n,
+                        })
+                    }
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        if let Some(size) = input.mpu_object_size
+            && size < 0
+        {
+            return Err(s3_error!(
+                InvalidRequest,
+                "x-amz-mp-object-size must be non-negative"
+            ));
+        }
+        let root = new_gen_id();
+        let creq = multipart::CompleteRequest {
+            parts: &parts,
+            root,
+            pre: &pre,
+            min_part_size: self.cfg.multipart_min_part_bytes,
+            etag: &etag,
+            expected_checksum: expected.as_ref(),
+            derive_checksum: &checksum::derive,
+        };
+        let done = self
+            .complete_resolving(&input.bucket, &input.key, &upload_id, &creq)
+            .await?;
+        if let Some(size) = input.mpu_object_size
+            && u64::try_from(size).is_ok_and(|s| s != done.size)
+        {
+            // AWS compares the declared size after the fact; the object is
+            // already published atomically, so report the mismatch only.
+            tracing::warn!(
+                declared = size,
+                actual = done.size,
+                "x-amz-mp-object-size mismatch"
+            );
+        }
+        if !done.already_completed {
+            self.discard_all(upload.bucket_id, &input.key, &upload_id)
+                .await;
+        }
+        let (crc32, crc32c, crc64nvme, sha1, sha256, checksum_type) = cs(done.checksum.as_ref());
+        Ok(S3Response::new(CompleteMultipartUploadOutput {
+            bucket: Some(input.bucket.clone()),
+            key: Some(input.key.clone()),
+            location: Some(format!("/{}/{}", input.bucket, input.key)),
+            e_tag: Some(ETag::Strong(done.etag)),
+            version_id: (done.version_id != "null").then_some(done.version_id),
+            checksum_crc32: crc32,
+            checksum_crc32c: crc32c,
+            checksum_crc64nvme: crc64nvme,
+            checksum_sha1: sha1,
+            checksum_sha256: sha256,
+            checksum_type,
+            ..Default::default()
+        }))
+    }
+
+    async fn abort_multipart_upload(
+        &self,
+        req: S3Request<AbortMultipartUploadInput>,
+    ) -> S3Result<S3Response<AbortMultipartUploadOutput>> {
+        let input = req.input;
+        let upload_id = parse_upload_id(&input.upload_id)?;
+        multipart::abort_and_discard(
+            self.meta.as_ref(),
+            &input.bucket,
+            &input.key,
+            &upload_id,
+            DISCARD_BATCH,
+            now_ms(),
+        )
+        .await
+        .map_err(meta_err)?;
+        Ok(S3Response::new(AbortMultipartUploadOutput::default()))
+    }
+
+    async fn list_parts(
+        &self,
+        req: S3Request<ListPartsInput>,
+    ) -> S3Result<S3Response<ListPartsOutput>> {
+        let input = req.input;
+        let upload_id = parse_upload_id(&input.upload_id)?;
+        let after = u32::try_from(input.part_number_marker.unwrap_or(0)).unwrap_or(0);
+        let max = usize::try_from(input.max_parts.unwrap_or(1000))
+            .unwrap_or(1000)
+            .clamp(1, 1000);
+        let page = multipart::list_parts(
+            self.meta.as_ref(),
+            &input.bucket,
+            &input.key,
+            &upload_id,
+            after,
+            max,
+        )
+        .await
+        .map_err(meta_err)?;
+        let next = page.parts.last().map(|(n, _)| *n);
+        let parts: Vec<Part> = page
+            .parts
+            .into_iter()
+            .map(|(n, p)| {
+                let (crc32, crc32c, crc64nvme, sha1, sha256, _) = cs(p.checksum.as_ref());
+                Part {
+                    part_number: Some(i32::try_from(n).unwrap_or(i32::MAX)),
+                    e_tag: Some(ETag::Strong(p.etag)),
+                    last_modified: Some(ms_to_timestamp(p.uploaded_ms)),
+                    size: Some(i64::try_from(p.size).unwrap_or(i64::MAX)),
+                    checksum_crc32: crc32,
+                    checksum_crc32c: crc32c,
+                    checksum_crc64nvme: crc64nvme,
+                    checksum_sha1: sha1,
+                    checksum_sha256: sha256,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        Ok(S3Response::new(ListPartsOutput {
+            bucket: Some(input.bucket),
+            key: Some(input.key),
+            upload_id: Some(input.upload_id),
+            part_number_marker: input.part_number_marker,
+            next_part_number_marker: page
+                .is_truncated
+                .then(|| next.map(|n| i32::try_from(n).unwrap_or(i32::MAX)))
+                .flatten(),
+            max_parts: input.max_parts,
+            is_truncated: Some(page.is_truncated),
+            parts: (!parts.is_empty()).then_some(parts),
+            initiator: Some(Initiator {
+                display_name: Some(page.upload.owner.clone()),
+                id: Some(page.upload.owner.clone()),
+            }),
+            owner: Some(owner_of(&page.upload.owner)),
+            checksum_algorithm: page
+                .upload
+                .checksum_algorithm
+                .map(|a| s3s::dto::ChecksumAlgorithm::from(a.name().to_string())),
+            checksum_type: page
+                .upload
+                .checksum_type
+                .map(|k| s3s::dto::ChecksumType::from(k.name().to_string())),
+            storage_class: Some(s3s::dto::StorageClass::from_static(
+                s3s::dto::StorageClass::STANDARD,
+            )),
+            ..Default::default()
+        }))
+    }
+
+    async fn list_multipart_uploads(
+        &self,
+        req: S3Request<ListMultipartUploadsInput>,
+    ) -> S3Result<S3Response<ListMultipartUploadsOutput>> {
+        let input = req.input;
+        let max = usize::try_from(input.max_uploads.unwrap_or(1000))
+            .unwrap_or(1000)
+            .clamp(1, 1000);
+        let upload_id_marker = match input.upload_id_marker.as_deref().filter(|s| !s.is_empty()) {
+            Some(s) => Some(
+                parse_upload_id(s)
+                    .map_err(|_| s3_error!(InvalidArgument, "invalid upload-id-marker"))?,
+            ),
+            None => None,
+        };
+        let resp = multipart::list_uploads(
+            self.meta.as_ref(),
+            &input.bucket,
+            &multipart::ListUploadsRequest {
+                prefix: input.prefix.clone().unwrap_or_default(),
+                delimiter: input.delimiter.clone(),
+                key_marker: input.key_marker.clone().filter(|k| !k.is_empty()),
+                upload_id_marker,
+                max_uploads: max,
+            },
+        )
+        .await
+        .map_err(meta_err)?;
+        let uploads: Vec<MultipartUpload> = resp
+            .uploads
+            .into_iter()
+            .map(|u| MultipartUpload {
+                key: Some(u.key),
+                upload_id: Some(upload_id_to_string(&u.upload_id)),
+                initiated: Some(ms_to_timestamp(u.initiated_ms)),
+                initiator: Some(Initiator {
+                    display_name: Some(u.owner.clone()),
+                    id: Some(u.owner.clone()),
+                }),
+                owner: Some(owner_of(&u.owner)),
+                storage_class: Some(s3s::dto::StorageClass::from_static(
+                    s3s::dto::StorageClass::STANDARD,
+                )),
+                checksum_algorithm: u
+                    .checksum_algorithm
+                    .map(|a| s3s::dto::ChecksumAlgorithm::from(a.name().to_string())),
+                checksum_type: u
+                    .checksum_type
+                    .map(|k| s3s::dto::ChecksumType::from(k.name().to_string())),
+            })
+            .collect();
+        let (next_key, next_upload) = match (resp.is_truncated, resp.next_markers) {
+            (true, Some((k, u))) => (Some(k), (u != [0xff; 16]).then(|| upload_id_to_string(&u))),
+            _ => (None, None),
+        };
+        Ok(S3Response::new(ListMultipartUploadsOutput {
+            bucket: Some(input.bucket),
+            prefix: input.prefix,
+            delimiter: input.delimiter,
+            key_marker: input.key_marker,
+            upload_id_marker: input.upload_id_marker,
+            max_uploads: input.max_uploads,
+            is_truncated: Some(resp.is_truncated),
+            next_key_marker: next_key,
+            next_upload_id_marker: next_upload,
+            uploads: (!uploads.is_empty()).then_some(uploads),
+            common_prefixes: (!resp.common_prefixes.is_empty()).then(|| {
+                resp.common_prefixes
+                    .into_iter()
+                    .map(|p| CommonPrefix { prefix: Some(p) })
+                    .collect()
+            }),
             encoding_type: input.encoding_type,
             ..Default::default()
         }))

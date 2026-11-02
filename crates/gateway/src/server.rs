@@ -1,25 +1,51 @@
-//! HTTP server wiring around an [`S3`] implementation.
+//! HTTP server wiring around an [`S3`] implementation: SigV4 (via `s3s`),
+//! the authorizer (RFC-012 §5.3) and the audit record per request
+//! (RFC-012 §5.7).
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Instant;
 
+use futures::future::BoxFuture;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use hyper_util::server::graceful::GracefulShutdown;
 use s3s::S3;
-use s3s::auth::SimpleAuth;
-use s3s::service::S3ServiceBuilder;
+use s3s::access::S3Access;
+use s3s::service::{S3Service, S3ServiceBuilder};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+use crate::auth::{AuditRecord, CredentialStore, StoreAuth};
 
 /// Gateway configuration.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     /// Address to listen on. Port 0 picks a free port.
     pub listen: SocketAddr,
-    /// Static credentials `(access key, secret key)`. `None` disables
-    /// authentication and accepts anonymous requests; only for tests.
+    /// Static credentials `(access key, secret key)` for a single principal
+    /// named after the access key. `None` and no `store` disables
+    /// authentication and accepts anonymous requests; only for tests and
+    /// experiments.
     pub credentials: Option<(String, String)>,
+    /// Multi-key credential store (takes precedence over `credentials`).
+    pub store: Option<Arc<CredentialStore>>,
+    /// Emit an audit record per request on target `arca.audit`.
+    pub audit: bool,
+}
+
+impl GatewayConfig {
+    /// A configuration with static credentials (or anonymous when `None`).
+    #[must_use]
+    pub fn new(listen: SocketAddr, credentials: Option<(String, String)>) -> Self {
+        Self {
+            listen,
+            credentials,
+            store: None,
+            audit: true,
+        }
+    }
 }
 
 /// A running gateway.
@@ -39,7 +65,8 @@ impl ServerHandle {
     }
 }
 
-/// Bind and start serving `backend`. Returns once the listener is bound.
+/// Bind and start serving `backend` without an authorizer (every
+/// authenticated request is allowed; the memory backend and most tests).
 ///
 /// # Errors
 ///
@@ -48,29 +75,67 @@ pub async fn serve<B>(cfg: GatewayConfig, backend: B) -> std::io::Result<ServerH
 where
     B: S3 + Send + Sync + 'static,
 {
+    serve_with_access(cfg, backend, None::<AllowAll>).await
+}
+
+/// An `S3Access` that allows everything (no authorizer configured).
+#[derive(Debug, Clone, Copy)]
+pub struct AllowAll;
+
+#[async_trait::async_trait]
+impl S3Access for AllowAll {}
+
+/// Bind and start serving `backend` with an authorizer.
+///
+/// # Errors
+///
+/// Returns the bind error.
+pub async fn serve_with_access<B, A>(
+    cfg: GatewayConfig,
+    backend: B,
+    access: Option<A>,
+) -> std::io::Result<ServerHandle>
+where
+    B: S3 + Send + Sync + 'static,
+    A: S3Access,
+{
     let service = {
         let mut b = S3ServiceBuilder::new(backend);
-        if let Some((ak, sk)) = cfg.credentials {
-            b.set_auth(SimpleAuth::from_single(ak, sk));
+        let store = cfg.store.clone().or_else(|| {
+            cfg.credentials
+                .as_ref()
+                .map(|(ak, sk)| Arc::new(CredentialStore::from_keys(&[(ak, sk, ak)])))
+        });
+        if let Some(store) = store {
+            b.set_auth(StoreAuth(store));
+        }
+        if let Some(a) = access {
+            b.set_access(a);
         }
         b.build()
     };
     let listener = TcpListener::bind(cfg.listen).await?;
     let local_addr = listener.local_addr()?;
     let (tx, mut rx) = oneshot::channel::<()>();
+    let audit = cfg.audit;
 
     let task = tokio::spawn(async move {
         let http = ConnBuilder::new(TokioExecutor::new());
         let graceful = GracefulShutdown::new();
         loop {
-            let (socket, _) = tokio::select! {
+            let (socket, peer) = tokio::select! {
                 res = listener.accept() => match res {
                     Ok(conn) => conn,
                     Err(_) => continue,
                 },
                 _ = &mut rx => break,
             };
-            let conn = http.serve_connection(TokioIo::new(socket), service.clone());
+            let svc = Audited {
+                inner: service.clone(),
+                peer: Some(peer),
+                audit,
+            };
+            let conn = http.serve_connection(TokioIo::new(socket), svc);
             let conn = graceful.watch(conn.into_owned());
             tokio::spawn(async move {
                 let _ = conn.await;
@@ -87,4 +152,59 @@ where
         shutdown: tx,
         task,
     })
+}
+
+/// Wraps the `s3s` service: creates the audit record, hands it to the
+/// authorizer and the backend through the request extensions, stamps
+/// `x-amz-request-id` on the response, and emits the record once the
+/// response is ready.
+#[derive(Clone)]
+struct Audited {
+    inner: S3Service,
+    peer: Option<SocketAddr>,
+    audit: bool,
+}
+
+impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
+    type Response = s3s::HttpResponse;
+    type Error = s3s::HttpError;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn call(&self, mut req: http::Request<hyper::body::Incoming>) -> Self::Future {
+        let record = AuditRecord::new(self.peer);
+        let request_id = record.fields().request_id;
+        let bytes_in = req
+            .headers()
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        req.extensions_mut().insert(record.clone());
+        let started = Instant::now();
+        let fut = hyper::service::Service::call(&self.inner, req);
+        let audit = self.audit;
+        Box::pin(async move {
+            let mut res = fut.await;
+            let status = match &res {
+                Ok(r) => r.status().as_u16(),
+                Err(_) => 500,
+            };
+            if let Ok(r) = &mut res
+                && let Ok(v) = http::HeaderValue::from_str(&request_id)
+            {
+                r.headers_mut().insert("x-amz-request-id", v);
+            }
+            if audit {
+                let bytes_out = res
+                    .as_ref()
+                    .ok()
+                    .and_then(|r| r.headers().get(http::header::CONTENT_LENGTH))
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                record.emit(status, bytes_in, bytes_out, started.elapsed().as_millis());
+            }
+            res
+        })
+    }
 }

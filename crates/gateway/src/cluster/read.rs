@@ -1,22 +1,31 @@
-//! Read path (RFC-004 §5.6, RFC-006 §5.3, §5.9): manifest → per chunk, a
-//! validated cache hit (possibly degraded, then repaired asynchronously) or
-//! a durable read with asynchronous cache population → stream.
+//! Read path (RFC-004 §5.6, RFC-006 §5.3, §5.9, RFC-007 §5.3–5.5):
+//! manifest (current or a version; inline chunks or part references) →
+//! conditional headers → per chunk, a validated cache hit (possibly
+//! degraded, then repaired asynchronously) or a durable read with
+//! asynchronous cache population → stream. Part manifests of a multipart
+//! object are resolved lazily, part by part, only for the requested range.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use arca_lake_metadata::KvStore;
-use arca_lake_metadata::ops::object::{self, Manifest};
-use arca_lake_metadata::records::{CachePlacement, ChunkRecord, GenId, GroupRecord};
+use arca_lake_metadata::ops::object::{self, Manifest, ManifestFound};
+use arca_lake_metadata::records::{
+    CachePlacement, Checksum, ChecksumAlgorithm, ChunkRecord, GenId, GenKind, GroupRecord, PartRef,
+};
 use arca_lake_protocol::client::concat_frames;
 use arca_lake_tiering::TierError;
 use arca_lake_tiering::cache::{self as tcache, CacheTierConfig};
 use bytes::Bytes;
-use s3s::dto::{ETag, GetObjectInput, GetObjectOutput, StreamingBlob};
+use s3s::dto::{
+    ETag, ETagCondition, GetObjectInput, GetObjectOutput, HeadObjectInput, HeadObjectOutput,
+    StreamingBlob, Timestamp,
+};
 use s3s::{S3Error, S3Response, S3Result, s3_error};
 
-use super::backend::{ClusterBackend, meta_err, now_ms};
+use super::backend::{ClusterBackend, meta_err, ms_to_timestamp, now_ms};
 use super::map::ClusterMap;
+use crate::checksum;
 
 /// An in-flight chunk read.
 type ChunkTask = tokio::task::JoinHandle<Result<Vec<Bytes>, S3Error>>;
@@ -25,27 +34,238 @@ fn addr_of(map: &ClusterMap) -> impl Fn(u64) -> Option<String> + Sync + '_ {
     move |node_id| map.node_addr(node_id).map(str::to_string)
 }
 
+// ---- conditional requests (RFC 9110 §13.1, RFC-007 §5.5) -----------------
+
+/// The four conditional headers of a read.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_field_names)]
+pub(super) struct Conditions<'a> {
+    pub if_match: Option<&'a ETagCondition>,
+    pub if_none_match: Option<&'a ETagCondition>,
+    pub if_modified_since: Option<&'a Timestamp>,
+    pub if_unmodified_since: Option<&'a Timestamp>,
+}
+
+/// Unix seconds of a timestamp (HTTP dates have second precision).
+pub(super) fn timestamp_secs(t: &Timestamp) -> Option<i64> {
+    let mut buf = Vec::new();
+    t.format(s3s::dto::TimestampFormat::EpochSeconds, &mut buf)
+        .ok()?;
+    let s = std::str::from_utf8(&buf).ok()?;
+    s.split('.').next()?.parse().ok()
+}
+
+/// Whether `cond` matches `etag`. `strong`: strong comparison (If-Match);
+/// otherwise weak comparison (If-None-Match), where a weak tag matches by
+/// opaque-tag equality.
+fn etag_matches(cond: &ETagCondition, etag: &str, strong: bool) -> bool {
+    match cond {
+        ETagCondition::Any => true,
+        ETagCondition::ETag(ETag::Strong(s)) => s == etag,
+        ETagCondition::ETag(ETag::Weak(s)) => !strong && s == etag,
+    }
+}
+
+/// Evaluate the conditions in RFC 9110 §13.2.2 order: `If-Match` (else
+/// `If-Unmodified-Since`) → `412`; then `If-None-Match` (else
+/// `If-Modified-Since`) → `304`. `last_modified_ms` is truncated to seconds
+/// for the date comparisons.
+pub(super) fn evaluate_conditions(
+    c: &Conditions<'_>,
+    etag: &str,
+    last_modified_ms: u64,
+) -> Result<(), S3Error> {
+    let lm_secs = i64::try_from(last_modified_ms / 1000).unwrap_or(i64::MAX);
+    if let Some(m) = c.if_match {
+        if !etag_matches(m, etag, true) {
+            return Err(s3_error!(PreconditionFailed));
+        }
+    } else if let Some(t) = c.if_unmodified_since
+        && let Some(since) = timestamp_secs(t)
+        && lm_secs > since
+    {
+        return Err(s3_error!(PreconditionFailed));
+    }
+    if let Some(n) = c.if_none_match {
+        if etag_matches(n, etag, false) {
+            return Err(s3_error!(NotModified));
+        }
+    } else if let Some(t) = c.if_modified_since
+        && let Some(since) = timestamp_secs(t)
+        && lm_secs <= since
+    {
+        return Err(s3_error!(NotModified));
+    }
+    Ok(())
+}
+
+/// An error carrying `x-amz-delete-marker: true` (and the marker's version
+/// id): `404 NoSuchKey` for the current version, `405 MethodNotAllowed`
+/// for an explicit version (AWS behaviour).
+pub(super) fn delete_marker_error(explicit_version: bool, version_id: &str) -> S3Error {
+    let mut e = if explicit_version {
+        s3_error!(MethodNotAllowed, "the specified version is a delete marker")
+    } else {
+        s3_error!(NoSuchKey)
+    };
+    let mut h = hyper::HeaderMap::new();
+    h.insert(
+        "x-amz-delete-marker",
+        hyper::header::HeaderValue::from_static("true"),
+    );
+    if let Ok(v) = hyper::header::HeaderValue::from_str(version_id) {
+        h.insert("x-amz-version-id", v);
+    }
+    e.set_headers(h);
+    e
+}
+
+/// The checksum headers of a stored checksum, as `(crc32, crc32c,
+/// crc64nvme, sha1, sha256, type)` output fields.
+pub(super) type ChecksumFields = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<s3s::dto::ChecksumType>,
+);
+
+pub(super) fn checksum_fields(c: Option<&Checksum>) -> ChecksumFields {
+    let Some(c) = c else {
+        return (None, None, None, None, None, None);
+    };
+    let v = Some(checksum::header_value(c));
+    let kind = Some(s3s::dto::ChecksumType::from(c.kind.name().to_string()));
+    match c.algorithm {
+        ChecksumAlgorithm::Crc32 => (v, None, None, None, None, kind),
+        ChecksumAlgorithm::Crc32c => (None, v, None, None, None, kind),
+        ChecksumAlgorithm::Crc64Nvme => (None, None, v, None, None, kind),
+        ChecksumAlgorithm::Sha1 => (None, None, None, v, None, kind),
+        ChecksumAlgorithm::Sha256 => (None, None, None, None, v, kind),
+    }
+}
+
+/// What a GET or HEAD describes: the version resolved and, with
+/// `partNumber`, the byte range of that part.
+pub(super) struct Described {
+    pub manifest: Manifest,
+    /// `(start, end)` of the selected part, if any.
+    pub part: Option<(u64, u64)>,
+    /// Number of parts of a multipart object.
+    pub parts_count: Option<u32>,
+}
+
 impl<S: KvStore + 'static> ClusterBackend<S> {
+    /// Resolve the version a GET/HEAD addresses, evaluate the conditional
+    /// headers and select the part (RFC-007 §5.4–5.5).
+    pub(super) async fn describe(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        conditions: &Conditions<'_>,
+        part_number: Option<i32>,
+    ) -> Result<Described, S3Error> {
+        let found =
+            object::read_manifest_version(self.meta.as_ref(), bucket, key, version_id, None)
+                .await
+                .map_err(meta_err)?;
+        let manifest = match found {
+            ManifestFound::Manifest(m) => m,
+            ManifestFound::DeleteMarker { version_id: v, .. } => {
+                return Err(delete_marker_error(version_id.is_some(), &v));
+            }
+            ManifestFound::Missing => {
+                return Err(if version_id.is_some() {
+                    s3_error!(NoSuchVersion)
+                } else {
+                    s3_error!(NoSuchKey)
+                });
+            }
+        };
+        evaluate_conditions(
+            conditions,
+            &manifest.header.etag,
+            manifest.pointer.last_modified_ms,
+        )?;
+        let parts_count = match manifest.header.kind {
+            GenKind::MultipartRoot { part_count, .. } => Some(part_count),
+            _ => None,
+        };
+        let part = match part_number {
+            None => None,
+            Some(n) if n < 1 => {
+                return Err(s3_error!(InvalidRange, "part number must be >= 1"));
+            }
+            Some(n) => {
+                let n = usize::try_from(n).unwrap_or(usize::MAX);
+                if manifest.parts.is_empty() {
+                    if n == 1 {
+                        Some((0, manifest.header.size))
+                    } else {
+                        return Err(s3_error!(
+                            InvalidRange,
+                            "the requested part number is not satisfiable"
+                        ));
+                    }
+                } else {
+                    let Some(p) = manifest.parts.get(n - 1) else {
+                        return Err(s3_error!(
+                            InvalidRange,
+                            "the requested part number is not satisfiable"
+                        ));
+                    };
+                    Some((p.offset, p.offset + p.size))
+                }
+            }
+        };
+        Ok(Described {
+            manifest,
+            part,
+            parts_count,
+        })
+    }
+
     pub(super) async fn read_object(
         &self,
         input: GetObjectInput,
     ) -> S3Result<S3Response<GetObjectOutput>> {
-        let manifest = object::read_manifest(self.meta.as_ref(), &input.bucket, &input.key, None)
-            .await
-            .map_err(meta_err)?
-            .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let conditions = Conditions {
+            if_match: input.if_match.as_ref(),
+            if_none_match: input.if_none_match.as_ref(),
+            if_modified_since: input.if_modified_since.as_ref(),
+            if_unmodified_since: input.if_unmodified_since.as_ref(),
+        };
+        let d = self
+            .describe(
+                &input.bucket,
+                &input.key,
+                input.version_id.as_deref(),
+                &conditions,
+                input.part_number,
+            )
+            .await?;
+        let manifest = d.manifest;
         let total = manifest.header.size;
+        let (base_start, base_end) = d.part.unwrap_or((0, total));
+        let span = base_end - base_start;
         let (start, end, content_range) = match &input.range {
-            None => (0, total, None),
+            None => (
+                base_start,
+                base_end,
+                d.part
+                    .map(|_| format!("bytes {base_start}-{}/{total}", base_end.saturating_sub(1))),
+            ),
             Some(r) => {
-                let r = r.check(total)?;
+                let r = r.check(span)?;
                 (
-                    r.start,
-                    r.end,
+                    base_start + r.start,
+                    base_start + r.end,
                     Some(format!(
                         "bytes {}-{}/{total}",
-                        r.start,
-                        r.end.saturating_sub(1)
+                        base_start + r.start,
+                        (base_start + r.end).saturating_sub(1)
                     )),
                 )
             }
@@ -53,22 +273,132 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
 
         let map = self.map_up_to_date().await.map_err(meta_err)?;
         self.note_access(manifest.pointer.generation);
+        let checksum_on = input
+            .checksum_mode
+            .as_ref()
+            .is_some_and(|m| m.as_str().eq_ignore_ascii_case("ENABLED"));
+        // Checksums describe whole objects (or, with `partNumber`, one
+        // part): a ranged read gets none, as AWS clients validate whatever
+        // header they receive against the bytes they got.
+        let stored = match (input.part_number, &input.range) {
+            (_, Some(_)) => None,
+            (Some(n), None) if !manifest.parts.is_empty() => manifest
+                .parts
+                .get(usize::try_from(n).unwrap_or(usize::MAX).saturating_sub(1))
+                .and_then(|p| p.checksum.as_ref()),
+            _ => manifest.header.checksum.as_ref(),
+        };
+        let (crc32, crc32c, crc64nvme, sha1, sha256, checksum_type) = if checksum_on {
+            checksum_fields(stored)
+        } else {
+            (None, None, None, None, None, None)
+        };
+        let version_id =
+            (manifest.pointer.version_id != "null").then(|| manifest.pointer.version_id.clone());
         let body = self.stream_range(Arc::clone(&map), &manifest, start, end);
-        Ok(S3Response::new(GetObjectOutput {
+        let mut resp = S3Response::new(GetObjectOutput {
             body: Some(body),
             content_length: Some(i64::try_from(end - start).unwrap_or(i64::MAX)),
             content_range,
             e_tag: Some(ETag::Strong(manifest.header.etag.clone())),
-            last_modified: Some(s3s::dto::Timestamp::from(
-                std::time::UNIX_EPOCH
-                    + std::time::Duration::from_millis(manifest.pointer.last_modified_ms),
-            )),
+            last_modified: Some(ms_to_timestamp(manifest.pointer.last_modified_ms)),
+            content_type: input
+                .response_content_type
+                .or_else(|| manifest.header.content_type.clone()),
+            metadata: (!manifest.header.user_metadata.is_empty())
+                .then(|| manifest.header.user_metadata.iter().cloned().collect()),
+            accept_ranges: Some("bytes".into()),
+            version_id,
+            checksum_crc32: crc32,
+            checksum_crc32c: crc32c,
+            checksum_crc64nvme: crc64nvme,
+            checksum_sha1: sha1,
+            checksum_sha256: sha256,
+            checksum_type,
+            ..Default::default()
+        });
+        if let Some(n) = d.parts_count.filter(|_| input.part_number.is_some()) {
+            resp.headers.insert(
+                "x-amz-mp-parts-count",
+                hyper::header::HeaderValue::from_str(&n.to_string())
+                    .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("0")),
+            );
+        }
+        if d.part.is_some() {
+            resp.status = Some(hyper::StatusCode::PARTIAL_CONTENT);
+        }
+        Ok(resp)
+    }
+
+    pub(super) async fn head_object_impl(
+        &self,
+        input: HeadObjectInput,
+    ) -> S3Result<S3Response<HeadObjectOutput>> {
+        let conditions = Conditions {
+            if_match: input.if_match.as_ref(),
+            if_none_match: input.if_none_match.as_ref(),
+            if_modified_since: input.if_modified_since.as_ref(),
+            if_unmodified_since: input.if_unmodified_since.as_ref(),
+        };
+        let d = self
+            .describe(
+                &input.bucket,
+                &input.key,
+                input.version_id.as_deref(),
+                &conditions,
+                input.part_number,
+            )
+            .await?;
+        let manifest = d.manifest;
+        let total = manifest.header.size;
+        let (start, end) = d.part.unwrap_or((0, total));
+        let checksum_on = input
+            .checksum_mode
+            .as_ref()
+            .is_some_and(|m| m.as_str().eq_ignore_ascii_case("ENABLED"));
+        let stored = match (input.part_number, &input.range) {
+            (_, Some(_)) => None,
+            (Some(n), None) if !manifest.parts.is_empty() => manifest
+                .parts
+                .get(usize::try_from(n).unwrap_or(usize::MAX).saturating_sub(1))
+                .and_then(|p| p.checksum.as_ref()),
+            _ => manifest.header.checksum.as_ref(),
+        };
+        let (crc32, crc32c, crc64nvme, sha1, sha256, checksum_type) = if checksum_on {
+            checksum_fields(stored)
+        } else {
+            (None, None, None, None, None, None)
+        };
+        let version_id =
+            (manifest.pointer.version_id != "null").then(|| manifest.pointer.version_id.clone());
+        let mut resp = S3Response::new(HeadObjectOutput {
+            content_length: Some(i64::try_from(end - start).unwrap_or(i64::MAX)),
+            content_range: d
+                .part
+                .map(|_| format!("bytes {start}-{}/{total}", end.saturating_sub(1))),
+            e_tag: Some(ETag::Strong(manifest.header.etag.clone())),
+            last_modified: Some(ms_to_timestamp(manifest.pointer.last_modified_ms)),
             content_type: manifest.header.content_type.clone(),
             metadata: (!manifest.header.user_metadata.is_empty())
                 .then(|| manifest.header.user_metadata.iter().cloned().collect()),
             accept_ranges: Some("bytes".into()),
+            version_id,
+            checksum_crc32: crc32,
+            checksum_crc32c: crc32c,
+            checksum_crc64nvme: crc64nvme,
+            checksum_sha1: sha1,
+            checksum_sha256: sha256,
+            checksum_type,
             ..Default::default()
-        }))
+        });
+        if let Some(n) = d.parts_count.filter(|_| input.part_number.is_some()) {
+            resp.headers.insert(
+                "x-amz-mp-parts-count",
+                hyper::header::HeaderValue::from_str(&n.to_string())
+                    .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("0")),
+            );
+        }
+        Ok(resp)
     }
 
     /// Stream bytes `[start, end)` of the object, chunk by chunk, with up
@@ -77,35 +407,53 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// in-flight chunks plus the channel buffer; a dropped body (client
     /// cancellation) aborts every in-flight read. Errors after the first
     /// byte terminate the stream with an error (the client observes a
-    /// truncated body), never with wrong bytes.
-    fn stream_range(
+    /// truncated body), never with wrong bytes. For a multipart object the
+    /// part manifests are read lazily, in order, for the parts overlapping
+    /// the range (RFC-007 §5.3.2).
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn stream_range(
         &self,
         map: Arc<ClusterMap>,
         manifest: &Manifest,
         start: u64,
         end: u64,
     ) -> StreamingBlob {
-        let generation = manifest.pointer.generation;
-        let chunks: Vec<(u32, ChunkRecord, Option<CachePlacement>)> = manifest
-            .chunks
-            .iter()
-            .filter(|(_, c)| c.offset < end && c.offset + u64::from(c.len) > start)
-            .map(|(i, c)| {
-                let cached = manifest
-                    .cache
-                    .iter()
-                    .find(|(ci, _)| ci == i)
-                    .map(|(_, p)| p.clone());
-                (*i, c.clone(), cached)
-            })
-            .collect();
+        let mut source = ChunkSource {
+            inline: std::collections::VecDeque::new(),
+            parts: std::collections::VecDeque::new(),
+            start,
+            end,
+        };
+        if manifest.parts.is_empty() {
+            let generation = manifest.pointer.generation;
+            for (i, c) in &manifest.chunks {
+                if c.offset < end && c.offset + u64::from(c.len) > start {
+                    let cached = manifest
+                        .cache
+                        .iter()
+                        .find(|(ci, _)| ci == i)
+                        .map(|(_, p)| p.clone());
+                    source.inline.push_back((generation, *i, c.clone(), cached));
+                }
+            }
+        } else {
+            // Binary search for the first part overlapping the range.
+            let first = manifest
+                .parts
+                .partition_point(|p| p.offset + p.size <= start);
+            for p in &manifest.parts[first..] {
+                if p.offset >= end {
+                    break;
+                }
+                source.parts.push_back(p.clone());
+            }
+        }
         let backend = self.clone();
         let parallelism = self.cfg.read_parallelism.max(1);
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, S3Error>>(1);
         tokio::spawn(async move {
             let mut pending: std::collections::VecDeque<(ChunkRecord, ChunkTask)> =
                 std::collections::VecDeque::new();
-            let mut queue = chunks.into_iter();
             let abort_all = |pending: &mut std::collections::VecDeque<(ChunkRecord, ChunkTask)>| {
                 for (_, task) in pending.drain(..) {
                     task.abort();
@@ -113,9 +461,16 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             };
             loop {
                 while pending.len() < parallelism {
-                    let Some((index, chunk, cached)) = queue.next() else {
-                        break;
+                    let next = match source.next(&backend).await {
+                        Ok(Some(n)) => n,
+                        Ok(None) => break,
+                        Err(e) => {
+                            abort_all(&mut pending);
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
                     };
+                    let (generation, index, chunk, cached) = next;
                     let backend = backend.clone();
                     let map = Arc::clone(&map);
                     let record = chunk.clone();
@@ -174,7 +529,56 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         });
         StreamingBlob::wrap(tokio_stream::wrappers::ReceiverStream::new(rx))
     }
+}
 
+/// Chunks to read, in object order: inline chunk records, then the chunk
+/// manifests of the remaining parts, resolved one part at a time. Offsets
+/// of part chunks are rebased to the object.
+struct ChunkSource {
+    inline: std::collections::VecDeque<(GenId, u32, ChunkRecord, Option<CachePlacement>)>,
+    parts: std::collections::VecDeque<PartRef>,
+    start: u64,
+    end: u64,
+}
+
+impl ChunkSource {
+    async fn next<S: KvStore + 'static>(
+        &mut self,
+        backend: &ClusterBackend<S>,
+    ) -> Result<Option<(GenId, u32, ChunkRecord, Option<CachePlacement>)>, S3Error> {
+        loop {
+            if let Some(c) = self.inline.pop_front() {
+                return Ok(Some(c));
+            }
+            let Some(part) = self.parts.pop_front() else {
+                return Ok(None);
+            };
+            let Some((chunks, cache)) =
+                object::read_part_manifest(backend.meta.as_ref(), &part.generation)
+                    .await
+                    .map_err(meta_err)?
+            else {
+                return Err(s3_error!(
+                    InternalError,
+                    "part {} manifest is missing (data integrity error)",
+                    part.part_number
+                ));
+            };
+            for (i, mut c) in chunks {
+                c.offset += part.offset;
+                if c.offset < self.end && c.offset + u64::from(c.len) > self.start {
+                    let cached = cache
+                        .iter()
+                        .find(|(ci, _)| *ci == i)
+                        .map(|(_, p)| p.clone());
+                    self.inline.push_back((part.generation, i, c, cached));
+                }
+            }
+        }
+    }
+}
+
+impl<S: KvStore + 'static> ClusterBackend<S> {
     /// One whole chunk: from the cache when a validated copy exists,
     /// otherwise from the durable placement (then possibly populated).
     pub(super) async fn read_chunk_bytes(
@@ -510,7 +914,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     }
 
     /// Coalesced access record for automatic tiering (RFC-006 §5.8).
-    fn note_access(&self, generation: GenId) {
+    pub(super) fn note_access(&self, generation: GenId) {
         let now = now_ms();
         let Some(reads) = self.cache_state.flush_access(generation, now) else {
             return;
@@ -519,6 +923,45 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         tokio::spawn(async move {
             let _ = object::record_access(backend.meta.as_ref(), &generation, now, reads).await;
         });
+    }
+
+    /// Every `(generation, index, chunk record, cache placement)` of the
+    /// current version of `bucket/key`, parts resolved (RFC-006 §5.5 tooling).
+    async fn all_chunks(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<
+        (
+            Manifest,
+            Vec<(GenId, u32, ChunkRecord, Option<CachePlacement>)>,
+        ),
+        S3Error,
+    > {
+        let manifest = object::read_manifest(self.meta.as_ref(), bucket, key, None)
+            .await
+            .map_err(meta_err)?
+            .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let mut source = ChunkSource {
+            inline: std::collections::VecDeque::new(),
+            parts: manifest.parts.iter().cloned().collect(),
+            start: 0,
+            end: manifest.header.size,
+        };
+        let g = manifest.pointer.generation;
+        for (i, c) in &manifest.chunks {
+            let cached = manifest
+                .cache
+                .iter()
+                .find(|(ci, _)| ci == i)
+                .map(|(_, p)| p.clone());
+            source.inline.push_back((g, *i, c.clone(), cached));
+        }
+        let mut out = Vec::new();
+        while let Some(c) = source.next(self).await? {
+            out.push(c);
+        }
+        Ok((manifest, out))
     }
 
     /// Populate every chunk of the current version of `bucket/key`
@@ -534,20 +977,16 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .cache
             .clone()
             .ok_or_else(|| s3_error!(InternalError, "no cache tier configured"))?;
-        let manifest = object::read_manifest(self.meta.as_ref(), bucket, key, None)
-            .await
-            .map_err(meta_err)?
-            .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let (_, chunks) = self.all_chunks(bucket, key).await?;
         let map = self.map_up_to_date().await.map_err(meta_err)?;
-        let generation = manifest.pointer.generation;
         let mut cached = 0;
-        for (index, chunk) in &manifest.chunks {
-            if manifest.cache.iter().any(|(i, _)| i == index) {
+        for (generation, index, chunk, placement) in &chunks {
+            if placement.is_some() {
                 cached += 1;
                 continue;
             }
             let bytes = concat_frames(self.read_durable(&map, chunk).await?);
-            let cid = arca_lake_common::chunk_id(&generation, *index);
+            let cid = arca_lake_common::chunk_id(generation, *index);
             let Some(group) = tcache::choose_group(map.groups.values(), &cfg.tier, &cid) else {
                 return Err(s3_error!(
                     InternalError,
@@ -562,7 +1001,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 &cfg,
                 group,
                 &addr_of(&map),
-                &generation,
+                generation,
                 *index,
                 bytes,
                 now_ms(),
@@ -588,17 +1027,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// As [`Self::prefetch`].
     pub async fn pin(&self, bucket: &str, key: &str) -> Result<usize, S3Error> {
         let n = self.prefetch(bucket, key).await?;
-        let manifest = object::read_manifest(self.meta.as_ref(), bucket, key, None)
-            .await
-            .map_err(meta_err)?
-            .ok_or_else(|| s3_error!(NoSuchKey))?;
-        arca_lake_metadata::ops::cache::set_pinned(
-            self.meta.as_ref(),
-            &manifest.pointer.generation,
-            true,
-        )
-        .await
-        .map_err(meta_err)?;
+        self.set_pinned(bucket, key, true).await?;
         Ok(n)
     }
 
@@ -608,17 +1037,23 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     ///
     /// Missing object or metadata errors.
     pub async fn unpin(&self, bucket: &str, key: &str) -> Result<usize, S3Error> {
+        self.set_pinned(bucket, key, false).await
+    }
+
+    async fn set_pinned(&self, bucket: &str, key: &str, pinned: bool) -> Result<usize, S3Error> {
         let manifest = object::read_manifest(self.meta.as_ref(), bucket, key, None)
             .await
             .map_err(meta_err)?
             .ok_or_else(|| s3_error!(NoSuchKey))?;
-        arca_lake_metadata::ops::cache::set_pinned(
-            self.meta.as_ref(),
-            &manifest.pointer.generation,
-            false,
-        )
-        .await
-        .map_err(meta_err)
+        let mut gens = vec![manifest.pointer.generation];
+        gens.extend(manifest.parts.iter().map(|p| p.generation));
+        let mut n = 0;
+        for g in gens {
+            n += arca_lake_metadata::ops::cache::set_pinned(self.meta.as_ref(), &g, pinned)
+                .await
+                .map_err(meta_err)?;
+        }
+        Ok(n)
     }
 
     /// Run LRU eviction of the configured cache tier (RFC-006 §5.4).

@@ -195,6 +195,24 @@ struct GatewayArgs {
     /// Allow anonymous access (no authentication). Experiments only.
     #[arg(long, conflicts_with = "access_key")]
     allow_anonymous: bool,
+    /// Credentials file (TOML; RFC-012 §5.2): principals and their access
+    /// keys, reloaded when it changes. Takes precedence over
+    /// `--access-key`.
+    #[arg(long, env = "ARCA_LAKE_CREDENTIALS_FILE")]
+    credentials_file: Option<std::path::PathBuf>,
+    /// Authorization: `owner-policy` (RFC-012 §5.3: bucket owner and bucket
+    /// policy; default with a credentials file and the cluster backend) or
+    /// `none` (every authenticated request is allowed; the memory backend
+    /// and experiments).
+    #[arg(long, value_parser = ["owner-policy", "none"])]
+    authorize: Option<String>,
+    /// Who may create buckets under `owner-policy`: `authenticated`,
+    /// `deny`, or a comma-separated list of principal names.
+    #[arg(long, default_value = "authenticated")]
+    bucket_creation: String,
+    /// Disable the per-request audit record (target `arca.audit`).
+    #[arg(long)]
+    no_audit: bool,
     /// `memory` (single process, no durability) or `cluster` (FoundationDB
     /// metadata and storage nodes; needs `--cluster-file`).
     #[arg(long, default_value = "memory", value_parser = ["memory", "cluster"])]
@@ -222,6 +240,10 @@ struct GatewayArgs {
     /// chunks plus their shards per PUT).
     #[arg(long = "write-pipeline", default_value_t = 2)]
     write_pipeline: usize,
+    /// Minimum size of every multipart part but the last. AWS requires
+    /// 5 MiB; smaller values are a non-AWS extension for small labs.
+    #[arg(long, default_value_t = 5 << 20)]
+    multipart_min_part_bytes: u64,
     /// Serve gateway cache counters as Prometheus text on this address
     /// (`GET /metrics`); cluster backend only.
     #[arg(long)]
@@ -452,15 +474,50 @@ async fn wait_for_shutdown() {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_gateway(args: GatewayArgs) -> ExitCode {
+    use arca_lake_gateway::auth::{Authorizer, BucketCreation, CredentialStore};
+    let store = match &args.credentials_file {
+        Some(path) => match CredentialStore::load(path) {
+            Ok(s) => {
+                tracing::info!(keys = s.len(), "credentials loaded");
+                let s = std::sync::Arc::new(s);
+                let _reloader = s.spawn_reloader(Duration::from_secs(30));
+                Some(s)
+            }
+            Err(e) => return fail(format!("credentials file: {e}")),
+        },
+        None => None,
+    };
     let credentials = match (args.access_key, args.secret_key) {
+        _ if store.is_some() => None,
         (Some(ak), Some(sk)) => Some((ak, sk)),
         _ if args.allow_anonymous => {
             eprintln!("WARNING: authentication disabled; every request is accepted");
             None
         }
-        _ => return fail("provide --access-key/--secret-key or --allow-anonymous"),
+        _ => {
+            return fail(
+                "provide --credentials-file, --access-key/--secret-key or --allow-anonymous",
+            );
+        }
     };
+    let authorize = match args.authorize.as_deref() {
+        Some("owner-policy") => true,
+        Some(_) => false,
+        None => store.is_some() && args.backend == "cluster",
+    };
+    if authorize && args.backend != "cluster" {
+        return fail("--authorize owner-policy needs --backend cluster");
+    }
+    let bucket_creation = match args.bucket_creation.as_str() {
+        "authenticated" => BucketCreation::Authenticated,
+        "deny" => BucketCreation::Deny,
+        list => BucketCreation::Principals(list.split(',').map(|s| s.trim().to_string()).collect()),
+    };
+    if !authorize {
+        tracing::warn!("authorization disabled: every authenticated request is allowed");
+    }
     let cache = match args.cache.config() {
         Ok(c) => c,
         Err(e) => return fail(e),
@@ -468,6 +525,8 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
     let cfg = arca_lake_gateway::GatewayConfig {
         listen: args.listen,
         credentials,
+        store: store.clone(),
+        audit: !args.no_audit,
     };
     let mut queue_shutdown: Option<(
         tokio::sync::oneshot::Sender<()>,
@@ -497,6 +556,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 population_queue_depth: args.cache.cache_population_queue_depth,
                 populations_per_node: args.cache.cache_populations_per_node,
                 write_pipeline: args.write_pipeline,
+                multipart_min_part_bytes: args.multipart_min_part_bytes,
             },
         )
         .await
@@ -529,7 +589,19 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
             queue_backend.shutdown().await;
         });
         queue_shutdown = Some((tx, drain));
-        arca_lake_gateway::serve(cfg, backend).await
+        if authorize {
+            let store = store
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::new(CredentialStore::from_keys(&[])));
+            let access = Authorizer::new(
+                std::sync::Arc::clone(backend.metadata()),
+                store,
+                bucket_creation,
+            );
+            arca_lake_gateway::serve_with_access(cfg, backend, Some(access)).await
+        } else {
+            arca_lake_gateway::serve(cfg, backend).await
+        }
     } else {
         arca_lake_gateway::serve(cfg, arca_lake_gateway::memory::MemoryBackend::new()).await
     };

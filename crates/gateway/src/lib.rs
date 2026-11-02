@@ -11,4 +11,11 @@ pub mod cluster;
 pub mod memory;
 mod server;
 
-pub use server::{GatewayConfig, ServerHandle, serve};
+pub use server::{AllowAll, GatewayConfig, ServerHandle, serve, serve_with_access};
+
+/// Authentication, authorization and audit (RFC-012).
+pub mod auth;
+/// Object checksums (RFC-007 §5.7).
+pub mod checksum;
+/// Bucket policy subset (RFC-012 §5.3.3).
+pub mod policy;

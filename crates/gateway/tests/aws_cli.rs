@@ -89,10 +89,10 @@ async fn aws_cli_smoke() {
     let access_key = format!("ARCATEST{}", uuid::Uuid::new_v4().simple());
     let secret_key = uuid::Uuid::new_v4().simple().to_string();
     let server = serve(
-        GatewayConfig {
-            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-            credentials: Some((access_key.clone(), secret_key.clone())),
-        },
+        GatewayConfig::new(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            Some((access_key.clone(), secret_key.clone())),
+        ),
         MemoryBackend::new(),
     )
     .await
