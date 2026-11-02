@@ -88,7 +88,8 @@ Numbers are in RFC-009; the summaries here are the decisions they support.
   recorded in RFC-009 §9.
 - Multi-gateway scaling and a multi-process FoundationDB were not
   measured (unchanged from Phase 2.1).
-- GitHub Actions did not run for the last commits of this phase (the
-  account's Actions billing refused to start jobs); the workspace tests
-  and the FoundationDB-backed suites were run locally and on a
-  validation host instead.
+- GitHub Actions did not run for the last commits of this phase
+  (GitHub-hosted runners were refused for billing reasons); the workspace
+  tests and the FoundationDB-backed suites were run locally and on a
+  validation host instead. CI moved to self-hosted Linux runners in
+  Phase 2.3.

@@ -8,9 +8,8 @@ on:
 permissions:
   contents: read
 
-# One self-hosted Linux runner executes every job of this workflow; a
-# later push cancels the run still queued for the same ref. The macOS leg
-# lives in ci-macos.yml (GitHub-hosted runner).
+# Self-hosted Linux runners execute every job of this workflow; a later
+# push cancels the run still in progress for the same ref.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
