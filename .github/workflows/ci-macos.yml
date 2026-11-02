@@ -1,0 +1,33 @@
+name: CI (macOS)
+
+# The macOS leg of the check job, on a GitHub-hosted runner. It is kept
+# apart from ci.yml so that the self-hosted Linux run's conclusion is not
+# tied to GitHub-hosted runner availability (see docs/roadmap/phase-2-2.md,
+# "not verified": these jobs were refused for billing reasons in Nov 2026).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check-macos:
+    name: fmt, clippy, test (macOS, without the fdb feature)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --features arca-lake-ec/rs-leopard
+      - run: cargo test --workspace --features arca-lake-ec/rs-leopard

@@ -8,18 +8,22 @@ on:
 permissions:
   contents: read
 
+# One self-hosted Linux runner executes every job of this workflow; a
+# later push cancels the run still queued for the same ref. The macOS leg
+# lives in ci-macos.yml (GitHub-hosted runner).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
   check:
-    name: fmt, clippy, test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: fmt, clippy, test (Linux)
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -29,8 +33,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The `fdb` feature links libfdb_c; install the client library on Linux
       # so that --all-features builds and runs. macOS tests skip that feature.
-      - name: install FoundationDB client library (Linux)
-        if: runner.os == 'Linux'
+      - name: install FoundationDB client library
         env:
           FDB_VERSION: 7.3.77
         run: |
@@ -40,17 +43,14 @@ jobs:
           sudo apt-get install -y /tmp/fdb-clients.deb
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features
-      - name: test (Linux, all features)
-        if: runner.os == 'Linux'
+      - name: test (all features)
         run: cargo test --workspace --all-features
-      - name: test (macOS, without the fdb feature)
-        if: runner.os == 'macOS'
-        run: cargo test --workspace --features arca-lake-ec/rs-leopard
       - run: cargo doc --workspace --no-deps --all-features
 
   fdb:
     name: FoundationDB backend tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
     env:
       FDB_VERSION: 7.3.77
     steps:
@@ -68,6 +68,7 @@ jobs:
       - name: start FoundationDB server
         run: |
           set -euo pipefail
+          docker rm -f fdb >/dev/null 2>&1 || true
           docker run -d --name fdb --network host -e FDB_NETWORKING_MODE=host \
             "foundationdb/foundationdb:${FDB_VERSION}"
           for _ in $(seq 1 30); do
@@ -89,10 +90,13 @@ jobs:
           set -euo pipefail
           cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
           cargo test -p arca-lake-testkit --features fdb --test e2e_fdb --test faults_fdb --test cache_fdb --test cache_ec_fdb -- --nocapture --test-threads=1
+      - name: stop FoundationDB server
+        if: always()
+        run: docker rm -f fdb >/dev/null 2>&1 || true
 
   fdb-failover:
     name: FoundationDB failover (3 processes)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
     env:
       FDB_VERSION: 7.3.77
@@ -114,6 +118,7 @@ jobs:
           # Bridge network: the processes advertise the container's address,
           # which the runner host can reach directly (same topology as the
           # local script, where fdbcli and the test container reach it).
+          docker rm -f arca-fdb >/dev/null 2>&1 || true
           docker run -d --name arca-fdb \
             -v "$PWD/deploy/dev/fdb-multi-entrypoint.sh:/entry.sh:ro" \
             --entrypoint bash "foundationdb/foundationdb:${FDB_VERSION}" /entry.sh
@@ -145,10 +150,14 @@ jobs:
           ARCA_CHAOS_DOCKER: "1"
           ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
         run: cargo test -p arca-lake-testkit --features fdb --test fdb_failover -- --nocapture --test-threads=1
+      - name: stop the cluster
+        if: always()
+        run: docker rm -f arca-fdb >/dev/null 2>&1 || true
 
   deny:
     name: licenses and advisories
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -157,7 +166,8 @@ jobs:
 
   secrets:
     name: secret scan
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -189,7 +199,8 @@ jobs:
   dco:
     name: DCO sign-off
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -210,7 +221,8 @@ jobs:
 
   docs:
     name: markdown links
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: lycheeverse/lychee-action@v2
