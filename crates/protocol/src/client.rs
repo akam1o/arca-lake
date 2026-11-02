@@ -307,6 +307,17 @@ impl NodeClients {
             .map_or(0, |c| c.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// `GetShard` RPCs currently in flight to any node from this pool.
+    #[must_use]
+    pub fn reads_in_flight_total(&self) -> u64 {
+        self.reads_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            .sum()
+    }
+
     fn read_counter(&self, addr: &str) -> Arc<AtomicU64> {
         Arc::clone(
             self.reads_in_flight

@@ -16,10 +16,11 @@
 //!   streams from this gateway at once. Permits are taken in node order,
 //!   so two populations can never deadlock on each other.
 //!
-//! **Durable reads first**: before taking its permits a population looks
-//! at the reads in flight to its nodes (`NodeClients::reads_in_flight`)
-//! and yields while there are any, up to a bounded total so that a busy
-//! node cannot starve the cache forever.
+//! **Durable reads first**: before taking its permits a population yields
+//! while the gateway has shard reads in flight to any of its nodes (up to
+//! [`MAX_DEFER_NODE`]) or to any node at all (up to the shorter
+//! [`MAX_DEFER_ANY`]), so that a read burst is served before the cache
+//! is written and a busy node still cannot starve the cache forever.
 //!
 //! **Retries**: node errors are retried a bounded number of times with
 //! exponential backoff; metadata and corruption errors are not.
@@ -40,9 +41,10 @@ use arca_lake_tiering::TierError;
 use arca_lake_tiering::cache::PopulateOutcome;
 use tokio::sync::{Semaphore, mpsc};
 
-/// Longest total time a population yields to durable reads before it
-/// proceeds anyway.
-const MAX_DEFER: Duration = Duration::from_millis(200);
+/// Longest time a population yields to reads in flight on its own nodes.
+const MAX_DEFER_NODE: Duration = Duration::from_millis(200);
+/// Longest time a population yields to reads in flight anywhere.
+const MAX_DEFER_ANY: Duration = Duration::from_millis(50);
 /// One yield step while reads are in flight.
 const DEFER_STEP: Duration = Duration::from_millis(5);
 /// Attempts per population for node errors.
@@ -270,12 +272,17 @@ async fn run_job(shared: &Shared, job: Job) {
     // reads, within a bound.
     let mut deferred = Duration::ZERO;
     let mut yielded = false;
-    while deferred < MAX_DEFER
-        && job
+    loop {
+        let on_own_nodes = job
             .nodes
             .iter()
-            .any(|n| shared.clients.reads_in_flight(n) > 0)
-    {
+            .any(|n| shared.clients.reads_in_flight(n) > 0);
+        let anywhere = shared.clients.reads_in_flight_total() > 0;
+        let keep_waiting =
+            (on_own_nodes && deferred < MAX_DEFER_NODE) || (anywhere && deferred < MAX_DEFER_ANY);
+        if !keep_waiting {
+            break;
+        }
         yielded = true;
         tokio::time::sleep(DEFER_STEP).await;
         deferred += DEFER_STEP;
