@@ -73,8 +73,13 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # Write: fresh objects, multipart objects, overwrite of the previous round.
   s3 "r$round-put" --op put --prefix "r$round" --objects $N --size $SIZE --concurrency 4
   s3 "r$round-mpput" --op multipart-put --prefix "m$round" --objects $MP_N --size $MP_SIZE --part-size $((8 << 20)) --concurrency 2
+  # A multipart PUT that failed explicitly (fault window) leaves no object:
+  # later reads of that round's multipart prefix accept 404.
+  mp_errors=$(tail -1 "$OUT/rounds.txt" | sed -E 's/.*errors=([0-9]+).*/\1/')
+  if [ "${mp_errors:-0}" = 0 ]; then echo "m$round ok" >> "$OUT/mp.txt"; else echo "m$round partial" >> "$OUT/mp.txt"; fi
   overwrite_errors=0
-  echo "r$round $round" >> "$OUT/seeds.txt"
+  # The round's PUT uses s3load's default seed (1); overwrites use the round.
+  echo "r$round 1" >> "$OUT/seeds.txt"
   if [ $round -ge 2 ]; then
     s3 "r$round-overwrite" --op put --prefix "r$((round-1))" --objects $N --size $SIZE --concurrency 4 --seed $round
     overwrite_errors=$(tail -1 "$OUT/rounds.txt" | sed -E 's/.*errors=([0-9]+).*/\1/')
@@ -100,7 +105,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # a random-order pass over the previous rounds (cache hits, populations,
   # evictions). Objects deleted two rounds ago are allowed to be missing.
   s3 "r$round-get" --op get --prefix "r$round" --objects $N --size $SIZE --concurrency 4 --verify --passes 2 --order random
-  s3 "r$round-mpget" --op get --prefix "m$round" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify
+  mp_allow=""; [ "${mp_errors:-0}" = 0 ] || mp_allow="--allow-missing"
+  s3 "r$round-mpget" --op get --prefix "m$round" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify $mp_allow
   # A failed overwrite PUT leaves the previous version in place (atomic
   # visibility), so the verified read of the overwritten round is only
   # meaningful when every overwrite succeeded; otherwise it is read
@@ -114,7 +120,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     fi
   fi
   if [ $round -ge 2 ]; then
-    s3 "r$round-prevmpget" --op get --prefix "m$((round-1))" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify
+    prev_allow=""; grep -q "^m$((round-1)) ok" "$OUT/mp.txt" || prev_allow="--allow-missing"
+    s3 "r$round-prevmpget" --op get --prefix "m$((round-1))" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify $prev_allow
   fi
   if [ $((round % 5)) = 2 ]; then sleep 10; start sa controller "$BIN controller --cluster-file $CLUSTER_FILE --id ctl-a --http 127.0.0.1:9901 $CTL_ARGS"; fi
   { echo "== round $round"; ctl_metrics | grep -E '^arca_controller_(leader |scrub|integrity|repair|stripe|data_integrity|manifest|gc_passes|cache_evicted)' ; sb "curl -s http://127.0.0.1:9901/metrics" | grep -E '^arca_controller_(leader |stripe_repairs_succeeded)' | sed 's/^/ctl-b /'; gw_metrics | grep -E '^arca_gateway_(degraded|unreadable|integrity|cache_hits|cache_misses|cache_populated)'; } >> "$OUT/metrics.txt" 2>/dev/null || true
@@ -143,7 +150,8 @@ for r in $(seq 1 $round); do
   else
     s3 "final-r$r" --op get --prefix "r$r" --objects $N --size $SIZE --concurrency 4 --verify --seed "$seed" $allow
   fi
-  s3 "final-m$r" --op get --prefix "m$r" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify
+  m_allow=""; grep -q "^m$r ok" "$OUT/mp.txt" || m_allow="--allow-missing"
+  s3 "final-m$r" --op get --prefix "m$r" --objects $MP_N --size $MP_SIZE --concurrency 2 --verify $m_allow
 done
 { echo "== final"; ctl_metrics | grep -E '^arca_controller_'; sb "curl -s http://127.0.0.1:9901/metrics" | grep -E '^arca_controller_' | sed 's/^/ctl-b /'; gw_metrics | grep -E '^arca_gateway_(degraded|unreadable|integrity|cache_)'; sa "curl -s http://127.0.0.1:9910/metrics; curl -s http://127.0.0.1:9911/metrics" | grep -E '^arca_node_(quarantined|corrupt|scrub)'; sb "curl -s http://127.0.0.1:9910/metrics" | grep -E '^arca_node_(quarantined|corrupt|scrub)'; } >> "$OUT/metrics.txt" 2>/dev/null || true
 for h in sa sb; do $h "grep -h -i 'unrecoverable\|panic\|invariant' $RUN_DIR/logs/*.log | head -50" >> "$OUT/log-grep.txt" 2>/dev/null || true; done
