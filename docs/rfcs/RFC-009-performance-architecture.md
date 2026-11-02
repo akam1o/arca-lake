@@ -745,7 +745,50 @@ Method: `put-profile.sh` with `--write-pipeline 1 / 2 / 4`, three
 repetitions each on idle hosts, then depth 1 against 2 with a
 synchronous write load running on another VM of the same storage.
 
-<!-- WRITE-PIPELINE -->
+Three repetitions per cell, each on a fresh cluster (`results/putprofile-pipe*`,
+`results/putprofile-noisy-pipe*`); the fdatasync column is the storage
+node's mean over the run, which is the environmental variable the PUT
+depends on (§6.14):
+
+| Configuration | PUT MiB/s, repetitions 1–3 | p50 ms | p95 ms | node fdatasync mean ms |
+| --- | --- | --- | --- | --- |
+| depth 1, idle hosts | 150 / 261 / 332 (median 261) | 352 / 209 / 189 | 772 / 345 / 214 | 27 / 11 / 6 |
+| depth 2, idle hosts | 225 / 178 / 193 (median 193) | 195 / 342 / 224 | 560 / 601 / 643 | 17 / 28 / 23 |
+| depth 4, idle hosts | 264 / 304 / 305 (median 304) | 219 / 208 / 212 | 367 / 276 / 234 | 12 / 7 / 9 |
+| depth 1, write load on another VM | 148 / 129 / 168 (median 148) | 465 / 492 / 363 | 543 / 567 / 461 | 29 / 37 / 26 |
+| depth 2, write load on another VM | 218 / 224 / 173 (median 218) | 286 / 281 / 284 | 369 / 347 / 520 | 28 / 28 / 40 |
+
+What it shows:
+
+- **Under the same disk latency, the pipeline recovers what the latency
+  took.** With the write load on another VM both depths saw 26–40 ms
+  fdatasync means; depth 2 delivered a median 218 MiB/s against 148 for
+  depth 1 (+47 %), p50 281–286 ms against 363–492 ms. On idle hosts the
+  repetitions did not see the same fdatasync latency (6–28 ms across the
+  nine runs), so they are compared at like latency: depth 2 at 28 ms
+  gave 178 MiB/s where depth 1 at 27 ms gave 150; depth 4 at 12 ms gave
+  264 where depth 1 at 11 ms gave 261.
+- **The ceiling does not move.** At single-digit fdatasync latency every
+  depth lands at 300–330 MiB/s: the gateway host's CPU (erasure coding,
+  hashing, HTTP) is the bound there, as the GET side is (§6.12), and
+  more chunks in flight cannot raise it.
+- **Depth 4 costs more than it adds here.** It needs twice the memory
+  per PUT of depth 2 and makes each shard stream slower on the node
+  (`put_recv` 26–37 ms against 4–8 ms, because four chunks' shards
+  share the link) for no further gain at these latencies; depth 2 is
+  the default.
+- The noisy depth-2 third repetition shows the kind of event the
+  pipeline cannot hide: one fdatasync of 638 ms on the node turned into
+  a 1.85 s p99 for the PUTs waiting on that group commit.
+
+The variance itself remains: the quiet repetitions of one depth still
+span 150–332 MiB/s with the node's fdatasync mean. R-48 is therefore
+closed as *explained and mitigated* rather than removed: PUT throughput
+on this environment is a function of the shared storage's write latency
+(§6.14), the pipeline flattens that function by about half at the
+latencies measured, and the regression check (§6.19) treats PUT-only
+changes as suspect until repeated.
+
 
 ### 6.17 Phase 2.3: metadata hot keys
 

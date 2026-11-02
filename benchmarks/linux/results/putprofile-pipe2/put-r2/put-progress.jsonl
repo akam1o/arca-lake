@@ -1,0 +1,8 @@
+{"progress":1,"label":"put-r2-put","t_s":1,"epoch_ms":1793584921224,"ops":19,"bytes":318767104,"in_flight":4,"max_lat_ms":226.0}
+{"progress":1,"label":"put-r2-put","t_s":2,"epoch_ms":1793584922220,"ops":15,"bytes":251658240,"in_flight":4,"max_lat_ms":320.1}
+{"progress":1,"label":"put-r2-put","t_s":3,"epoch_ms":1793584923220,"ops":8,"bytes":134217728,"in_flight":4,"max_lat_ms":612.8}
+{"progress":1,"label":"put-r2-put","t_s":4,"epoch_ms":1793584924219,"ops":8,"bytes":134217728,"in_flight":4,"max_lat_ms":644.9}
+{"progress":1,"label":"put-r2-put","t_s":5,"epoch_ms":1793584925219,"ops":13,"bytes":218103808,"in_flight":4,"max_lat_ms":456.7}
+{"progress":1,"label":"put-r2-put","t_s":6,"epoch_ms":1793584926219,"ops":6,"bytes":100663296,"in_flight":4,"max_lat_ms":600.7}
+{"progress":1,"label":"put-r2-put","t_s":7,"epoch_ms":1793584927219,"ops":6,"bytes":100663296,"in_flight":4,"max_lat_ms":609.5}
+{"progress":1,"label":"put-r2-put","t_s":8,"epoch_ms":1793584928220,"ops":12,"bytes":201326592,"in_flight":4,"max_lat_ms":600.2}

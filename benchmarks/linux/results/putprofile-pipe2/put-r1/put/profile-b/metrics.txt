@@ -1,0 +1,3024 @@
+--- 1793584877.497193200 http://127.0.0.1:9900/metrics
+# TYPE arca_gateway_cache_hits_total counter
+arca_gateway_cache_hits_total 0
+# TYPE arca_gateway_cache_misses_total counter
+arca_gateway_cache_misses_total 0
+# TYPE arca_gateway_cache_fallbacks_total counter
+arca_gateway_cache_fallbacks_total 0
+# TYPE arca_gateway_cache_invalidations_total counter
+arca_gateway_cache_invalidations_total 0
+# TYPE arca_gateway_cache_populated_total counter
+arca_gateway_cache_populated_total 0
+# TYPE arca_gateway_cache_population_failures_total counter
+arca_gateway_cache_population_failures_total 0
+# TYPE arca_gateway_cache_populations_deduplicated_total counter
+arca_gateway_cache_populations_deduplicated_total 0
+# TYPE arca_gateway_cache_admissions_rejected_total counter
+arca_gateway_cache_admissions_rejected_total 0
+# TYPE arca_gateway_cache_degraded_hits_total counter
+arca_gateway_cache_degraded_hits_total 0
+# TYPE arca_gateway_cache_shards_repaired_total counter
+arca_gateway_cache_shards_repaired_total 0
+# TYPE arca_gateway_cache_shard_repair_failures_total counter
+arca_gateway_cache_shard_repair_failures_total 0
+# TYPE arca_gateway_cache_shard_repairs_skipped_total counter
+arca_gateway_cache_shard_repairs_skipped_total 0
+# TYPE arca_gateway_cache_populations_skipped_total counter
+arca_gateway_cache_populations_skipped_total 0
+# TYPE arca_gateway_cache_lookup_hits_total counter
+arca_gateway_cache_lookup_hits_total 0
+# TYPE arca_gateway_cache_fallback_unreadable_total counter
+arca_gateway_cache_fallback_unreadable_total 0
+# TYPE arca_gateway_cache_fallback_corrupt_total counter
+arca_gateway_cache_fallback_corrupt_total 0
+# TYPE arca_gateway_cache_fallback_node_total counter
+arca_gateway_cache_fallback_node_total 0
+# TYPE arca_gateway_cache_fallback_unknown_group_total counter
+arca_gateway_cache_fallback_unknown_group_total 0
+# TYPE arca_gateway_cache_admission_rejected_size_total counter
+arca_gateway_cache_admission_rejected_size_total 0
+# TYPE arca_gateway_cache_admission_rejected_threshold_total counter
+arca_gateway_cache_admission_rejected_threshold_total 0
+# TYPE arca_gateway_cache_admission_rejected_capacity_total counter
+arca_gateway_cache_admission_rejected_capacity_total 0
+# TYPE arca_gateway_cache_admission_rejected_generation_total counter
+arca_gateway_cache_admission_rejected_generation_total 0
+# TYPE arca_gateway_cache_population_failures_node_total counter
+arca_gateway_cache_population_failures_node_total 0
+# TYPE arca_gateway_cache_population_failures_meta_total counter
+arca_gateway_cache_population_failures_meta_total 0
+# TYPE arca_gateway_cache_population_failures_corrupt_total counter
+arca_gateway_cache_population_failures_corrupt_total 0
+# TYPE arca_gateway_node_rpc_stalled_total counter
+arca_gateway_node_rpc_stalled_total 0
+# TYPE arca_gateway_node_rpc_deadline_exceeded_total counter
+arca_gateway_node_rpc_deadline_exceeded_total 0
+# TYPE arca_gateway_node_rpc_unary_timeouts_total counter
+arca_gateway_node_rpc_unary_timeouts_total 0
+# TYPE arca_gateway_node_rpc_retries_total counter
+arca_gateway_node_rpc_retries_total 0
+# TYPE arca_gateway_node_rpc_exhausted_total counter
+arca_gateway_node_rpc_exhausted_total 0
+# TYPE arca_gateway_put_in_flight gauge
+arca_gateway_put_in_flight 0
+# TYPE arca_gateway_put_phase_seconds histogram
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="body_read"} 0
+arca_gateway_put_phase_seconds_count{phase="body_read"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="body_read"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="encode"} 0
+arca_gateway_put_phase_seconds_count{phase="encode"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="encode"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="shard_write"} 0
+arca_gateway_put_phase_seconds_count{phase="shard_write"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="shard_write"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="append"} 0
+arca_gateway_put_phase_seconds_count{phase="append"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="append"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_count{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="commit"} 0
+arca_gateway_put_phase_seconds_count{phase="commit"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="commit"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="total"} 0
+arca_gateway_put_phase_seconds_count{phase="total"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="total"} 0
+# TYPE arca_gateway_population_queue_enqueued_total counter
+arca_gateway_population_queue_enqueued_total 0
+# TYPE arca_gateway_population_queue_dropped_full_total counter
+arca_gateway_population_queue_dropped_full_total 0
+# TYPE arca_gateway_population_queue_dropped_shutdown_total counter
+arca_gateway_population_queue_dropped_shutdown_total 0
+# TYPE arca_gateway_population_queue_completed_total counter
+arca_gateway_population_queue_completed_total 0
+# TYPE arca_gateway_population_queue_retries_total counter
+arca_gateway_population_queue_retries_total 0
+# TYPE arca_gateway_population_queue_deferred_for_reads_total counter
+arca_gateway_population_queue_deferred_for_reads_total 0
+# TYPE arca_gateway_population_queue_queued gauge
+arca_gateway_population_queue_queued 0
+# TYPE arca_gateway_population_queue_running gauge
+arca_gateway_population_queue_running 0
+# TYPE arca_gateway_meta_txn_attempts_total counter
+arca_gateway_meta_txn_attempts_total 4
+# TYPE arca_gateway_meta_txn_conflicts_total counter
+arca_gateway_meta_txn_conflicts_total 0
+# TYPE arca_gateway_meta_txn_unknown_retries_total counter
+arca_gateway_meta_txn_unknown_retries_total 0
+# TYPE arca_gateway_meta_txn_exhausted_total counter
+arca_gateway_meta_txn_exhausted_total 0
+--- 1793584877.497193200 http://127.0.0.1:9910/metrics
+# TYPE arca_node_put_in_flight gauge
+arca_node_put_in_flight 0
+# TYPE arca_node_phase_seconds histogram
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="1"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="5"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="10"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="put_recv"} 0
+arca_node_phase_seconds_count{phase="put_recv"} 0
+arca_node_phase_seconds_max_seconds{phase="put_recv"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="1"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="5"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="10"} 0
+arca_node_phase_seconds_bucket{phase="put_queue",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="put_queue"} 0
+arca_node_phase_seconds_count{phase="put_queue"} 0
+arca_node_phase_seconds_max_seconds{phase="put_queue"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="1"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="5"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="10"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="put_store"} 0
+arca_node_phase_seconds_count{phase="put_store"} 0
+arca_node_phase_seconds_max_seconds{phase="put_store"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="10"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="get_serve"} 0
+arca_node_phase_seconds_count{phase="get_serve"} 0
+arca_node_phase_seconds_max_seconds{phase="get_serve"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_append"} 0
+arca_node_phase_seconds_count{phase="store_append"} 0
+arca_node_phase_seconds_max_seconds{phase="store_append"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_rollover"} 0
+arca_node_phase_seconds_count{phase="store_rollover"} 0
+arca_node_phase_seconds_max_seconds{phase="store_rollover"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_sync_wait"} 0
+arca_node_phase_seconds_count{phase="store_sync_wait"} 0
+arca_node_phase_seconds_max_seconds{phase="store_sync_wait"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_fsync"} 0
+arca_node_phase_seconds_count{phase="store_fsync"} 0
+arca_node_phase_seconds_max_seconds{phase="store_fsync"} 0
+--- 1793584877.497193200 http://127.0.0.1:9920/metrics
+unreachable
+--- 1793584877.497193200 http://127.0.0.1:9921/metrics
+unreachable
+--- 1793584878.527378301 http://127.0.0.1:9900/metrics
+# TYPE arca_gateway_cache_hits_total counter
+arca_gateway_cache_hits_total 0
+# TYPE arca_gateway_cache_misses_total counter
+arca_gateway_cache_misses_total 0
+# TYPE arca_gateway_cache_fallbacks_total counter
+arca_gateway_cache_fallbacks_total 0
+# TYPE arca_gateway_cache_invalidations_total counter
+arca_gateway_cache_invalidations_total 0
+# TYPE arca_gateway_cache_populated_total counter
+arca_gateway_cache_populated_total 0
+# TYPE arca_gateway_cache_population_failures_total counter
+arca_gateway_cache_population_failures_total 0
+# TYPE arca_gateway_cache_populations_deduplicated_total counter
+arca_gateway_cache_populations_deduplicated_total 0
+# TYPE arca_gateway_cache_admissions_rejected_total counter
+arca_gateway_cache_admissions_rejected_total 0
+# TYPE arca_gateway_cache_degraded_hits_total counter
+arca_gateway_cache_degraded_hits_total 0
+# TYPE arca_gateway_cache_shards_repaired_total counter
+arca_gateway_cache_shards_repaired_total 0
+# TYPE arca_gateway_cache_shard_repair_failures_total counter
+arca_gateway_cache_shard_repair_failures_total 0
+# TYPE arca_gateway_cache_shard_repairs_skipped_total counter
+arca_gateway_cache_shard_repairs_skipped_total 0
+# TYPE arca_gateway_cache_populations_skipped_total counter
+arca_gateway_cache_populations_skipped_total 0
+# TYPE arca_gateway_cache_lookup_hits_total counter
+arca_gateway_cache_lookup_hits_total 0
+# TYPE arca_gateway_cache_fallback_unreadable_total counter
+arca_gateway_cache_fallback_unreadable_total 0
+# TYPE arca_gateway_cache_fallback_corrupt_total counter
+arca_gateway_cache_fallback_corrupt_total 0
+# TYPE arca_gateway_cache_fallback_node_total counter
+arca_gateway_cache_fallback_node_total 0
+# TYPE arca_gateway_cache_fallback_unknown_group_total counter
+arca_gateway_cache_fallback_unknown_group_total 0
+# TYPE arca_gateway_cache_admission_rejected_size_total counter
+arca_gateway_cache_admission_rejected_size_total 0
+# TYPE arca_gateway_cache_admission_rejected_threshold_total counter
+arca_gateway_cache_admission_rejected_threshold_total 0
+# TYPE arca_gateway_cache_admission_rejected_capacity_total counter
+arca_gateway_cache_admission_rejected_capacity_total 0
+# TYPE arca_gateway_cache_admission_rejected_generation_total counter
+arca_gateway_cache_admission_rejected_generation_total 0
+# TYPE arca_gateway_cache_population_failures_node_total counter
+arca_gateway_cache_population_failures_node_total 0
+# TYPE arca_gateway_cache_population_failures_meta_total counter
+arca_gateway_cache_population_failures_meta_total 0
+# TYPE arca_gateway_cache_population_failures_corrupt_total counter
+arca_gateway_cache_population_failures_corrupt_total 0
+# TYPE arca_gateway_node_rpc_stalled_total counter
+arca_gateway_node_rpc_stalled_total 0
+# TYPE arca_gateway_node_rpc_deadline_exceeded_total counter
+arca_gateway_node_rpc_deadline_exceeded_total 0
+# TYPE arca_gateway_node_rpc_unary_timeouts_total counter
+arca_gateway_node_rpc_unary_timeouts_total 0
+# TYPE arca_gateway_node_rpc_retries_total counter
+arca_gateway_node_rpc_retries_total 0
+# TYPE arca_gateway_node_rpc_exhausted_total counter
+arca_gateway_node_rpc_exhausted_total 0
+# TYPE arca_gateway_put_in_flight gauge
+arca_gateway_put_in_flight 4
+# TYPE arca_gateway_put_phase_seconds histogram
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.001"} 16
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.005"} 46
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.01"} 68
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.025"} 83
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.05"} 88
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.1"} 88
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.25"} 88
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.5"} 88
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="1"} 88
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="2.5"} 88
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="5"} 88
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="10"} 88
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="+Inf"} 88
+arca_gateway_put_phase_seconds_sum{phase="body_read"} 0.587269549
+arca_gateway_put_phase_seconds_count{phase="body_read"} 88
+arca_gateway_put_phase_seconds_max_seconds{phase="body_read"} 0.030828245
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.005"} 33
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.01"} 69
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.025"} 70
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.05"} 70
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.1"} 70
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.25"} 70
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.5"} 70
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="1"} 70
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="2.5"} 70
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="5"} 70
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="10"} 70
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="+Inf"} 70
+arca_gateway_put_phase_seconds_sum{phase="encode"} 0.391823862
+arca_gateway_put_phase_seconds_count{phase="encode"} 70
+arca_gateway_put_phase_seconds_max_seconds{phase="encode"} 0.012135168
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.025"} 1
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.05"} 13
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.1"} 63
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.25"} 64
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.5"} 64
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="1"} 64
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="2.5"} 64
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="5"} 64
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="10"} 64
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="+Inf"} 64
+arca_gateway_put_phase_seconds_sum{phase="shard_write"} 4.079459887
+arca_gateway_put_phase_seconds_count{phase="shard_write"} 64
+arca_gateway_put_phase_seconds_max_seconds{phase="shard_write"} 0.101191753
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.005"} 14
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.01"} 16
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.025"} 16
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.05"} 16
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.1"} 16
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.25"} 16
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.5"} 16
+arca_gateway_put_phase_seconds_bucket{phase="append",le="1"} 16
+arca_gateway_put_phase_seconds_bucket{phase="append",le="2.5"} 16
+arca_gateway_put_phase_seconds_bucket{phase="append",le="5"} 16
+arca_gateway_put_phase_seconds_bucket{phase="append",le="10"} 16
+arca_gateway_put_phase_seconds_bucket{phase="append",le="+Inf"} 16
+arca_gateway_put_phase_seconds_sum{phase="append"} 0.063984973
+arca_gateway_put_phase_seconds_count{phase="append"} 16
+arca_gateway_put_phase_seconds_max_seconds{phase="append"} 0.007804567
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_count{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.005"} 15
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.01"} 16
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.025"} 16
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.05"} 16
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.1"} 16
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.25"} 16
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.5"} 16
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="1"} 16
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="2.5"} 16
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="5"} 16
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="10"} 16
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="+Inf"} 16
+arca_gateway_put_phase_seconds_sum{phase="commit"} 0.064626254
+arca_gateway_put_phase_seconds_count{phase="commit"} 16
+arca_gateway_put_phase_seconds_max_seconds{phase="commit"} 0.006679841
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.25"} 16
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.5"} 16
+arca_gateway_put_phase_seconds_bucket{phase="total",le="1"} 16
+arca_gateway_put_phase_seconds_bucket{phase="total",le="2.5"} 16
+arca_gateway_put_phase_seconds_bucket{phase="total",le="5"} 16
+arca_gateway_put_phase_seconds_bucket{phase="total",le="10"} 16
+arca_gateway_put_phase_seconds_bucket{phase="total",le="+Inf"} 16
+arca_gateway_put_phase_seconds_sum{phase="total"} 2.972161351
+arca_gateway_put_phase_seconds_count{phase="total"} 16
+arca_gateway_put_phase_seconds_max_seconds{phase="total"} 0.203621288
+# TYPE arca_gateway_population_queue_enqueued_total counter
+arca_gateway_population_queue_enqueued_total 0
+# TYPE arca_gateway_population_queue_dropped_full_total counter
+arca_gateway_population_queue_dropped_full_total 0
+# TYPE arca_gateway_population_queue_dropped_shutdown_total counter
+arca_gateway_population_queue_dropped_shutdown_total 0
+# TYPE arca_gateway_population_queue_completed_total counter
+arca_gateway_population_queue_completed_total 0
+# TYPE arca_gateway_population_queue_retries_total counter
+arca_gateway_population_queue_retries_total 0
+# TYPE arca_gateway_population_queue_deferred_for_reads_total counter
+arca_gateway_population_queue_deferred_for_reads_total 0
+# TYPE arca_gateway_population_queue_queued gauge
+arca_gateway_population_queue_queued 0
+# TYPE arca_gateway_population_queue_running gauge
+arca_gateway_population_queue_running 0
+# TYPE arca_gateway_meta_txn_attempts_total counter
+arca_gateway_meta_txn_attempts_total 126
+# TYPE arca_gateway_meta_txn_conflicts_total counter
+arca_gateway_meta_txn_conflicts_total 0
+# TYPE arca_gateway_meta_txn_unknown_retries_total counter
+arca_gateway_meta_txn_unknown_retries_total 0
+# TYPE arca_gateway_meta_txn_exhausted_total counter
+arca_gateway_meta_txn_exhausted_total 0
+--- 1793584878.527378301 http://127.0.0.1:9910/metrics
+# TYPE arca_node_put_in_flight gauge
+arca_node_put_in_flight 7
+# TYPE arca_node_phase_seconds histogram
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.005"} 4
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.01"} 14
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.025"} 34
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.05"} 65
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.1"} 65
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.25"} 65
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.5"} 65
+arca_node_phase_seconds_bucket{phase="put_recv",le="1"} 65
+arca_node_phase_seconds_bucket{phase="put_recv",le="2.5"} 65
+arca_node_phase_seconds_bucket{phase="put_recv",le="5"} 65
+arca_node_phase_seconds_bucket{phase="put_recv",le="10"} 65
+arca_node_phase_seconds_bucket{phase="put_recv",le="+Inf"} 65
+arca_node_phase_seconds_sum{phase="put_recv"} 1.506729185
+arca_node_phase_seconds_count{phase="put_recv"} 65
+arca_node_phase_seconds_max_seconds{phase="put_recv"} 0.047854587
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.001"} 53
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.005"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.01"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.025"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.05"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.1"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.25"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.5"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="1"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="2.5"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="5"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="10"} 64
+arca_node_phase_seconds_bucket{phase="put_queue",le="+Inf"} 64
+arca_node_phase_seconds_sum{phase="put_queue"} 0.028099102
+arca_node_phase_seconds_count{phase="put_queue"} 64
+arca_node_phase_seconds_max_seconds{phase="put_queue"} 0.003626595
+arca_node_phase_seconds_bucket{phase="put_store",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.01"} 13
+arca_node_phase_seconds_bucket{phase="put_store",le="0.025"} 50
+arca_node_phase_seconds_bucket{phase="put_store",le="0.05"} 64
+arca_node_phase_seconds_bucket{phase="put_store",le="0.1"} 64
+arca_node_phase_seconds_bucket{phase="put_store",le="0.25"} 64
+arca_node_phase_seconds_bucket{phase="put_store",le="0.5"} 64
+arca_node_phase_seconds_bucket{phase="put_store",le="1"} 64
+arca_node_phase_seconds_bucket{phase="put_store",le="2.5"} 64
+arca_node_phase_seconds_bucket{phase="put_store",le="5"} 64
+arca_node_phase_seconds_bucket{phase="put_store",le="10"} 64
+arca_node_phase_seconds_bucket{phase="put_store",le="+Inf"} 64
+arca_node_phase_seconds_sum{phase="put_store"} 1.118194362
+arca_node_phase_seconds_count{phase="put_store"} 64
+arca_node_phase_seconds_max_seconds{phase="put_store"} 0.040966521
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="10"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="get_serve"} 0
+arca_node_phase_seconds_count{phase="get_serve"} 0
+arca_node_phase_seconds_max_seconds{phase="get_serve"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.001"} 1
+arca_node_phase_seconds_bucket{phase="store_append",le="0.005"} 61
+arca_node_phase_seconds_bucket{phase="store_append",le="0.01"} 64
+arca_node_phase_seconds_bucket{phase="store_append",le="0.025"} 64
+arca_node_phase_seconds_bucket{phase="store_append",le="0.05"} 65
+arca_node_phase_seconds_bucket{phase="store_append",le="0.1"} 65
+arca_node_phase_seconds_bucket{phase="store_append",le="0.25"} 65
+arca_node_phase_seconds_bucket{phase="store_append",le="0.5"} 65
+arca_node_phase_seconds_bucket{phase="store_append",le="1"} 65
+arca_node_phase_seconds_bucket{phase="store_append",le="2.5"} 65
+arca_node_phase_seconds_bucket{phase="store_append",le="5"} 65
+arca_node_phase_seconds_bucket{phase="store_append",le="10"} 65
+arca_node_phase_seconds_bucket{phase="store_append",le="+Inf"} 65
+arca_node_phase_seconds_sum{phase="store_append"} 0.17245889
+arca_node_phase_seconds_count{phase="store_append"} 65
+arca_node_phase_seconds_max_seconds{phase="store_append"} 0.03198486
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_rollover"} 0
+arca_node_phase_seconds_count{phase="store_rollover"} 0
+arca_node_phase_seconds_max_seconds{phase="store_rollover"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.005"} 3
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.01"} 25
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.025"} 62
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.05"} 64
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.1"} 64
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.25"} 64
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.5"} 64
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="1"} 64
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="2.5"} 64
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="5"} 64
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="10"} 64
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="+Inf"} 64
+arca_node_phase_seconds_sum{phase="store_sync_wait"} 0.801490503
+arca_node_phase_seconds_count{phase="store_sync_wait"} 64
+arca_node_phase_seconds_max_seconds{phase="store_sync_wait"} 0.025370784
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.005"} 7
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.01"} 29
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.025"} 38
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.05"} 38
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.1"} 38
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.25"} 38
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.5"} 38
+arca_node_phase_seconds_bucket{phase="store_fsync",le="1"} 38
+arca_node_phase_seconds_bucket{phase="store_fsync",le="2.5"} 38
+arca_node_phase_seconds_bucket{phase="store_fsync",le="5"} 38
+arca_node_phase_seconds_bucket{phase="store_fsync",le="10"} 38
+arca_node_phase_seconds_bucket{phase="store_fsync",le="+Inf"} 38
+arca_node_phase_seconds_sum{phase="store_fsync"} 0.294689947
+arca_node_phase_seconds_count{phase="store_fsync"} 38
+arca_node_phase_seconds_max_seconds{phase="store_fsync"} 0.017593731
+--- 1793584878.527378301 http://127.0.0.1:9920/metrics
+unreachable
+--- 1793584878.527378301 http://127.0.0.1:9921/metrics
+unreachable
+--- 1793584879.586944668 http://127.0.0.1:9900/metrics
+# TYPE arca_gateway_cache_hits_total counter
+arca_gateway_cache_hits_total 0
+# TYPE arca_gateway_cache_misses_total counter
+arca_gateway_cache_misses_total 0
+# TYPE arca_gateway_cache_fallbacks_total counter
+arca_gateway_cache_fallbacks_total 0
+# TYPE arca_gateway_cache_invalidations_total counter
+arca_gateway_cache_invalidations_total 0
+# TYPE arca_gateway_cache_populated_total counter
+arca_gateway_cache_populated_total 0
+# TYPE arca_gateway_cache_population_failures_total counter
+arca_gateway_cache_population_failures_total 0
+# TYPE arca_gateway_cache_populations_deduplicated_total counter
+arca_gateway_cache_populations_deduplicated_total 0
+# TYPE arca_gateway_cache_admissions_rejected_total counter
+arca_gateway_cache_admissions_rejected_total 0
+# TYPE arca_gateway_cache_degraded_hits_total counter
+arca_gateway_cache_degraded_hits_total 0
+# TYPE arca_gateway_cache_shards_repaired_total counter
+arca_gateway_cache_shards_repaired_total 0
+# TYPE arca_gateway_cache_shard_repair_failures_total counter
+arca_gateway_cache_shard_repair_failures_total 0
+# TYPE arca_gateway_cache_shard_repairs_skipped_total counter
+arca_gateway_cache_shard_repairs_skipped_total 0
+# TYPE arca_gateway_cache_populations_skipped_total counter
+arca_gateway_cache_populations_skipped_total 0
+# TYPE arca_gateway_cache_lookup_hits_total counter
+arca_gateway_cache_lookup_hits_total 0
+# TYPE arca_gateway_cache_fallback_unreadable_total counter
+arca_gateway_cache_fallback_unreadable_total 0
+# TYPE arca_gateway_cache_fallback_corrupt_total counter
+arca_gateway_cache_fallback_corrupt_total 0
+# TYPE arca_gateway_cache_fallback_node_total counter
+arca_gateway_cache_fallback_node_total 0
+# TYPE arca_gateway_cache_fallback_unknown_group_total counter
+arca_gateway_cache_fallback_unknown_group_total 0
+# TYPE arca_gateway_cache_admission_rejected_size_total counter
+arca_gateway_cache_admission_rejected_size_total 0
+# TYPE arca_gateway_cache_admission_rejected_threshold_total counter
+arca_gateway_cache_admission_rejected_threshold_total 0
+# TYPE arca_gateway_cache_admission_rejected_capacity_total counter
+arca_gateway_cache_admission_rejected_capacity_total 0
+# TYPE arca_gateway_cache_admission_rejected_generation_total counter
+arca_gateway_cache_admission_rejected_generation_total 0
+# TYPE arca_gateway_cache_population_failures_node_total counter
+arca_gateway_cache_population_failures_node_total 0
+# TYPE arca_gateway_cache_population_failures_meta_total counter
+arca_gateway_cache_population_failures_meta_total 0
+# TYPE arca_gateway_cache_population_failures_corrupt_total counter
+arca_gateway_cache_population_failures_corrupt_total 0
+# TYPE arca_gateway_node_rpc_stalled_total counter
+arca_gateway_node_rpc_stalled_total 0
+# TYPE arca_gateway_node_rpc_deadline_exceeded_total counter
+arca_gateway_node_rpc_deadline_exceeded_total 0
+# TYPE arca_gateway_node_rpc_unary_timeouts_total counter
+arca_gateway_node_rpc_unary_timeouts_total 0
+# TYPE arca_gateway_node_rpc_retries_total counter
+arca_gateway_node_rpc_retries_total 0
+# TYPE arca_gateway_node_rpc_exhausted_total counter
+arca_gateway_node_rpc_exhausted_total 0
+# TYPE arca_gateway_put_in_flight gauge
+arca_gateway_put_in_flight 4
+# TYPE arca_gateway_put_phase_seconds histogram
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.001"} 40
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.005"} 116
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.01"} 163
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.025"} 193
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.05"} 199
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.1"} 199
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.25"} 199
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.5"} 199
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="1"} 199
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="2.5"} 199
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="5"} 199
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="10"} 199
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="+Inf"} 199
+arca_gateway_put_phase_seconds_sum{phase="body_read"} 1.153819259
+arca_gateway_put_phase_seconds_count{phase="body_read"} 199
+arca_gateway_put_phase_seconds_max_seconds{phase="body_read"} 0.030828245
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.005"} 78
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.01"} 155
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.025"} 160
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.05"} 160
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.1"} 160
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.25"} 160
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.5"} 160
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="1"} 160
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="2.5"} 160
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="5"} 160
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="10"} 160
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="+Inf"} 160
+arca_gateway_put_phase_seconds_sum{phase="encode"} 0.890514415
+arca_gateway_put_phase_seconds_count{phase="encode"} 160
+arca_gateway_put_phase_seconds_max_seconds{phase="encode"} 0.016374094
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.025"} 2
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.05"} 52
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.1"} 155
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.25"} 156
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.5"} 156
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="1"} 156
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="2.5"} 156
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="5"} 156
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="10"} 156
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="+Inf"} 156
+arca_gateway_put_phase_seconds_sum{phase="shard_write"} 9.20783017
+arca_gateway_put_phase_seconds_count{phase="shard_write"} 156
+arca_gateway_put_phase_seconds_max_seconds{phase="shard_write"} 0.101191753
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.005"} 23
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.01"} 31
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.025"} 37
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.05"} 37
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.1"} 37
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.25"} 37
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.5"} 37
+arca_gateway_put_phase_seconds_bucket{phase="append",le="1"} 37
+arca_gateway_put_phase_seconds_bucket{phase="append",le="2.5"} 37
+arca_gateway_put_phase_seconds_bucket{phase="append",le="5"} 37
+arca_gateway_put_phase_seconds_bucket{phase="append",le="10"} 37
+arca_gateway_put_phase_seconds_bucket{phase="append",le="+Inf"} 37
+arca_gateway_put_phase_seconds_sum{phase="append"} 0.217858872
+arca_gateway_put_phase_seconds_count{phase="append"} 37
+arca_gateway_put_phase_seconds_max_seconds{phase="append"} 0.021974177
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_count{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.005"} 28
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.01"} 35
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.025"} 37
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.05"} 37
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.1"} 37
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.25"} 37
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.5"} 37
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="1"} 37
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="2.5"} 37
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="5"} 37
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="10"} 37
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="+Inf"} 37
+arca_gateway_put_phase_seconds_sum{phase="commit"} 0.182819687
+arca_gateway_put_phase_seconds_count{phase="commit"} 37
+arca_gateway_put_phase_seconds_max_seconds{phase="commit"} 0.017229939
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.25"} 37
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.5"} 37
+arca_gateway_put_phase_seconds_bucket{phase="total",le="1"} 37
+arca_gateway_put_phase_seconds_bucket{phase="total",le="2.5"} 37
+arca_gateway_put_phase_seconds_bucket{phase="total",le="5"} 37
+arca_gateway_put_phase_seconds_bucket{phase="total",le="10"} 37
+arca_gateway_put_phase_seconds_bucket{phase="total",le="+Inf"} 37
+arca_gateway_put_phase_seconds_sum{phase="total"} 6.657274465
+arca_gateway_put_phase_seconds_count{phase="total"} 37
+arca_gateway_put_phase_seconds_max_seconds{phase="total"} 0.203621288
+# TYPE arca_gateway_population_queue_enqueued_total counter
+arca_gateway_population_queue_enqueued_total 0
+# TYPE arca_gateway_population_queue_dropped_full_total counter
+arca_gateway_population_queue_dropped_full_total 0
+# TYPE arca_gateway_population_queue_dropped_shutdown_total counter
+arca_gateway_population_queue_dropped_shutdown_total 0
+# TYPE arca_gateway_population_queue_completed_total counter
+arca_gateway_population_queue_completed_total 0
+# TYPE arca_gateway_population_queue_retries_total counter
+arca_gateway_population_queue_retries_total 0
+# TYPE arca_gateway_population_queue_deferred_for_reads_total counter
+arca_gateway_population_queue_deferred_for_reads_total 0
+# TYPE arca_gateway_population_queue_queued gauge
+arca_gateway_population_queue_queued 0
+# TYPE arca_gateway_population_queue_running gauge
+arca_gateway_population_queue_running 0
+# TYPE arca_gateway_meta_txn_attempts_total counter
+arca_gateway_meta_txn_attempts_total 279
+# TYPE arca_gateway_meta_txn_conflicts_total counter
+arca_gateway_meta_txn_conflicts_total 0
+# TYPE arca_gateway_meta_txn_unknown_retries_total counter
+arca_gateway_meta_txn_unknown_retries_total 0
+# TYPE arca_gateway_meta_txn_exhausted_total counter
+arca_gateway_meta_txn_exhausted_total 0
+--- 1793584879.586944668 http://127.0.0.1:9910/metrics
+# TYPE arca_node_put_in_flight gauge
+arca_node_put_in_flight 3
+# TYPE arca_node_phase_seconds histogram
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.005"} 14
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.01"} 42
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.025"} 101
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.05"} 160
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.1"} 160
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.25"} 160
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.5"} 160
+arca_node_phase_seconds_bucket{phase="put_recv",le="1"} 160
+arca_node_phase_seconds_bucket{phase="put_recv",le="2.5"} 160
+arca_node_phase_seconds_bucket{phase="put_recv",le="5"} 160
+arca_node_phase_seconds_bucket{phase="put_recv",le="10"} 160
+arca_node_phase_seconds_bucket{phase="put_recv",le="+Inf"} 160
+arca_node_phase_seconds_sum{phase="put_recv"} 3.306236328
+arca_node_phase_seconds_count{phase="put_recv"} 160
+arca_node_phase_seconds_max_seconds{phase="put_recv"} 0.048333217
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.001"} 139
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.005"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.01"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.025"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.05"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.1"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.25"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.5"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="1"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="2.5"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="5"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="10"} 157
+arca_node_phase_seconds_bucket{phase="put_queue",le="+Inf"} 157
+arca_node_phase_seconds_sum{phase="put_queue"} 0.056232063
+arca_node_phase_seconds_count{phase="put_queue"} 157
+arca_node_phase_seconds_max_seconds{phase="put_queue"} 0.003626595
+arca_node_phase_seconds_bucket{phase="put_store",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.01"} 30
+arca_node_phase_seconds_bucket{phase="put_store",le="0.025"} 133
+arca_node_phase_seconds_bucket{phase="put_store",le="0.05"} 157
+arca_node_phase_seconds_bucket{phase="put_store",le="0.1"} 157
+arca_node_phase_seconds_bucket{phase="put_store",le="0.25"} 157
+arca_node_phase_seconds_bucket{phase="put_store",le="0.5"} 157
+arca_node_phase_seconds_bucket{phase="put_store",le="1"} 157
+arca_node_phase_seconds_bucket{phase="put_store",le="2.5"} 157
+arca_node_phase_seconds_bucket{phase="put_store",le="5"} 157
+arca_node_phase_seconds_bucket{phase="put_store",le="10"} 157
+arca_node_phase_seconds_bucket{phase="put_store",le="+Inf"} 157
+arca_node_phase_seconds_sum{phase="put_store"} 2.612919854
+arca_node_phase_seconds_count{phase="put_store"} 157
+arca_node_phase_seconds_max_seconds{phase="put_store"} 0.040966521
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="10"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="get_serve"} 0
+arca_node_phase_seconds_count{phase="get_serve"} 0
+arca_node_phase_seconds_max_seconds{phase="get_serve"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.001"} 1
+arca_node_phase_seconds_bucket{phase="store_append",le="0.005"} 145
+arca_node_phase_seconds_bucket{phase="store_append",le="0.01"} 158
+arca_node_phase_seconds_bucket{phase="store_append",le="0.025"} 159
+arca_node_phase_seconds_bucket{phase="store_append",le="0.05"} 160
+arca_node_phase_seconds_bucket{phase="store_append",le="0.1"} 160
+arca_node_phase_seconds_bucket{phase="store_append",le="0.25"} 160
+arca_node_phase_seconds_bucket{phase="store_append",le="0.5"} 160
+arca_node_phase_seconds_bucket{phase="store_append",le="1"} 160
+arca_node_phase_seconds_bucket{phase="store_append",le="2.5"} 160
+arca_node_phase_seconds_bucket{phase="store_append",le="5"} 160
+arca_node_phase_seconds_bucket{phase="store_append",le="10"} 160
+arca_node_phase_seconds_bucket{phase="store_append",le="+Inf"} 160
+arca_node_phase_seconds_sum{phase="store_append"} 0.438734074
+arca_node_phase_seconds_count{phase="store_append"} 160
+arca_node_phase_seconds_max_seconds{phase="store_append"} 0.03198486
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_rollover"} 0
+arca_node_phase_seconds_count{phase="store_rollover"} 0
+arca_node_phase_seconds_max_seconds{phase="store_rollover"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.005"} 6
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.01"} 65
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.025"} 154
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.05"} 157
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.1"} 157
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.25"} 157
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.5"} 157
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="1"} 157
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="2.5"} 157
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="5"} 157
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="10"} 157
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="+Inf"} 157
+arca_node_phase_seconds_sum{phase="store_sync_wait"} 1.891550594
+arca_node_phase_seconds_count{phase="store_sync_wait"} 157
+arca_node_phase_seconds_max_seconds{phase="store_sync_wait"} 0.026206611
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.005"} 13
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.01"} 78
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.025"} 99
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.05"} 99
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.1"} 99
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.25"} 99
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.5"} 99
+arca_node_phase_seconds_bucket{phase="store_fsync",le="1"} 99
+arca_node_phase_seconds_bucket{phase="store_fsync",le="2.5"} 99
+arca_node_phase_seconds_bucket{phase="store_fsync",le="5"} 99
+arca_node_phase_seconds_bucket{phase="store_fsync",le="10"} 99
+arca_node_phase_seconds_bucket{phase="store_fsync",le="+Inf"} 99
+arca_node_phase_seconds_sum{phase="store_fsync"} 0.789076824
+arca_node_phase_seconds_count{phase="store_fsync"} 99
+arca_node_phase_seconds_max_seconds{phase="store_fsync"} 0.01981109
+--- 1793584879.586944668 http://127.0.0.1:9920/metrics
+unreachable
+--- 1793584879.586944668 http://127.0.0.1:9921/metrics
+unreachable
+--- 1793584880.628971710 http://127.0.0.1:9900/metrics
+# TYPE arca_gateway_cache_hits_total counter
+arca_gateway_cache_hits_total 0
+# TYPE arca_gateway_cache_misses_total counter
+arca_gateway_cache_misses_total 0
+# TYPE arca_gateway_cache_fallbacks_total counter
+arca_gateway_cache_fallbacks_total 0
+# TYPE arca_gateway_cache_invalidations_total counter
+arca_gateway_cache_invalidations_total 0
+# TYPE arca_gateway_cache_populated_total counter
+arca_gateway_cache_populated_total 0
+# TYPE arca_gateway_cache_population_failures_total counter
+arca_gateway_cache_population_failures_total 0
+# TYPE arca_gateway_cache_populations_deduplicated_total counter
+arca_gateway_cache_populations_deduplicated_total 0
+# TYPE arca_gateway_cache_admissions_rejected_total counter
+arca_gateway_cache_admissions_rejected_total 0
+# TYPE arca_gateway_cache_degraded_hits_total counter
+arca_gateway_cache_degraded_hits_total 0
+# TYPE arca_gateway_cache_shards_repaired_total counter
+arca_gateway_cache_shards_repaired_total 0
+# TYPE arca_gateway_cache_shard_repair_failures_total counter
+arca_gateway_cache_shard_repair_failures_total 0
+# TYPE arca_gateway_cache_shard_repairs_skipped_total counter
+arca_gateway_cache_shard_repairs_skipped_total 0
+# TYPE arca_gateway_cache_populations_skipped_total counter
+arca_gateway_cache_populations_skipped_total 0
+# TYPE arca_gateway_cache_lookup_hits_total counter
+arca_gateway_cache_lookup_hits_total 0
+# TYPE arca_gateway_cache_fallback_unreadable_total counter
+arca_gateway_cache_fallback_unreadable_total 0
+# TYPE arca_gateway_cache_fallback_corrupt_total counter
+arca_gateway_cache_fallback_corrupt_total 0
+# TYPE arca_gateway_cache_fallback_node_total counter
+arca_gateway_cache_fallback_node_total 0
+# TYPE arca_gateway_cache_fallback_unknown_group_total counter
+arca_gateway_cache_fallback_unknown_group_total 0
+# TYPE arca_gateway_cache_admission_rejected_size_total counter
+arca_gateway_cache_admission_rejected_size_total 0
+# TYPE arca_gateway_cache_admission_rejected_threshold_total counter
+arca_gateway_cache_admission_rejected_threshold_total 0
+# TYPE arca_gateway_cache_admission_rejected_capacity_total counter
+arca_gateway_cache_admission_rejected_capacity_total 0
+# TYPE arca_gateway_cache_admission_rejected_generation_total counter
+arca_gateway_cache_admission_rejected_generation_total 0
+# TYPE arca_gateway_cache_population_failures_node_total counter
+arca_gateway_cache_population_failures_node_total 0
+# TYPE arca_gateway_cache_population_failures_meta_total counter
+arca_gateway_cache_population_failures_meta_total 0
+# TYPE arca_gateway_cache_population_failures_corrupt_total counter
+arca_gateway_cache_population_failures_corrupt_total 0
+# TYPE arca_gateway_node_rpc_stalled_total counter
+arca_gateway_node_rpc_stalled_total 0
+# TYPE arca_gateway_node_rpc_deadline_exceeded_total counter
+arca_gateway_node_rpc_deadline_exceeded_total 0
+# TYPE arca_gateway_node_rpc_unary_timeouts_total counter
+arca_gateway_node_rpc_unary_timeouts_total 0
+# TYPE arca_gateway_node_rpc_retries_total counter
+arca_gateway_node_rpc_retries_total 0
+# TYPE arca_gateway_node_rpc_exhausted_total counter
+arca_gateway_node_rpc_exhausted_total 0
+# TYPE arca_gateway_put_in_flight gauge
+arca_gateway_put_in_flight 3
+# TYPE arca_gateway_put_phase_seconds histogram
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.001"} 66
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.005"} 199
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.01"} 271
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.025"} 311
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.05"} 317
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.1"} 317
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.25"} 317
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.5"} 317
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="1"} 317
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="2.5"} 317
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="5"} 317
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="10"} 317
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="+Inf"} 317
+arca_gateway_put_phase_seconds_sum{phase="body_read"} 1.64596753
+arca_gateway_put_phase_seconds_count{phase="body_read"} 317
+arca_gateway_put_phase_seconds_max_seconds{phase="body_read"} 0.030828245
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.005"} 130
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.01"} 245
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.025"} 254
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.05"} 254
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.1"} 254
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.25"} 254
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.5"} 254
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="1"} 254
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="2.5"} 254
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="5"} 254
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="10"} 254
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="+Inf"} 254
+arca_gateway_put_phase_seconds_sum{phase="encode"} 1.397011222
+arca_gateway_put_phase_seconds_count{phase="encode"} 254
+arca_gateway_put_phase_seconds_max_seconds{phase="encode"} 0.016374094
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.025"} 12
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.05"} 112
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.1"} 249
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.25"} 250
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.5"} 250
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="1"} 250
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="2.5"} 250
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="5"} 250
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="10"} 250
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="+Inf"} 250
+arca_gateway_put_phase_seconds_sum{phase="shard_write"} 13.489389719
+arca_gateway_put_phase_seconds_count{phase="shard_write"} 250
+arca_gateway_put_phase_seconds_max_seconds{phase="shard_write"} 0.101191753
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.005"} 27
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.01"} 45
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.025"} 62
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.05"} 62
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.1"} 62
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.25"} 62
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.5"} 62
+arca_gateway_put_phase_seconds_bucket{phase="append",le="1"} 62
+arca_gateway_put_phase_seconds_bucket{phase="append",le="2.5"} 62
+arca_gateway_put_phase_seconds_bucket{phase="append",le="5"} 62
+arca_gateway_put_phase_seconds_bucket{phase="append",le="10"} 62
+arca_gateway_put_phase_seconds_bucket{phase="append",le="+Inf"} 62
+arca_gateway_put_phase_seconds_sum{phase="append"} 0.471151228
+arca_gateway_put_phase_seconds_count{phase="append"} 62
+arca_gateway_put_phase_seconds_max_seconds{phase="append"} 0.021974177
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_count{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.005"} 30
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.01"} 46
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.025"} 62
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.05"} 62
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.1"} 62
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.25"} 62
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.5"} 62
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="1"} 62
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="2.5"} 62
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="5"} 62
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="10"} 62
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="+Inf"} 62
+arca_gateway_put_phase_seconds_sum{phase="commit"} 0.478076784
+arca_gateway_put_phase_seconds_count{phase="commit"} 62
+arca_gateway_put_phase_seconds_max_seconds{phase="commit"} 0.020131889
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.25"} 62
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.5"} 62
+arca_gateway_put_phase_seconds_bucket{phase="total",le="1"} 62
+arca_gateway_put_phase_seconds_bucket{phase="total",le="2.5"} 62
+arca_gateway_put_phase_seconds_bucket{phase="total",le="5"} 62
+arca_gateway_put_phase_seconds_bucket{phase="total",le="10"} 62
+arca_gateway_put_phase_seconds_bucket{phase="total",le="+Inf"} 62
+arca_gateway_put_phase_seconds_sum{phase="total"} 10.816439182
+arca_gateway_put_phase_seconds_count{phase="total"} 62
+arca_gateway_put_phase_seconds_max_seconds{phase="total"} 0.203621288
+# TYPE arca_gateway_population_queue_enqueued_total counter
+arca_gateway_population_queue_enqueued_total 0
+# TYPE arca_gateway_population_queue_dropped_full_total counter
+arca_gateway_population_queue_dropped_full_total 0
+# TYPE arca_gateway_population_queue_dropped_shutdown_total counter
+arca_gateway_population_queue_dropped_shutdown_total 0
+# TYPE arca_gateway_population_queue_completed_total counter
+arca_gateway_population_queue_completed_total 0
+# TYPE arca_gateway_population_queue_retries_total counter
+arca_gateway_population_queue_retries_total 0
+# TYPE arca_gateway_population_queue_deferred_for_reads_total counter
+arca_gateway_population_queue_deferred_for_reads_total 0
+# TYPE arca_gateway_population_queue_queued gauge
+arca_gateway_population_queue_queued 0
+# TYPE arca_gateway_population_queue_running gauge
+arca_gateway_population_queue_running 0
+# TYPE arca_gateway_meta_txn_attempts_total counter
+arca_gateway_meta_txn_attempts_total 447
+# TYPE arca_gateway_meta_txn_conflicts_total counter
+arca_gateway_meta_txn_conflicts_total 0
+# TYPE arca_gateway_meta_txn_unknown_retries_total counter
+arca_gateway_meta_txn_unknown_retries_total 0
+# TYPE arca_gateway_meta_txn_exhausted_total counter
+arca_gateway_meta_txn_exhausted_total 0
+--- 1793584880.628971710 http://127.0.0.1:9910/metrics
+# TYPE arca_node_put_in_flight gauge
+arca_node_put_in_flight 1
+# TYPE arca_node_phase_seconds histogram
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.005"} 44
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.01"} 98
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.025"} 186
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.05"} 252
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.1"} 252
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.25"} 252
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.5"} 252
+arca_node_phase_seconds_bucket{phase="put_recv",le="1"} 252
+arca_node_phase_seconds_bucket{phase="put_recv",le="2.5"} 252
+arca_node_phase_seconds_bucket{phase="put_recv",le="5"} 252
+arca_node_phase_seconds_bucket{phase="put_recv",le="10"} 252
+arca_node_phase_seconds_bucket{phase="put_recv",le="+Inf"} 252
+arca_node_phase_seconds_sum{phase="put_recv"} 4.341520756
+arca_node_phase_seconds_count{phase="put_recv"} 252
+arca_node_phase_seconds_max_seconds{phase="put_recv"} 0.048333217
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.001"} 226
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.005"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.01"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.025"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.05"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.1"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.25"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.5"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="1"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="2.5"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="5"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="10"} 252
+arca_node_phase_seconds_bucket{phase="put_queue",le="+Inf"} 252
+arca_node_phase_seconds_sum{phase="put_queue"} 0.090749949
+arca_node_phase_seconds_count{phase="put_queue"} 252
+arca_node_phase_seconds_max_seconds{phase="put_queue"} 0.003626595
+arca_node_phase_seconds_bucket{phase="put_store",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.01"} 62
+arca_node_phase_seconds_bucket{phase="put_store",le="0.025"} 226
+arca_node_phase_seconds_bucket{phase="put_store",le="0.05"} 252
+arca_node_phase_seconds_bucket{phase="put_store",le="0.1"} 252
+arca_node_phase_seconds_bucket{phase="put_store",le="0.25"} 252
+arca_node_phase_seconds_bucket{phase="put_store",le="0.5"} 252
+arca_node_phase_seconds_bucket{phase="put_store",le="1"} 252
+arca_node_phase_seconds_bucket{phase="put_store",le="2.5"} 252
+arca_node_phase_seconds_bucket{phase="put_store",le="5"} 252
+arca_node_phase_seconds_bucket{phase="put_store",le="10"} 252
+arca_node_phase_seconds_bucket{phase="put_store",le="+Inf"} 252
+arca_node_phase_seconds_sum{phase="put_store"} 3.836587009
+arca_node_phase_seconds_count{phase="put_store"} 252
+arca_node_phase_seconds_max_seconds{phase="put_store"} 0.040966521
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="10"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="get_serve"} 0
+arca_node_phase_seconds_count{phase="get_serve"} 0
+arca_node_phase_seconds_max_seconds{phase="get_serve"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.001"} 1
+arca_node_phase_seconds_bucket{phase="store_append",le="0.005"} 233
+arca_node_phase_seconds_bucket{phase="store_append",le="0.01"} 250
+arca_node_phase_seconds_bucket{phase="store_append",le="0.025"} 251
+arca_node_phase_seconds_bucket{phase="store_append",le="0.05"} 252
+arca_node_phase_seconds_bucket{phase="store_append",le="0.1"} 252
+arca_node_phase_seconds_bucket{phase="store_append",le="0.25"} 252
+arca_node_phase_seconds_bucket{phase="store_append",le="0.5"} 252
+arca_node_phase_seconds_bucket{phase="store_append",le="1"} 252
+arca_node_phase_seconds_bucket{phase="store_append",le="2.5"} 252
+arca_node_phase_seconds_bucket{phase="store_append",le="5"} 252
+arca_node_phase_seconds_bucket{phase="store_append",le="10"} 252
+arca_node_phase_seconds_bucket{phase="store_append",le="+Inf"} 252
+arca_node_phase_seconds_sum{phase="store_append"} 0.678593573
+arca_node_phase_seconds_count{phase="store_append"} 252
+arca_node_phase_seconds_max_seconds{phase="store_append"} 0.03198486
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_rollover"} 0
+arca_node_phase_seconds_count{phase="store_rollover"} 0
+arca_node_phase_seconds_max_seconds{phase="store_rollover"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.005"} 8
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.01"} 125
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.025"} 249
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.05"} 252
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.1"} 252
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.25"} 252
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.5"} 252
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="1"} 252
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="2.5"} 252
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="5"} 252
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="10"} 252
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="+Inf"} 252
+arca_node_phase_seconds_sum{phase="store_sync_wait"} 2.834179824
+arca_node_phase_seconds_count{phase="store_sync_wait"} 252
+arca_node_phase_seconds_max_seconds{phase="store_sync_wait"} 0.026206611
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.005"} 18
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.01"} 147
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.025"} 177
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.05"} 177
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.1"} 177
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.25"} 177
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.5"} 177
+arca_node_phase_seconds_bucket{phase="store_fsync",le="1"} 177
+arca_node_phase_seconds_bucket{phase="store_fsync",le="2.5"} 177
+arca_node_phase_seconds_bucket{phase="store_fsync",le="5"} 177
+arca_node_phase_seconds_bucket{phase="store_fsync",le="10"} 177
+arca_node_phase_seconds_bucket{phase="store_fsync",le="+Inf"} 177
+arca_node_phase_seconds_sum{phase="store_fsync"} 1.376791433
+arca_node_phase_seconds_count{phase="store_fsync"} 177
+arca_node_phase_seconds_max_seconds{phase="store_fsync"} 0.020205839
+--- 1793584880.628971710 http://127.0.0.1:9920/metrics
+unreachable
+--- 1793584880.628971710 http://127.0.0.1:9921/metrics
+unreachable
+--- 1793584881.695432315 http://127.0.0.1:9900/metrics
+# TYPE arca_gateway_cache_hits_total counter
+arca_gateway_cache_hits_total 0
+# TYPE arca_gateway_cache_misses_total counter
+arca_gateway_cache_misses_total 0
+# TYPE arca_gateway_cache_fallbacks_total counter
+arca_gateway_cache_fallbacks_total 0
+# TYPE arca_gateway_cache_invalidations_total counter
+arca_gateway_cache_invalidations_total 0
+# TYPE arca_gateway_cache_populated_total counter
+arca_gateway_cache_populated_total 0
+# TYPE arca_gateway_cache_population_failures_total counter
+arca_gateway_cache_population_failures_total 0
+# TYPE arca_gateway_cache_populations_deduplicated_total counter
+arca_gateway_cache_populations_deduplicated_total 0
+# TYPE arca_gateway_cache_admissions_rejected_total counter
+arca_gateway_cache_admissions_rejected_total 0
+# TYPE arca_gateway_cache_degraded_hits_total counter
+arca_gateway_cache_degraded_hits_total 0
+# TYPE arca_gateway_cache_shards_repaired_total counter
+arca_gateway_cache_shards_repaired_total 0
+# TYPE arca_gateway_cache_shard_repair_failures_total counter
+arca_gateway_cache_shard_repair_failures_total 0
+# TYPE arca_gateway_cache_shard_repairs_skipped_total counter
+arca_gateway_cache_shard_repairs_skipped_total 0
+# TYPE arca_gateway_cache_populations_skipped_total counter
+arca_gateway_cache_populations_skipped_total 0
+# TYPE arca_gateway_cache_lookup_hits_total counter
+arca_gateway_cache_lookup_hits_total 0
+# TYPE arca_gateway_cache_fallback_unreadable_total counter
+arca_gateway_cache_fallback_unreadable_total 0
+# TYPE arca_gateway_cache_fallback_corrupt_total counter
+arca_gateway_cache_fallback_corrupt_total 0
+# TYPE arca_gateway_cache_fallback_node_total counter
+arca_gateway_cache_fallback_node_total 0
+# TYPE arca_gateway_cache_fallback_unknown_group_total counter
+arca_gateway_cache_fallback_unknown_group_total 0
+# TYPE arca_gateway_cache_admission_rejected_size_total counter
+arca_gateway_cache_admission_rejected_size_total 0
+# TYPE arca_gateway_cache_admission_rejected_threshold_total counter
+arca_gateway_cache_admission_rejected_threshold_total 0
+# TYPE arca_gateway_cache_admission_rejected_capacity_total counter
+arca_gateway_cache_admission_rejected_capacity_total 0
+# TYPE arca_gateway_cache_admission_rejected_generation_total counter
+arca_gateway_cache_admission_rejected_generation_total 0
+# TYPE arca_gateway_cache_population_failures_node_total counter
+arca_gateway_cache_population_failures_node_total 0
+# TYPE arca_gateway_cache_population_failures_meta_total counter
+arca_gateway_cache_population_failures_meta_total 0
+# TYPE arca_gateway_cache_population_failures_corrupt_total counter
+arca_gateway_cache_population_failures_corrupt_total 0
+# TYPE arca_gateway_node_rpc_stalled_total counter
+arca_gateway_node_rpc_stalled_total 0
+# TYPE arca_gateway_node_rpc_deadline_exceeded_total counter
+arca_gateway_node_rpc_deadline_exceeded_total 0
+# TYPE arca_gateway_node_rpc_unary_timeouts_total counter
+arca_gateway_node_rpc_unary_timeouts_total 0
+# TYPE arca_gateway_node_rpc_retries_total counter
+arca_gateway_node_rpc_retries_total 0
+# TYPE arca_gateway_node_rpc_exhausted_total counter
+arca_gateway_node_rpc_exhausted_total 0
+# TYPE arca_gateway_put_in_flight gauge
+arca_gateway_put_in_flight 4
+# TYPE arca_gateway_put_phase_seconds histogram
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.001"} 82
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.005"} 241
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.01"} 314
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.025"} 356
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.05"} 362
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.1"} 362
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.25"} 362
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.5"} 362
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="1"} 362
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="2.5"} 362
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="5"} 362
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="10"} 362
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="+Inf"} 362
+arca_gateway_put_phase_seconds_sum{phase="body_read"} 1.741121532
+arca_gateway_put_phase_seconds_count{phase="body_read"} 362
+arca_gateway_put_phase_seconds_max_seconds{phase="body_read"} 0.030828245
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.005"} 161
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.01"} 280
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.025"} 290
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.05"} 290
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.1"} 290
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.25"} 290
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.5"} 290
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="1"} 290
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="2.5"} 290
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="5"} 290
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="10"} 290
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="+Inf"} 290
+arca_gateway_put_phase_seconds_sum{phase="encode"} 1.543638988
+arca_gateway_put_phase_seconds_count{phase="encode"} 290
+arca_gateway_put_phase_seconds_max_seconds{phase="encode"} 0.016374094
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.025"} 12
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.05"} 118
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.1"} 263
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.25"} 288
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.5"} 288
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="1"} 288
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="2.5"} 288
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="5"} 288
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="10"} 288
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="+Inf"} 288
+arca_gateway_put_phase_seconds_sum{phase="shard_write"} 17.367656736
+arca_gateway_put_phase_seconds_count{phase="shard_write"} 288
+arca_gateway_put_phase_seconds_max_seconds{phase="shard_write"} 0.222621618
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.005"} 27
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.01"} 45
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.025"} 65
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.05"} 65
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.1"} 69
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.25"} 70
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.5"} 70
+arca_gateway_put_phase_seconds_bucket{phase="append",le="1"} 70
+arca_gateway_put_phase_seconds_bucket{phase="append",le="2.5"} 70
+arca_gateway_put_phase_seconds_bucket{phase="append",le="5"} 70
+arca_gateway_put_phase_seconds_bucket{phase="append",le="10"} 70
+arca_gateway_put_phase_seconds_bucket{phase="append",le="+Inf"} 70
+arca_gateway_put_phase_seconds_sum{phase="append"} 0.931804322
+arca_gateway_put_phase_seconds_count{phase="append"} 70
+arca_gateway_put_phase_seconds_max_seconds{phase="append"} 0.121502914
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_count{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.005"} 30
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.01"} 46
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.025"} 64
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.05"} 64
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.1"} 67
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.25"} 69
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.5"} 69
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="1"} 69
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="2.5"} 69
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="5"} 69
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="10"} 69
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="+Inf"} 69
+arca_gateway_put_phase_seconds_sum{phase="commit"} 0.991309154
+arca_gateway_put_phase_seconds_count{phase="commit"} 69
+arca_gateway_put_phase_seconds_max_seconds{phase="commit"} 0.140359623
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.25"} 64
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.5"} 66
+arca_gateway_put_phase_seconds_bucket{phase="total",le="1"} 69
+arca_gateway_put_phase_seconds_bucket{phase="total",le="2.5"} 69
+arca_gateway_put_phase_seconds_bucket{phase="total",le="5"} 69
+arca_gateway_put_phase_seconds_bucket{phase="total",le="10"} 69
+arca_gateway_put_phase_seconds_bucket{phase="total",le="+Inf"} 69
+arca_gateway_put_phase_seconds_sum{phase="total"} 13.614698708
+arca_gateway_put_phase_seconds_count{phase="total"} 69
+arca_gateway_put_phase_seconds_max_seconds{phase="total"} 0.556042871
+# TYPE arca_gateway_population_queue_enqueued_total counter
+arca_gateway_population_queue_enqueued_total 0
+# TYPE arca_gateway_population_queue_dropped_full_total counter
+arca_gateway_population_queue_dropped_full_total 0
+# TYPE arca_gateway_population_queue_dropped_shutdown_total counter
+arca_gateway_population_queue_dropped_shutdown_total 0
+# TYPE arca_gateway_population_queue_completed_total counter
+arca_gateway_population_queue_completed_total 0
+# TYPE arca_gateway_population_queue_retries_total counter
+arca_gateway_population_queue_retries_total 0
+# TYPE arca_gateway_population_queue_deferred_for_reads_total counter
+arca_gateway_population_queue_deferred_for_reads_total 0
+# TYPE arca_gateway_population_queue_queued gauge
+arca_gateway_population_queue_queued 0
+# TYPE arca_gateway_population_queue_running gauge
+arca_gateway_population_queue_running 0
+# TYPE arca_gateway_meta_txn_attempts_total counter
+arca_gateway_meta_txn_attempts_total 509
+# TYPE arca_gateway_meta_txn_conflicts_total counter
+arca_gateway_meta_txn_conflicts_total 0
+# TYPE arca_gateway_meta_txn_unknown_retries_total counter
+arca_gateway_meta_txn_unknown_retries_total 0
+# TYPE arca_gateway_meta_txn_exhausted_total counter
+arca_gateway_meta_txn_exhausted_total 0
+--- 1793584881.695432315 http://127.0.0.1:9910/metrics
+# TYPE arca_node_put_in_flight gauge
+arca_node_put_in_flight 2
+# TYPE arca_node_phase_seconds histogram
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.001"} 2
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.005"} 77
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.01"} 133
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.025"} 223
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.05"} 290
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.1"} 290
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.25"} 290
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.5"} 290
+arca_node_phase_seconds_bucket{phase="put_recv",le="1"} 290
+arca_node_phase_seconds_bucket{phase="put_recv",le="2.5"} 290
+arca_node_phase_seconds_bucket{phase="put_recv",le="5"} 290
+arca_node_phase_seconds_bucket{phase="put_recv",le="10"} 290
+arca_node_phase_seconds_bucket{phase="put_recv",le="+Inf"} 290
+arca_node_phase_seconds_sum{phase="put_recv"} 4.49423534
+arca_node_phase_seconds_count{phase="put_recv"} 290
+arca_node_phase_seconds_max_seconds{phase="put_recv"} 0.048333217
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.001"} 261
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.005"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.01"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.025"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.05"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.1"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.25"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.5"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="1"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="2.5"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="5"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="10"} 288
+arca_node_phase_seconds_bucket{phase="put_queue",le="+Inf"} 288
+arca_node_phase_seconds_sum{phase="put_queue"} 0.096693701
+arca_node_phase_seconds_count{phase="put_queue"} 288
+arca_node_phase_seconds_max_seconds{phase="put_queue"} 0.003626595
+arca_node_phase_seconds_bucket{phase="put_store",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.01"} 62
+arca_node_phase_seconds_bucket{phase="put_store",le="0.025"} 229
+arca_node_phase_seconds_bucket{phase="put_store",le="0.05"} 263
+arca_node_phase_seconds_bucket{phase="put_store",le="0.1"} 276
+arca_node_phase_seconds_bucket{phase="put_store",le="0.25"} 288
+arca_node_phase_seconds_bucket{phase="put_store",le="0.5"} 288
+arca_node_phase_seconds_bucket{phase="put_store",le="1"} 288
+arca_node_phase_seconds_bucket{phase="put_store",le="2.5"} 288
+arca_node_phase_seconds_bucket{phase="put_store",le="5"} 288
+arca_node_phase_seconds_bucket{phase="put_store",le="10"} 288
+arca_node_phase_seconds_bucket{phase="put_store",le="+Inf"} 288
+arca_node_phase_seconds_sum{phase="put_store"} 6.640273967
+arca_node_phase_seconds_count{phase="put_store"} 288
+arca_node_phase_seconds_max_seconds{phase="put_store"} 0.125174554
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="10"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="get_serve"} 0
+arca_node_phase_seconds_count{phase="get_serve"} 0
+arca_node_phase_seconds_max_seconds{phase="get_serve"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.001"} 1
+arca_node_phase_seconds_bucket{phase="store_append",le="0.005"} 268
+arca_node_phase_seconds_bucket{phase="store_append",le="0.01"} 287
+arca_node_phase_seconds_bucket{phase="store_append",le="0.025"} 289
+arca_node_phase_seconds_bucket{phase="store_append",le="0.05"} 290
+arca_node_phase_seconds_bucket{phase="store_append",le="0.1"} 290
+arca_node_phase_seconds_bucket{phase="store_append",le="0.25"} 290
+arca_node_phase_seconds_bucket{phase="store_append",le="0.5"} 290
+arca_node_phase_seconds_bucket{phase="store_append",le="1"} 290
+arca_node_phase_seconds_bucket{phase="store_append",le="2.5"} 290
+arca_node_phase_seconds_bucket{phase="store_append",le="5"} 290
+arca_node_phase_seconds_bucket{phase="store_append",le="10"} 290
+arca_node_phase_seconds_bucket{phase="store_append",le="+Inf"} 290
+arca_node_phase_seconds_sum{phase="store_append"} 0.771243425
+arca_node_phase_seconds_count{phase="store_append"} 290
+arca_node_phase_seconds_max_seconds{phase="store_append"} 0.03198486
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_rollover"} 0
+arca_node_phase_seconds_count{phase="store_rollover"} 0
+arca_node_phase_seconds_max_seconds{phase="store_rollover"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.005"} 8
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.01"} 125
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.025"} 255
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.05"} 263
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.1"} 277
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.25"} 288
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.5"} 288
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="1"} 288
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="2.5"} 288
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="5"} 288
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="10"} 288
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="+Inf"} 288
+arca_node_phase_seconds_sum{phase="store_sync_wait"} 5.545599102
+arca_node_phase_seconds_count{phase="store_sync_wait"} 288
+arca_node_phase_seconds_max_seconds{phase="store_sync_wait"} 0.122829151
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.005"} 18
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.01"} 147
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.025"} 183
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.05"} 184
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.1"} 197
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.25"} 197
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.5"} 197
+arca_node_phase_seconds_bucket{phase="store_fsync",le="1"} 197
+arca_node_phase_seconds_bucket{phase="store_fsync",le="2.5"} 197
+arca_node_phase_seconds_bucket{phase="store_fsync",le="5"} 197
+arca_node_phase_seconds_bucket{phase="store_fsync",le="10"} 197
+arca_node_phase_seconds_bucket{phase="store_fsync",le="+Inf"} 197
+arca_node_phase_seconds_sum{phase="store_fsync"} 2.337267747
+arca_node_phase_seconds_count{phase="store_fsync"} 197
+arca_node_phase_seconds_max_seconds{phase="store_fsync"} 0.082900651
+--- 1793584881.695432315 http://127.0.0.1:9920/metrics
+unreachable
+--- 1793584881.695432315 http://127.0.0.1:9921/metrics
+unreachable
+--- 1793584882.720917805 http://127.0.0.1:9900/metrics
+# TYPE arca_gateway_cache_hits_total counter
+arca_gateway_cache_hits_total 0
+# TYPE arca_gateway_cache_misses_total counter
+arca_gateway_cache_misses_total 0
+# TYPE arca_gateway_cache_fallbacks_total counter
+arca_gateway_cache_fallbacks_total 0
+# TYPE arca_gateway_cache_invalidations_total counter
+arca_gateway_cache_invalidations_total 0
+# TYPE arca_gateway_cache_populated_total counter
+arca_gateway_cache_populated_total 0
+# TYPE arca_gateway_cache_population_failures_total counter
+arca_gateway_cache_population_failures_total 0
+# TYPE arca_gateway_cache_populations_deduplicated_total counter
+arca_gateway_cache_populations_deduplicated_total 0
+# TYPE arca_gateway_cache_admissions_rejected_total counter
+arca_gateway_cache_admissions_rejected_total 0
+# TYPE arca_gateway_cache_degraded_hits_total counter
+arca_gateway_cache_degraded_hits_total 0
+# TYPE arca_gateway_cache_shards_repaired_total counter
+arca_gateway_cache_shards_repaired_total 0
+# TYPE arca_gateway_cache_shard_repair_failures_total counter
+arca_gateway_cache_shard_repair_failures_total 0
+# TYPE arca_gateway_cache_shard_repairs_skipped_total counter
+arca_gateway_cache_shard_repairs_skipped_total 0
+# TYPE arca_gateway_cache_populations_skipped_total counter
+arca_gateway_cache_populations_skipped_total 0
+# TYPE arca_gateway_cache_lookup_hits_total counter
+arca_gateway_cache_lookup_hits_total 0
+# TYPE arca_gateway_cache_fallback_unreadable_total counter
+arca_gateway_cache_fallback_unreadable_total 0
+# TYPE arca_gateway_cache_fallback_corrupt_total counter
+arca_gateway_cache_fallback_corrupt_total 0
+# TYPE arca_gateway_cache_fallback_node_total counter
+arca_gateway_cache_fallback_node_total 0
+# TYPE arca_gateway_cache_fallback_unknown_group_total counter
+arca_gateway_cache_fallback_unknown_group_total 0
+# TYPE arca_gateway_cache_admission_rejected_size_total counter
+arca_gateway_cache_admission_rejected_size_total 0
+# TYPE arca_gateway_cache_admission_rejected_threshold_total counter
+arca_gateway_cache_admission_rejected_threshold_total 0
+# TYPE arca_gateway_cache_admission_rejected_capacity_total counter
+arca_gateway_cache_admission_rejected_capacity_total 0
+# TYPE arca_gateway_cache_admission_rejected_generation_total counter
+arca_gateway_cache_admission_rejected_generation_total 0
+# TYPE arca_gateway_cache_population_failures_node_total counter
+arca_gateway_cache_population_failures_node_total 0
+# TYPE arca_gateway_cache_population_failures_meta_total counter
+arca_gateway_cache_population_failures_meta_total 0
+# TYPE arca_gateway_cache_population_failures_corrupt_total counter
+arca_gateway_cache_population_failures_corrupt_total 0
+# TYPE arca_gateway_node_rpc_stalled_total counter
+arca_gateway_node_rpc_stalled_total 0
+# TYPE arca_gateway_node_rpc_deadline_exceeded_total counter
+arca_gateway_node_rpc_deadline_exceeded_total 0
+# TYPE arca_gateway_node_rpc_unary_timeouts_total counter
+arca_gateway_node_rpc_unary_timeouts_total 0
+# TYPE arca_gateway_node_rpc_retries_total counter
+arca_gateway_node_rpc_retries_total 0
+# TYPE arca_gateway_node_rpc_exhausted_total counter
+arca_gateway_node_rpc_exhausted_total 0
+# TYPE arca_gateway_put_in_flight gauge
+arca_gateway_put_in_flight 4
+# TYPE arca_gateway_put_phase_seconds histogram
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.001"} 93
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.005"} 279
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.01"} 353
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.025"} 395
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.05"} 401
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.1"} 401
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.25"} 401
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.5"} 401
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="1"} 401
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="2.5"} 401
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="5"} 401
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="10"} 401
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="+Inf"} 401
+arca_gateway_put_phase_seconds_sum{phase="body_read"} 1.809885942
+arca_gateway_put_phase_seconds_count{phase="body_read"} 401
+arca_gateway_put_phase_seconds_max_seconds{phase="body_read"} 0.030828245
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.005"} 186
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.01"} 311
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.025"} 322
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.05"} 322
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.1"} 322
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.25"} 322
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.5"} 322
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="1"} 322
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="2.5"} 322
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="5"} 322
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="10"} 322
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="+Inf"} 322
+arca_gateway_put_phase_seconds_sum{phase="encode"} 1.680705173
+arca_gateway_put_phase_seconds_count{phase="encode"} 322
+arca_gateway_put_phase_seconds_max_seconds{phase="encode"} 0.016374094
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.025"} 12
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.05"} 119
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.1"} 273
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.25"} 317
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.5"} 317
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="1"} 317
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="2.5"} 317
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="5"} 317
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="10"} 317
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="+Inf"} 317
+arca_gateway_put_phase_seconds_sum{phase="shard_write"} 20.595793644
+arca_gateway_put_phase_seconds_count{phase="shard_write"} 317
+arca_gateway_put_phase_seconds_max_seconds{phase="shard_write"} 0.222621618
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.005"} 27
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.01"} 45
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.025"} 65
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.05"} 66
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.1"} 76
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.25"} 78
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.5"} 78
+arca_gateway_put_phase_seconds_bucket{phase="append",le="1"} 78
+arca_gateway_put_phase_seconds_bucket{phase="append",le="2.5"} 78
+arca_gateway_put_phase_seconds_bucket{phase="append",le="5"} 78
+arca_gateway_put_phase_seconds_bucket{phase="append",le="10"} 78
+arca_gateway_put_phase_seconds_bucket{phase="append",le="+Inf"} 78
+arca_gateway_put_phase_seconds_sum{phase="append"} 1.538738656
+arca_gateway_put_phase_seconds_count{phase="append"} 78
+arca_gateway_put_phase_seconds_max_seconds{phase="append"} 0.121502914
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_count{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.005"} 30
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.01"} 46
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.025"} 64
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.05"} 65
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.1"} 72
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.25"} 78
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.5"} 78
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="1"} 78
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="2.5"} 78
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="5"} 78
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="10"} 78
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="+Inf"} 78
+arca_gateway_put_phase_seconds_sum{phase="commit"} 1.787494047
+arca_gateway_put_phase_seconds_count{phase="commit"} 78
+arca_gateway_put_phase_seconds_max_seconds{phase="commit"} 0.14184961
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.25"} 64
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.5"} 69
+arca_gateway_put_phase_seconds_bucket{phase="total",le="1"} 78
+arca_gateway_put_phase_seconds_bucket{phase="total",le="2.5"} 78
+arca_gateway_put_phase_seconds_bucket{phase="total",le="5"} 78
+arca_gateway_put_phase_seconds_bucket{phase="total",le="10"} 78
+arca_gateway_put_phase_seconds_bucket{phase="total",le="+Inf"} 78
+arca_gateway_put_phase_seconds_sum{phase="total"} 18.342399714
+arca_gateway_put_phase_seconds_count{phase="total"} 78
+arca_gateway_put_phase_seconds_max_seconds{phase="total"} 0.606439556
+# TYPE arca_gateway_population_queue_enqueued_total counter
+arca_gateway_population_queue_enqueued_total 0
+# TYPE arca_gateway_population_queue_dropped_full_total counter
+arca_gateway_population_queue_dropped_full_total 0
+# TYPE arca_gateway_population_queue_dropped_shutdown_total counter
+arca_gateway_population_queue_dropped_shutdown_total 0
+# TYPE arca_gateway_population_queue_completed_total counter
+arca_gateway_population_queue_completed_total 0
+# TYPE arca_gateway_population_queue_retries_total counter
+arca_gateway_population_queue_retries_total 0
+# TYPE arca_gateway_population_queue_deferred_for_reads_total counter
+arca_gateway_population_queue_deferred_for_reads_total 0
+# TYPE arca_gateway_population_queue_queued gauge
+arca_gateway_population_queue_queued 0
+# TYPE arca_gateway_population_queue_running gauge
+arca_gateway_population_queue_running 0
+# TYPE arca_gateway_meta_txn_attempts_total counter
+arca_gateway_meta_txn_attempts_total 564
+# TYPE arca_gateway_meta_txn_conflicts_total counter
+arca_gateway_meta_txn_conflicts_total 0
+# TYPE arca_gateway_meta_txn_unknown_retries_total counter
+arca_gateway_meta_txn_unknown_retries_total 0
+# TYPE arca_gateway_meta_txn_exhausted_total counter
+arca_gateway_meta_txn_exhausted_total 0
+--- 1793584882.720917805 http://127.0.0.1:9910/metrics
+# TYPE arca_node_put_in_flight gauge
+arca_node_put_in_flight 0
+# TYPE arca_node_phase_seconds histogram
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.001"} 6
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.005"} 103
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.01"} 164
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.025"} 255
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.05"} 322
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.1"} 322
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.25"} 322
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.5"} 322
+arca_node_phase_seconds_bucket{phase="put_recv",le="1"} 322
+arca_node_phase_seconds_bucket{phase="put_recv",le="2.5"} 322
+arca_node_phase_seconds_bucket{phase="put_recv",le="5"} 322
+arca_node_phase_seconds_bucket{phase="put_recv",le="10"} 322
+arca_node_phase_seconds_bucket{phase="put_recv",le="+Inf"} 322
+arca_node_phase_seconds_sum{phase="put_recv"} 4.595509584
+arca_node_phase_seconds_count{phase="put_recv"} 322
+arca_node_phase_seconds_max_seconds{phase="put_recv"} 0.048333217
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.001"} 295
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.005"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.01"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.025"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.05"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.1"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.25"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.5"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="1"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="2.5"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="5"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="10"} 322
+arca_node_phase_seconds_bucket{phase="put_queue",le="+Inf"} 322
+arca_node_phase_seconds_sum{phase="put_queue"} 0.099422303
+arca_node_phase_seconds_count{phase="put_queue"} 322
+arca_node_phase_seconds_max_seconds{phase="put_queue"} 0.003626595
+arca_node_phase_seconds_bucket{phase="put_store",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.01"} 62
+arca_node_phase_seconds_bucket{phase="put_store",le="0.025"} 229
+arca_node_phase_seconds_bucket{phase="put_store",le="0.05"} 266
+arca_node_phase_seconds_bucket{phase="put_store",le="0.1"} 303
+arca_node_phase_seconds_bucket{phase="put_store",le="0.25"} 322
+arca_node_phase_seconds_bucket{phase="put_store",le="0.5"} 322
+arca_node_phase_seconds_bucket{phase="put_store",le="1"} 322
+arca_node_phase_seconds_bucket{phase="put_store",le="2.5"} 322
+arca_node_phase_seconds_bucket{phase="put_store",le="5"} 322
+arca_node_phase_seconds_bucket{phase="put_store",le="10"} 322
+arca_node_phase_seconds_bucket{phase="put_store",le="+Inf"} 322
+arca_node_phase_seconds_sum{phase="put_store"} 9.389702681
+arca_node_phase_seconds_count{phase="put_store"} 322
+arca_node_phase_seconds_max_seconds{phase="put_store"} 0.125372639
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="10"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="get_serve"} 0
+arca_node_phase_seconds_count{phase="get_serve"} 0
+arca_node_phase_seconds_max_seconds{phase="get_serve"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.001"} 2
+arca_node_phase_seconds_bucket{phase="store_append",le="0.005"} 299
+arca_node_phase_seconds_bucket{phase="store_append",le="0.01"} 319
+arca_node_phase_seconds_bucket{phase="store_append",le="0.025"} 321
+arca_node_phase_seconds_bucket{phase="store_append",le="0.05"} 322
+arca_node_phase_seconds_bucket{phase="store_append",le="0.1"} 322
+arca_node_phase_seconds_bucket{phase="store_append",le="0.25"} 322
+arca_node_phase_seconds_bucket{phase="store_append",le="0.5"} 322
+arca_node_phase_seconds_bucket{phase="store_append",le="1"} 322
+arca_node_phase_seconds_bucket{phase="store_append",le="2.5"} 322
+arca_node_phase_seconds_bucket{phase="store_append",le="5"} 322
+arca_node_phase_seconds_bucket{phase="store_append",le="10"} 322
+arca_node_phase_seconds_bucket{phase="store_append",le="+Inf"} 322
+arca_node_phase_seconds_sum{phase="store_append"} 0.838426919
+arca_node_phase_seconds_count{phase="store_append"} 322
+arca_node_phase_seconds_max_seconds{phase="store_append"} 0.03198486
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_rollover"} 0
+arca_node_phase_seconds_count{phase="store_rollover"} 0
+arca_node_phase_seconds_max_seconds{phase="store_rollover"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.005"} 8
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.01"} 125
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.025"} 255
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.05"} 267
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.1"} 305
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.25"} 322
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.5"} 322
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="1"} 322
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="2.5"} 322
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="5"} 322
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="10"} 322
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="+Inf"} 322
+arca_node_phase_seconds_sum{phase="store_sync_wait"} 8.210685943
+arca_node_phase_seconds_count{phase="store_sync_wait"} 322
+arca_node_phase_seconds_max_seconds{phase="store_sync_wait"} 0.123532747
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.005"} 18
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.01"} 147
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.025"} 183
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.05"} 195
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.1"} 216
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.25"} 216
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.5"} 216
+arca_node_phase_seconds_bucket{phase="store_fsync",le="1"} 216
+arca_node_phase_seconds_bucket{phase="store_fsync",le="2.5"} 216
+arca_node_phase_seconds_bucket{phase="store_fsync",le="5"} 216
+arca_node_phase_seconds_bucket{phase="store_fsync",le="10"} 216
+arca_node_phase_seconds_bucket{phase="store_fsync",le="+Inf"} 216
+arca_node_phase_seconds_sum{phase="store_fsync"} 3.283571405
+arca_node_phase_seconds_count{phase="store_fsync"} 216
+arca_node_phase_seconds_max_seconds{phase="store_fsync"} 0.082900651
+--- 1793584882.720917805 http://127.0.0.1:9920/metrics
+unreachable
+--- 1793584882.720917805 http://127.0.0.1:9921/metrics
+unreachable
+--- 1793584883.753341926 http://127.0.0.1:9900/metrics
+# TYPE arca_gateway_cache_hits_total counter
+arca_gateway_cache_hits_total 0
+# TYPE arca_gateway_cache_misses_total counter
+arca_gateway_cache_misses_total 0
+# TYPE arca_gateway_cache_fallbacks_total counter
+arca_gateway_cache_fallbacks_total 0
+# TYPE arca_gateway_cache_invalidations_total counter
+arca_gateway_cache_invalidations_total 0
+# TYPE arca_gateway_cache_populated_total counter
+arca_gateway_cache_populated_total 0
+# TYPE arca_gateway_cache_population_failures_total counter
+arca_gateway_cache_population_failures_total 0
+# TYPE arca_gateway_cache_populations_deduplicated_total counter
+arca_gateway_cache_populations_deduplicated_total 0
+# TYPE arca_gateway_cache_admissions_rejected_total counter
+arca_gateway_cache_admissions_rejected_total 0
+# TYPE arca_gateway_cache_degraded_hits_total counter
+arca_gateway_cache_degraded_hits_total 0
+# TYPE arca_gateway_cache_shards_repaired_total counter
+arca_gateway_cache_shards_repaired_total 0
+# TYPE arca_gateway_cache_shard_repair_failures_total counter
+arca_gateway_cache_shard_repair_failures_total 0
+# TYPE arca_gateway_cache_shard_repairs_skipped_total counter
+arca_gateway_cache_shard_repairs_skipped_total 0
+# TYPE arca_gateway_cache_populations_skipped_total counter
+arca_gateway_cache_populations_skipped_total 0
+# TYPE arca_gateway_cache_lookup_hits_total counter
+arca_gateway_cache_lookup_hits_total 0
+# TYPE arca_gateway_cache_fallback_unreadable_total counter
+arca_gateway_cache_fallback_unreadable_total 0
+# TYPE arca_gateway_cache_fallback_corrupt_total counter
+arca_gateway_cache_fallback_corrupt_total 0
+# TYPE arca_gateway_cache_fallback_node_total counter
+arca_gateway_cache_fallback_node_total 0
+# TYPE arca_gateway_cache_fallback_unknown_group_total counter
+arca_gateway_cache_fallback_unknown_group_total 0
+# TYPE arca_gateway_cache_admission_rejected_size_total counter
+arca_gateway_cache_admission_rejected_size_total 0
+# TYPE arca_gateway_cache_admission_rejected_threshold_total counter
+arca_gateway_cache_admission_rejected_threshold_total 0
+# TYPE arca_gateway_cache_admission_rejected_capacity_total counter
+arca_gateway_cache_admission_rejected_capacity_total 0
+# TYPE arca_gateway_cache_admission_rejected_generation_total counter
+arca_gateway_cache_admission_rejected_generation_total 0
+# TYPE arca_gateway_cache_population_failures_node_total counter
+arca_gateway_cache_population_failures_node_total 0
+# TYPE arca_gateway_cache_population_failures_meta_total counter
+arca_gateway_cache_population_failures_meta_total 0
+# TYPE arca_gateway_cache_population_failures_corrupt_total counter
+arca_gateway_cache_population_failures_corrupt_total 0
+# TYPE arca_gateway_node_rpc_stalled_total counter
+arca_gateway_node_rpc_stalled_total 0
+# TYPE arca_gateway_node_rpc_deadline_exceeded_total counter
+arca_gateway_node_rpc_deadline_exceeded_total 0
+# TYPE arca_gateway_node_rpc_unary_timeouts_total counter
+arca_gateway_node_rpc_unary_timeouts_total 0
+# TYPE arca_gateway_node_rpc_retries_total counter
+arca_gateway_node_rpc_retries_total 0
+# TYPE arca_gateway_node_rpc_exhausted_total counter
+arca_gateway_node_rpc_exhausted_total 0
+# TYPE arca_gateway_put_in_flight gauge
+arca_gateway_put_in_flight 4
+# TYPE arca_gateway_put_phase_seconds histogram
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.001"} 113
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.005"} 339
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.01"} 413
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.025"} 457
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.05"} 463
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.1"} 463
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.25"} 463
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.5"} 463
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="1"} 463
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="2.5"} 463
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="5"} 463
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="10"} 463
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="+Inf"} 463
+arca_gateway_put_phase_seconds_sum{phase="body_read"} 1.931271712
+arca_gateway_put_phase_seconds_count{phase="body_read"} 463
+arca_gateway_put_phase_seconds_max_seconds{phase="body_read"} 0.030828245
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.005"} 221
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.01"} 360
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.025"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.05"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.1"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.25"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.5"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="1"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="2.5"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="5"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="10"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="+Inf"} 372
+arca_gateway_put_phase_seconds_sum{phase="encode"} 1.91819644
+arca_gateway_put_phase_seconds_count{phase="encode"} 372
+arca_gateway_put_phase_seconds_max_seconds{phase="encode"} 0.016374094
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.025"} 14
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.05"} 124
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.1"} 300
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.25"} 367
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.5"} 367
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="1"} 367
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="2.5"} 367
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="5"} 367
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="10"} 367
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="+Inf"} 367
+arca_gateway_put_phase_seconds_sum{phase="shard_write"} 25.261297395
+arca_gateway_put_phase_seconds_count{phase="shard_write"} 367
+arca_gateway_put_phase_seconds_max_seconds{phase="shard_write"} 0.222621618
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.005"} 27
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.01"} 47
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.025"} 70
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.05"} 76
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.1"} 88
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.25"} 90
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.5"} 90
+arca_gateway_put_phase_seconds_bucket{phase="append",le="1"} 90
+arca_gateway_put_phase_seconds_bucket{phase="append",le="2.5"} 90
+arca_gateway_put_phase_seconds_bucket{phase="append",le="5"} 90
+arca_gateway_put_phase_seconds_bucket{phase="append",le="10"} 90
+arca_gateway_put_phase_seconds_bucket{phase="append",le="+Inf"} 90
+arca_gateway_put_phase_seconds_sum{phase="append"} 1.900194807
+arca_gateway_put_phase_seconds_count{phase="append"} 90
+arca_gateway_put_phase_seconds_max_seconds{phase="append"} 0.121502914
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_count{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.005"} 30
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.01"} 46
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.025"} 69
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.05"} 75
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.1"} 83
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.25"} 90
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.5"} 90
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="1"} 90
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="2.5"} 90
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="5"} 90
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="10"} 90
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="+Inf"} 90
+arca_gateway_put_phase_seconds_sum{phase="commit"} 2.217163429
+arca_gateway_put_phase_seconds_count{phase="commit"} 90
+arca_gateway_put_phase_seconds_max_seconds{phase="commit"} 0.14184961
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.25"} 68
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.5"} 81
+arca_gateway_put_phase_seconds_bucket{phase="total",le="1"} 90
+arca_gateway_put_phase_seconds_bucket{phase="total",le="2.5"} 90
+arca_gateway_put_phase_seconds_bucket{phase="total",le="5"} 90
+arca_gateway_put_phase_seconds_bucket{phase="total",le="10"} 90
+arca_gateway_put_phase_seconds_bucket{phase="total",le="+Inf"} 90
+arca_gateway_put_phase_seconds_sum{phase="total"} 22.362936947
+arca_gateway_put_phase_seconds_count{phase="total"} 90
+arca_gateway_put_phase_seconds_max_seconds{phase="total"} 0.606439556
+# TYPE arca_gateway_population_queue_enqueued_total counter
+arca_gateway_population_queue_enqueued_total 0
+# TYPE arca_gateway_population_queue_dropped_full_total counter
+arca_gateway_population_queue_dropped_full_total 0
+# TYPE arca_gateway_population_queue_dropped_shutdown_total counter
+arca_gateway_population_queue_dropped_shutdown_total 0
+# TYPE arca_gateway_population_queue_completed_total counter
+arca_gateway_population_queue_completed_total 0
+# TYPE arca_gateway_population_queue_retries_total counter
+arca_gateway_population_queue_retries_total 0
+# TYPE arca_gateway_population_queue_deferred_for_reads_total counter
+arca_gateway_population_queue_deferred_for_reads_total 0
+# TYPE arca_gateway_population_queue_queued gauge
+arca_gateway_population_queue_queued 0
+# TYPE arca_gateway_population_queue_running gauge
+arca_gateway_population_queue_running 0
+# TYPE arca_gateway_meta_txn_attempts_total counter
+arca_gateway_meta_txn_attempts_total 650
+# TYPE arca_gateway_meta_txn_conflicts_total counter
+arca_gateway_meta_txn_conflicts_total 0
+# TYPE arca_gateway_meta_txn_unknown_retries_total counter
+arca_gateway_meta_txn_unknown_retries_total 0
+# TYPE arca_gateway_meta_txn_exhausted_total counter
+arca_gateway_meta_txn_exhausted_total 0
+--- 1793584883.753341926 http://127.0.0.1:9910/metrics
+# TYPE arca_node_put_in_flight gauge
+arca_node_put_in_flight 4
+# TYPE arca_node_phase_seconds histogram
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.001"} 9
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.005"} 138
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.01"} 211
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.025"} 305
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.05"} 372
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.1"} 372
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.25"} 372
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.5"} 372
+arca_node_phase_seconds_bucket{phase="put_recv",le="1"} 372
+arca_node_phase_seconds_bucket{phase="put_recv",le="2.5"} 372
+arca_node_phase_seconds_bucket{phase="put_recv",le="5"} 372
+arca_node_phase_seconds_bucket{phase="put_recv",le="10"} 372
+arca_node_phase_seconds_bucket{phase="put_recv",le="+Inf"} 372
+arca_node_phase_seconds_sum{phase="put_recv"} 4.803566004
+arca_node_phase_seconds_count{phase="put_recv"} 372
+arca_node_phase_seconds_max_seconds{phase="put_recv"} 0.048333217
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.001"} 340
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.005"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.01"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.025"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.05"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.1"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.25"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.5"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="1"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="2.5"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="5"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="10"} 368
+arca_node_phase_seconds_bucket{phase="put_queue",le="+Inf"} 368
+arca_node_phase_seconds_sum{phase="put_queue"} 0.10541562
+arca_node_phase_seconds_count{phase="put_queue"} 368
+arca_node_phase_seconds_max_seconds{phase="put_queue"} 0.003626595
+arca_node_phase_seconds_bucket{phase="put_store",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.01"} 62
+arca_node_phase_seconds_bucket{phase="put_store",le="0.025"} 234
+arca_node_phase_seconds_bucket{phase="put_store",le="0.05"} 289
+arca_node_phase_seconds_bucket{phase="put_store",le="0.1"} 349
+arca_node_phase_seconds_bucket{phase="put_store",le="0.25"} 368
+arca_node_phase_seconds_bucket{phase="put_store",le="0.5"} 368
+arca_node_phase_seconds_bucket{phase="put_store",le="1"} 368
+arca_node_phase_seconds_bucket{phase="put_store",le="2.5"} 368
+arca_node_phase_seconds_bucket{phase="put_store",le="5"} 368
+arca_node_phase_seconds_bucket{phase="put_store",le="10"} 368
+arca_node_phase_seconds_bucket{phase="put_store",le="+Inf"} 368
+arca_node_phase_seconds_sum{phase="put_store"} 11.909318528
+arca_node_phase_seconds_count{phase="put_store"} 368
+arca_node_phase_seconds_max_seconds{phase="put_store"} 0.125372639
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="10"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="get_serve"} 0
+arca_node_phase_seconds_count{phase="get_serve"} 0
+arca_node_phase_seconds_max_seconds{phase="get_serve"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.001"} 2
+arca_node_phase_seconds_bucket{phase="store_append",le="0.005"} 347
+arca_node_phase_seconds_bucket{phase="store_append",le="0.01"} 369
+arca_node_phase_seconds_bucket{phase="store_append",le="0.025"} 371
+arca_node_phase_seconds_bucket{phase="store_append",le="0.05"} 372
+arca_node_phase_seconds_bucket{phase="store_append",le="0.1"} 372
+arca_node_phase_seconds_bucket{phase="store_append",le="0.25"} 372
+arca_node_phase_seconds_bucket{phase="store_append",le="0.5"} 372
+arca_node_phase_seconds_bucket{phase="store_append",le="1"} 372
+arca_node_phase_seconds_bucket{phase="store_append",le="2.5"} 372
+arca_node_phase_seconds_bucket{phase="store_append",le="5"} 372
+arca_node_phase_seconds_bucket{phase="store_append",le="10"} 372
+arca_node_phase_seconds_bucket{phase="store_append",le="+Inf"} 372
+arca_node_phase_seconds_sum{phase="store_append"} 0.948115943
+arca_node_phase_seconds_count{phase="store_append"} 372
+arca_node_phase_seconds_max_seconds{phase="store_append"} 0.03198486
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_rollover"} 0
+arca_node_phase_seconds_count{phase="store_rollover"} 0
+arca_node_phase_seconds_max_seconds{phase="store_rollover"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.005"} 8
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.01"} 129
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.025"} 262
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.05"} 292
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.1"} 351
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.25"} 368
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.5"} 368
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="1"} 368
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="2.5"} 368
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="5"} 368
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="10"} 368
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="+Inf"} 368
+arca_node_phase_seconds_sum{phase="store_sync_wait"} 10.62434139
+arca_node_phase_seconds_count{phase="store_sync_wait"} 368
+arca_node_phase_seconds_max_seconds{phase="store_sync_wait"} 0.123532747
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.005"} 18
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.01"} 152
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.025"} 196
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.05"} 220
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.1"} 245
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.25"} 245
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.5"} 245
+arca_node_phase_seconds_bucket{phase="store_fsync",le="1"} 245
+arca_node_phase_seconds_bucket{phase="store_fsync",le="2.5"} 245
+arca_node_phase_seconds_bucket{phase="store_fsync",le="5"} 245
+arca_node_phase_seconds_bucket{phase="store_fsync",le="10"} 245
+arca_node_phase_seconds_bucket{phase="store_fsync",le="+Inf"} 245
+arca_node_phase_seconds_sum{phase="store_fsync"} 4.190754977
+arca_node_phase_seconds_count{phase="store_fsync"} 245
+arca_node_phase_seconds_max_seconds{phase="store_fsync"} 0.082900651
+--- 1793584883.753341926 http://127.0.0.1:9920/metrics
+unreachable
+--- 1793584883.753341926 http://127.0.0.1:9921/metrics
+unreachable
+--- 1793584884.778413129 http://127.0.0.1:9900/metrics
+# TYPE arca_gateway_cache_hits_total counter
+arca_gateway_cache_hits_total 0
+# TYPE arca_gateway_cache_misses_total counter
+arca_gateway_cache_misses_total 0
+# TYPE arca_gateway_cache_fallbacks_total counter
+arca_gateway_cache_fallbacks_total 0
+# TYPE arca_gateway_cache_invalidations_total counter
+arca_gateway_cache_invalidations_total 0
+# TYPE arca_gateway_cache_populated_total counter
+arca_gateway_cache_populated_total 0
+# TYPE arca_gateway_cache_population_failures_total counter
+arca_gateway_cache_population_failures_total 0
+# TYPE arca_gateway_cache_populations_deduplicated_total counter
+arca_gateway_cache_populations_deduplicated_total 0
+# TYPE arca_gateway_cache_admissions_rejected_total counter
+arca_gateway_cache_admissions_rejected_total 0
+# TYPE arca_gateway_cache_degraded_hits_total counter
+arca_gateway_cache_degraded_hits_total 0
+# TYPE arca_gateway_cache_shards_repaired_total counter
+arca_gateway_cache_shards_repaired_total 0
+# TYPE arca_gateway_cache_shard_repair_failures_total counter
+arca_gateway_cache_shard_repair_failures_total 0
+# TYPE arca_gateway_cache_shard_repairs_skipped_total counter
+arca_gateway_cache_shard_repairs_skipped_total 0
+# TYPE arca_gateway_cache_populations_skipped_total counter
+arca_gateway_cache_populations_skipped_total 0
+# TYPE arca_gateway_cache_lookup_hits_total counter
+arca_gateway_cache_lookup_hits_total 0
+# TYPE arca_gateway_cache_fallback_unreadable_total counter
+arca_gateway_cache_fallback_unreadable_total 0
+# TYPE arca_gateway_cache_fallback_corrupt_total counter
+arca_gateway_cache_fallback_corrupt_total 0
+# TYPE arca_gateway_cache_fallback_node_total counter
+arca_gateway_cache_fallback_node_total 0
+# TYPE arca_gateway_cache_fallback_unknown_group_total counter
+arca_gateway_cache_fallback_unknown_group_total 0
+# TYPE arca_gateway_cache_admission_rejected_size_total counter
+arca_gateway_cache_admission_rejected_size_total 0
+# TYPE arca_gateway_cache_admission_rejected_threshold_total counter
+arca_gateway_cache_admission_rejected_threshold_total 0
+# TYPE arca_gateway_cache_admission_rejected_capacity_total counter
+arca_gateway_cache_admission_rejected_capacity_total 0
+# TYPE arca_gateway_cache_admission_rejected_generation_total counter
+arca_gateway_cache_admission_rejected_generation_total 0
+# TYPE arca_gateway_cache_population_failures_node_total counter
+arca_gateway_cache_population_failures_node_total 0
+# TYPE arca_gateway_cache_population_failures_meta_total counter
+arca_gateway_cache_population_failures_meta_total 0
+# TYPE arca_gateway_cache_population_failures_corrupt_total counter
+arca_gateway_cache_population_failures_corrupt_total 0
+# TYPE arca_gateway_node_rpc_stalled_total counter
+arca_gateway_node_rpc_stalled_total 0
+# TYPE arca_gateway_node_rpc_deadline_exceeded_total counter
+arca_gateway_node_rpc_deadline_exceeded_total 0
+# TYPE arca_gateway_node_rpc_unary_timeouts_total counter
+arca_gateway_node_rpc_unary_timeouts_total 0
+# TYPE arca_gateway_node_rpc_retries_total counter
+arca_gateway_node_rpc_retries_total 0
+# TYPE arca_gateway_node_rpc_exhausted_total counter
+arca_gateway_node_rpc_exhausted_total 0
+# TYPE arca_gateway_put_in_flight gauge
+arca_gateway_put_in_flight 0
+# TYPE arca_gateway_put_phase_seconds histogram
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.001"} 122
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.005"} 356
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.01"} 430
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.025"} 474
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.05"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.1"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.25"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.5"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="1"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="2.5"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="5"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="10"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="+Inf"} 480
+arca_gateway_put_phase_seconds_sum{phase="body_read"} 1.952702427
+arca_gateway_put_phase_seconds_count{phase="body_read"} 480
+arca_gateway_put_phase_seconds_max_seconds{phase="body_read"} 0.030828245
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.005"} 232
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.01"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.025"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.05"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.1"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.25"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="1"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="2.5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="10"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="+Inf"} 384
+arca_gateway_put_phase_seconds_sum{phase="encode"} 1.966470983
+arca_gateway_put_phase_seconds_count{phase="encode"} 384
+arca_gateway_put_phase_seconds_max_seconds{phase="encode"} 0.016374094
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.025"} 14
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.05"} 124
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.1"} 303
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.25"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="1"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="2.5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="10"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="+Inf"} 384
+arca_gateway_put_phase_seconds_sum{phase="shard_write"} 27.695098907
+arca_gateway_put_phase_seconds_count{phase="shard_write"} 384
+arca_gateway_put_phase_seconds_max_seconds{phase="shard_write"} 0.227491886
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.005"} 27
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.01"} 47
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.025"} 71
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.05"} 79
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.1"} 94
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.25"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="1"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="2.5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="10"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="+Inf"} 96
+arca_gateway_put_phase_seconds_sum{phase="append"} 2.160764357
+arca_gateway_put_phase_seconds_count{phase="append"} 96
+arca_gateway_put_phase_seconds_max_seconds{phase="append"} 0.121502914
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_count{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.005"} 30
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.01"} 46
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.025"} 70
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.05"} 79
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.1"} 89
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.25"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="1"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="2.5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="10"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="+Inf"} 96
+arca_gateway_put_phase_seconds_sum{phase="commit"} 2.474324918
+arca_gateway_put_phase_seconds_count{phase="commit"} 96
+arca_gateway_put_phase_seconds_max_seconds{phase="commit"} 0.14184961
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.25"} 68
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.5"} 85
+arca_gateway_put_phase_seconds_bucket{phase="total",le="1"} 96
+arca_gateway_put_phase_seconds_bucket{phase="total",le="2.5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="total",le="5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="total",le="10"} 96
+arca_gateway_put_phase_seconds_bucket{phase="total",le="+Inf"} 96
+arca_gateway_put_phase_seconds_sum{phase="total"} 25.231264517
+arca_gateway_put_phase_seconds_count{phase="total"} 96
+arca_gateway_put_phase_seconds_max_seconds{phase="total"} 0.606439556
+# TYPE arca_gateway_population_queue_enqueued_total counter
+arca_gateway_population_queue_enqueued_total 0
+# TYPE arca_gateway_population_queue_dropped_full_total counter
+arca_gateway_population_queue_dropped_full_total 0
+# TYPE arca_gateway_population_queue_dropped_shutdown_total counter
+arca_gateway_population_queue_dropped_shutdown_total 0
+# TYPE arca_gateway_population_queue_completed_total counter
+arca_gateway_population_queue_completed_total 0
+# TYPE arca_gateway_population_queue_retries_total counter
+arca_gateway_population_queue_retries_total 0
+# TYPE arca_gateway_population_queue_deferred_for_reads_total counter
+arca_gateway_population_queue_deferred_for_reads_total 0
+# TYPE arca_gateway_population_queue_queued gauge
+arca_gateway_population_queue_queued 0
+# TYPE arca_gateway_population_queue_running gauge
+arca_gateway_population_queue_running 0
+# TYPE arca_gateway_meta_txn_attempts_total counter
+arca_gateway_meta_txn_attempts_total 676
+# TYPE arca_gateway_meta_txn_conflicts_total counter
+arca_gateway_meta_txn_conflicts_total 0
+# TYPE arca_gateway_meta_txn_unknown_retries_total counter
+arca_gateway_meta_txn_unknown_retries_total 0
+# TYPE arca_gateway_meta_txn_exhausted_total counter
+arca_gateway_meta_txn_exhausted_total 0
+--- 1793584884.778413129 http://127.0.0.1:9910/metrics
+# TYPE arca_node_put_in_flight gauge
+arca_node_put_in_flight 0
+# TYPE arca_node_phase_seconds histogram
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.001"} 9
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.005"} 148
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.01"} 223
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.025"} 317
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.05"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.1"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.25"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.5"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="1"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="2.5"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="5"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="10"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="+Inf"} 384
+arca_node_phase_seconds_sum{phase="put_recv"} 4.838108217
+arca_node_phase_seconds_count{phase="put_recv"} 384
+arca_node_phase_seconds_max_seconds{phase="put_recv"} 0.048333217
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.001"} 356
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.005"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.01"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.025"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.05"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.1"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.25"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.5"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="1"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="2.5"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="5"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="10"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="+Inf"} 384
+arca_node_phase_seconds_sum{phase="put_queue"} 0.106265233
+arca_node_phase_seconds_count{phase="put_queue"} 384
+arca_node_phase_seconds_max_seconds{phase="put_queue"} 0.003626595
+arca_node_phase_seconds_bucket{phase="put_store",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.01"} 62
+arca_node_phase_seconds_bucket{phase="put_store",le="0.025"} 234
+arca_node_phase_seconds_bucket{phase="put_store",le="0.05"} 291
+arca_node_phase_seconds_bucket{phase="put_store",le="0.1"} 361
+arca_node_phase_seconds_bucket{phase="put_store",le="0.25"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="0.5"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="1"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="2.5"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="5"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="10"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="+Inf"} 384
+arca_node_phase_seconds_sum{phase="put_store"} 13.269168121
+arca_node_phase_seconds_count{phase="put_store"} 384
+arca_node_phase_seconds_max_seconds{phase="put_store"} 0.125372639
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="10"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="get_serve"} 0
+arca_node_phase_seconds_count{phase="get_serve"} 0
+arca_node_phase_seconds_max_seconds{phase="get_serve"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.001"} 2
+arca_node_phase_seconds_bucket{phase="store_append",le="0.005"} 359
+arca_node_phase_seconds_bucket{phase="store_append",le="0.01"} 381
+arca_node_phase_seconds_bucket{phase="store_append",le="0.025"} 383
+arca_node_phase_seconds_bucket{phase="store_append",le="0.05"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="0.1"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="0.25"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="0.5"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="1"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="2.5"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="5"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="10"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="+Inf"} 384
+arca_node_phase_seconds_sum{phase="store_append"} 0.974572019
+arca_node_phase_seconds_count{phase="store_append"} 384
+arca_node_phase_seconds_max_seconds{phase="store_append"} 0.03198486
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_rollover"} 0
+arca_node_phase_seconds_count{phase="store_rollover"} 0
+arca_node_phase_seconds_max_seconds{phase="store_rollover"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.005"} 8
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.01"} 129
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.025"} 262
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.05"} 294
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.1"} 363
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.25"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.5"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="1"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="2.5"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="5"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="10"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="+Inf"} 384
+arca_node_phase_seconds_sum{phase="store_sync_wait"} 11.950942267
+arca_node_phase_seconds_count{phase="store_sync_wait"} 384
+arca_node_phase_seconds_max_seconds{phase="store_sync_wait"} 0.123532747
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.005"} 18
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.01"} 152
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.025"} 196
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.05"} 223
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.1"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.25"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.5"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="1"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="2.5"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="5"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="10"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="+Inf"} 255
+arca_node_phase_seconds_sum{phase="store_fsync"} 4.749107926
+arca_node_phase_seconds_count{phase="store_fsync"} 255
+arca_node_phase_seconds_max_seconds{phase="store_fsync"} 0.082900651
+--- 1793584884.778413129 http://127.0.0.1:9920/metrics
+unreachable
+--- 1793584884.778413129 http://127.0.0.1:9921/metrics
+unreachable
+--- 1793584885.802770809 http://127.0.0.1:9900/metrics
+# TYPE arca_gateway_cache_hits_total counter
+arca_gateway_cache_hits_total 0
+# TYPE arca_gateway_cache_misses_total counter
+arca_gateway_cache_misses_total 0
+# TYPE arca_gateway_cache_fallbacks_total counter
+arca_gateway_cache_fallbacks_total 0
+# TYPE arca_gateway_cache_invalidations_total counter
+arca_gateway_cache_invalidations_total 0
+# TYPE arca_gateway_cache_populated_total counter
+arca_gateway_cache_populated_total 0
+# TYPE arca_gateway_cache_population_failures_total counter
+arca_gateway_cache_population_failures_total 0
+# TYPE arca_gateway_cache_populations_deduplicated_total counter
+arca_gateway_cache_populations_deduplicated_total 0
+# TYPE arca_gateway_cache_admissions_rejected_total counter
+arca_gateway_cache_admissions_rejected_total 0
+# TYPE arca_gateway_cache_degraded_hits_total counter
+arca_gateway_cache_degraded_hits_total 0
+# TYPE arca_gateway_cache_shards_repaired_total counter
+arca_gateway_cache_shards_repaired_total 0
+# TYPE arca_gateway_cache_shard_repair_failures_total counter
+arca_gateway_cache_shard_repair_failures_total 0
+# TYPE arca_gateway_cache_shard_repairs_skipped_total counter
+arca_gateway_cache_shard_repairs_skipped_total 0
+# TYPE arca_gateway_cache_populations_skipped_total counter
+arca_gateway_cache_populations_skipped_total 0
+# TYPE arca_gateway_cache_lookup_hits_total counter
+arca_gateway_cache_lookup_hits_total 0
+# TYPE arca_gateway_cache_fallback_unreadable_total counter
+arca_gateway_cache_fallback_unreadable_total 0
+# TYPE arca_gateway_cache_fallback_corrupt_total counter
+arca_gateway_cache_fallback_corrupt_total 0
+# TYPE arca_gateway_cache_fallback_node_total counter
+arca_gateway_cache_fallback_node_total 0
+# TYPE arca_gateway_cache_fallback_unknown_group_total counter
+arca_gateway_cache_fallback_unknown_group_total 0
+# TYPE arca_gateway_cache_admission_rejected_size_total counter
+arca_gateway_cache_admission_rejected_size_total 0
+# TYPE arca_gateway_cache_admission_rejected_threshold_total counter
+arca_gateway_cache_admission_rejected_threshold_total 0
+# TYPE arca_gateway_cache_admission_rejected_capacity_total counter
+arca_gateway_cache_admission_rejected_capacity_total 0
+# TYPE arca_gateway_cache_admission_rejected_generation_total counter
+arca_gateway_cache_admission_rejected_generation_total 0
+# TYPE arca_gateway_cache_population_failures_node_total counter
+arca_gateway_cache_population_failures_node_total 0
+# TYPE arca_gateway_cache_population_failures_meta_total counter
+arca_gateway_cache_population_failures_meta_total 0
+# TYPE arca_gateway_cache_population_failures_corrupt_total counter
+arca_gateway_cache_population_failures_corrupt_total 0
+# TYPE arca_gateway_node_rpc_stalled_total counter
+arca_gateway_node_rpc_stalled_total 0
+# TYPE arca_gateway_node_rpc_deadline_exceeded_total counter
+arca_gateway_node_rpc_deadline_exceeded_total 0
+# TYPE arca_gateway_node_rpc_unary_timeouts_total counter
+arca_gateway_node_rpc_unary_timeouts_total 0
+# TYPE arca_gateway_node_rpc_retries_total counter
+arca_gateway_node_rpc_retries_total 0
+# TYPE arca_gateway_node_rpc_exhausted_total counter
+arca_gateway_node_rpc_exhausted_total 0
+# TYPE arca_gateway_put_in_flight gauge
+arca_gateway_put_in_flight 0
+# TYPE arca_gateway_put_phase_seconds histogram
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.001"} 122
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.005"} 356
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.01"} 430
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.025"} 474
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.05"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.1"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.25"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.5"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="1"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="2.5"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="5"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="10"} 480
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="+Inf"} 480
+arca_gateway_put_phase_seconds_sum{phase="body_read"} 1.952702427
+arca_gateway_put_phase_seconds_count{phase="body_read"} 480
+arca_gateway_put_phase_seconds_max_seconds{phase="body_read"} 0.030828245
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.005"} 232
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.01"} 372
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.025"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.05"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.1"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.25"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="1"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="2.5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="10"} 384
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="+Inf"} 384
+arca_gateway_put_phase_seconds_sum{phase="encode"} 1.966470983
+arca_gateway_put_phase_seconds_count{phase="encode"} 384
+arca_gateway_put_phase_seconds_max_seconds{phase="encode"} 0.016374094
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.025"} 14
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.05"} 124
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.1"} 303
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.25"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="1"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="2.5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="5"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="10"} 384
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="+Inf"} 384
+arca_gateway_put_phase_seconds_sum{phase="shard_write"} 27.695098907
+arca_gateway_put_phase_seconds_count{phase="shard_write"} 384
+arca_gateway_put_phase_seconds_max_seconds{phase="shard_write"} 0.227491886
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.005"} 27
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.01"} 47
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.025"} 71
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.05"} 79
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.1"} 94
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.25"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="1"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="2.5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="10"} 96
+arca_gateway_put_phase_seconds_bucket{phase="append",le="+Inf"} 96
+arca_gateway_put_phase_seconds_sum{phase="append"} 2.160764357
+arca_gateway_put_phase_seconds_count{phase="append"} 96
+arca_gateway_put_phase_seconds_max_seconds{phase="append"} 0.121502914
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_count{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_max_seconds{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.005"} 30
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.01"} 46
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.025"} 70
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.05"} 79
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.1"} 89
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.25"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="1"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="2.5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="10"} 96
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="+Inf"} 96
+arca_gateway_put_phase_seconds_sum{phase="commit"} 2.474324918
+arca_gateway_put_phase_seconds_count{phase="commit"} 96
+arca_gateway_put_phase_seconds_max_seconds{phase="commit"} 0.14184961
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.25"} 68
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.5"} 85
+arca_gateway_put_phase_seconds_bucket{phase="total",le="1"} 96
+arca_gateway_put_phase_seconds_bucket{phase="total",le="2.5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="total",le="5"} 96
+arca_gateway_put_phase_seconds_bucket{phase="total",le="10"} 96
+arca_gateway_put_phase_seconds_bucket{phase="total",le="+Inf"} 96
+arca_gateway_put_phase_seconds_sum{phase="total"} 25.231264517
+arca_gateway_put_phase_seconds_count{phase="total"} 96
+arca_gateway_put_phase_seconds_max_seconds{phase="total"} 0.606439556
+# TYPE arca_gateway_population_queue_enqueued_total counter
+arca_gateway_population_queue_enqueued_total 0
+# TYPE arca_gateway_population_queue_dropped_full_total counter
+arca_gateway_population_queue_dropped_full_total 0
+# TYPE arca_gateway_population_queue_dropped_shutdown_total counter
+arca_gateway_population_queue_dropped_shutdown_total 0
+# TYPE arca_gateway_population_queue_completed_total counter
+arca_gateway_population_queue_completed_total 0
+# TYPE arca_gateway_population_queue_retries_total counter
+arca_gateway_population_queue_retries_total 0
+# TYPE arca_gateway_population_queue_deferred_for_reads_total counter
+arca_gateway_population_queue_deferred_for_reads_total 0
+# TYPE arca_gateway_population_queue_queued gauge
+arca_gateway_population_queue_queued 0
+# TYPE arca_gateway_population_queue_running gauge
+arca_gateway_population_queue_running 0
+# TYPE arca_gateway_meta_txn_attempts_total counter
+arca_gateway_meta_txn_attempts_total 676
+# TYPE arca_gateway_meta_txn_conflicts_total counter
+arca_gateway_meta_txn_conflicts_total 0
+# TYPE arca_gateway_meta_txn_unknown_retries_total counter
+arca_gateway_meta_txn_unknown_retries_total 0
+# TYPE arca_gateway_meta_txn_exhausted_total counter
+arca_gateway_meta_txn_exhausted_total 0
+--- 1793584885.802770809 http://127.0.0.1:9910/metrics
+# TYPE arca_node_put_in_flight gauge
+arca_node_put_in_flight 0
+# TYPE arca_node_phase_seconds histogram
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.001"} 9
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.005"} 148
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.01"} 223
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.025"} 317
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.05"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.1"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.25"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="0.5"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="1"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="2.5"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="5"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="10"} 384
+arca_node_phase_seconds_bucket{phase="put_recv",le="+Inf"} 384
+arca_node_phase_seconds_sum{phase="put_recv"} 4.838108217
+arca_node_phase_seconds_count{phase="put_recv"} 384
+arca_node_phase_seconds_max_seconds{phase="put_recv"} 0.048333217
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.001"} 356
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.005"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.01"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.025"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.05"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.1"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.25"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="0.5"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="1"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="2.5"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="5"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="10"} 384
+arca_node_phase_seconds_bucket{phase="put_queue",le="+Inf"} 384
+arca_node_phase_seconds_sum{phase="put_queue"} 0.106265233
+arca_node_phase_seconds_count{phase="put_queue"} 384
+arca_node_phase_seconds_max_seconds{phase="put_queue"} 0.003626595
+arca_node_phase_seconds_bucket{phase="put_store",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="put_store",le="0.01"} 62
+arca_node_phase_seconds_bucket{phase="put_store",le="0.025"} 234
+arca_node_phase_seconds_bucket{phase="put_store",le="0.05"} 291
+arca_node_phase_seconds_bucket{phase="put_store",le="0.1"} 361
+arca_node_phase_seconds_bucket{phase="put_store",le="0.25"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="0.5"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="1"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="2.5"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="5"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="10"} 384
+arca_node_phase_seconds_bucket{phase="put_store",le="+Inf"} 384
+arca_node_phase_seconds_sum{phase="put_store"} 13.269168121
+arca_node_phase_seconds_count{phase="put_store"} 384
+arca_node_phase_seconds_max_seconds{phase="put_store"} 0.125372639
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="1"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="5"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="10"} 0
+arca_node_phase_seconds_bucket{phase="get_serve",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="get_serve"} 0
+arca_node_phase_seconds_count{phase="get_serve"} 0
+arca_node_phase_seconds_max_seconds{phase="get_serve"} 0
+arca_node_phase_seconds_bucket{phase="store_append",le="0.001"} 2
+arca_node_phase_seconds_bucket{phase="store_append",le="0.005"} 359
+arca_node_phase_seconds_bucket{phase="store_append",le="0.01"} 381
+arca_node_phase_seconds_bucket{phase="store_append",le="0.025"} 383
+arca_node_phase_seconds_bucket{phase="store_append",le="0.05"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="0.1"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="0.25"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="0.5"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="1"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="2.5"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="5"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="10"} 384
+arca_node_phase_seconds_bucket{phase="store_append",le="+Inf"} 384
+arca_node_phase_seconds_sum{phase="store_append"} 0.974572019
+arca_node_phase_seconds_count{phase="store_append"} 384
+arca_node_phase_seconds_max_seconds{phase="store_append"} 0.03198486
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.005"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.01"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.025"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.05"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.25"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="0.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="1"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="2.5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="5"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="10"} 0
+arca_node_phase_seconds_bucket{phase="store_rollover",le="+Inf"} 0
+arca_node_phase_seconds_sum{phase="store_rollover"} 0
+arca_node_phase_seconds_count{phase="store_rollover"} 0
+arca_node_phase_seconds_max_seconds{phase="store_rollover"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.005"} 8
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.01"} 129
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.025"} 262
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.05"} 294
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.1"} 363
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.25"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="0.5"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="1"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="2.5"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="5"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="10"} 384
+arca_node_phase_seconds_bucket{phase="store_sync_wait",le="+Inf"} 384
+arca_node_phase_seconds_sum{phase="store_sync_wait"} 11.950942267
+arca_node_phase_seconds_count{phase="store_sync_wait"} 384
+arca_node_phase_seconds_max_seconds{phase="store_sync_wait"} 0.123532747
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.001"} 0
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.005"} 18
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.01"} 152
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.025"} 196
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.05"} 223
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.1"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.25"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="0.5"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="1"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="2.5"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="5"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="10"} 255
+arca_node_phase_seconds_bucket{phase="store_fsync",le="+Inf"} 255
+arca_node_phase_seconds_sum{phase="store_fsync"} 4.749107926
+arca_node_phase_seconds_count{phase="store_fsync"} 255
+arca_node_phase_seconds_max_seconds{phase="store_fsync"} 0.082900651
+--- 1793584885.802770809 http://127.0.0.1:9920/metrics
+unreachable
+--- 1793584885.802770809 http://127.0.0.1:9921/metrics
+unreachable

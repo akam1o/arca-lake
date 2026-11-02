@@ -1,0 +1,52 @@
+Linux 7.0.0-38-generic (<host>) 	11/02/26 	_x86_64_	(4 CPU)
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
+02:07:34     1000    313674    8.00   13.00    0.00    0.00   21.00     3  15230.00      0.00  582404   45184   0.56      0.00      0.00  arca-lake
+02:07:34     1000    313734   51.00   28.00    0.00    0.00   79.00     1  49726.00      0.00  383396   98404   1.21      0.00      0.00  arca-lake
+02:07:34     1000    314030    7.00    9.00    0.00    0.00   16.00     0  38203.00      0.00  277180   73812   0.91      1.00      0.00  s3load
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
+02:07:35     1000    313674   10.00   10.00    0.00    0.00   20.00     3   4136.00      0.00  582404   45516   0.56      0.00      0.00  arca-lake
+02:07:35     1000    313734   57.00   28.00    0.00    0.00   85.00     1  24065.00      0.00  383396  111764   1.38      0.00      0.00  arca-lake
+02:07:35     1000    314030    7.00    7.00    0.00    0.00   14.00     0  15584.00      0.00  277180   54448   0.67      0.00      0.00  s3load
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
+02:07:36     1000    313674   12.00   11.00    0.00    0.00   23.00     3   5081.00      0.00  582404   48044   0.59      0.00      0.00  arca-lake
+02:07:36     1000    313734   62.00   32.00    0.00    0.00   94.00     1  18038.00      0.00  383396  106164   1.31      0.00      0.00  arca-lake
+02:07:36     1000    314030    7.00    5.00    0.00    0.00   12.00     0   4102.00      0.00  277180   54392   0.67      0.00      0.00  s3load
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
+02:07:37     1000    313674   11.00   11.00    0.00    0.00   22.00     3   5225.00      0.00  582404   49748   0.61      0.00      0.00  arca-lake
+02:07:37     1000    313734   62.00   31.00    0.00    0.00   93.00     1  24822.00      0.00  383396   89856   1.11      0.00      0.00  arca-lake
+02:07:37     1000    314030    7.00    6.00    0.00    0.00   13.00     0      1.00      0.00  277180   54392   0.67      0.00      0.00  s3load
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
+02:07:38     1000    313674   11.00   13.00    0.00    0.00   24.00     3   4489.00      0.00  582404   52992   0.65      0.00      0.00  arca-lake
+02:07:38     1000    313734   65.00   32.00    0.00    0.00   97.00     1  36184.00      0.00  383396  136872   1.68      0.00      0.00  arca-lake
+02:07:38     1000    314030    7.00    6.00    0.00    0.00   13.00     0   4097.00      0.00  277180   54416   0.67      0.00      0.00  s3load
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
+02:07:39     1000    313674   12.00   12.00    0.00    0.00   24.00     3   1884.00      0.00  582404   50416   0.62      0.00      0.00  arca-lake
+02:07:39     1000    313734   66.00   32.00    0.00    0.00   98.00     1  31012.00      0.00  383396  120828   1.49      0.00      0.00  arca-lake
+02:07:39     1000    314030    7.00    8.00    0.00    0.00   15.00     0  24553.00      0.00  277180   87184   1.07      0.00      0.00  s3load
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
+02:07:40     1000    313674   16.00   13.00    0.00    0.00   29.00     3   6710.00      0.00  582404   53088   0.65      0.00      0.00  arca-lake
+02:07:40     1000    313734   76.00   34.00    0.00    0.00  110.00     1  23649.00      0.00  383524  115444   1.42      0.00      0.00  arca-lake
+02:07:40     1000    314030    8.00    8.00    0.00    0.00   16.00     0   4093.00      0.00  277180  103568   1.27      0.00      0.00  s3load
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
+02:07:41     1000    313674   13.00   13.00    0.00    0.00   26.00     3   1294.00      0.00  582404   53236   0.66      0.00      0.00  arca-lake
+02:07:41     1000    313734   68.00   35.00    0.00    0.00  103.00     1  21740.00      0.00  383524  122076   1.50      0.00      0.00  arca-lake
+02:07:41     1000    314030    8.00    5.00    0.00    0.00   13.00     0      0.00      0.00  277180  103568   1.27      0.00      0.00  s3load
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
+02:07:42     1000    313674   15.00   13.00    0.00    0.00   28.00     3   4131.00      0.00  582404   55232   0.68      0.00      0.00  arca-lake
+02:07:42     1000    313734   74.00   38.00    0.00    0.00  112.00     1  24574.00      0.00  383524  132164   1.63      0.00      0.00  arca-lake
+02:07:42     1000    314030    7.00    8.00    0.00    0.00   15.00     0   4054.00      0.00  277180  119824   1.47      0.00      0.00  s3load
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
+02:07:43     1000    313674    3.00    3.00    0.00    0.00    6.00     3    689.00      0.00  582404   53144   0.65      0.00      0.00  arca-lake
+02:07:43     1000    313734   13.00    7.00    0.00    0.00   20.00     1    672.00      0.00  383524   81156   1.00      0.00      0.00  arca-lake
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  minflt/s  majflt/s     VSZ     RSS   %MEM   cswch/s nvcswch/s  Command
