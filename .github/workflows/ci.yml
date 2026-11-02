@@ -26,6 +26,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: prepare the runner (compiler, pkg-config; idempotent)
+        run: |
+          set -euo pipefail
+          if ! command -v cc >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
+          fi
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
@@ -55,6 +62,13 @@ jobs:
       FDB_VERSION: 7.3.77
     steps:
       - uses: actions/checkout@v4
+      - name: prepare the runner (compiler, pkg-config; idempotent)
+        run: |
+          set -euo pipefail
+          if ! command -v cc >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
+          fi
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
@@ -68,6 +82,7 @@ jobs:
       - name: start FoundationDB server
         run: |
           set -euo pipefail
+          docker() { sudo docker "$@"; }
           docker rm -f fdb >/dev/null 2>&1 || true
           docker run -d --name fdb --network host -e FDB_NETWORKING_MODE=host \
             "foundationdb/foundationdb:${FDB_VERSION}"
@@ -92,7 +107,7 @@ jobs:
           cargo test -p arca-lake-testkit --features fdb --test e2e_fdb --test faults_fdb --test cache_fdb --test cache_ec_fdb -- --nocapture --test-threads=1
       - name: stop FoundationDB server
         if: always()
-        run: docker rm -f fdb >/dev/null 2>&1 || true
+        run: sudo docker rm -f fdb >/dev/null 2>&1 || true
 
   fdb-failover:
     name: FoundationDB failover (3 processes)
@@ -102,6 +117,13 @@ jobs:
       FDB_VERSION: 7.3.77
     steps:
       - uses: actions/checkout@v4
+      - name: prepare the runner (compiler, pkg-config; idempotent)
+        run: |
+          set -euo pipefail
+          if ! command -v cc >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
+          fi
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
@@ -115,6 +137,7 @@ jobs:
       - name: start a three-process FoundationDB cluster (bridge network)
         run: |
           set -euo pipefail
+          docker() { sudo docker "$@"; }
           # Bridge network: the processes advertise the container's address,
           # which the runner host can reach directly (same topology as the
           # local script, where fdbcli and the test container reach it).
@@ -130,7 +153,7 @@ jobs:
           done
           IP="$(docker exec arca-fdb hostname -i | awk '{print $1}')"
           echo "fdb address: $IP"
-          fdbcli() { timeout 60 docker exec arca-fdb fdbcli --timeout 20 --exec "$1"; }
+          fdbcli() { timeout 60 sudo docker exec arca-fdb fdbcli --timeout 20 --exec "$1"; }
           fdbcli "configure new double memory" || true
           sleep 3
           fdbcli "coordinators ${IP}:4500 ${IP}:4501 ${IP}:4502" || true
@@ -143,6 +166,12 @@ jobs:
           fdbcli "status details" | head -40
           docker exec arca-fdb cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
           cat /tmp/fdb.cluster
+      - name: put a sudo docker wrapper on PATH for the test's chaos actions
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          printf '#!/usr/bin/env bash\nexec sudo /usr/bin/docker "$@"\n' > "$HOME/.local/bin/docker"
+          chmod +x "$HOME/.local/bin/docker"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: run the failover test
         env:
           ARCA_FDB_TESTS: "1"
@@ -152,7 +181,7 @@ jobs:
         run: cargo test -p arca-lake-testkit --features fdb --test fdb_failover -- --nocapture --test-threads=1
       - name: stop the cluster
         if: always()
-        run: docker rm -f arca-fdb >/dev/null 2>&1 || true
+        run: sudo docker rm -f arca-fdb >/dev/null 2>&1 || true
 
   deny:
     name: licenses and advisories
@@ -160,9 +189,17 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
+      - name: install cargo-deny (pinned release)
+        env:
+          DENY_VERSION: 0.18.5
+        run: |
+          set -euo pipefail
+          base="https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VERSION}"
+          curl -sSL -o deny.tar.gz "${base}/cargo-deny-${DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf deny.tar.gz --strip-components=1 -C "$HOME/.local/bin" "cargo-deny-${DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: cargo-deny check
 
   secrets:
     name: secret scan
@@ -225,7 +262,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: lycheeverse/lychee-action@v2
-        with:
-          args: --no-progress --offline './**/*.md'
-          fail: true
+      - name: check markdown links (lychee, pinned image)
+        run: |
+          set -euo pipefail
+          sudo docker run --rm -v "$PWD:/input:ro" -w /input lycheeverse/lychee:0.20.1 \
+            --no-progress --offline './**/*.md'
