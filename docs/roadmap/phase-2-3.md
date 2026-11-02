@@ -1,6 +1,6 @@
 # Phase 2.3: Performance stabilization and scalability
 
-Status: **in progress**. Phase 2.3 acts on the Phase 2.2 measurements:
+Status: **complete** (measurements and documents below). Phase 2.3 acts on the Phase 2.2 measurements:
 the cause of the PUT variance (R-48), the gateway's GET CPU, a node-aware
 population queue, the metadata hot keys, multi-gateway scaling, and a
 performance regression check. Design records: ADR-0012; numbers:
@@ -51,7 +51,14 @@ Numbers are in RFC-009; the summaries here are the decisions they support.
 - **Population queue (RFC-006 §5.3.1)**: bounded, node-aware, yields to
   reads, retries node errors, drains at shutdown; five test cases.
 
-<!-- PHASE-2-3-RESULTS-2 -->
+- **Multi-gateway (§6.18)**: on three hosts that each run a node and a
+  gateway, 1 / 2 / 3 gateways deliver the same aggregate GET (560–744
+  MiB/s) and PUT peaks at two gateways (295 MiB/s); the hosts' CPU is
+  the bound, metadata (zero conflicts, under 250 transactions/s) and
+  the network are not. Scaling needs gateways on their own hosts.
+- **Two-host repeat and baseline (§6.19)**: durable GET +12–20 % with
+  23 % less gateway CPU per GiB after the frame pass-through; baseline
+  `lab-2host` recorded for the regression check.
 
 ## Not verified
 
