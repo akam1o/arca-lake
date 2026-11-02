@@ -200,6 +200,8 @@ pub struct AwsCli {
     pub access_key: String,
     /// Secret key.
     pub secret_key: String,
+    /// `AWS_CONFIG_FILE` to use (multipart thresholds, checksum settings).
+    pub config_file: Option<std::path::PathBuf>,
 }
 
 impl AwsCli {
@@ -234,6 +236,11 @@ impl AwsCli {
             .env("AWS_DEFAULT_REGION", "us-east-1")
             .env("AWS_EC2_METADATA_DISABLED", "true")
             .env_remove("AWS_PROFILE")
+            .envs(
+                self.config_file
+                    .as_ref()
+                    .map(|p| ("AWS_CONFIG_FILE", p.as_os_str().to_owned())),
+            )
             .stdin(Stdio::null())
             .output()
             .await

@@ -32,6 +32,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 tempfile.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+aws-sdk-s3.workspace = true
+aws-credential-types.workspace = true
+
 [[test]]
 name = "e2e_fdb"
 required-features = ["fdb"]

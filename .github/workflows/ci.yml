@@ -32,6 +32,12 @@ jobs:
             sudo apt-get update -qq
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
           fi
+          # S3 compatibility tests drive the gateway with the AWS CLI and
+          # boto3 (they skip when the tools are absent; the runner has them).
+          if ! command -v aws >/dev/null || ! python3 -c 'import boto3' 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq awscli python3-boto3
+          fi
           # bindgen (foundationdb-sys) needs libclang.
           if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
             sudo apt-get update -qq
@@ -81,6 +87,12 @@ jobs:
           if ! command -v cc >/dev/null; then
             sudo apt-get update -qq
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
+          fi
+          # S3 compatibility tests drive the gateway with the AWS CLI and
+          # boto3 (they skip when the tools are absent; the runner has them).
+          if ! command -v aws >/dev/null || ! python3 -c 'import boto3' 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq awscli python3-boto3
           fi
           # bindgen (foundationdb-sys) needs libclang.
           if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
@@ -150,6 +162,12 @@ jobs:
           if ! command -v cc >/dev/null; then
             sudo apt-get update -qq
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
+          fi
+          # S3 compatibility tests drive the gateway with the AWS CLI and
+          # boto3 (they skip when the tools are absent; the runner has them).
+          if ! command -v aws >/dev/null || ! python3 -c 'import boto3' 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq awscli python3-boto3
           fi
           # bindgen (foundationdb-sys) needs libclang.
           if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then

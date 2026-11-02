@@ -616,6 +616,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             endpoint: format!("http://{}", self.gateway_addr),
             access_key: self.credentials.0.clone(),
             secret_key: self.credentials.1.clone(),
+            config_file: None,
         }
     }
 
@@ -626,6 +627,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             endpoint: format!("http://{}", self.gateway_addr),
             access_key: access_key.to_string(),
             secret_key: secret_key.to_string(),
+            config_file: None,
         }
     }
 

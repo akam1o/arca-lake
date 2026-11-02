@@ -627,10 +627,63 @@ impl<S: KvStore + 'static> Authorizer<S> {
     }
 }
 
-fn query_param<'a>(uri: &'a hyper::Uri, name: &str) -> Option<&'a str> {
+/// Percent-decode a query value (`+` is not a space in S3 query strings).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (
+                hex_val(b.get(i + 1).copied()),
+                hex_val(b.get(i + 2).copied()),
+            )
+        {
+            out.push(h << 4 | l);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(c: Option<u8>) -> Option<u8> {
+    match c? {
+        c @ b'0'..=b'9' => Some(c - b'0'),
+        c @ b'a'..=b'f' => Some(c - b'a' + 10),
+        c @ b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// `(bucket, key, version id)` of an `x-amz-copy-source` header
+/// (`/bucket/key?versionId=v` or `bucket/key`, percent-encoded).
+#[must_use]
+pub fn parse_copy_source(src: &str) -> Option<(String, String, Option<String>)> {
+    let (path, query) = src
+        .split_once('?')
+        .map_or((src, None), |(p, q)| (p, Some(q)));
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let (bucket, key) = path.split_once('/')?;
+    if bucket.is_empty() || key.is_empty() {
+        return None;
+    }
+    let version = query.and_then(|q| {
+        q.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            (k == "versionId").then(|| percent_decode(v))
+        })
+    });
+    Some((percent_decode(bucket), percent_decode(key), version))
+}
+
+fn query_param(uri: &hyper::Uri, name: &str) -> Option<String> {
     uri.query()?.split('&').find_map(|kv| {
         let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-        (k == name).then_some(v)
+        (k == name).then(|| percent_decode(v))
     })
 }
 
@@ -670,8 +723,8 @@ impl<S: KvStore + 'static> S3Access for Authorizer<S> {
             .get("x-amz-metadata-directive")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        let prefix = query_param(&uri, "prefix").map(str::to_string);
-        let delimiter = query_param(&uri, "delimiter").map(str::to_string);
+        let prefix = query_param(&uri, "prefix");
+        let delimiter = query_param(&uri, "delimiter");
 
         let note = |cx: &mut S3AccessContext<'_>, decision: &str| {
             if let Some(a) = cx.extensions_mut().get::<AuditRecord>() {
@@ -740,7 +793,45 @@ impl<S: KvStore + 'static> S3Access for Authorizer<S> {
                     metadata_directive: metadata_directive.as_deref(),
                     copy_source: copy_source.as_deref(),
                 };
-                self.decide(&principal, action, record.as_ref(), &req)
+                let mut outcome = self.decide(&principal, action, record.as_ref(), &req);
+                // A copy also reads its source: authorize `s3:GetObject`
+                // (`Version`) on the source bucket, which may be another
+                // tenant's (rule 7: a denied source is AccessDenied).
+                if let (Authz::Allow(_), Some(src)) = (&outcome, copy_source.as_deref()) {
+                    let Some((src_bucket, src_key, src_version)) = parse_copy_source(src) else {
+                        note(cx, "bad-copy-source");
+                        return Err(s3_error!(InvalidArgument, "malformed x-amz-copy-source"));
+                    };
+                    let src_action = if src_version.is_some() {
+                        "s3:GetObjectVersion"
+                    } else {
+                        "s3:GetObject"
+                    };
+                    let src_record = match bucket::get_bucket(self.meta.as_ref(), &src_bucket).await
+                    {
+                        Ok(b) => Some(b),
+                        Err(arca_lake_metadata::MetaError::NoSuchBucket) => None,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "source bucket record read failed during authorization");
+                            note(cx, "error-deny");
+                            return Err(s3_error!(ServiceUnavailable, "metadata unavailable"));
+                        }
+                    };
+                    let src_req = PolicyRequest {
+                        principal: &principal,
+                        action: src_action,
+                        key: Some(&src_key),
+                        source_ip,
+                        secure_transport: secure,
+                        ..Default::default()
+                    };
+                    if let Authz::Deny(why) =
+                        self.decide(&principal, src_action, src_record.as_ref(), &src_req)
+                    {
+                        outcome = Authz::Deny(format!("source:{why}"));
+                    }
+                }
+                outcome
             }
         };
         match outcome {
@@ -853,6 +944,33 @@ not_after = "2000-01-01T00:00:00Z"
         // Unknown fields and duplicate ids are errors.
         std::fs::write(&path, "[[principal]]\nname = \"x\"\nbogus = 1\n").unwrap();
         assert!(CredentialStore::read_file(&path).is_err());
+    }
+
+    #[test]
+    fn query_values_are_percent_decoded() {
+        assert_eq!(percent_decode("public%2Fa%20b"), "public/a b");
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("bad%2"), "bad%2");
+        let uri: hyper::Uri = "/b?list-type=2&prefix=public%2F&delimiter=%2F"
+            .parse()
+            .unwrap();
+        assert_eq!(query_param(&uri, "prefix").as_deref(), Some("public/"));
+        assert_eq!(query_param(&uri, "delimiter").as_deref(), Some("/"));
+        assert_eq!(query_param(&uri, "versionId"), None);
+    }
+
+    #[test]
+    fn copy_source_header_parses() {
+        assert_eq!(
+            parse_copy_source("/b/dir%2Fk?versionId=abc"),
+            Some(("b".into(), "dir/k".into(), Some("abc".into())))
+        );
+        assert_eq!(
+            parse_copy_source("b/k"),
+            Some(("b".into(), "k".into(), None))
+        );
+        assert_eq!(parse_copy_source("/b"), None);
+        assert_eq!(parse_copy_source("/b/"), None);
     }
 
     #[test]

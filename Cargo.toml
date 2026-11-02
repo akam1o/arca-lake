@@ -78,6 +78,10 @@ reed-solomon-erasure = { version = "6", default-features = false }
 reed-solomon-simd = "3.1"
 proptest = "1.12"
 base64 = "0.22"
+# Default features include the legacy hyper 0.14 / rustls 0.21 client,
+# which carries open advisories; the hyper 1 client is enough for tests.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "http-1x", "default-https-client", "rt-tokio", "sigv4a"] }
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
