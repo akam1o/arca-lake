@@ -1,0 +1,22 @@
+name: runner probe
+# Manual: report what the self-hosted runner provides, so that CI jobs can
+# be sized to it (nothing here is required by the build).
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - run: |
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+          echo "user=$(id -un) uid=$(id -u) nproc=$(nproc) mem_gb=$(free -g | awk '/Mem:/{print $2}')"
+          echo "sudo=$(sudo -n true 2>/dev/null && echo nopasswd || echo no)"
+          echo "docker=$(command -v docker || echo none)"; docker info --format '{{.ServerVersion}}' 2>/dev/null || true
+          echo "podman=$(command -v podman || echo none)"
+          echo "rustup=$(command -v rustup || echo none) cargo=$(command -v cargo || echo none)"
+          echo "python3=$(command -v python3 || echo none) curl=$(command -v curl || echo none) jq=$(command -v jq || echo none)"
+          echo "fdbserver=$(command -v fdbserver || echo none) fdbcli=$(command -v fdbcli || echo none)"
+          echo "disk_free_gb=$(df -BG --output=avail "$PWD" | tail -1 | tr -d ' G')"
+          echo "work_dir=$PWD"
+          echo "kernel=$(uname -r)"
