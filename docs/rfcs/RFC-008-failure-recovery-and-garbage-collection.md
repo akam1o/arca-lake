@@ -1,11 +1,12 @@
 # RFC-008: Failure Recovery and Garbage Collection
 
-- Status: draft
+- Status: draft (Phase 3.2 adds §8: scrubbing, classification, quarantine, stripe repair)
 - Authors: arca-lake maintainers
 - Created: 2026-11-01
-- Depends on: RFC-003, RFC-004, RFC-005
+- Depends on: RFC-003, RFC-004, RFC-005, RFC-007
 - Related ADRs: ADR-0005 (single-owner chunks, tombstone queue with grace),
-  ADR-0007 (commit resolution, reference-checked GC, repair completion)
+  ADR-0007 (commit resolution, reference-checked GC, repair completion),
+  ADR-0015 (durable quarantine, controller-driven scrub, stripe repair)
 
 > This document is public. It must not contain non-public infrastructure
 > details, capacity plans, hostnames, credentials, or unmeasured performance
@@ -51,6 +52,12 @@ still accounts for.
 | I9 | Every shard delete or repair write carries the group epoch of the fenced transaction that decided it; nodes reject lower epochs (§6.4). | controller GC and repair; node fencing | `repair_completion.rs::delete_decided_under_an_old_epoch_…` |
 | I10 | At most one controller commits metadata changes; a controller that lost its lease cannot commit after its successor's first transaction (RFC-011). | `FencedKv` | `controller.rs` |
 | I8 | A writer holding an epoch older than a member's enforced epoch cannot write to that member. | node fencing (RFC-004 §5.4) | `e2e.rs`, `repair.rs` |
+| I11 | A repair writes a shard only if the chunk reconstructed from the sources decodes to bytes whose CRC-32C equals the chunk record's `crc32c` and whose length equals `len` (§8.5). | `stripe_repair::reconstruct` | `integrity.rs`, `repair_completion.rs` |
+| I12 | Every repair write carries the epoch of the group record read in the task's planning transaction; a node with a higher enforced epoch rejects it and the task re-plans (I9 for repairs). | stripe repair worker; node fencing | `integrity.rs::epoch_change_during_stripe_repair_…` |
+| I13 | Quarantine changes what a node *serves*, never what metadata *references*: a quarantined shard is reported as absent to readers and repair, its bytes stay on the device until the record is superseded or tombstoned and its segment compacted, and no metadata is written by the node. | storage engine quarantine log (§8.2) | `storage/tests/quarantine.rs` |
+| I14 | A shard that is quarantined, missing, or fails verification is never a reconstruction source and never a read source; only shards whose block CRCs verified on the node and whose length matches the stripe layout are. | `read_coded`, `stripe_repair::classify` | `integrity.rs`, `suite.rs::corrupt_shard_…` |
+| I15 | A stripe with fewer than `k` verifiable shards of a live chunk is recorded as `Unrecoverable`; readers return an integrity error and never bytes for it; the record is cleared only by a verification that finds `k` good shards again. | repair task state; `read_durable` | `integrity.rs::unrecoverable_stripe_…` |
+| I16 | Scrubbing and stripe repair never delete a shard; deletion remains the GC and reconciliation path under I6. | code structure (no delete RPC in the scrub/repair modules) | review; `integrity.rs` asserts shard counts |
 
 ## 5. Intermediate states and recovery
 
@@ -272,7 +279,244 @@ clock far behind delays reclamation.
 Shards of the replaced member are never deleted by repair; reconciliation
 reclaims them after step 4 (§6.3, last row).
 
-## 8. Alternatives considered
+## 8. Integrity: scrubbing, classification, quarantine and stripe repair
+
+Phase 3.2. Silent corruption is found by reading shards back, classified
+against the metadata, kept away from readers by a durable quarantine, and
+repaired by reconstructing the affected shards from the surviving ones
+without changing membership or epochs. Member replacement (§7) stays the
+answer to a failed node; this section handles shards.
+
+### 8.1 Verification levels
+
+| Level | What is checked | Where | By |
+| --- | --- | --- | --- |
+| L1 record header | magic, version, flags, key (group, chunk id, shard index) equals the index key, payload length, sequence equals the index entry, header CRC-32C, physical location (segment exists, record lies within the segment's valid length) | storage engine `get` | every read, scrub |
+| L2 payload | CRC-32C of every payload block (RFC-005) | storage engine `get` | every read (covered blocks), scrub (all blocks) |
+| L3 metadata agreement | a live chunk record places the chunk in this group (RFC-004 §5.1 prefix → generation); the shard's length equals the stripe layout's shard length for `(len, k, m, scheme)`; the member holding it is a current member; the chunk record's placement epoch is not newer than the group's | controller scrub | per shard |
+| L4 stripe | at least `k` shards verify at L1–L3; the chunk assembled from `k` of them has the chunk record's `crc32c` and `len` | gateway `read_coded`, controller repair | every read, every repair |
+
+Multipart objects add nothing to L1–L4: a part generation's chunk records
+are ordinary chunk records (RFC-007 §5.3). The manifest level (root
+references ↔ part headers, part checksums, sizes) is checked by the
+manifest scrub (§8.6).
+
+### 8.2 Node-side verification and durable quarantine
+
+**`ScrubShards` RPC** (additive to `VerifyShards`): a page of the node's
+index entries for a group, each read in full through the validating read
+path, returning `ShardScrub { key, payload_len, crc32c, sequence, status }`
+with `status ∈ { OK, CHECKSUM_MISMATCH, INVALID_HEADER, TRUNCATED,
+QUARANTINED, IO_ERROR }`. The node quarantines on `CHECKSUM_MISMATCH`,
+`INVALID_HEADER` and `TRUNCATED`; it never quarantines on `IO_ERROR`
+(a transient read failure must not look like corruption) and it never
+quarantines on a listing or on the metadata-level classes below, which
+only the controller can see. `VerifyShards` keeps its shape and gains the
+same durable quarantine semantics.
+
+**Quarantine implementation.** Three designs were compared:
+
+| Design | Evidence kept | Survives restart | Format change | GC interaction |
+| --- | --- | --- | --- | --- |
+| (a) tombstone the corrupt record | no (indistinguishable from a delete) | yes | no | a tombstone is a delete: reconciliation can no longer tell a corrupt shard from a deleted one |
+| (b) a new record flag (`QUARANTINE` marker record) | yes | yes | **yes** (old readers reject unknown flags; needs the RFC-014 format gate) | marker superseded by a later data record |
+| (c) sidecar quarantine log next to the segments | yes (bytes untouched until compaction) | yes | no | tombstone or newer data record releases the entry |
+
+(c) is chosen: no format change, the bytes stay for investigation, the
+log is append-only and fsynced, and replay is idempotent. Details:
+
+- `<dir>/quarantine.log`: one JSON line per event:
+  `{"event":"quarantine","key":…,"segment":…,"offset":…,"sequence":…,"payload_len":…,"reason":…,"unix_ms":…}`,
+  `{"event":"release",…,"cause":"superseded"|"tombstone"|"purged"}`.
+  Written with the same durability as a record (write, fsync) before the
+  index change becomes visible.
+- In memory: `quarantined: BTreeMap<ShardKey, QuarantineEntry>`; the key
+  is removed from the live index. Effects: `GetShard` → `DATA_LOSS
+  "quarantined"`; `ListShards` omits the key unless the request sets
+  `include_quarantined`, in which case the entry carries
+  `quarantined = true`; `VerifyShards`/`ScrubShards` report
+  `QUARANTINED`; `Health` reports `quarantined_shards` and
+  `quarantined_bytes`.
+- Release: a `PutShard` of the same key (repair) appends a record with a
+  higher sequence and removes the entry (`superseded`); a `DeleteShard`
+  tombstones and removes it (`tombstone`); compaction of the segment that
+  held the bytes drops the bytes (`purged`) — the entry is already gone
+  by then or is released with cause `purged`. Quarantined bytes are never
+  copied by compaction.
+- Open: segments are scanned as before, with two changes: a record whose
+  header validates but whose payload fails is **skipped and quarantined**
+  (the scan continues at the next record, so a single bit flip no longer
+  hides every later record of the segment); a region whose header does
+  not validate is a *hole*: the scan resynchronises at the next aligned
+  offset holding a fully valid record (bounded by the segment length) and
+  records a `hole` event (the keys that were in the hole are simply
+  absent from the index and surface as `MissingShard` at L3). A torn tail
+  (no later valid record) is truncated as before. The quarantine log is
+  replayed after the scan; entries whose record is no longer the newest
+  for the key are dropped.
+- Safety (I13): quarantine never deletes bytes, never writes metadata,
+  and never reduces the set of shards metadata references; a healthy
+  shard cannot be quarantined because the only triggers are a failed
+  header or block CRC on the node's own read of its own record. The
+  `OpenReport` and the quarantine log are the investigation record;
+  `arca-lake storage-node quarantine list --dir` prints them offline.
+
+### 8.3 Scrub scheduler (controller)
+
+The leader drives scrubbing so that progress is in metadata and survives
+controller failover and node restarts (nodes keep no scrub state).
+
+- Cursor: `("al","scrub",group_id) = ScrubCursor { pass, phase, member,
+  after: Option<chunk_id>, started_ms, finished_ms, verified, bytes,
+  findings: [u64; 8] }` with `phase ∈ { Shards, Presence, Done }`;
+  written after every page in a fenced transaction (RFC-011), so the
+  next leader resumes at the page where the previous one stopped.
+- Phase `Shards`: for each current member in turn, `ScrubShards` pages
+  of `--scrub-page` keys; every shard is classified (§8.4); findings are
+  counted and `CorruptShard`/`Mismatch` findings enqueue a repair task.
+- Phase `Presence`: the merged member listing (`GroupWalker`, quarantined
+  shards excluded) yields every chunk id with the members holding it; a
+  gap on a live, placed chunk is `MissingShard` (enqueued); a chunk with
+  fewer than `k` holders is `UnrecoverableStripe` (recorded, §8.5); a
+  chunk nobody references is `UnexpectedShard` (counted; reconciliation
+  decides, §6.3).
+- Scheduling: a group is scrubbed when `now − finished_ms ≥
+  --scrub-interval` (default 24 h; 0 disables); `--scrub-concurrency`
+  groups at a time (default 1); the pass is paced by a byte budget
+  `--scrub-rate-mib` per second over all groups (default 32 MiB/s): the
+  worker sleeps until the bytes verified so far fit the budget. The node
+  bounds the work per RPC (`limit` ≤ 16 384 keys, reads on the blocking
+  pool, one scrub RPC in flight per node: a second one waits).
+- Everything is idempotent: re-scrubbing a page re-classifies it; a task
+  that already exists is not duplicated (one task per `(group, chunk)`).
+
+### 8.4 Corruption classification
+
+| Class | Condition | Detected by | Response |
+| --- | --- | --- | --- |
+| Missing Shard | a live chunk record places the chunk in the group and a current member holds no live record for its shard index | presence phase; degraded read; member repair walk | repair task (reconstruct onto the member) |
+| Checksum Mismatch | a payload block CRC fails on the node | node read / scrub | node quarantines; repair task |
+| Truncated Shard | the record extends past the segment's valid length, or `payload_len` disagrees with the record | node read / scrub / open | node quarantines; repair task |
+| Invalid Header | record magic, version, key, sequence or header CRC fails | node read / scrub / open (hole) | node quarantines (or the hole is skipped); the key is then Missing |
+| Unexpected Shard | the node holds a valid shard that no live generation references, or on a group where the chunk record places it elsewhere | scrub L3; reconciliation | counted by scrub; deleted by reconciliation after the minimum age (§6.3), never by scrub (I16) |
+| Stale Placement Epoch | the chunk record's placement epoch is newer than the group record's epoch (metadata ahead of the group: a restore, RFC-015), or the shard sits on a former member | scrub L3 | counted and logged; repair refuses the group until the epoch is reconciled (RFC-015 §5.4); former-member copies go to reconciliation |
+| Metadata / Data Mismatch | the shard verifies at L1–L2 but its length is not the layout's shard length, or the assembled chunk's CRC differs from the chunk record (some shard carries wrong bytes with a valid CRC: a misdirected write or a stale record) | scrub L3; repair / read L4 | treated as a corrupt shard: repair finds a verifying `k`-subset (bounded search over the candidates) and rewrites the shards outside it; if no subset verifies → Unrecoverable |
+| Unrecoverable Stripe | fewer than `k` shards verify for a live chunk | repair classify; read | task state `Unrecoverable { have, need }`, metric, log, admin listing; GET returns the integrity error, never bytes (I15); re-checked on every scrub pass and every read report; cleared when `k` good shards are found (a returning node, a restored device) |
+
+"Live" means the generation is `Pending` or `Committed` (RFC-008 §6.3);
+chunks of retiring generations are left to GC.
+
+### 8.5 Stripe repair state machine
+
+One task per stripe: `("al","repair",group_id,chunk_id) = RepairTask {
+reason, state, targets: Vec<u16>, epoch, attempts, next_attempt_ms,
+created_ms, updated_ms, last_error }`. Tasks are created by scrub,
+by gateway degraded-read reports (§8.7) and by `admin repair enqueue`;
+the stripe repair worker (controller leader, `--repair-workers`
+concurrent tasks, `--repair-rate-mib`) drives them.
+
+```text
+Detect ─▶ Classify ─▶ Plan ─▶ Reconstruct ─▶ Verify ─▶ Commit ─▶ Cleanup
+  │          │          │          │            │
+  │          │          │          │            └─ mismatch → Classify (attempts+1)
+  │          │          │          └─ epoch rejected → Classify (fresh group record)
+  │          │          └─ good < k → Unrecoverable (persisted; re-Classify each pass)
+  │          └─ generation not live → Done (GC's problem)
+  └─ task exists → no-op
+```
+
+| Stage | Action | Persisted | Crash here → next pass |
+| --- | --- | --- | --- |
+| 1 Detect | create the task (`Detected`) if none exists | task | re-detection is a no-op |
+| 2 Classify | read the group record and the chunk record; `VerifyShards` every current member for this chunk; a source is *good* iff its node reports OK and the length equals the layout; a target is a member that is missing, quarantined, corrupt, or outside the verifying subset | nothing | repeated |
+| 3 Plan | if the generation is not live → remove the task; if `good < k` → `Unrecoverable { have, need }`; else `Planned { targets, epoch = group.epoch }` | task | re-planned from fresh reads |
+| 4 Reconstruct | read `k` good shards, decode, check `crc32c` and `len` against the chunk record (I11); if the chunk CRC fails, try other `k`-subsets of the good shards (at most `C(n,k)`, bounded by `n ≤ 32`); the shards outside the verifying subset join the targets | nothing | repeated; no write happened |
+| 5 Verify-before-write and write | encode the verified chunk; for each target write the shard with `PutShard` carrying the planned epoch (I12); the node's returned CRC must equal the shard's CRC; an epoch rejection restarts at Classify | nothing (the write itself is durable on the node; a crash leaves correct bytes that Verify will accept) | repeated: rewriting identical bytes is harmless |
+| 6 Verify | `VerifyShards` on every target: OK with the expected shard CRC; else `attempts += 1`, back off, → Classify | task (`attempts`, `next_attempt_ms`) | repeated |
+| 7 Commit | remove the task; count the repair as succeeded | task removed | a task whose targets already verify is removed at Classify (no targets) |
+| 8 Cleanup | nothing to delete: the node released its quarantine entry when the new record superseded it; metrics updated | — | — |
+
+Idempotence and convergence: every stage re-reads its inputs, writes
+only the same bytes to the same keys under the same epoch, and the task
+key is unique per stripe, so two detections, a leader failover at any
+stage, or a re-issued `admin repair` converge on one of: task removed
+(stripe healthy) or `Unrecoverable`. Writes race safely with readers
+(the node serves either the quarantined-absent state or the new valid
+record), with GC (a chunk whose generation retires during repair is
+skipped at Plan; a shard written after that is reclaimed by
+reconciliation, as in §5.4), and with member repair (§7) because both use
+the epoch: a membership change raises the epoch and every in-flight
+stripe write is rejected (I12).
+
+Retry policy: `attempts` with exponential back-off (`30 s · 2^attempts`,
+capped at 1 h); after `--repair-max-attempts` (default 8) the task is
+`Failed { attempts, last_error }`, visible to the operator, and retried
+at the next scrub pass of the group.
+
+### 8.6 Multipart integrity (RFC-007 §5.3)
+
+Manifest scrub (`admin verify-manifests`, and the controller's scrub pass
+once per `--scrub-interval`): for every multipart root generation,
+every part reference must name a `Committed` generation of kind `Part {
+upload_id, part_number }` for the same upload and part number, whose
+header `size` and `chunk_count` equal the reference's, whose checksum
+equals the reference's, and whose chunk records cover exactly `size`
+bytes; the references' sizes must sum to the root's `size` and their
+offsets must be contiguous. Findings are `ManifestMismatch` (counted,
+logged with the generation; the object is served as long as the parts
+verify, because the part manifests are the ground truth, but the
+mismatch is an invariant violation to investigate). A dangling reference
+(part generation missing or not `Committed`) is `Unrecoverable` for that
+byte range (I15) and is reported with the object; GC of such a part
+would violate I-MP1, so this finding is also a `gc_skipped_referenced`
+investigation. Versioned objects and delete markers add no case: a root
+is a generation like any other, and a marker references none.
+
+Full-object checksum verification (`admin verify-object`) reads every
+byte through the gateway's read path and compares with the stored
+checksum (composite or full-object); it is an operator tool, not part of
+scheduled scrubbing.
+
+### 8.7 Gateway degraded-read reports
+
+`read_coded` already decodes around missing or failing shards. From
+Phase 3.2 a read that needed parity (`missing` non-empty) is a *degraded
+read*: counted (`arca_gateway_degraded_reads_total`) and reported as a
+repair task (`Detected`, reason `DegradedRead`) through a per-gateway
+deduplicating queue (one report per chunk per 10 min, bounded size), so
+that a corruption hit by a client is repaired before the next scrub
+pass. An unreadable chunk (`have < k`) is reported the same way with
+reason `Unreadable` and the client receives the integrity error.
+
+### 8.8 Metrics
+
+Bounded cardinality: no per-group, per-chunk or per-node labels; the only
+label is the class (eight values, §8.4).
+
+| Series | Type | Meaning |
+| --- | --- | --- |
+| `arca_controller_scrub_passes_total`, `_scrub_shards_verified_total`, `_scrub_bytes_total`, `_scrub_errors_total` | counter | scheduler progress and node/metadata errors during scrub |
+| `arca_controller_scrub_groups_in_progress`, `_scrub_groups_overdue` | gauge | groups being scrubbed / past the interval |
+| `arca_controller_integrity_findings_total{class}` | counter | findings by class (8 classes) |
+| `arca_controller_repair_queue_depth`, `_repair_tasks_unrecoverable`, `_repair_tasks_failed` | gauge | stripe repair queue state |
+| `arca_controller_stripe_repairs_succeeded_total`, `_failed_total`, `_shards_rewritten_total`, `_repair_bytes_total` | counter | stripe repair outcomes |
+| `arca_controller_data_integrity_status` | gauge | 0 = no open findings; 1 = repairs pending or failed; 2 = unrecoverable stripes present |
+| `arca_node_quarantined_shards`, `_quarantined_bytes` | gauge | node quarantine state |
+| `arca_node_corrupt_reads_total`, `_scrub_shards_total`, `_scrub_bytes_total`, `_scrub_corrupt_total` | counter | node-side detections |
+| `arca_gateway_degraded_reads_total`, `_unreadable_reads_total`, `_integrity_reports_total`, `_integrity_reports_dropped_total` | counter | read-path reports |
+
+### 8.9 Operator interface
+
+`arca-lake admin integrity status` (scrub cursors per group, queue depth,
+unrecoverable and failed tasks with chunk ids and the objects that
+reference them), `admin scrub run --group <id>` (reset the cursor so the
+next pass starts now), `admin repair enqueue --group --chunk`, `admin
+repair list`, `arca-lake storage-node quarantine list --dir <dir>`
+(offline listing of the quarantine log and the last open report), and
+`storage-node corrupt-shard` (test-only, hidden: flips bytes in a
+record on a stopped node for drills).
+
+## 9. Alternatives considered
 
 | Alternative | Why not |
 | --- | --- |
@@ -281,7 +525,7 @@ reclaims them after step 4 (§6.3, last row).
 | Mark a group `Active` when the replaced member's shards are written | Misses a second membership change in flight; listing every member is O(shards) but makes completion a verified fact. |
 | Per-chunk "repaired" flags in metadata | O(chunks) metadata writes per repair (DD-3). |
 
-## 9. Verified and not verified
+## 10. Verified and not verified
 
 Verified on the in-process cluster with the in-memory backend and, for the
 end-to-end and commit-fault suites, on a real FoundationDB cluster:
@@ -301,15 +545,26 @@ during a PUT; more than one simultaneous repair on different groups; power
 loss of a storage node mid-`PutShard` beyond the storage engine's own
 crash tests (RFC-005); real-network behaviour (RFC-011 §8, risk R-35).
 
-## 10. Open questions
+## 11. Open questions
 
 - Grace-period measurement by commit version instead of wall clock (OD-16).
 - Reconciliation scheduling and rate limits (paging exists, §6.5).
 - Whether `skipped_referenced > 0` should halt the controller.
 
-## 11. Acceptance criteria
+## 12. Acceptance criteria
 
-- All tests named in §5 pass on both backends in CI.
-- The model test (`crates/metadata/tests/model.rs`) covers I1–I5.
-- A controller process schedules GC, reconciliation, and repair (Phase 2)
-  without changing the recipes.
+Labels as RFC-007 §11 (Designed / Implemented / Verified / Not
+Implemented / Not Verified).
+
+| # | Criterion | Status |
+| --- | --- | --- |
+| G1 | All tests named in §5 pass on both backends in CI; the model test covers I1–I5; the controller schedules GC, reconciliation and repair | Verified (Phase 2) |
+| G2 | Durable quarantine: a corrupt shard found on read or scrub is absent to readers and repair after a node restart, its bytes remain until compaction, the quarantine log records it, and a repair write releases it (I13) | Designed |
+| G3 | Open recovery skips a record with a corrupt payload and resynchronises after a corrupt header; the records after it are indexed | Designed |
+| G4 | `ScrubShards` classifies OK / checksum / header / truncated / quarantined / I/O error and never quarantines on I/O error | Designed |
+| G5 | Controller scrub: cursor persisted per page, resumes after leader failover and node restart; rate and concurrency limits observable; every class of §8.4 is produced by a test that injects it | Designed |
+| G6 | Stripe repair: single missing, several missing, corrupt, metadata/data mismatch, unrecoverable (no write, GET error), concurrent detections converge to one task, repair during GET/PUT/DELETE, epoch change mid-repair restarts at Classify, leader failover mid-repair resumes; every reconstructed shard verified before and after the write (I11, I12) | Designed |
+| G7 | Multipart: manifest scrub covers roots, references, parts, chunk placement, part and full-object checksums; GC after Complete never removes a referenced part (I-MP1) under scrub and repair | Designed |
+| G8 | FoundationDB failover during multipart operations (RFC-007 A10) | Designed |
+| G9 | Metrics of §8.8 exported with bounded cardinality | Designed |
+| G10 | Scrubbing at the default rate costs less than 15 % of PUT and GET throughput on the validation hosts | Designed (hypothesis) |

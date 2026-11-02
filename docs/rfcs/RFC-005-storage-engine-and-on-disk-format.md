@@ -128,6 +128,19 @@ A fault-injection hook at each step is part of the public API so that tests
 (and later chaos tooling) can interrupt it. Reads holding the old file
 complete on the unlinked inode. Candidates are chosen by dead-byte fraction.
 
+### 5.6a Durable quarantine and resynchronising recovery (Phase 3.2)
+
+A record that fails validation on read or scrub is quarantined durably:
+the event is appended (and fsynced) to `<dir>/quarantine.log` before the
+key leaves the live index, the bytes stay in the segment until the
+record is superseded or tombstoned and the segment compacted, and the
+entry is replayed at open. Recovery no longer stops at a record whose
+payload fails its block CRCs: the record is skipped and quarantined; a
+region whose header fails is a hole and the scan resynchronises at the
+next aligned offset holding a fully valid record. Only a torn tail (no
+later valid record) is truncated. Design comparison and the node and
+controller sides: RFC-008 §8.2, ADR-0015.
+
 ### 5.7 Scrubbing
 
 `scrub` reads every live record through the validating read path; corrupt
