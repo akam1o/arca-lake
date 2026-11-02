@@ -32,6 +32,8 @@ def main():
             continue
         for phase in ["put", "get1", "get2"]:
             files = sorted(f for f in os.listdir(d) if re.match(rf"{phase}-g\d+\.jsonl$", f))
+            if not files and os.path.exists(os.path.join(d, f"{phase}.jsonl")):
+                files = [f"{phase}.jsonl"]  # single gateway: the plain layout
             rows = []
             for f in files:
                 lines = [json.loads(l) for l in open(os.path.join(d, f), encoding="utf-8") if l.strip()]
