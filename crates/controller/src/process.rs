@@ -239,7 +239,7 @@ async fn run<S: KvStore + 'static>(
         // Leader: fenced store, scheduler tasks, renewal loop.
         let fenced = Arc::new(FencedKv::new(Arc::clone(&meta), leadership.clone()));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let tasks = start_leader_tasks(&fenced, &cfg, &metrics, stop_rx);
+        let tasks = start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx);
         let lost = loop {
             tokio::select! {
                 () = tokio::time::sleep(renew_every) => {}
@@ -278,7 +278,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
     meta: &Arc<FencedKv<S>>,
     cfg: &ControllerConfig,
     metrics: &Arc<Metrics>,
-    stop: watch::Receiver<bool>,
+    stop: &watch::Receiver<bool>,
 ) -> Vec<JoinHandle<()>> {
     let clients =
         NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
