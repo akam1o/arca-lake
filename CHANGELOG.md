@@ -146,6 +146,18 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
     CI and `deploy/dev/fdb-test.sh`), `tiering.rs` (5).
   - RFC-006 Multi-Tier Storage draft with Phase 2 status; ADR-0009;
     Phase 2 roadmap page; risks R-41–R-45.
+- Phase 3.0 review reflected (conditional approval): RFC-007 multipart
+  redesigned as a hierarchical manifest (root + per-part reference keys,
+  Complete in one bounded transaction, batched abort and root finish,
+  invariants I-MP1–I-MP4, linearization points, failure matrix),
+  versioning linearization points and AWS differences, per-operation
+  conditional-request table, checksum composite/full-object rules;
+  RFC-012 nine normative authorization rules and the supported policy
+  JSON subset; RFC-014 three independent compatibility axes, write gates,
+  idempotent crash-safe finalize, rollback/downgrade policy, mixed-version
+  test strategy; RFC-015 cluster recovery state machine with incarnation
+  id, verification pass and completion criteria; status-labelled
+  acceptance criteria in RFC-007/012/013/014/015; ADR-0014.
 - Phase 3.0 production-hardening design (documents only, under review):
   - `docs/security/threat-model.md`; RFC-012 Security Architecture
     (SigV4 via s3s with a reloadable multi-key store, bucket ownership and

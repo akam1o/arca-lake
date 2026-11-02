@@ -1,6 +1,6 @@
 # RFC-012: Security Architecture
 
-- Status: draft (Phase 3.0; implementation in Phase 3.1–3.3 as noted per control)
+- Status: draft, conditionally approved (Phase 3.0 review reflected; implementation Phase 3.1–3.3 as noted per control)
 - Authors: arca-lake maintainers
 - Created: 2026-11-02
 - Depends on: RFC-001, RFC-003, RFC-007, RFC-011
@@ -118,43 +118,132 @@ The controls are numbered **C-1 … C-11**; the threat model references them.
 
 ### 5.3 C-3 bucket ownership, policy, and tenant isolation
 
-- `BucketRecord` gains `owner: String` (principal name) and
-  `policy: Option<Vec<u8>>` (the policy document as stored). Record
-  version 2 with a v1 decoder (RFC-014 §5.3): v1 buckets decode with
-  `owner = "legacy"`, which only the operator's `admin` tooling can
-  reassign; until reassigned, the policy evaluation treats the bucket as
-  owned by nobody and refuses tenant access (fail closed).
-- **Evaluation order** (per request, in `S3Access::check`):
-  1. the operation's required action is derived from the s3s op name
-     (`s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket`,
-     `s3:CreateBucket`, `s3:DeleteBucket`, `s3:PutBucketPolicy`, …);
-  2. `CreateBucket` and `ListBuckets` are principal-level: allowed for any
-     authenticated principal (the bucket becomes theirs); `ListBuckets`
-     returns only buckets the principal owns or has `s3:ListBucket` on;
-  3. for bucket-scoped actions: the owner is allowed everything; otherwise
-     the bucket policy is evaluated: any `Deny` matching wins, then any
-     `Allow`, else deny;
-  4. the result and the decisive statement id are put in the audit record.
-- **Policy grammar** (JSON, AWS shape, documented subset):
-  `Version`, `Statement[]` with `Sid`, `Effect` (`Allow|Deny`),
-  `Principal` (`"*"`, or `{"AWS": ["arca:principal/<name>", …]}`),
-  `Action` (string or list, `s3:*` and prefix wildcards),
-  `Resource` (`arn:aws:s3:::bucket` and `arn:aws:s3:::bucket/<prefix>*`),
-  `Condition` with only `StringEquals`/`StringLike` on `s3:prefix` and
-  `IpAddress`/`NotIpAddress` on `aws:SourceIp`. Any other condition key or
-  element → the policy is rejected at `PutBucketPolicy` with
-  `MalformedPolicy`; nothing unknown is silently ignored.
-- **Tenant isolation** is the consequence: a principal's requests only
-  ever touch buckets it owns or is granted; keys, generations and cache
-  placements carry the bucket id, so nothing below the bucket needs a
-  tenant dimension. Per-tenant quotas are a RFC-013 item (capacity
-  counters per bucket already exist for cache; durable usage per bucket is
-  added with multipart accounting in RFC-007).
-- Alternatives: object ACLs (rejected: AWS itself recommends policies;
-  per-object metadata on every GET costs a read); a separate authorization
-  service (rejected for the OSS baseline: one more process, and the
-  policy is small enough to evaluate in the gateway from a cached bucket
-  record, which the gateway already reads for every request).
+Initial scope (Phase 3.0 review item 1.2): bucket owner plus a bucket
+policy subset. IAM users/roles/groups, STS and ACLs are out of scope.
+
+#### 5.3.1 Records
+
+`BucketRecord` gains `owner: String` (principal name) and `policy:
+Option<String>` (the policy document as stored, validated at
+registration). Record version 2 with a version-1 decoder (RFC-014
+§5.3): a v1 bucket decodes with `owner = ""` (no owner). A bucket with
+no owner is accessible only through `arca-lake admin bucket set-owner`
+(B3, cluster-file holder) until an owner is assigned: with no owner and
+no policy every principal is denied (rule 1).
+
+#### 5.3.2 Authorization rules (normative)
+
+1. **Default deny.** A request is allowed only if a rule below allows it.
+   Absence of a policy, absence of a matching statement, an unknown
+   action, or an unknown bucket all deny.
+2. **Explicit Deny wins.** If any applicable `Deny` statement matches
+   the request, the request is denied, regardless of `Allow` statements
+   and regardless of ownership (rule 4 lists the one exception).
+3. **Bucket owner rights.** The owner of a bucket is allowed every
+   bucket-scoped and object-scoped action on that bucket
+   (`s3:*` on `arn:aws:s3:::bucket` and `arn:aws:s3:::bucket/*`) without
+   a policy. Ownership is recorded at `CreateBucket` (the authenticated
+   principal) and changed only by the admin command. `ListAllMyBuckets`
+   returns the principal's own buckets only. `CreateBucket` is allowed
+   for every authenticated principal (a deployment flag
+   `--bucket-creation allow|deny|list:<principals>` restricts it).
+4. **Explicit Deny applies to the owner too**, with one exception: a
+   `Deny` can never remove the owner's `s3:PutBucketPolicy`,
+   `s3:DeleteBucketPolicy` and `s3:GetBucketPolicy`, so an owner cannot
+   lock themselves out of fixing the policy (AWS behaves the same for the
+   account root). A policy that denies those actions to the owner is
+   accepted but the denial is ineffective for the owner and the audit
+   record notes `owner-override`.
+5. **Unsupported elements are rejected at registration.**
+   `PutBucketPolicy` parses the document against the grammar in §5.3.3;
+   any element, action, condition operator, condition key, principal
+   form or resource form outside the grammar fails with
+   `MalformedPolicy` and the message names the first offending element.
+   Nothing is stored that the evaluator does not fully understand, so the
+   evaluator never meets an unknown element at request time.
+6. **Evaluation errors deny.** Any error while evaluating (a stored
+   policy that fails to parse because of a bug or corruption, a missing
+   bucket record mid-request, a metadata read error) results in
+   `AccessDenied` (or the metadata error for the request as a whole),
+   never in an allow. The owner's rule 3 still applies when the bucket
+   record itself is readable (a corrupt *policy* does not lock out the
+   owner, who can replace it).
+7. **No tenant leakage.** Error responses do not reveal whether a bucket
+   or key exists to a principal that is not allowed to know: a denied
+   request on an existing bucket and a request on a non-existent bucket
+   both return `403 AccessDenied` for non-owners (AWS behaviour for
+   `HeadBucket`/`GetObject` without `ListBucket`); `ListAllMyBuckets`
+   never lists other principals' buckets; audit records of one tenant
+   are never returned to another (there is no tenant-facing audit API);
+   metrics carry no bucket, key or principal labels.
+8. **Gateway and storage node authorization are separate boundaries.**
+   The gateway authorizes *S3 principals* against *buckets and objects*
+   (this section). Storage nodes know nothing about S3 principals,
+   buckets or policies; they authorize *service identities* against
+   *RPCs* (§5.5). A compromised gateway therefore has the data-path
+   rights of a gateway identity and nothing more (threat T6); a storage
+   node never makes an S3 authorization decision.
+9. **Internal RPCs carry a service identity and role-based
+   authorization** (§5.5): every gRPC connection is mutually
+   authenticated; the server maps the peer's certificate to a role and
+   checks the role against the RPC table before any argument is read.
+
+Evaluation order per request, in `S3Access::check` before the operation
+runs and inside the operation's metadata transaction for the bucket
+record read (so a policy change and a write are serialized):
+
+```text
+action := action_of(operation)             -- table in §5.3.3
+bucket := bucket_record(name)              -- missing → deny (rule 7)
+if any Deny statement matches (principal, action, resource, conditions):
+    if principal == owner and action ∈ {Put,Get,Delete}BucketPolicy: allow (owner-override, rule 4)
+    else deny (rule 2)
+if principal == bucket.owner: allow (rule 3)
+if any Allow statement matches: allow
+deny (rule 1)
+```
+
+#### 5.3.3 Supported AWS policy JSON subset (compatibility matrix)
+
+| Element | Supported values | Unsupported (rejected at registration) |
+| --- | --- | --- |
+| `Version` | `"2012-10-17"` | anything else |
+| `Statement` | array of statements (also a single object) | — |
+| `Sid` | any string, unique within the document | duplicates |
+| `Effect` | `Allow`, `Deny` | — |
+| `Principal` | `"*"`, `{"AWS": "*"}`, `{"AWS": "<name>"}` or a list of names (principal names of this deployment; the `arn:aws:iam::…` form is accepted when its last path element is a principal name) | `Service`, `Federated`, `CanonicalUser`, `NotPrincipal` |
+| `Action` | string or list of: `s3:GetObject`, `s3:GetObjectVersion`, `s3:PutObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:ListBucket`, `s3:ListBucketVersions`, `s3:ListBucketMultipartUploads`, `s3:ListMultipartUploadParts`, `s3:AbortMultipartUpload`, `s3:GetObjectAttributes`, `s3:GetBucketVersioning`, `s3:PutBucketVersioning`, `s3:GetBucketPolicy`, `s3:PutBucketPolicy`, `s3:DeleteBucketPolicy`, `s3:GetBucketLocation`, `s3:DeleteBucket`, `s3:*`, and prefix wildcards over this list (`s3:Get*`, `s3:*Object*`) | any action outside the list (including `s3:PutObjectAcl`, `s3:GetObjectAcl`, lifecycle and tagging actions until implemented), `NotAction` |
+| `Resource` | `arn:aws:s3:::<bucket>`, `arn:aws:s3:::<bucket>/*`, `arn:aws:s3:::<bucket>/<prefix>*` where `<bucket>` is the policy's bucket; `"*"` | other buckets, `NotResource`, wildcards inside the bucket name |
+| `Condition` | `StringEquals`, `StringNotEquals`, `StringLike`, `StringNotLike` on `s3:prefix`, `s3:delimiter`, `s3:x-amz-metadata-directive`, `s3:x-amz-copy-source`; `IpAddress`, `NotIpAddress` on `aws:SourceIp` (CIDR); `Bool` on `aws:SecureTransport` | every other operator or key (`aws:PrincipalArn`, `aws:userid`, `s3:ExistingObjectTag/*`, `aws:CurrentTime`, `...IfExists`, `ForAllValues`, `ForAnyValue`, …) |
+
+Operation → action mapping: Get/HeadObject → `s3:GetObject`
+(`s3:GetObjectVersion` when `versionId` is given); PutObject,
+CopyObject destination, CreateMultipartUpload, UploadPart,
+UploadPartCopy destination, CompleteMultipartUpload → `s3:PutObject`;
+CopyObject/UploadPartCopy source → `s3:GetObject`(`Version`) on the
+source bucket; DeleteObject(s) → `s3:DeleteObject`
+(`s3:DeleteObjectVersion` with `versionId`); ListObjects(V2),
+HeadBucket → `s3:ListBucket`; ListObjectVersions →
+`s3:ListBucketVersions`; ListMultipartUploads →
+`s3:ListBucketMultipartUploads`; ListParts →
+`s3:ListMultipartUploadParts`; AbortMultipartUpload →
+`s3:AbortMultipartUpload`; bucket versioning/policy/location/delete →
+the like-named action. Operations without a listed action (ACLs,
+tagging, lifecycle, …) are `NotImplemented` and never authorized.
+
+#### 5.3.4 Tenant isolation
+
+The bucket is the tenant boundary: `owner` on the bucket record; every
+lower key (objects, versions, generations, part records, cache
+placements) carries the bucket id or a generation id that belongs to one
+bucket, so nothing below the bucket needs a tenant dimension. Per-tenant
+quotas are an RFC-013 item.
+
+Alternatives: object ACLs (rejected: AWS itself recommends policies;
+per-object metadata on every GET costs a read); a separate authorization
+service (rejected for the OSS baseline: one more process; the policy is
+small enough to evaluate in the gateway from the bucket record it
+already reads for every request).
 
 ### 5.4 C-2 edge TLS
 
@@ -357,22 +446,21 @@ visibility, epoch fencing or GC safety.
 
 ## 11. Acceptance criteria
 
-- A request signed with an inactive or unknown key is refused and
-  audited; rotation with two active keys passes a test that signs with
-  both during the overlap.
-- A principal cannot list, read, write or delete another principal's
-  bucket without a policy; with an `Allow` on a prefix it can read only
-  that prefix; a `Deny` wins over `Allow`; unknown policy elements are
-  rejected at `PutBucketPolicy`.
-- Anonymous mode: without a bucket policy allowing `*`, anonymous requests
-  are refused.
-- A gRPC connection without a client certificate, or with a certificate
-  of role `gateway`, cannot call `UpdateGroupEpoch`; a node presenting
-  another node's name is refused by the client.
-- Audit records exist for every S3 request in the conformance suite and
-  contain no secret material (asserted by a scan of the log).
-- Rate-limited and over-budget requests return `503 SlowDown` with
-  `Retry-After`, and the in-flight budget is never exceeded under a load
-  test with 2× the configured concurrency.
-- The performance regression check with TLS on both edges reports CPU
-  per GiB within the stated hypothesis or the number is recorded.
+Labels as RFC-007 §11 (Designed / Implemented / Verified / Not
+Implemented / Not Verified); Designed never implies Implemented.
+
+| # | Criterion | Status |
+| --- | --- | --- |
+| S-A1 | A request signed with an unknown or inactive key is refused (`InvalidAccessKeyId`) and audited; two active keys per principal both sign successfully during a rotation; removing the old key refuses it | Designed |
+| S-A2 | Credentials file reload (SIGHUP and mtime) swaps the key set atomically; an invalid file keeps the previous set and increments the failure counter | Designed |
+| S-A3 | Default deny: a principal cannot list, head, read, write or delete another principal's bucket without a policy (rule 1); error is `AccessDenied`, not `NoSuchBucket` (rule 7) | Designed |
+| S-A4 | Explicit Deny beats Allow, including for the owner; the owner keeps `*BucketPolicy` despite a Deny (rule 4) | Designed |
+| S-A5 | `PutBucketPolicy` rejects every unsupported element in §5.3.3 with `MalformedPolicy` naming the element; nothing unknown is stored (rule 5) | Designed |
+| S-A6 | A corrupt stored policy denies non-owners and still lets the owner replace it (rule 6) | Designed |
+| S-A7 | Prefix-scoped `Allow` grants only that prefix; `aws:SourceIp` and `s3:prefix` conditions evaluate correctly; property test: the evaluator is a pure function of (policy, request) with Deny monotonic | Designed |
+| S-A8 | Anonymous mode: without a policy allowing `*`, anonymous requests are refused | Designed |
+| S-A9 | Audit: every S3 request in the conformance suite produces exactly one record with principal, key id, action, bucket, decision and status; a scan of the log finds no secret, signature or user metadata value | Designed |
+| S-A10 | Gateway/node boundary: a node never reads a bucket record or policy (code review + a test that nodes serve a cluster whose metadata store they cannot reach) | Designed |
+| S-A11 | mTLS: a gRPC connection without a client certificate, or with role `gateway`, cannot call `UpdateGroupEpoch`; a node presenting another node's name is refused by the client | Designed (Phase 3.3) |
+| S-A12 | Rate-limited and over-budget requests return `503 SlowDown` with `Retry-After`; the in-flight budget is never exceeded under 2× configured concurrency | Designed (Phase 3.3) |
+| S-A13 | Performance regression with TLS on both edges within the stated hypothesis or recorded | Designed (Phase 3.3) |

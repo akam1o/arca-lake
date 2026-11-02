@@ -1,6 +1,6 @@
 # RFC-015: Backup, Restore and Disaster Recovery
 
-- Status: draft (Phase 3.0 design; implementation and drills Phase 3.3)
+- Status: draft, conditionally approved (Phase 3.0 review reflected; cluster-state record in Phase 3.1, remainder and drills Phase 3.3)
 - Authors: arca-lake maintainers
 - Created: 2026-11-02
 - Depends on: RFC-003, RFC-004, RFC-006, RFC-008, RFC-011, RFC-014
@@ -62,7 +62,7 @@ backup).
 | Item | How | Why |
 | --- | --- | --- |
 | Metadata (`("al",…)`) | `fdbbackup start -d <url> --continuous` (whole database; arca-lake owns the keyspace) | the truth about objects, placements, groups, epochs, leases, GC queues |
-| Layout and `min_software` keys | inside the above | needed for RFC-014's startup gate after restore |
+| Schema, `schema_write`, `format_write` and cluster-state keys | inside the above | needed for RFC-014's startup gate and RFC-015's state machine after restore (the restored state is overwritten by `restore mark`) |
 | Node identities | node records inside the above; each node's `group-epochs.txt` and segment directory stay on the node | the restore procedure treats nodes as live, not as backups |
 | Credentials, certificates, cluster file | **not** in FoundationDB; backed up by the deployment's secret management | RFC-012 §5.10 |
 | Configuration (flags, profiles) | deployment's configuration management | reproducibility |
@@ -88,42 +88,113 @@ however, time went on to `now`:
 | Cache placements | **advisory** | copies may be gone or belong to different generations | fallback and invalidation (exists); usage recomputed |
 | Pending generations at `T` | **expired** | leases long gone | GC's expiry pass handles them normally |
 
-### 5.3 Restore procedure (metadata)
+### 5.3 Cluster recovery states
 
-1. **Freeze**: stop gateways and controllers (or set the cluster
-   `read_only` flag, §5.6, so gateways serve reads only and controllers
-   stop GC, reconciliation, repair, eviction, tiering, lifecycle).
-2. **Restore** FoundationDB to `T` (`fdbrestore`), or into a fresh
-   cluster with the same cluster file name for the processes.
-3. **Mark the cluster `restored_at = T, verification_pending = true`**
-   (`admin restore mark --at T`): while set, the controller's
-   reconciliation and GC are **disabled** and refuse to run; the gateway
-   serves reads and refuses writes with `503` (the epoch catch-up has not
-   happened yet).
-4. **Epoch catch-up** (§5.4).
-5. **Verification pass** (`admin restore verify`, runs on the controller
-   leader, resumable, rate limited): for every group, walk the chunk
-   records of every committed generation that places in it and
-   `VerifyShards` on every member; classify each chunk `ok`, `degraded`
-   (≥ `k` good), `unreadable` (< `k`). Write the result to
-   `("al","meta","restore","report")` and export counters; mark
-   unreadable generations with `integrity: Unreadable` so that GET/HEAD
-   return an integrity error, listing shows the flag, and nothing serves
-   bytes that are not there. Then walk every node's `ListShards` and
-   classify shards as referenced / orphan (post-`T` generations, by
-   UUIDv7 time > `T`) / former-member.
-6. **Report** (`admin restore report`): counts and a list of unreadable
-   objects (bucket/key/version) for the operator; orphans by node with
-   their total bytes.
-7. **Decide**: the operator either accepts the report (`admin restore
-   accept`: clears `verification_pending`, re-enables writes, GC and
-   reconciliation, which may now delete orphans after `min_orphan_age`
-   as usual) or restores to a different `T` and repeats.
-8. **Repair**: degraded chunks are queued for ordinary repair.
+Phase 3.0 review item 1.4: the deletion freeze is one consequence of an
+explicit cluster state machine stored in metadata.
 
-The hard rule (B2): with `verification_pending` set, no code path on any
-component deletes a shard. The flag is a metadata key checked by every
-GC/reconcile transaction (fenced, so a stale leader cannot bypass it).
+`("al","meta","cluster") = ClusterState { incarnation: [u8; 16], state,
+restored_at_ms: Option<u64>, restored_from: Option<String>,
+changed_ms, changed_by }` is read at the start of every mutating
+transaction of every component (one extra read of a key that only the
+operator or the verification task writes: no conflicts in steady state)
+and refreshed by read-only paths every few seconds.
+
+| State | Client reads | Client writes | GC / reconcile / eviction / tiering / lifecycle / multipart sweep | Repair | Verification | Entered by |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Active` | yes | yes | yes | yes | — | `admin cluster activate` (from `ReadOnly`) or initialization |
+| `ReadOnly` | yes | no (`503 ServiceUnavailable`, `x-amz-error-detail: cluster read-only`) | **no** | yes (adds shards, never deletes) | optional | `admin cluster set-read-only` (maintenance) or verification success |
+| `Restoring` | **no** (`503`) | no | no | no | no | `admin restore mark --at T` **before** any arca-lake process is started on restored metadata (the command also writes the new incarnation) |
+| `VerificationPending` | yes, unverified objects may fail with an integrity error, never with wrong bytes | no | **no** | no (membership may be stale) | running | epoch catch-up completed (§5.4) |
+| `RecoveryRequired` | yes, as above; objects classified unreadable return the integrity error | no | **no** | yes, for degraded chunks | re-runnable | verification finished with unreadable objects, missing shards, or an incomplete pass (node absent) |
+
+Transitions: `Active → Restoring` (operator, after `fdbrestore`);
+`Restoring → VerificationPending` (epoch catch-up done); `VerificationPending
+→ ReadOnly` (verification complete, nothing unreadable, every node
+listed); `VerificationPending → RecoveryRequired` (otherwise);
+`RecoveryRequired → ReadOnly` (`admin restore accept`, which marks the
+listed objects `Unreadable` and is audited; or nodes return and a re-run
+finishes clean); `ReadOnly → Active` (`admin cluster activate`);
+`Active ↔ ReadOnly` (maintenance). No other transition exists; in
+particular there is no path from `Restoring`, `VerificationPending` or
+`RecoveryRequired` to `Active` that skips `ReadOnly`, and **no state
+other than `Active` allows a client PUT**.
+
+**Cluster Incarnation ID.** `restore mark` writes a fresh incarnation.
+Every process records the incarnation it started under and includes it
+in every mutating transaction's read set; a mismatch aborts the
+transaction with `ClusterIncarnationChanged`, after which the process
+re-reads the state and, since it is not `Active`, refuses writes. Storage
+nodes persist the incarnation they last saw (`cluster.txt` next to
+`group-epochs.txt`, Phase 3.3) and report it in `Health`; the
+controller's reconcile and GC refuse to delete on a node whose reported
+incarnation differs from metadata's. This fences gateways and
+controllers that were running during the restore and a controller whose
+lease token predates it (the lease key is restored too, so the fencing
+token alone would not distinguish).
+
+**Why `Restoring` is mandatory.** Restored metadata looks exactly like
+live metadata; nothing in it says "restored". The operator's `restore
+mark` is the only point where that fact enters the system, so the
+procedure requires it before any process starts, and the nodes' epoch
+fencing provides the backstop if the operator forgets: node epochs are
+higher than restored group epochs, so writes with restored epochs are
+rejected (`FAILED_PRECONDITION`), and reconcile refuses on an
+incarnation mismatch.
+
+### 5.3.1 Restore procedure
+
+1. **Freeze**: stop gateways and controllers (or `set-read-only` first,
+   then stop).
+2. **Restore** FoundationDB to `T` (`fdbrestore`) or into a fresh
+   cluster.
+3. **Mark**: `admin restore mark --at T --from <backup-url>` → state
+   `Restoring`, new incarnation, `restored_at = T`.
+4. **Start** controllers (they see `Restoring`, run nothing but the
+   recovery tasks) and gateways (they refuse everything with `503`).
+5. **Placement epoch recovery** (§5.4): controller task, metadata-only;
+   on completion state → `VerificationPending`. Reads now open.
+6. **Verification pass** (§5.3.2) → `ReadOnly` or `RecoveryRequired`.
+7. **Report** (`admin restore report`) and **decide**: `accept`, or
+   restore to another `T` and repeat from step 2.
+8. **Activate** (`admin cluster activate`): writes open; GC, reconcile,
+   eviction, tiering, lifecycle and the multipart sweep resume; orphans
+   are deleted by reconcile only after `min_orphan_age` as usual.
+
+### 5.3.2 Verification pass
+
+Runs on the controller leader, resumable (cursor per group and per
+node), rate limited, in `VerificationPending` or `RecoveryRequired`:
+
+- **Object integrity verification**: for every committed generation
+  (objects, multipart roots via their part references, parts), for every
+  chunk record: `VerifyShards` on every member of the placement's group;
+  classify `ok` (all shards verify), `degraded` (≥ `k` verify), 
+  `unreadable` (< `k`). Degraded chunks are queued for repair;
+  unreadable generations are listed in the report.
+- **Missing shard detection**: a shard that metadata references and no
+  member holds (deleted by GC after `T`) is `missing`; a chunk with
+  fewer than `k` shards present is `unreadable` (a special case of the
+  above) and the report distinguishes "missing" from "corrupt".
+- **Orphan classification**: `ListShards` on every node; a shard is
+  `referenced` (a live generation places it, RFC-008 §6.3), `orphan
+  post-T` (generation id UUIDv7 time > `T` and no generation record:
+  written after `T`, unrecoverable as an object because its header is
+  gone), `orphan pre-T` (older, unreferenced: ordinary garbage), or
+  `former-member`. Nothing is deleted; counts and bytes per node go to
+  the report.
+- **Completion criteria**: every group's every referenced chunk has a
+  classification; every registered node answered `ListShards`
+  completely (a node absent during the pass makes it *incomplete* and
+  the state `RecoveryRequired`, unless the operator excludes the node
+  with `--exclude-node`, which is audited and recorded in the report);
+  the report `("al","meta","restore","report",incarnation)` is written
+  in one transaction at the end with the incarnation id, so a report
+  from a previous incarnation can never be mistaken for this one.
+- **Safe recovery resume**: after a controller crash the next leader
+  resumes from the cursors; the state does not change until the final
+  transaction; `accept` is refused while the pass is incomplete unless
+  `--force` (audited).
 
 ### 5.4 Epoch catch-up
 
@@ -150,15 +221,16 @@ usage counter (`("al","cusage",tier)`) is recomputed by `admin cache
 recount` (sum of placement bytes, one range read per tier) so that
 capacity checks are correct again; eviction then proceeds normally.
 
-### 5.6 Cluster flags
+### 5.6 Cluster state enforcement
 
-`("al","meta","flags") = { read_only: bool, verification_pending: bool,
-restored_at: Option<ms> }`: read by gateways (reject writes with `503
-ServiceUnavailable` and a `x-amz-error-detail: cluster read-only`
-header) and by controller schedulers (GC, reconcile, repair writes,
-eviction, tiering, lifecycle) at the start of every pass and inside
-every deleting transaction. `admin cluster set-read-only on|off` is also
-the tool for planned maintenance.
+The `ClusterState` record replaces the earlier `flags` sketch. Enforced
+in: the gateway's request admission (state and incarnation checked per
+request from a cached copy refreshed every 2 s, and inside every commit
+transaction); the controller's scheduler (before every pass) and every
+deleting or moving transaction (GC finish, reconcile delete, eviction,
+tiering switch, lifecycle delete, multipart sweep); `admin` mutating
+commands. The check is a read of one key in the same transaction, so a
+stale leader or a stale gateway cannot bypass it.
 
 ### 5.7 Recovery objectives
 
@@ -185,7 +257,7 @@ backup that fails this check pages.
 | Decision | Chosen | Alternatives |
 | --- | --- | --- |
 | Backup unit | FoundationDB backup only + live nodes | full node snapshots (2× capacity, inconsistent with metadata time anyway); application-level export of manifests (slower, same gaps) |
-| Post-restore safety | explicit `verification_pending` gate checked in every deleting transaction | rely on `min_orphan_age` (post-`T` orphans older than that would be deleted before anyone looked); a long global pause (humans forget) |
+| Post-restore safety | explicit cluster state machine (`Restoring` → `VerificationPending` → `ReadOnly`/`RecoveryRequired` → `Active`) with an incarnation id, checked in every mutating transaction | a single boolean flag (no distinction between "verifying", "needs a decision" and "maintenance"; no fencing of stale processes); rely on `min_orphan_age` (post-`T` orphans older than that would be deleted before anyone looked); a long global pause (humans forget) |
 | Unreadable objects | marked, refused, reported | silently 404 (hides loss); serve partial bytes (never) |
 | Epochs | catch-up from nodes, metadata-only | rewrite all shards (unnecessary); ignore epochs (breaks fencing) |
 | Read-only flag | metadata key checked per transaction | process flags (not fenced; forgotten on restart) |
@@ -232,14 +304,13 @@ rate limited so that reads continue to be served during the pass.
 
 ## 11. Acceptance criteria
 
-- Drill on the validation hosts: write objects, take a continuous
-  backup, write and delete more objects, run GC, kill FoundationDB's
-  data, restore to `T`, catch up epochs, verify, report lists exactly
-  the deleted-after-`T` objects as unreadable and the post-`T` objects as
-  orphans, GET of an unreadable object returns the integrity error,
-  `accept`, reconciliation deletes the orphans after the age gate,
-  repair fixes degraded chunks, every surviving object verifies against
-  its client-side checksum. Timed and recorded in RFC-013.
-- No deleting transaction succeeds while `verification_pending` is set
-  (fault test with an injected stale leader).
-- Backup validation job detects a corrupted backup fixture.
+Labels as RFC-007 §11.
+
+| # | Criterion | Status |
+| --- | --- | --- |
+| B-A1 | `ClusterState` record exists; gateways refuse PUT/DELETE/multipart/copy with `503` in every state but `Active`; GC, reconcile, eviction, tiering and the multipart sweep refuse to run in every state but `Active` (and `ReadOnly` for repair only) | Designed (record and gateway/controller gates Phase 3.1 if time allows, else 3.3) |
+| B-A2 | Incarnation fencing: a process started under incarnation A cannot commit a mutating transaction after `restore mark` writes incarnation B (fault test with a stale leader and a stale gateway) | Designed (Phase 3.3) |
+| B-A3 | Drill on validation hosts: write, back up, write and delete more, run GC, destroy FoundationDB data, restore to `T`, mark, epoch catch-up, verify; the report lists exactly the deleted-after-`T` objects as unreadable and the post-`T` shards as orphans; GET of an unreadable object returns the integrity error; `accept`, `activate`; reconcile deletes orphans after the age gate; repair fixes degraded chunks; every surviving object verifies against its client-side checksum; timed | Designed (Phase 3.3) |
+| B-A4 | Verification completion criteria enforced: a node stopped during the pass yields `RecoveryRequired` and `accept` is refused without `--force` | Designed (Phase 3.3) |
+| B-A5 | Backup validation job detects a corrupted backup fixture | Designed (Phase 3.3) |
+| B-A6 | No PUT succeeds between `restore mark` and `activate` (asserted by the drill's load generator) | Designed (Phase 3.3) |

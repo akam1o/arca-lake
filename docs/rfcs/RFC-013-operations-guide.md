@@ -300,9 +300,14 @@ restore scenarios.
 
 ## 13. Acceptance criteria
 
-- Every runbook in §5 and §10 has been executed at least once on the
-  validation hosts during Phase 3.3–3.4 and the transcript (sanitized)
-  is linked from the roadmap page.
-- The metric registry test passes (no unlisted series).
-- The alert rules exist as a Prometheus rule file in `deploy/` and load
-  with `promtool check rules`.
+Labels as RFC-007 §11 (Designed / Implemented / Verified / Not
+Implemented / Not Verified).
+
+| # | Criterion | Status |
+| --- | --- | --- |
+| O-A1 | Every runbook in §5 and §10 executed at least once on validation hosts (Phase 3.3–3.4) with a sanitized transcript linked from the roadmap | Designed |
+| O-A2 | Metric registry test: every exported series is listed in §7 | Designed |
+| O-A3 | Alert rules exist as a Prometheus rule file in `deploy/` and pass `promtool check rules` | Designed |
+| O-A4 | Public-repository CI checklist (§9) items 1, 2, 4, 5 | Implemented (workflow permissions, self-hosted on `push` to `main` only, sanitizer check, cargo-deny); item 3 (dedicated rebuilt runner VMs) Designed |
+| O-A5 | Node add/remove/replace-member/decommission commands | Not Implemented (Phase 3.2) |
+| O-A6 | Cluster state commands (`set-read-only`, `activate`, `restore mark/verify/report/accept`) | Not Implemented (Phase 3.3) |

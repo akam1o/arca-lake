@@ -1,6 +1,6 @@
 # RFC-014: Rolling Upgrade and Compatibility
 
-- Status: draft (Phase 3.0 design; implementation Phase 3.3)
+- Status: draft, conditionally approved (Phase 3.0 review reflected; prerequisites in Phase 3.1, remainder Phase 3.3)
 - Authors: arca-lake maintainers
 - Created: 2026-11-02
 - Depends on: RFC-003, RFC-005, RFC-008, RFC-011
@@ -54,135 +54,187 @@ arca-lake release, R-18); zero-downtime for a single-gateway deployment.
 
 ## 5. Proposed design
 
-### 5.1 Version vocabulary
+### 5.1 Three independent compatibility axes
 
-- **Software version**: the crate version (`arca-lake --version`),
-  semantic.
-- **Protocol version** `P`: the gRPC message/semantics version
-  (`arca_lake.storage.v1`, `PROTOCOL_VERSION`).
-- **Segment format version** `F`: `SEGMENT_FORMAT_VERSION` and
-  `RECORD_VERSION` (RFC-005).
-- **Layout version** `L`: the metadata key layout and record versions
-  taken together (`("al","meta","layout")`).
-- **Compatibility window**: a release supports `P ∈ {P_cur−1, P_cur}`,
-  reads `F ≤ F_cur`, reads `L ∈ {L_cur−1, L_cur}` and writes `L_cur`
-  records only after finalization. A release that would need more than
-  that is not a rolling upgrade and the release notes say so.
+Phase 3.0 review item 1.3: compatibility is managed on three axes with
+independent version numbers and independent compatibility ranges. A
+release declares all three; a change on one axis never implies a change
+on another.
 
-### 5.2 Protocol versioning
+| Axis | Symbol | What it versions | Where the number lives | Read range of a build | Write rule |
+| --- | --- | --- | --- | --- | --- |
+| Wire Protocol | `P` | gRPC messages and RPC semantics between gateway/controller and nodes | `PROTOCOL_VERSION` in `arca-lake-protocol`; advertised per node in `Health { protocol_min, protocol_max }` | `[P_cur − 1, P_cur]` | negotiated per connection (§5.2) |
+| Metadata Schema | `M` | key layout and record encodings in FoundationDB | `("al","meta","schema")` (current schema), `("al","meta","schema_write")` (schema that writers may use), record version byte per record | records and layout `[M_cur − 1, M_cur]` | writers encode the version named by `schema_write` (§5.4) |
+| Storage Format | `F` | segment header and record format on node devices | `SEGMENT_FORMAT_VERSION`/`RECORD_VERSION` in `arca-lake-storage`; `("al","meta","format_write")` (format nodes may write) | all `F ≤ F_cur` | a node writes `min(F_cur, format_write)` (§5.3) |
 
-- Every request already carries `protocol_version`. The check becomes:
-  accept `v` if `P_min ≤ v ≤ P_cur` (window of two). The `Health`
-  response gains `protocol_min` and `protocol_max`; clients (gateway,
-  controller) call `Health` on first connection to a node and cache the
-  node's window, then send `min(P_cur, node.protocol_max)`.
-- Additive changes (new optional fields, new RPCs) do not bump `P`;
-  a client must tolerate `Unimplemented` for a new RPC on an old node
-  (the scrub RPC in Phase 3.2 is such a case: the controller skips nodes
-  that return `Unimplemented` and counts them).
-- Semantic changes (field meaning, required new behaviour) bump `P`; the
-  node implements both behaviours for the window.
-- Group epochs and fencing are unchanged by version: a node at N+1 and a
-  node at N in the same group agree on epochs because epochs are data,
-  not protocol.
+The software version (crate version) maps to a triple `(P, M, F)` in the
+release notes. A rolling upgrade from release A to release B is
+supported iff `P_B − P_A ≤ 1`, `M_B − M_A ≤ 1` and the build B reads
+`F_A`. Anything else is not a rolling upgrade and the release notes say
+so.
 
-### 5.3 On-disk formats
+### 5.2 Wire protocol versioning and negotiation
+
+- Every request carries `protocol_version` (exists). The node accepts
+  `v` iff `P_cur − 1 ≤ v ≤ P_cur`. `Health` gains `protocol_min` and
+  `protocol_max`; clients call `Health` on first connection to a node,
+  cache the window, and send `min(P_cur_client, node.protocol_max)`. A
+  node whose window does not intersect the client's is reported as
+  incompatible (`arca_gateway_node_incompatible_total`) and skipped for
+  placement.
+- Additive changes (optional fields, new RPCs) do not bump `P`; a client
+  tolerates `Unimplemented` for a new RPC on an old node and counts it.
+- Semantic changes bump `P`; the node implements both behaviours for the
+  window.
+- Epochs and fencing are data, not protocol: nodes at different `P` in
+  one group agree on epochs.
+- **Mixed-version cluster**: a group may hold nodes at `P` and `P + 1`
+  indefinitely; repair reads any member and writes the target in the
+  target's negotiated protocol and allowed format.
+
+### 5.3 Storage format and the write gate
 
 - Reading: every build keeps decoders for all `F` since 1
-  (`format_compat.rs` golden files, one per version; the test asserts
-  every golden file still opens and verifies).
-- Writing: a node writes `F_cur` only if `cluster.min_software_version`
-  (§5.4) is at least the version that introduced `F_cur`; otherwise it
-  writes `F_cur−1`. Mixed segments within one directory are allowed
-  (the segment header carries its version). Downgrade is possible until
-  a segment with the new format exists; `arca-lake storage-node
-  --check-downgrade <version>` scans headers and says so.
-- Record format changes follow the same rule within a segment; the
-  record header's version byte selects the decoder.
+  (`format_compat.rs` golden files, one per version).
+- **Write gate**: a node writes format `min(F_cur, format_write)`, where
+  `format_write` is read from metadata at start and re-read on every
+  controller heartbeat response (nodes do not hold the cluster file; the
+  controller passes the value in `Health` requests, and a node that has
+  never heard a value writes `F` of its own previous release, i.e. the
+  conservative choice). **While any node runs a build that cannot read
+  `F_cur`, `format_write` stays below `F_cur`**, because finalization
+  (§5.5) raises it only after every registered node reports a software
+  version that reads `F_cur`. Mixed segments within one directory are
+  allowed (the segment header carries its version).
+- Downgrade check: `arca-lake storage-node --check-downgrade <F>` scans
+  segment headers and refuses if any segment is newer than `F`.
 
-### 5.4 Metadata layout version and migrations
+### 5.4 Metadata schema versioning and migration
 
-- Initialization (`admin init`, new; `create-groups` on an empty cluster
-  calls it) writes `("al","meta","layout") = L_cur` and
-  `("al","meta","min_software") = <version>`.
-- Startup check (every process, read-only): `L` must be in the build's
-  window, else refuse to start with the message `layout L_x requires
-  software ≥ … (this build: …)`. A build older than the layout never
-  starts; a build newer than `L+1` never starts.
-- Record versions: every record carries its version byte (exists);
-  decoders for `v` and `v−1` exist in a release; **writers write the
-  record version allowed by `min_software`** (lazy upgrade of records
-  on rewrite is not done: a record is rewritten only when its operation
-  rewrites it, and then in the allowed version). This keeps a v1 reader
-  working until finalization.
-- **Finalization** (`admin upgrade finalize`): the operator runs it when
-  every process reports the new software version (`admin status` shows
-  versions from the node health RPC and the controller/gateway
-  heartbeat records, Phase 3.3). It bumps `min_software` and, if the
-  release has a migration, runs it: migrations are idempotent, resumable
-  (cursor in `("al","meta","migration",name)`), rate limited, executed by
-  the controller leader (fenced), and bump `L` only at the end. Example
-  (Phase 3.1): bucket records v1 → v2 (`owner = "legacy"`) is a lazy
-  decoder, not a rewrite, so the migration only bumps `L`.
-- **Downgrade policy**: before finalization, any process may be downgraded
-  to N (it reads `L` and the records it finds, all ≤ its window). After
-  finalization, downgrade is refused by the startup check; recovery is
-  "fix forward" or restore (RFC-015) with the data-loss consequences
-  stated there.
+- **Schema key**: `("al","meta","schema") = M` is written at
+  initialization (`admin init`; `create-groups` on an empty store calls
+  it) together with `("al","meta","schema_write") = M`. Phase 3.1 writes
+  `M = 2` on new clusters and treats a store with data but no schema key
+  as `M = 1` (the Phase 2 layout), stamping the key on first contact.
+- **Startup gate** (every process, read-only): refuse to start unless
+  `M_cur − 1 ≤ schema ≤ M_cur`, with the message `metadata schema M_x
+  requires software with M ∈ [x, x+1] (this build: M_cur)`. A build older
+  than the schema never starts (downgrade prevention); a build newer
+  than `schema + 1` never starts (no skipped versions).
+- **Records**: every record carries its version byte (exists); a build
+  decodes versions `M_cur − 1` and `M_cur` and encodes the version named
+  by `schema_write` (writers read `schema_write` once per process start
+  and on a periodic refresh; a stale value is always the *older* one,
+  which every peer reads). Records are rewritten only when their
+  operation rewrites them (lazy upgrade); a reader of `M_cur − 1` never
+  meets an `M_cur` record before finalization.
+- **Migrations** are named, idempotent and resumable (cursor in
+  `("al","meta","migration",name)`), rate limited, executed by the
+  controller leader under its fencing token, and never required for
+  correctness before finalization (the old build ignores keys it does
+  not know only if they are additive; a migration that is not additive
+  is not a rolling upgrade).
 
-### 5.5 Upgrade order and procedure
+### 5.5 Upgrade finalization (idempotent, crash-safe)
 
-1. **Read the release notes**: window, migration, estimated migration
-   time, downgrade cut-off.
-2. **Storage nodes first**, one failure domain at a time: stop the node
-   (SIGTERM; in-flight streams finish or fail with retryable errors that
-   the gateway's RPC policy handles, ADR-0011), replace the binary,
-   start, wait for `Health` and `last_seen`, check
-   `arca_gateway_node_rpc_exhausted_total` flat. The controller's health
-   pass tolerates `--unhealthy-after-secs` of absence before repair would
-   start; keep each restart under that.
-3. **Controllers**: followers first, leader last (SIGTERM releases the
-   lease; the new leader, at N+1, resumes repairs via cursors).
-4. **Gateways**: drain from the load balancer, restart, return.
-5. **Verify**: `admin status --versions` shows one version everywhere;
-   the conformance smoke test passes.
-6. **Finalize** (§5.4) once the operator is satisfied; take a backup
-   right before (RFC-015), since finalization is the downgrade cut-off.
+`arca-lake admin upgrade finalize --to <release>` performs these steps,
+each a separate idempotent transaction that re-checks its precondition,
+with a cursor `("al","meta","upgrade") = { target, step, started_ms,
+by_token }` so that any crash (operator, controller, FoundationDB) is
+resumed by re-running the command or by the controller leader's
+finalize task, which picks up an unfinished cursor:
+
+1. **Precondition**: every registered node and every controller and
+   gateway heartbeat record (`("al","proc",id)`, written every 30 s with
+   software version and `(P, M, F)`) reports a version ≥ target; nodes
+   absent for longer than the heartbeat window block finalization unless
+   `--ignore-absent <id>` is given (audited). Writes the cursor.
+2. **Migration** (if the release has one): runs to completion via its
+   own cursor; idempotent re-run after a crash.
+3. **`schema_write := M_target`**: from now on writers encode new
+   records; old builds can no longer start (the startup gate) — this is
+   the **downgrade cut-off** and the release notes say so; a backup
+   (RFC-015) is taken automatically before this step unless
+   `--no-backup` is given.
+4. **`format_write := F_target`**: nodes begin writing the new format at
+   their next heartbeat.
+5. **`schema := M_target`**, clear the cursor, audit record.
+
+Idempotence: each step is a compare-and-set on the cursor's `step`; two
+concurrent invocations serialize on the cursor key; a step that finds
+its effect already applied advances the cursor without changing data.
+Crash safety: no step depends on an in-memory value from a previous
+step; a controller crash during step 2 resumes the migration from its
+cursor; during steps 3–5 the next invocation re-reads the keys and
+performs the remaining compare-and-sets. The controller leader checks
+for an unfinished cursor on every election and finishes it (fenced).
+
+### 5.6 Rollback and downgrade policy
+
+- **Before step 3** (`schema_write` unchanged): roll back by
+  reinstalling the previous build on any process in any order; every
+  record and segment is of the old version; the cursor, if present, is
+  cleared by `admin upgrade cancel`.
+- **After step 3**: downgrade is refused by the startup gate. Recovery
+  is forward (a hot-fix release in the same window) or restore of the
+  pre-finalize backup (RFC-015) with its stated consequences (writes
+  after the backup are lost). This is why finalization is a deliberate
+  operator action and never automatic.
+- **Downgrade prevention** is enforced, not advisory: the startup gate
+  on `schema`, the node's refusal to open a segment newer than it
+  understands, and the protocol window.
+
+### 5.7 Mixed-version test strategy
+
+A rolling-upgrade test needs two builds. Until a release tag exists, CI
+builds the workspace twice: once at `HEAD` and once with
+`ARCA_LAKE_TEST_VERSION_BUMP=1`, which makes the build report `(P + 1,
+M + 1, F + 1)` with identical semantics except for an additive test-only
+field in `Health`, a test-only record field and a test-only segment
+header flag. The mixed-version test runs one group with nodes from both
+builds under PUT/GET/repair, upgrades the old nodes one at a time under
+load, finalizes, verifies every object, and asserts that the old build
+refuses to start. Once real tags exist, the previous tag replaces the
+bumped build.
+
+### 5.8 Upgrade order and procedure
+
+1. Read the release notes: `(P, M, F)` deltas, migration, estimated
+   duration, downgrade cut-off.
+2. Storage nodes first, one failure domain at a time (SIGTERM, replace
+   binary, start, wait for `Health` and `last_seen`); keep each restart
+   under `--unhealthy-after-secs`.
+3. Controllers: followers first, leader last (SIGTERM releases the
+   lease; the new leader resumes repairs via cursors).
+4. Gateways: drain, restart, return.
+5. Verify `admin status --versions` shows one version everywhere and the
+   conformance smoke test passes.
+6. Finalize (§5.5) when satisfied; this is the downgrade cut-off.
 
 Why this order: nodes must understand the newest protocol before any
-client speaks it (clients negotiate down, but a node cannot negotiate
-up); the controller must be newest before a migration runs; gateways
-last so that the data path is served by the most tested combination
-(new gateway → new nodes) only after nodes are done.
+client speaks it (clients negotiate down, nodes cannot negotiate up);
+the controller must be newest before a migration runs; gateways last so
+the data path runs on the most tested combination only after nodes are
+done.
 
-### 5.6 Upgrade failure recovery
+### 5.9 Upgrade failure recovery
 
 | Failure | Recovery |
 | --- | --- |
 | New node binary crashes on start | start the old binary (format not finalized → readable); the group is unaffected (one member) |
 | New node starts but misbehaves (errors, corruption reports) | downgrade that node; `admin replace-member` if its data is suspect (repair rewrites it) |
-| Controller at N+1 fails migration midway | migration cursor; fix forward with a patched N+1; `L` not yet bumped, so N controllers can still lead (they ignore the partial migration keys, which are additive) |
+| Controller at N+1 fails migration midway | migration cursor; fix forward with a patched N+1; `schema_write` not yet bumped, so N controllers can still lead (they ignore the partial migration keys, which are additive) |
+| Controller crashes during finalize (any step) | the cursor records the step; the next leader or the next `finalize` invocation resumes; no step is half-applied because each is one compare-and-set transaction |
 | Finalized, then a defect is found | no downgrade; hot-fix release N+1.1 with the same window; restore is the last resort |
 | Gateway at N+1 returns new error shapes clients reject | drain it; downgrade; file the compatibility bug |
-
-### 5.7 Mixed-version operation rules
-
-- A group may contain nodes at N and N+1 indefinitely (reads and writes
-  use the negotiated protocol per node; formats per node).
-- Repair reads from any member and writes to the target in the target's
-  format.
-- A gateway at N with nodes at N+1: works (window). A gateway at N+1
-  with a node at N: works (negotiates down); features that need the new
-  protocol on that node are refused with a clear error (e.g. scrub on
-  that node is skipped and counted).
 
 ## 6. Alternatives considered
 
 | Decision | Chosen | Alternatives |
 | --- | --- | --- |
-| Compatibility window | adjacent versions (N, N+1) | any-to-any (unbounded test matrix); none (stop-the-world upgrades, which is today) |
-| Format write gate | cluster `min_software` set by finalization | per-node auto-detection (a node cannot see every peer); time-based (unsafe) |
-| Record migration | lazy decoders, rewrite-on-write, explicit finalize | eager rewrite at upgrade (long, blocks downgrade immediately); dual-write (complex) |
+| Compatibility axes | three independent axes `(P, M, F)`, each with an adjacent-version range | one monolithic version (couples a wire change to a format change and forces needless cut-offs); unbounded any-to-any (untestable) |
+| Format write gate | `format_write` key raised by finalization after every node reports a reading build | per-node auto-detection (a node cannot see every peer); time-based (unsafe) |
+| Record migration | lazy decoders, writers encode the `schema_write` version, explicit idempotent finalize with a cursor | eager rewrite at upgrade (long, blocks downgrade immediately); dual-write (complex); finalize as one big transaction (not resumable, not auditable per step) |
 | Protocol negotiation | window advertised in `Health`, client picks | strict equality (today; no rolling upgrade); per-RPC feature flags only (does not cover semantic changes) |
 | Upgrade order | nodes → controllers → gateways | gateways first (new clients could speak a protocol no node has) |
 
@@ -213,7 +265,7 @@ work; the release notes carry a measured duration per million objects.
 
 ## 10. Open questions
 
-- Should `min_software` also gate protocol version advertisement, so
+- Should `schema_write` also gate protocol version advertisement, so
   that no client *speaks* P_cur before finalization? (Proposal: no;
   protocol is negotiated per peer and both are tested; the gate is for
   persistent formats.)
@@ -223,15 +275,14 @@ work; the release notes carry a measured duration per million objects.
 
 ## 11. Acceptance criteria
 
-- A test starts a cluster with nodes at the previous release's binary
-  (built from the previous tag in CI) and the current one in one group,
-  runs PUT/GET/repair across them, upgrades the old nodes one at a time
-  under load, and verifies every object; then finalizes and verifies
-  that the old binary refuses to start.
-- Golden files for every segment, record and layout version pass the
-  compatibility tests; a format bump without a golden file fails CI.
-- A controller handoff under a running repair resumes from the cursor
-  within one election interval (exists: `repair_completion.rs`,
-  `controller.rs`; extended to assert the interval).
-- The downgrade check command reports correctly before and after a
-  format bump.
+Labels as RFC-007 §11.
+
+| # | Criterion | Status |
+| --- | --- | --- |
+| U-A1 | Schema key written at initialization; a store with data but no key is treated as `M = 1` and stamped; the startup gate refuses builds outside `[schema, schema + 1]` with the documented message | Designed (Phase 3.1 writes the key; gate Phase 3.3) |
+| U-A2 | Record version 2 (bucket owner/policy, generation kind/checksum) decodes version-1 records; golden encodings per version pass; a record change without a golden file fails CI | Designed (Phase 3.1) |
+| U-A3 | Protocol window: a node accepts `P − 1` and `P`, advertises the window in `Health`, a client negotiates down; incompatible nodes are counted and skipped | Designed (Phase 3.3) |
+| U-A4 | Format write gate: with `format_write < F_cur` a node writes the old format; a mixed-version group (bumped build) serves PUT/GET/repair; the old build reads every segment written while the gate was low | Designed (Phase 3.3) |
+| U-A5 | Finalize: idempotent (re-run is a no-op), crash-safe (killed after each step, resumed by the leader), concurrent invocations serialize; after step 3 the old build refuses to start | Designed (Phase 3.3) |
+| U-A6 | Rollback before step 3 by reinstalling the old build under load loses no acknowledged write | Designed (Phase 3.3) |
+| U-A7 | Controller handoff under a running repair resumes from the cursor within one election interval | Verified (`repair_completion.rs`, `controller.rs`; interval assertion Phase 3.3) |

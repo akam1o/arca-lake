@@ -1,6 +1,6 @@
 # RFC-007: S3 Gateway Compatibility
 
-- Status: draft (Phase 3.0 design; implementation Phase 3.1)
+- Status: draft, conditionally approved (Phase 3.0 review reflected; implementation Phase 3.1)
 - Authors: arca-lake maintainers
 - Created: 2026-11-02
 - Depends on: RFC-001, RFC-002, RFC-003, RFC-008, RFC-012
@@ -85,135 +85,362 @@ and returning tags without tag-based policy conditions.
 | Auth | SigV4 header, presigned, POST policy | implemented (s3s) |
 | Checksums | ETag MD5 (single part), composite ETag, five checksum algorithms, `checksum-mode` | Phase 3.1 |
 
-### 5.2 Object model recap (RFC-002)
+### 5.2 Object model recap (RFC-002) and generation kinds
 
 A key has a current pointer and, when versioning is enabled, a version
 history; every version is a *generation* with a header and chunk
 records; generations are `Pending` (leased), `Committed`, or `Retiring`
-(GC). Multipart and copy build on generations without new concepts.
+(GC). Phase 3.1 gives the header a *kind*:
 
-### 5.3 Multipart upload
+| Kind | Chunks | Referenced by | Used for |
+| --- | --- | --- | --- |
+| `Object` | inline (`("al","g",gen,"c",i)`) | current pointer, version record | single PUT, CopyObject |
+| `Part { upload_id, part_number }` | inline | part record while the upload is open; part manifest reference of the root after Complete | one multipart part |
+| `MultipartRoot { part_count }` | none of its own; part manifest references `("al","g",root,"m",n)` | current pointer, version record | a completed multipart object |
 
-- **Upload id**: a fresh UUIDv7 (`upload_id`), recorded in
-  `("al","mpu",bucket_id,key,upload_id) = MultipartRecord { initiated_ms,
-  owner, content_type, user_metadata, checksum_algorithm, state:
-  Open|Completing|Completed|Aborted }` and in a listing index
-  `("al","mpui",bucket_id,key,upload_id)`.
-- **Parts**: each `UploadPart` is a PUT of an independent *part
-  generation* (`Pending`, lease renewed as RFC-003/ADR-0011) whose header
-  carries `part_of: Some(upload_id)` and `part_number`; on success the
-  part record `("al","mpu",bucket_id,key,upload_id,"p",part_number) =
-  PartRecord { generation, size, etag_md5, checksum }` is written,
-  **replacing** any previous generation for that part number (the old
-  one goes `Retiring`). Parts are streamed, erasure coded and placed
-  exactly like objects (same chunking, same pipeline), so a part is
-  durable before `UploadPart` returns 200 (Durable ACK holds per part).
-- **Complete**: one metadata transaction reads the record (`Open`), the
-  listed parts in order, validates sizes (every part except the last
-  ≥ 5 MiB, part numbers ascending, ETags match), then writes a new
-  *object generation header* whose chunk records are the concatenation of
-  the parts' chunk records with re-based offsets (chunk ids stay the
-  parts' chunk ids: shards are not rewritten; the object generation
-  *adopts* the part generations' chunks), sets the composite ETag
-  `md5(md5_1‖…‖md5_N)-N`, publishes the current pointer (rule V1,
-  versioning as for PUT), marks the multipart record `Completed`, and
-  marks the part generations as `Adopted { by: object_gen }` so that GC
-  never collects their chunks while the object generation lives.
-  Atomic visibility: the object appears in one transaction. Chunk record
-  count may exceed the single-transaction budget for very large uploads:
-  the adoption writes only a *part list* in the object header
-  (`parts: Vec<GenId>`) and the read path resolves chunks through the
-  part generations; this keeps completion to one transaction regardless
-  of size. Alternatives rejected: copying shards into a new generation
-  (doubles write traffic and time); rewriting chunk records into the
-  object generation across several transactions (loses single-transaction
-  atomicity).
-- **Concurrent completes** of the same upload: the transaction requires
-  state `Open`; the first commit wins and sets `Completed` with the
-  resulting version id; a second complete with an identical part list
-  returns the same result (idempotent, AWS behaviour); a differing part
-  list after completion returns `NoSuchUpload`.
-- **Abort**: sets `Aborted`, retires every part generation (GC collects
-  them after the grace), removes the record after GC confirms; idempotent
-  (`NoSuchUpload` only after the record is gone). `UploadPart` to an
-  aborted or completed upload fails with `NoSuchUpload`.
-- **Orphaned uploads**: never completed nor aborted. Lifecycle
-  `AbortIncompleteMultipartUpload` (§5.10) and a controller default of
-  7 days abort them; the part generations are ordinary pending/retiring
-  generations, so RFC-008's GC and reconciliation already cover their
-  shards; the metadata `mpu` record is removed by the same pass.
-- **ListParts / ListMultipartUploads**: range reads of the part records
-  and the `mpui` index with the AWS pagination markers.
-- **UploadPartCopy**: reads the source (version) through the gateway's
-  read path and writes a part; byte ranges supported.
-- **Limits**: 10 000 parts, part size 5 MiB–5 GiB (configurable minimum
-  for the lab), 2 000 concurrent uploads per bucket soft cap (RFC-012
-  C-8).
+Multipart and copy build on generations without new placement or GC
+concepts: shards are always owned by exactly one generation, and a
+generation is never shared between two keys or two versions.
+
+### 5.3 Multipart upload (hierarchical manifest)
+
+Design rule from the Phase 3.0 review: parts are immutable generations,
+Complete copies no shard **and no chunk manifest**. Complete publishes a
+small *Object Manifest Root* that references the parts' immutable
+manifests. The size of the Complete transaction is proportional to the
+number of parts (≤ 10 000), never to the number of chunks or bytes.
+
+#### 5.3.1 Structure
+
+| Element | Key | Value | Lifetime |
+| --- | --- | --- | --- |
+| Multipart Upload Record | `("al","mpu",bucket_id,key,upload_id)` | `MultipartRecord { initiated_ms, owner, content_type, user_metadata, checksum_algorithm, checksum_type, state }` with `state ∈ { Open, Aborting, Completed { root } }` | created by CreateMultipartUpload; removed when the upload is aborted (end of the abort sweep) or when the root generation is finished by GC |
+| Part Generation | `("al","g",part_gen,"h")` header with `kind = Part { upload_id, part_number }` | `Pending` while streaming → `Committed` when sealed → `Retiring` when superseded, aborted, discarded by Complete, or when its root is collected | one UploadPart |
+| Immutable Part Manifest | `("al","g",part_gen,"c",i)` | `ChunkRecord` (chunk placement) per chunk of the part, offsets relative to the part | written while pending, never modified after the seal |
+| Part Record | `("al","mpp",upload_id,part_number)` | `PartRecord { generation, size, etag, checksum, chunk_count, uploaded_ms }` | written by the seal transaction; replaced by a re-upload of the same part number; cleared by abort / root finish |
+| Object Manifest Root | `("al","g",root,"h")` header with `kind = MultipartRoot { part_count }`, `chunk_count = 0`, composite ETag and checksum | `Committed` at Complete; `Retiring` when displaced or deleted | the object generation of a completed upload |
+| Part Manifest Reference | `("al","g",root,"m",n)` | `PartRef { generation, part_number, offset, size, chunk_count, etag, checksum }` | written by Complete (one key per part so that the root header stays far below the 100 KB value limit); cleared by root finish |
+| Object Generation | the root (multipart) or an `Object`-kind generation (single PUT) | pointed to by the current pointer / version record | visibility |
+| Chunk Placement | `ChunkRecord.placement` | `{ group_id, epoch }` | unchanged (RFC-004) |
+
+`upload_id` is a UUIDv7 rendered as 32 hex characters (opaque to
+clients). Part records live under their own prefix so that
+ListMultipartUploads scans only upload records and ListParts scans only
+one upload's part records.
+
+#### 5.3.2 Operations
+
+- **CreateMultipartUpload**: one transaction writes the upload record
+  (`Open`). Requires the bucket to exist and the principal to be
+  authorized for `s3:PutObject` (RFC-012). Returns `upload_id`.
+- **UploadPart** (`part_number ∈ [1, 10 000]`): `begin_part` allocates
+  a pending generation of kind `Part` (the transaction reads the upload
+  record and requires `Open`); the body is streamed, erasure coded and
+  placed exactly like a PUT (same chunking, same pipeline, same lease
+  renewal, RFC-003 §5.3); the **seal transaction** re-reads the upload
+  record (`Open`, else `NoSuchUpload` and the generation is retired by
+  the caller), reads the existing part record for `part_number`, retires
+  the generation it names (re-upload of the same part number: the old
+  part becomes garbage, AWS semantics "last upload wins"), writes the
+  new part record, and sets the header `Committed` with size, MD5 ETag
+  and checksum. Durable ACK holds per part: every shard of the part is
+  durable before the seal. A seal whose commit outcome is unknown is
+  resolved by re-reading the header: `Committed` → success; `Pending`
+  and leased → retry; `Retiring` while the upload is still `Open` → the
+  part was superseded by a concurrent re-upload (success, the client's
+  bytes were replaced by its own later request); otherwise failure.
+- **ListParts**: range read of `("al","mpp",upload_id,·)` with
+  `PartNumberMarker`/`MaxParts`; the upload record must be `Open`.
+- **ListMultipartUploads**: range read of `("al","mpu",bucket_id,prefix)`
+  returning `Open` records only (`Aborting` and `Completed` are internal
+  states), ordered by key then upload id (UUIDv7 order = initiation
+  order), with `KeyMarker`/`UploadIdMarker`/`MaxUploads`/`Delimiter`.
+- **CompleteMultipartUpload**: **one transaction**, the linearization
+  point of the whole upload (§5.3.3):
+  1. read the upload record: `Open` → continue; `Completed { root }` →
+     if the requested part list equals the root's references (same
+     part numbers and ETags) return the same result (idempotent retry
+     after a lost reply), else `NoSuchUpload`; `Aborting` or missing →
+     `NoSuchUpload`;
+  2. validate the request: part numbers strictly ascending
+     (`InvalidPartOrder`), at least one part, every listed part has a
+     part record whose ETag equals the request's (`InvalidPart`), every
+     part except the last is at least the minimum part size
+     (`EntityTooSmall`, default 5 MiB, `--multipart-min-part-bytes`);
+  3. compute offsets, total size, the composite ETag
+     `hex(md5(md5_1 ‖ … ‖ md5_N))-N`, and the composite or full-object
+     checksum (§5.7);
+  4. evaluate conditional headers (`If-None-Match`, `If-Match`) against
+     the current pointer as a PUT commit does (§5.5);
+  5. write the root header (`Committed`, kind `MultipartRoot`), one
+     `PartRef` per listed part, the current pointer and (versioned
+     buckets) the version record, retire the displaced `null` version as
+     a PUT does, and set the upload record to `Completed { root }`.
+     Listed parts stay `Committed`; parts that were uploaded but **not
+     listed** are not touched by this transaction (bounded transaction
+     size) and are retired afterwards by the completing gateway and, if
+     it dies, by the controller's multipart sweep (§5.3.4).
+  The root generation id is chosen before the first attempt, so a retry
+  after an unknown commit outcome re-reads the upload record and finds
+  either `Open` (retry) or `Completed { root == ours }` (success).
+  Transaction size: 10 000 references × (≈ 40 B key + ≈ 90 B value +
+  conflict-range and mutation overhead) ≈ 2 MB plus the part records
+  read (≈ 1 MB), within FoundationDB's 10 MB limit and the 5 s
+  transaction window; the test suite completes a 10 000-part upload
+  against FoundationDB and asserts a single commit. Nothing in the
+  transaction depends on chunk count or object size.
+- **AbortMultipartUpload**: transaction 1 sets the upload record to
+  `Aborting` (from `Open`; `Completed` → `NoSuchUpload`; missing →
+  `NoSuchUpload`). Then, in batches of at most `abort_batch` part records
+  per transaction (default 512, bounded by the transaction size since a
+  header rewrite carries the object key), each batch re-reads the upload
+  record (`Aborting`), retires the named part generations and clears
+  their part records; the last transaction clears the upload record. In-
+  flight part generations (pending) are not touched: their seal fails on
+  the state check and their lease expiry retires them. A gateway that
+  dies mid-abort leaves an `Aborting` record that the controller sweep
+  finishes; a client retrying Abort continues the same sweep.
+- **UploadPartCopy**: reads a source object (version) through the read
+  path and writes a part through the part write path; byte ranges
+  supported. Phase 3.1 implements it if time permits, otherwise it is
+  `NotImplemented` and listed as such in §5.1.
+- **GET/HEAD of a multipart object**: the manifest read returns the root
+  header and its references in one transaction; chunk records are then
+  resolved per part, lazily and in order, only for the parts that
+  overlap the requested range (binary search on `PartRef.offset`). A
+  part's manifest is immutable, so it can be cached per generation.
+  `x-amz-mp-parts-count` and `partNumber` GET (one part) are supported.
+- **Limits**: part number 1–10 000; part size minimum 5 MiB (last part
+  excepted) and maximum 5 GiB; object size ≤ 5 TiB; 1 000 open uploads
+  per key (soft, RFC-012 C-8).
+
+#### 5.3.3 Linearization points
+
+| Operation | Linearization point |
+| --- | --- |
+| UploadPart | commit of the seal transaction (the part becomes the upload's part `n`) |
+| CompleteMultipartUpload | commit of the Complete transaction: before it, the key's current version is unchanged and ListParts shows the parts; after it, GET/HEAD/List see the object atomically and ListParts/UploadPart return `NoSuchUpload` |
+| AbortMultipartUpload | commit of transaction 1 (`Open → Aborting`): after it, Complete and UploadPart fail; the part garbage collection that follows is not observable through the S3 API |
+| Concurrent Complete × Complete | the first commit wins; the second reads `Completed { root }` in its own transaction and returns the same result (identical part list) or `NoSuchUpload` |
+| Complete × Abort | whichever transaction commits first decides; the loser observes the new state (`NoSuchUpload`) |
+| Complete × UploadPart (same part number) | serializable: either the seal commits first and Complete validates the new ETag (mismatch → `InvalidPart`), or Complete commits first and the seal fails with `NoSuchUpload` (its generation is retired) |
+
+#### 5.3.4 Part reference management and garbage collection
+
+Invariant **I-MP1 (referenced parts are never collected)**: a part
+generation `P` with `kind = Part { u, n }` is *live* iff the upload record
+`u` exists and either its state is `Open` or `Aborting`, or its state is
+`Completed { root }` and the root's reference `("al","g",root,"m",n)`
+names `P` and the root header exists. Only these transitions retire a
+part, and each re-reads the upload record (and the reference) in its own
+transaction, so a part is retired only when it is provably not live:
+
+1. the seal of a re-upload of the same part number (upload `Open`,
+   previous part record read in the same transaction);
+2. the abort sweep (upload `Aborting`);
+3. the post-Complete sweep: upload `Completed { root }`, part record
+   present, reference for `n` absent or naming another generation
+   (discarded part);
+4. root finish: the root is `Retiring` and GC is finishing it (§ below).
+
+Defence in depth: GC's `verify_unreferenced` step (RFC-008) refuses to
+collect a `Retiring` part generation whose upload record is `Completed {
+root }` with a reference still naming it while the root header exists,
+and counts the refusal in `gc_skipped_referenced_total` (an invariant
+violation to investigate, RFC-013 §10.4).
+
+Invariant **I-MP2 (root collection retires parts, in bounded steps)**:
+finishing a `MultipartRoot` generation (root `Retiring`, unreferenced by
+pointer and version records) processes its references in batches: each
+transaction re-checks the root is `Retiring`, retires the referenced part
+generations of the batch and clears those reference keys; the last
+transaction clears the upload record and its part records, then the
+root subspace. Retired parts are collected by the ordinary GC pass
+(their shards are deleted, then their metadata). `Retiring` is terminal,
+so a partially finished root is simply finished by the next pass.
+
+Invariant **I-MP3 (shard attribution is unchanged)**: a shard
+`(generation prefix, chunk index)` on a node is referenced iff a pending
+or committed generation with that prefix places that chunk in that group
+(RFC-008 §6.3). Parts are generations, so reconciliation needs no new
+rule; a part's shards become orphans only after the part is retired and
+collected.
+
+Invariant **I-MP4 (upload records never leak)**: every upload record
+reaches removal: `Open` records older than `--multipart-expiry` (default
+7 days; 0 disables) are aborted by the controller sweep (lifecycle
+`AbortIncompleteMultipartUpload` overrides per bucket); `Aborting`
+records are finished by the sweep; `Completed` records are removed when
+their root is finished.
+
+The controller **multipart sweep** runs with GC: for each `Aborting`
+record it continues the abort; for each `Completed` record it retires
+discarded parts (transition 3); for each expired `Open` record it
+begins an abort. All its transactions carry the same state checks as
+the gateway's.
+
+#### 5.3.5 Failure matrix
+
+| Failure | Behaviour |
+| --- | --- |
+| Gateway dies during UploadPart | the pending part's lease expires → `expire_pending` retires it → shards collected; the client retries UploadPart |
+| Seal commit outcome unknown | resolved by header state (§5.3.2) |
+| Complete commit outcome unknown | re-read the upload record: `Completed { ours }` → success; `Open` → retry (same root id); `Aborting`/missing → `NoSuchUpload` |
+| Gateway dies after Complete, before discarding unlisted parts | the controller sweep retires them (transition 3) |
+| Gateway dies mid-Abort | `Aborting` record; sweep finishes |
+| Node loss between UploadPart and Complete | parts are coded and repairable like objects; Complete reads no shard |
+| Complete with a part number that was re-uploaded concurrently | the request's ETag no longer matches → `InvalidPart`; the client re-lists parts |
+| Root displaced (overwrite/delete) while a GET streams it | the GET holds the manifest; part shards stay until the root is finished and the parts' grace elapses (RFC-008) |
+| FoundationDB failover during Complete | the single transaction either committed or not; the retry logic above applies |
+| 10 000 parts × many chunks | Complete cost is independent of chunk count; GET resolves part manifests lazily; root finish is batched |
 
 ### 5.4 Versioning exposure
 
 - `PutBucketVersioning` → `bucket::set_versioning` (exists);
   `GetBucketVersioning` reads the record. Suspending keeps history.
-- PUT returns `x-amz-version-id` (the generation id rendered as the
-  version id; `null` for unversioned/suspended per RFC-002 §5.3).
-- GET/HEAD with `versionId` read that version's generation (new recipe
+- PUT returns `x-amz-version-id` (a UUIDv7 rendered as 32 hex characters
+  on `Enabled` buckets; `null` on unversioned and suspended buckets, as
+  RFC-002 §5.3).
+- GET/HEAD with `versionId` read that version's generation (recipe
   `read_version`); a delete marker returns `405 MethodNotAllowed` with
-  `x-amz-delete-marker: true` as AWS does; a missing version
-  `NoSuchVersion`.
-- DELETE without `versionId` on a versioned bucket writes a delete marker
-  (exists in metadata); with `versionId` it retires that generation (or
-  removes the marker) — the RFC-003 §10 open point about
-  commit-unknown on versioned delete is resolved by making the versioned
-  delete idempotent on the version id (deleting a version that is
-  already retiring succeeds).
-- `ListObjectVersions` walks `("al","v",bucket_id,key,…)` newest first
-  with `KeyMarker`/`VersionIdMarker` pagination; `IsLatest` from the
-  current pointer; delete markers listed under `DeleteMarkers`.
-- `ListObjectsV2` keeps skipping delete markers (exists).
+  `x-amz-delete-marker: true`; a missing version `NoSuchVersion`; GET of
+  a key whose current version is a delete marker returns `404 NoSuchKey`
+  with `x-amz-delete-marker: true`.
+- DELETE without `versionId` on an `Enabled` bucket writes a delete
+  marker (exists); on a `Suspended` bucket it writes a `null` delete
+  marker replacing the `null` version (AWS behaviour); on an unversioned
+  bucket it removes the key. DELETE with `versionId` removes exactly that
+  version (generation retired, version record cleared; a delete marker
+  removed restores the previous version as current) and is idempotent on
+  the version id: deleting a version that no longer exists succeeds, so
+  a retry after an unknown commit outcome is safe.
+- `ListObjectVersions` walks the version records newest first with
+  `KeyMarker`/`VersionIdMarker`; the `null` version of a suspended or
+  never-versioned bucket has no version record and is synthesized from
+  the current pointer; `IsLatest` comes from the current pointer; delete
+  markers are listed under `DeleteMarkers`.
+- `ListObjectsV2` skips keys whose current version is a delete marker.
+
+**Linearization points** (all in FoundationDB serializable transactions):
+
+| Operation | Point | Consequence |
+| --- | --- | --- |
+| PUT | commit transaction | before: old current version; after: new version current, old `null` version retiring |
+| DELETE (marker or unversioned) | the delete transaction | GET after it returns 404; GET before it returns the full old object (its generation is retired, its shards survive the grace period) |
+| DELETE `versionId` | the delete transaction | the version disappears from ListObjectVersions and GET `versionId` atomically |
+| GET / HEAD | the manifest read transaction | one consistent snapshot of pointer, header and chunk records (or root references); bytes streamed after it belong to that generation, never to a mix |
+| ListObjectsV2 / ListObjectVersions | the range-read transaction of each page | each page is a snapshot; pages are not mutually atomic (as AWS) |
+| Concurrent PUT × PUT (same key) | commit order | the later commit's version is current; on `Enabled` buckets both are versions; on others the earlier one is retired |
+| Concurrent PUT × DELETE | commit order | either the delete marker is current (PUT's version is non-current) or the PUT's version is current |
+| Concurrent GET × DELETE | the GET's manifest read vs the delete commit | the GET either sees the object fully or 404; never a truncated body because of the delete (shards outlive the grace period) |
+
+**Differences from AWS S3 recorded in the matrix**: version ids are 32
+hex characters (AWS: opaque, up to 1024 characters); `ListObjectVersions`
+orders versions of one key by commit order, which is also AWS's order;
+`null` versions do not appear in `ListObjectVersions` on `Enabled`
+buckets unless one exists from a suspended or unversioned period (same
+as AWS); MFA delete is not supported (`PutBucketVersioning` with
+`MFADelete` → `NotImplemented`).
 
 ### 5.5 Conditional requests
 
-Evaluated in the gateway against the manifest read at request start:
-`If-Match`/`If-None-Match` against the ETag (strong comparison; weak
-tags → `PreconditionFailed`/`NotModified` per RFC 9110), `If-Modified-Since`/
-`If-Unmodified-Since` against `last_modified` (commit time, second
-precision). Precedence as RFC 9110 §13.2.2. For PUT, `If-None-Match:
-<etag>` becomes supported (evaluated in the commit transaction like `*`
-today); DELETE gains `If-Match`. Status codes: `304 NotModified` for GET
-with `If-None-Match` match or `If-Modified-Since` not newer; `412` for
-the rest.
+Evaluated against the ETag and `last_modified` (commit time, second
+precision for the HTTP date comparison) of the version the request
+resolves to. Strong comparison only; a weak ETag in `If-Match` fails the
+precondition, in `If-None-Match` it is compared by opaque-tag equality
+as RFC 9110 §8.8.3.2 allows. Precedence follows RFC 9110 §13.2.2:
+`If-Match` is evaluated before `If-Unmodified-Since` (which is ignored
+when `If-Match` is present), `If-None-Match` before `If-Modified-Since`
+(ignored when `If-None-Match` is present). AWS's documented combination
+rules give the same results and are the reference for the test matrix.
+
+| Operation | Header | Condition false → | Notes |
+| --- | --- | --- | --- |
+| GET / HEAD | `If-Match` | `412 PreconditionFailed` | |
+| GET / HEAD | `If-None-Match` | `304 NotModified` | body omitted; ETag and Last-Modified still sent |
+| GET / HEAD | `If-Modified-Since` | `304 NotModified` | ignored if `If-None-Match` present or if the date is invalid |
+| GET / HEAD | `If-Unmodified-Since` | `412 PreconditionFailed` | ignored if `If-Match` present |
+| GET / HEAD on a missing key | any | `404 NoSuchKey` | the key check precedes the condition |
+| PUT | `If-None-Match: *` | `412 PreconditionFailed` | evaluated in the commit transaction (exists) |
+| PUT | `If-None-Match: <etag>` | `NotImplemented` | AWS accepts only `*` here; same |
+| PUT | `If-Match: <etag>` | `412 PreconditionFailed`; key missing → `404 NoSuchKey` | evaluated in the commit transaction against the current version (AWS behaviour) |
+| CompleteMultipartUpload | `If-None-Match: *`, `If-Match` | as PUT | evaluated in the Complete transaction |
+| CopyObject | `x-amz-copy-source-if-match` | `412 PreconditionFailed` | against the source version |
+| CopyObject | `x-amz-copy-source-if-none-match` | `412 PreconditionFailed` | AWS returns 412, not 304, for copy sources |
+| CopyObject | `x-amz-copy-source-if-modified-since` | `412 PreconditionFailed` | |
+| CopyObject | `x-amz-copy-source-if-unmodified-since` | `412 PreconditionFailed` | |
+| CopyObject | destination `If-None-Match: *` | `412 PreconditionFailed` | evaluated in the destination commit (extension documented in the matrix; AWS added conditional copy destinations later than PUT) |
+| DELETE | `If-Match` | `412 PreconditionFailed` | evaluated in the delete transaction |
+
+`409 ConditionalRequestConflict`: AWS returns it when a conditional write
+races another write on the same key. arca-lake serializes conditional
+writes in FoundationDB transactions (a conflict is retried internally up
+to the transaction retry budget), so clients observe `200`, `412` or
+`404`, and `503 SlowDown` only when the retry budget is exhausted. The
+matrix records that `409` is never emitted.
 
 ### 5.6 CopyObject
 
 Physical copy (OD-11): the gateway reads the source (optionally a
-`versionId`, with the copy-source conditional headers) through the
-normal read path and writes a new generation through the normal write
-path (so coding profile, placement and durability are those of the
-destination bucket); `MetadataDirective=COPY|REPLACE`; same-key copy with
-`REPLACE` is the AWS way to change metadata. Response `CopyObjectResult`
-with the new ETag and `LastModified`. Alternative rejected: sharing
-chunks between generations (reference counting across generations would
-complicate GC safety, RFC-008 I1–I10).
+`versionId`; the copy-source conditional headers are evaluated against
+that version's ETag and commit time) through the normal read path and
+writes a new generation through the normal write path (so coding
+profile, placement and durability are those of the destination bucket).
+The source version is fixed at the manifest read: a concurrent DELETE or
+overwrite of the source does not affect the copy (its shards survive the
+GC grace period; a copy longer than the grace period of a deleted source
+fails with an error, never with wrong bytes, because every chunk is CRC
+checked). `MetadataDirective=COPY|REPLACE` controls user metadata and
+content type (`REPLACE` takes the request's; `COPY` the source's);
+same-key copy requires `REPLACE` (AWS). Destination overwrite follows
+the PUT rules (versioning, retiring the displaced `null` version); a
+failure after some chunks were placed aborts the destination generation
+like a failed PUT. Response `CopyObjectResult` with the new ETag (MD5 of
+the bytes copied, so a copy of a multipart object gets a single-part
+ETag, as AWS does for copies below the multipart threshold) and
+`LastModified`. Alternative rejected: sharing chunks between generations
+(reference counting across generations would complicate GC safety,
+RFC-008 I1–I10).
 
 ### 5.7 Checksums
 
-- Single PUT: s3s decodes `x-amz-checksum-*` headers and `aws-chunked`
-  trailers; the gateway computes the requested algorithm over the body
-  while hashing MD5 (one pass) and compares; mismatch → `BadDigest`
-  (verified by s3s for SHA-256 of the payload already). The algorithm and
-  value are stored in the generation header (`checksum: Option<(Algo,
-  Vec<u8>)>`) and returned by GET/HEAD when `x-amz-checksum-mode:
-  ENABLED` and by `GetObjectAttributes`.
-- Multipart: per-part checksums stored in the part record; the object's
-  checksum is the AWS *composite* (`checksum-of-checksums` with `-N`) for
-  CRC32/CRC32C/SHA1/SHA256, and the *full-object* CRC64NVME when that
-  algorithm is used (AWS computes it over the whole object; the gateway
-  combines part CRC64s by polynomial combination, available in the
-  `crc64fast-nvme` crate; if the combination is not available at
-  implementation time, CRC64NVME multipart is refused with
-  `InvalidRequest` and documented).
-- ETag stays MD5 (single) / composite (multipart); clients that need a
-  content hash use checksums.
+Algorithms: CRC32, CRC32C, CRC64NVME, SHA1, SHA256 (`crc32fast`, `crc32c`,
+`crc64fast-nvme`, `sha1`, `sha2` crates; no checksum code of our own
+beyond the standard CRC combination step below).
+
+- **Single PUT**: `s3s` decodes `x-amz-checksum-*` headers and
+  `aws-chunked` trailers; the gateway computes the requested algorithm
+  over the body in the same pass as MD5; mismatch → `BadDigest`
+  (`InvalidRequest` for a malformed value) **before commit**: the
+  generation is aborted and nothing is published. Algorithm, value and
+  type are stored in the generation header and returned by GET/HEAD with
+  `x-amz-checksum-mode: ENABLED` and by `GetObjectAttributes`. A PUT
+  without a checksum header stores none (AWS's default CRC64NVME
+  computation on the client is a client behaviour; servers that do not
+  receive a trailer have nothing to store). `x-amz-sdk-checksum-algorithm`
+  without a value is accepted and the value is taken from the trailer.
+- **UploadPart**: identical, per part; the part checksum is stored in the
+  part record and returned by ListParts.
+- **CompleteMultipartUpload**: the client sends each part's checksum
+  (optional); the Complete transaction verifies them against the part
+  records (`InvalidPart` on mismatch) and derives the object checksum:
+  - `COMPOSITE` (default for CRC32, CRC32C, SHA1, SHA256): `algo(c_1 ‖ …
+    ‖ c_N)` rendered as base64 with the `-N` suffix, as AWS;
+  - `FULL_OBJECT` (the only type for CRC64NVME; optional for CRC32 and
+    CRC32C via `x-amz-checksum-type: FULL_OBJECT`): the CRC of the whole
+    object computed by combining the parts' CRCs with their lengths
+    (standard CRC combination over GF(2); verified by a test against a
+    direct CRC of the concatenation). SHA1/SHA256 cannot be combined;
+    `FULL_OBJECT` with them → `InvalidRequest`.
+  A client-supplied `x-amz-checksum-*` on Complete is compared with the
+  derived value (`BadDigest` on mismatch); nothing is published on any
+  mismatch.
+- **CopyObject**: the destination's checksum is recomputed from the bytes
+  copied (the copy reads the source and so verifies the source's stored
+  checksum when it has one; a mismatch is a corruption report, `500
+  InternalError`, never a published copy).
+- ETag stays MD5 (single) / composite MD5 (multipart) and is never a
+  checksum value; clients that need a content hash use checksums.
 
 ### 5.8 DeleteObjects
 
@@ -252,8 +479,9 @@ the s3s shapes.
 
 | Decision | Chosen | Alternatives |
 | --- | --- | --- |
-| Multipart completion | adopt part generations; object header lists parts | copy shards into one generation (2× writes); multi-transaction rewrite (non-atomic) |
-| Part storage | each part is a generation with its own lease | parts as raw chunk lists in one pending generation (loses per-part Durable ACK and simple abort) |
+| Multipart completion | hierarchical manifest: root with one reference key per part, parts keep their immutable manifests | copy shards into one generation (2× writes); copy every chunk record into the root in one transaction (unbounded transaction size: forbidden by the Phase 3.0 review); multi-transaction rewrite (non-atomic) |
+| Part storage | each part is a generation with its own lease and part record | parts as raw chunk lists in one pending generation (loses per-part Durable ACK and simple abort) |
+| Abort / root finish | batched transactions with a terminal state check (`Aborting`, `Retiring`) | one transaction (exceeds the size limit at 10 000 parts with long keys) |
 | CopyObject | physical copy through read+write | chunk sharing with refcounts (GC complexity); server-side hard links on nodes (no such primitive) |
 | Composite checksum | AWS algorithm per family | full-object only (incompatible with SDK expectations for multipart) |
 | Lifecycle evaluation | controller scheduler over listings | per-object timers in metadata (write amplification); external cron (ops burden) |
@@ -268,11 +496,7 @@ action for RFC-012 policies).
 
 | Scenario | Behaviour |
 | --- | --- |
-| Gateway dies mid-part | the part generation's lease expires → GC; the client retries `UploadPart` (replaces) |
-| Complete commits but reply lost | retry with the same parts returns the same version (idempotent) |
-| Two completes with different part lists race | first wins; second gets `NoSuchUpload` |
-| Abort races with Complete | state transition decides in one transaction; the loser gets `NoSuchUpload` |
-| Node loss between part upload and complete | parts are coded and repairable like objects; complete does not read shards |
+| Multipart failures | §5.3.5 (gateway death at every step, unknown commit outcomes, races, node loss, FoundationDB failover) |
 | Lifecycle expires an object a client is reading | the read holds the manifest; chunks stay until GC grace (RFC-008) |
 | Versioned delete with unknown commit outcome | retry is idempotent on the version id |
 | Copy source overwritten mid-copy | the copy reads one generation (the manifest it started with); result is that version |
@@ -282,9 +506,12 @@ action for RFC-012 policies).
 
 Unchanged: Durable ACK (`m_ack = m`) per part and per object, atomic
 visibility of completion and copy, strong read-after-write on the
-current pointer, generation isolation (part generations are adopted,
-never shared), epoch fencing, GC safety (adopted generations are
-`Referenced` through the adopting header until it retires).
+current pointer, generation isolation (a part belongs to one upload and,
+after Complete, to one root; parts are never shared), epoch fencing, GC
+safety. New invariants I-MP1 … I-MP4 (§5.3.4) bind multipart to GC
+safety: a referenced part generation is never retired, a retiring root
+retires its parts in bounded steps, shard attribution needs no new
+rule, upload records never leak.
 
 ## 9. Performance considerations
 
@@ -306,24 +533,29 @@ measured in Phase 3.1).
 
 ## 11. Acceptance criteria
 
-- The AWS CLI (`aws s3 cp` with multipart threshold, `aws s3api`
-  create/upload-part/complete/abort/list-parts/list-multipart-uploads,
-  put/get-bucket-versioning, list-object-versions, copy-object,
-  delete-objects, get-object with `--version-id` and `--checksum-mode`)
-  and the AWS SDK for Rust pass a conformance suite in CI against the
-  memory backend, and the same suite passes against the cluster backend
-  in the FoundationDB job.
-- ETag of a multipart object equals `md5(concat)-N` computed by the test
-  from the parts; single-part ETag equals the body MD5.
-- Concurrent completes (10 racers) produce one version; concurrent
-  uploads of the same part number keep exactly one part generation live
-  after GC.
-- Abort after complete returns `NoSuchUpload`; complete after abort
-  returns `NoSuchUpload`; parts of an aborted upload are collected by GC
-  (shard count returns to baseline).
-- Versioned bucket: PUT twice, GET each version, DELETE creates a marker,
-  GET returns 404 with `x-amz-delete-marker`, DELETE of the marker
-  restores, `ListObjectVersions` lists both and the marker.
-- Conditional GET/HEAD matrix (16 cases) returns the RFC 9110 codes.
-- The compatibility matrix in §5.1 is reproduced in `docs/` from the test
-  suite's own list of exercised operations, so the two cannot drift.
+Status labels (Phase 3.0 review item 1.5): **Designed** = specified in
+this RFC; **Implemented** = code merged on `main`; **Verified** = an
+automated test or a recorded measurement exercises it; **Not
+Implemented** / **Not Verified** = explicitly not yet. Designed never
+implies Implemented or Verified. This table is updated with every
+phase report.
+
+| # | Criterion | Status |
+| --- | --- | --- |
+| A1 | AWS CLI conformance (`aws s3 cp` multipart, `s3api` create/upload-part/complete/abort/list-parts/list-multipart-uploads, put/get-bucket-versioning, list-object-versions, copy-object, delete-objects, get-object `--version-id` and `--checksum-mode`) against the cluster backend in CI | Designed |
+| A2 | Two AWS SDKs (Python boto3, Rust aws-sdk-s3) pass the same conformance scenarios in CI | Designed |
+| A3 | Multipart ETag equals `md5(concat)-N` computed by the test; single-part ETag equals the body MD5 | Designed |
+| A4 | 10 000-part upload completes with one metadata transaction against FoundationDB; GET of the object verifies every byte | Designed |
+| A5 | Concurrent Completes (≥ 8 racers) produce exactly one version and one root; losers get the idempotent result or `NoSuchUpload` | Designed |
+| A6 | Concurrent UploadPart of the same part number keeps exactly one part generation live after GC; the other's shards are collected | Designed |
+| A7 | Complete × Abort race: exactly one wins; the loser gets `NoSuchUpload`; no part referenced by a root is ever retired (I-MP1 asserted by GC's `skipped_referenced == 0`) | Designed |
+| A8 | Complete with an unknown commit outcome (fault-injected) resolves to exactly one visible version with the chosen root id | Designed |
+| A9 | Gateway death during UploadPart, after Complete and mid-Abort leaves no leaked generation, part record or upload record after GC and the sweep | Designed |
+| A10 | FoundationDB failover during multipart uploads: every acknowledged part and every acknowledged Complete is durable | Designed |
+| A11 | Versioned bucket: PUT twice, GET each version, DELETE creates a marker, GET returns 404 with `x-amz-delete-marker`, DELETE of the marker restores, ListObjectVersions lists both and the marker; suspended-bucket `null` version semantics | Designed |
+| A12 | Conditional GET/HEAD matrix (16 header combinations) returns the RFC 9110 / AWS codes; PUT/Complete/Copy/DELETE conditions per §5.5 | Designed |
+| A13 | CopyObject: source version fixed under concurrent source DELETE, destination overwrite, `MetadataDirective`, content type, ETag, checksum recomputed, conditional copy, failure after partial placement leaves no visible object | Designed |
+| A14 | Checksums: five algorithms on PUT, UploadPart, Complete (composite and full-object), GET/HEAD return; mismatch publishes nothing and returns `BadDigest` | Designed |
+| A15 | Property-based and model-based tests of the versioned key state machine (PUT/DELETE/DELETE-version/GET sequences against a reference model) | Designed |
+| A16 | The compatibility matrix in §5.1 is generated from the conformance suite's list of exercised operations, so the two cannot drift | Designed |
+| A17 | Performance regression (Phase 2.3 tooling) with multipart PUT added: PUT/GET throughput, CPU-s/GiB, RSS, metadata transaction latency, p95/p99 within tolerance | Designed |

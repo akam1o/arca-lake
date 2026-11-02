@@ -1,7 +1,6 @@
 # ADR-0013: Phase 3.0 design decisions (security, S3 compatibility, upgrade, backup)
 
-Status: proposed (Phase 3.0; becomes accepted when the design review of
-RFC-007, RFC-012, RFC-013, RFC-014 and RFC-015 closes)
+Status: accepted (Phase 3.0 review: conditional approval; amendments in ADR-0014)
 
 ## Context
 
@@ -22,14 +21,14 @@ consistency, durability, operational load and security.
 | Service identity | mTLS on every gRPC connection with a SPIFFE-shaped SAN (`arca://<cluster>/<role>/<name>`), role-scoped RPC authorization on nodes | network isolation alone (no per-RPC authorization; R-19); shared tokens (distribution problem solved worse than by certificates) |
 | Audit | one structured record per S3 request on a dedicated tracing target; controller mutations likewise | database table (volume, coupling); access logs only (no principal/decision fields) |
 | Resource protection | explicit budgets and token buckets in the gateway and node, `503 SlowDown` never blocking | proxy-only limits (cannot distinguish principals); unbounded (today) |
-| Multipart completion | adopt part generations into the object header (one transaction, size-independent) | copy shards (2× writes); multi-transaction rewrite (not atomic) |
+| Multipart completion | hierarchical manifest (ADR-0014): root with one reference key per part; parts keep their immutable manifests | copy shards (2× writes); copy chunk manifests into one transaction (unbounded size; rejected in review); multi-transaction rewrite (not atomic) |
 | CopyObject | physical copy through the read and write paths | shared chunks with reference counts (GC safety complexity) |
 | Checksums | AWS composite rules per algorithm family; ETag stays MD5/composite | full-object only (SDK incompatibility for multipart) |
 | Compatibility window | adjacent versions; nodes → controllers → gateways; explicit `finalize` gates new persistent formats and migrations | any-to-any (untestable); stop-the-world (today) |
 | Protocol versioning | window advertised by nodes in `Health`, negotiated by clients; additive changes do not bump | strict equality (today); feature flags only (semantic changes uncovered) |
 | Metadata migration | lazy decoders, rewrite-on-write in the allowed version, resumable fenced migrations, layout key written and checked | eager rewrite (long; immediate downgrade cut-off) |
 | Backup unit | FoundationDB continuous backup; nodes are live, not backed up | node snapshots (2× capacity, still time-inconsistent) |
-| Post-restore safety | `verification_pending` gate checked in every deleting transaction; unreadable objects marked and refused | rely on orphan age (post-`T` orphans would be deleted unseen); silent 404 for lost objects |
+| Post-restore safety | cluster state machine with an incarnation id (RFC-015 §5.3; superseded the `verification_pending` flag after the Phase 3.0 review, ADR-0014), checked in every mutating transaction; unreadable objects marked and refused | rely on orphan age (post-`T` orphans would be deleted unseen); silent 404 for lost objects |
 | Admin privilege | cluster file until mTLS identities exist, then an `admin` role certificate | separate admin API first (one more privilege model to secure before identities exist) |
 | CI for a public repository | self-hosted runners run `main` pushes by maintainers only; fork PRs on GitHub-hosted or after a maintainer push; actions pinned; read-only token | `pull_request_target` on self-hosted (untrusted code on persistent runners) |
 
@@ -37,7 +36,7 @@ consistency, durability, operational load and security.
 
 - RFC-003 and RFC-002 gain record version 2 for buckets (owner, policy,
   lifecycle, tags) and the `mpu` key space; RFC-005 gains the format
-  write gate; RFC-008 gains the `verification_pending` and `read_only`
+  write gate; RFC-008 gains the cluster state and `ReadOnly`
   flags; RFC-011 gains migrations, scrub, lifecycle and the restore
   verification as scheduled tasks.
 - Implementation order (roadmap Phase 3.1–3.4): compatibility window
