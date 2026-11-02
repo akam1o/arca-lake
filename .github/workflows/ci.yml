@@ -50,7 +50,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/arca-lake
-          key: tools-${{ runner.os }}-fdb${{ env.FDB_VERSION }}-v1
+          key: tools-${{ runner.os }}-fdb7.3.77-v1
       - name: install FoundationDB client library
         env:
           FDB_VERSION: 7.3.77
@@ -97,7 +97,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/arca-lake
-          key: tools-${{ runner.os }}-fdb${{ env.FDB_VERSION }}-v1
+          key: tools-${{ runner.os }}-fdb7.3.77-v1
       - name: install FoundationDB client library
         run: |
           set -euo pipefail
@@ -166,7 +166,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/arca-lake
-          key: tools-${{ runner.os }}-fdb${{ env.FDB_VERSION }}-v1
+          key: tools-${{ runner.os }}-fdb7.3.77-v1
       - name: install FoundationDB client library
         run: |
           set -euo pipefail
