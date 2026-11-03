@@ -48,6 +48,19 @@ groups:
           summary: "Segment compaction keeps failing; deleted space is not reclaimed"
           runbook: "RFC-005 §5.6"
 
+      - alert: ArcaBackupVerificationFailed
+        expr: max(arca_backup_verify_success) == 0
+        labels: { severity: page }
+        annotations:
+          summary: "The last restored metadata backup had findings: the backup may not be usable"
+          runbook: "RFC-015 §11 B-A5, RFC-013 §5.9"
+      - alert: ArcaBackupVerificationStale
+        expr: time() - max(arca_backup_verify_last_success_timestamp_seconds) > 26 * 3600
+        labels: { severity: ticket }
+        annotations:
+          summary: "No backup has been verified by a restore for more than 26 hours"
+          runbook: "RFC-015 §11 B-A5"
+
   - name: arca-lake-availability
     rules:
       - alert: ArcaNoControllerLeader

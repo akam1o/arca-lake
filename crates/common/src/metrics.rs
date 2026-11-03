@@ -24,7 +24,8 @@ pub struct Family {
     pub name: String,
     /// `counter`, `gauge` or `histogram`.
     pub kind: String,
-    /// `gateway`, `node` or `controller`.
+    /// `gateway`, `node`, `controller`, or `backup` (the backup
+    /// verification job's text-file metrics).
     pub process: String,
     /// Unit.
     pub unit: String,

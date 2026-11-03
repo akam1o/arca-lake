@@ -4,6 +4,15 @@
 # - for none. Every exported family must be listed with the same type and
 # labels, and every listed family must be exported (crates/cli tests);
 # the HELP lines of /metrics come from the help column.
+arca_backup_age_seconds	gauge	backup	seconds	-	age of the verified backup (its restorable point) at verification
+arca_backup_restore_duration_seconds	gauge	backup	seconds	-	time the last restore into the verification cluster took
+arca_backup_unresolved_findings	gauge	backup	findings	-	findings of the last backup verification
+arca_backup_verified_bytes	gauge	backup	bytes	-	object bytes the verified metadata describes
+arca_backup_verified_versions	gauge	backup	versions	-	object versions (delete markers included) verified
+arca_backup_verify_duration_seconds	gauge	backup	seconds	-	time the last verification of restored metadata took
+arca_backup_verify_last_run_timestamp_seconds	gauge	backup	unix_seconds	-	end of the last backup verification run
+arca_backup_verify_last_success_timestamp_seconds	gauge	backup	unix_seconds	-	end of the last backup verification without findings
+arca_backup_verify_success	gauge	backup	bool	-	1 when the last backup verification found nothing
 arca_controller_cache_chunks_reconstructed_total	counter	controller	chunks	-	cache chunks rebuilt by cache-group repair
 arca_controller_cache_evicted_total	counter	controller	chunks	-	cache copies evicted by the LRU pass
 arca_controller_cache_over_watermark	gauge	controller	bool	-	1 while cache usage is above the high watermark

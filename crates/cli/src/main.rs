@@ -863,6 +863,13 @@ enum AdminCommand {
         #[command(flatten)]
         plan: PlanArgs,
     },
+    /// Metadata backup verification (RFC-015 B-A5): checks of a backup
+    /// restored into an isolated cluster (`--cluster-file` names that
+    /// cluster). A metadata backup holds no shard data.
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
     /// Cluster read-only switch (RFC-015 §5.3).
     Cluster {
         #[command(subcommand)]
@@ -964,6 +971,29 @@ enum RecoveryCommand {
     },
     /// Accepted data losses and the finalize audit trail.
     Losses,
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupCommand {
+    /// Verify restored metadata (read-only): schema, cluster state and
+    /// epochs, every committed generation against its chunk records and
+    /// groups, multipart roots against their parts, one latest version
+    /// per key and every version resolving. Exit 2 on findings.
+    VerifyRestored {
+        /// Write Prometheus text-file metrics of this run here
+        /// (atomically; for a text-file collector).
+        #[arg(long)]
+        metrics_file: Option<PathBuf>,
+        /// End of the verified backup (restorable point), Unix ms: exported
+        /// as the backup's age.
+        #[arg(long)]
+        backup_end_ms: Option<u64>,
+        /// Seconds the restore took (measured by the job), exported.
+        #[arg(long)]
+        restore_seconds: Option<f64>,
+    },
+    /// Print the arca-lake key range as `fdbbackup -k` expects it.
+    KeyRange,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1833,6 +1863,7 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
         AdminCommand::Upgrade { command } => run_admin_upgrade(meta, command, now).await,
         AdminCommand::Recovery { command } => run_admin_recovery(meta, command, now).await,
         AdminCommand::Cluster { command } => run_admin_cluster(meta, command, now).await,
+        AdminCommand::Backup { command } => run_admin_backup(meta.as_ref(), command, now).await,
         AdminCommand::ReplaceMember {
             group,
             index,
@@ -2515,6 +2546,118 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
                 );
             }
             ExitCode::SUCCESS
+        }
+    }
+}
+
+fn fdb_escaped(b: &[u8]) -> String {
+    use std::fmt::Write as _;
+    b.iter().fold(String::new(), |mut s, c| {
+        if c.is_ascii_alphanumeric() {
+            s.push(char::from(*c));
+        } else {
+            let _ = write!(s, "\\x{c:02x}");
+        }
+        s
+    })
+}
+
+/// Text-file metrics of a backup verification run (registry process
+/// `backup`).
+#[allow(clippy::cast_precision_loss)]
+fn render_backup_metrics(
+    r: &arca_lake_controller::backup::RestoredReport,
+    now_ms: u64,
+    verify_seconds: f64,
+    restore_seconds: Option<f64>,
+    backup_end_ms: Option<u64>,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let ok = r.findings_total == 0;
+    let now = now_ms as f64 / 1000.0;
+    let mut g = |name: &str, v: f64| {
+        let _ = writeln!(out, "# TYPE {name} gauge\n{name} {v}");
+    };
+    g("arca_backup_verify_last_run_timestamp_seconds", now);
+    g("arca_backup_verify_success", if ok { 1.0 } else { 0.0 });
+    if ok {
+        g("arca_backup_verify_last_success_timestamp_seconds", now);
+    }
+    g("arca_backup_verify_duration_seconds", verify_seconds);
+    g(
+        "arca_backup_restore_duration_seconds",
+        restore_seconds.unwrap_or(0.0),
+    );
+    g(
+        "arca_backup_age_seconds",
+        backup_end_ms.map_or(0.0, |e| now_ms.saturating_sub(e) as f64 / 1000.0),
+    );
+    g("arca_backup_verified_bytes", r.bytes as f64);
+    g("arca_backup_verified_versions", r.versions as f64);
+    g("arca_backup_unresolved_findings", r.findings_total as f64);
+    arca_lake_common::metrics::annotate(&out)
+}
+
+async fn run_admin_backup<S: arca_lake_metadata::KvStore>(
+    meta: &S,
+    command: BackupCommand,
+    now: u64,
+) -> ExitCode {
+    match command {
+        BackupCommand::KeyRange => {
+            let r = arca_lake_metadata::keys::all_range();
+            println!("{} {}", fdb_escaped(&r.begin), fdb_escaped(&r.end));
+            ExitCode::SUCCESS
+        }
+        BackupCommand::VerifyRestored {
+            metrics_file,
+            backup_end_ms,
+            restore_seconds,
+        } => {
+            let started = std::time::Instant::now();
+            let r = match arca_lake_controller::backup::verify_restored(meta).await {
+                Ok(r) => r,
+                Err(e) => return fail(e),
+            };
+            let secs = started.elapsed().as_secs_f64();
+            println!(
+                "restored metadata: schema {:?} format_write {:?} cluster {:?} groups {} nodes {} buckets {} versions {} delete_markers {} generations committed {} pending {} retiring {} bytes {} multipart roots {} parts {} findings {} ({:.1} s)",
+                r.schema,
+                r.format_write,
+                r.cluster,
+                r.groups,
+                r.nodes,
+                r.buckets,
+                r.versions,
+                r.delete_markers,
+                r.committed,
+                r.pending,
+                r.retiring,
+                r.bytes,
+                r.multipart_roots,
+                r.multipart_parts,
+                r.findings_total,
+                secs
+            );
+            for f in &r.findings {
+                println!("finding: {f}");
+            }
+            println!("note: a metadata backup holds no shard data; this verifies metadata only");
+            if let Some(path) = metrics_file {
+                let text = render_backup_metrics(&r, now, secs, restore_seconds, backup_end_ms);
+                let tmp = path.with_extension("tmp");
+                if let Err(e) =
+                    std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &path))
+                {
+                    return fail(format!("{}: {e}", path.display()));
+                }
+            }
+            if r.findings_total == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            }
         }
     }
 }
@@ -3331,6 +3474,10 @@ mod metrics_registry {
             let problems = arca_lake_common::metrics::validate(process, &text);
             assert!(problems.is_empty(), "{process}:\n{}", problems.join("\n"));
         }
+        let r = arca_lake_controller::backup::RestoredReport::default();
+        let text = render_backup_metrics(&r, 1_000, 1.0, Some(2.0), Some(500));
+        let problems = arca_lake_common::metrics::validate("backup", &text);
+        assert!(problems.is_empty(), "backup:\n{}", problems.join("\n"));
         // Explicitly plaintext processes export `_tls_enabled 0` and none
         // of the other TLS families.
         for (process, text) in [
