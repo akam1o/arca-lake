@@ -79,8 +79,12 @@ written to the metadata store.
    `--bucket-creation` to restrict who creates buckets; audit records go
    to the tracing target `arca.audit`. Smoke test with the AWS CLI
    (`aws s3 mb`, `cp`, `ls`, `rm`).
-8. Record the layout version (`admin layout show`; RFC-014) and take the
-   first backup (RFC-015).
+8. `admin init` (idempotent; stamps the schema, `schema_write`,
+   `format_write` and an `Active` cluster state with its incarnation —
+   controllers also do it on first start), then record the versions
+   (`admin status --versions`: every process and node with its software
+   version and P/M/F windows; RFC-014) and take the first backup
+   (RFC-015).
 
 ### 5.3 Node addition (capacity expansion)
 
@@ -89,30 +93,44 @@ written to the metadata store.
    create-groups --count …`); the gateway picks groups by free space
    (`WritableGroup.min_free_bytes`, RFC-004 §5.5), so new groups receive
    new writes. Existing groups are not rebalanced automatically; to move
-   data, replace a member (`admin replace-member --group G --from N --to
-   M`, Phase 3.2) which runs the repair path.
+   data, replace a member (`admin replace-member --group G --index I
+   --node M --yes`, Phase 3.3) which runs the repair path.
 3. Verify: `arca_controller_nodes_total` increments; the new node's
    `live_bytes` grows; no `task_errors`.
 
 ### 5.4 Node removal (decommission)
 
-1. `admin decommission-node N --dry-run`: lists groups where N is a
-   member and the replacement candidates per failure domain.
-2. `admin decommission-node N`: marks the node `Draining`; the controller
-   replaces N in every group it belongs to (repair path, one group at a
-   time, rate limited by `--repair-rate`), then marks it `Retired`.
-3. Wait for `arca_controller_repairs_completed_total` to reach the dry
-   run's count and `admin status` to show no group with N; stop the
-   process; remove the node record (`admin remove-node N`), which is
-   refused while any group still lists it.
-4. Rollback: `admin decommission-node N --cancel` before `Retired`
-   returns the node to `Active` for groups not yet re-membered.
+Phase 3.3 (implemented as below; the planned `--dry-run` and
+`remove-node` are not implemented).
+
+1. `admin decommission-node --node N --yes`: records `Draining` for N
+   (`("al","nstate",N)`). The controller leader replaces N in every group
+   it belongs to with the member-replacement state machine (epoch fence,
+   persisted repair cursor, completeness check), one member per group per
+   pass, durable groups before cache groups, keeping the group's device
+   class and failure domain, and never choosing a draining or
+   decommissioned node. It proceeds only while the cluster is `Active`.
+2. Progress: `admin status` prints `node N lifecycle Draining … blocked
+   …`; a reason appears when no healthy replacement fits ("no healthy
+   replacement with free failure domain") or the cluster is not `Active`;
+   nothing is changed while blocked.
+3. Done: the leader records `Decommissioned` only when no durable or
+   cache group lists N and no group is still `Repairing`; then stop the
+   process. A controller crash or failover at any point resumes from the
+   `Draining` record and the group's repair cursor.
+4. `admin decommission-node --node N --cancel` stops a drain before it
+   completes; members already moved stay moved.
 
 ### 5.5 Device replacement (failed disk)
 
 A failed device is a node that is unhealthy: with `--auto-repair` the
 controller replaces it in every group after `--unhealthy-after-secs`
-(RFC-011 §5.5) — no operator action is needed for durability. To reuse
+(RFC-011 §5.5) — no operator action is needed for durability. To move a
+member deliberately (a device that is failing but still readable):
+`admin replace-member --group G --index I [--node M] --yes`; the leader
+carries the request out (only while `Active`), `admin status` shows it
+with its last error, and it disappears once the group is `Active` with a
+different node at the index. To reuse
 the host: stop the process, replace the device, start the node with an
 empty directory **under a new node id** (`register-node` again); the old
 id is removed once its groups are re-membered (§5.4 step 3). Re-using
@@ -143,14 +161,63 @@ needs reconciliation: every leader action is fenced.
 
 ### 5.8 Rolling upgrade
 
-RFC-014. Order: storage nodes, then controllers, then gateways; one
-host at a time; verify after each; finalize the layout version last.
+RFC-014 (as amended by ADR-0016). Order: storage nodes, then
+controllers, then gateways; one host at a time; verify after each.
+
+1. `admin status --versions` before and after each restart: every node,
+   controller and gateway with its software version and P/M/F windows.
+   While mixed, new processes negotiate the older protocol and write the
+   older record and segment versions (`schema_write`, `format_write`).
+2. Rollback before finalize: reinstall the previous binary; every record
+   and segment written meanwhile is readable by it.
+3. `admin upgrade finalize [--ignore-absent ID …] --wait`: the leader
+   checks that every node (live `Health`) and every fresh heartbeat
+   reaches the target, then raises `schema_write` (the downgrade
+   cut-off), `format_write` and the schema, one compare-and-set step per
+   pass; `admin upgrade status` shows the step, the blocking reason and
+   the history; a finished upgrade is kept as an audit record.
+   `admin upgrade cancel` works only before the cut-off.
+4. After finalize the previous binaries refuse to start (schema gate;
+   nodes refuse the newer segment format). `admin upgrade check-downgrade
+   --schema M` and `storage-node check-downgrade --dir D --format F` say
+   in advance whether a given build can run.
 
 ### 5.9 Backup and restore
 
-RFC-015: continuous FoundationDB backup, node segment directories are
-not backed up (they are the data; durability is coding), post-restore
-verification before reconciliation resumes.
+RFC-015: FoundationDB backup of the metadata; node segment directories
+are not backed up (they are the data; durability is coding). A metadata
+backup is not a data backup: objects whose shards were removed after the
+backup point are reported unreadable, never recovered, and writes after
+the backup point are lost (RPO = backup point).
+
+Restore runbook (exercised by `fdb_restore.rs`, real
+`fdbbackup`/`fdbrestore`):
+
+1. Stop every gateway and controller. Restore the metadata into an
+   empty, dedicated cluster: `fdbrestore start --dest-cluster-file F -r
+   URL -v VERSION -w` (the version of the restore point; without `-v`
+   the restore runs to the end of the mutation log).
+2. `admin recovery begin --from LABEL --backup-point-ms MS --yes`: a new
+   incarnation and `Restoring`. Every process of the previous
+   incarnation is fenced (metadata guard and node `DeleteShard`) even if
+   it is still running.
+3. Start controllers: the leader raises every group epoch above what any
+   member enforces (catch-up), then `VerificationPending`: a resumable
+   pass classifies matched, orphan (pre/post backup point), former-member,
+   missing, corrupt, degraded, unreadable, placement-epoch, membership,
+   manifest and cache findings into the report. Nothing is deleted;
+   client writes are refused; reads are served (or fail with the
+   integrity error).
+4. `admin recovery status` shows the cursor and the report with every
+   affected object. The pass ends in `ReadOnly` (clean and complete) or
+   `RecoveryRequired` (unreadable data, dangling parts, unanswered nodes);
+   repair runs in both.
+5. `admin recovery finalize --yes` (`--force` to accept a
+   `RecoveryRequired` report; the acceptance is recorded) makes the
+   cluster `Active`; reconciliation then reclaims post-restore orphans.
+   Start gateways (they adopt the new incarnation at start).
+   `admin recovery verify --yes` re-runs the pass from the start;
+   `admin recovery resume` continues it.
 
 ## 6. Capacity and quotas
 
@@ -182,7 +249,10 @@ exported series is listed.
 | `arca_controller_integrity_findings_total{class}` | counter | controller | findings by class; `class` has eight values (RFC-008 §8.4) |
 | `arca_controller_repair_queue_depth`, `_repair_tasks_unrecoverable`, `_repair_tasks_failed`, `_data_integrity_status` | gauge | controller | stripe repair queue; status 0 = clean, 1 = repairs pending or failed, 2 = unrecoverable stripes |
 | `arca_controller_stripe_repairs_succeeded_total`, `_stripe_repairs_failed_total`, `_shards_rewritten_total`, `_repair_bytes_total` | counter | controller | stripe repair outcomes (RFC-008 §8.5) |
-| `arca_controller_manifest_roots_verified_total`, `_manifest_findings_total`, `_manifest_findings` | counter, gauge | controller | multipart manifest scrub (RFC-008 §8.6) |
+| `arca_controller_manifest_roots_verified_total`, `_manifest_findings_total`, `_manifest_findings` | counter, gauge | controller | multipart manifest scrub (RFC-008 §8.6); one page per scrub pass from a persisted cursor (Phase 3.3) |
+| `arca_controller_integrity_findings_open{class}` | gauge | controller | open repair tasks by class: distinct stripes unresolved now, as opposed to the cumulative detections of `_findings_total` (Phase 3.3, R-56) |
+| `arca_controller_cluster_phase`, `_upgrade_step` | gauge | controller | 0 Active, 1 ReadOnly, 2 Restoring, 3 VerificationPending, 4 RecoveryRequired; finalize step 0 none … 5 (RFC-014/015, Phase 3.3) |
+| `arca_controller_passes_skipped_by_state_total`, `_recovery_passes_total`, `_guard_refusals_total` | counter | controller | scheduler passes the cluster state did not admit; recovery passes that did work; writes refused by the commit-time guard |
 | `arca_gateway_degraded_reads_total`, `_unreadable_reads_total`, `_integrity_reports_total`, `_integrity_reports_dropped_total` | counter | gateway | read-path integrity reports (RFC-008 §8.7) |
 | `arca_gateway_cache_*_total` (25 series, RFC-006 §5.3) | counter | gateway | hit accounting |
 | `arca_gateway_node_rpc_{stalled,deadline_exceeded,unary_timeouts,retries,exhausted}_total` | counter | gateway | ADR-0011 |
@@ -195,6 +265,7 @@ exported series is listed.
 | `arca_node_quarantined_shards`, `_quarantined_bytes` | gauge | node | durable quarantine (RFC-008 §8.2) |
 | `arca_node_corrupt_reads_total`, `_scrub_shards_total`, `_scrub_bytes_total`, `_scrub_corrupt_total` | counter | node | node-side detections and `ScrubShards` work |
 
+No test asserts the registry yet (R-62); it is maintained by hand.
 Labels never carry addresses, host names, key ids, bucket names or
 object keys (`docs/security/public-artifacts.md` applies to exported
 series too).
@@ -297,6 +368,13 @@ device). Otherwise restore the object from a client-side copy (a new
 PUT supersedes the generation; GC retires the damaged one). Never
 delete the task by hand: it is the record that the data is missing.
 
+Phase 3.3: `admin integrity status --objects` resolves every
+unrecoverable or failed task to bucket, key, version id (and whether it
+is the current version), part number and chunk; `admin integrity
+verify-object --bucket B --key K [--version-id V]` checks every shard of
+one version (every part of a multipart object) on its members and exits
+0 healthy, 1 degraded or incomplete, 2 unreadable.
+
 ### 10.6a Repair task stuck in `Failed` (Phase 3.2)
 
 `arca_controller_repair_tasks_failed > 0`. The worker gave up after
@@ -315,6 +393,17 @@ in `quarantine.log`). A node that keeps quarantining new records has a
 failing device: replace it (§5.5). The log and the bytes are evidence;
 `quarantine.log` may be deleted after investigation (recovery
 re-derives the state by re-scanning).
+
+### 10.6c Gateway returns 503 "cluster not available" (Phase 3.3)
+
+The message names the reason. "cluster is ReadOnly / Restoring /
+VerificationPending / RecoveryRequired": the cluster state does not
+admit the request (`admin recovery status`). "cluster incarnation
+changed since this gateway started": a restore was marked after this
+gateway started; restart it. A controller log line "cluster state: …"
+with `arca_controller_guard_refusals_total` rising is the same fence on
+the controller side; `passes_skipped_by_state_total` counts the passes
+that did not start for that reason.
 
 ### 10.7 Node refuses writes: epoch rejected
 

@@ -30,6 +30,17 @@ it where the implementation differs.
 | Legacy stores | a store with data and no schema key is stamped `schema = schema_write = 2`, `format_write = 1`, `Active` with a fresh incarnation on first contact by a controller or `admin init`; an empty store is initialised with the current versions | treating no key as `M = 1` (RFC-014 §5.4 text; the Phase 3.1/3.2 stores wrote version-2 records, so `M = 1` would be false) |
 | Records written below the current schema | the version byte is `min(M_cur, schema_write)`; the postcard body is identical for 2 and 3, so no down-encoder is needed for the test bump; the lowest writable version is a constant `RECORD_WRITE_MIN = 2` and a future layout change needs an explicit down-encoder before it may ship | always writing `M_cur` (an upgraded gateway would write records the not-yet-upgraded ones cannot read) |
 
+### Decisions made during implementation
+
+| Decision | Chosen | Why |
+| --- | --- | --- |
+| Restore point of the orphan split | an operator-supplied backup point (`admin recovery begin --backup-point-ms`), recorded in the cluster state; the mark time when absent (every orphan then counts as older) | the mark time is after every post-backup write, so it classified post-backup shards as older garbage (found by the drill) |
+| Chunks no node lists | a metadata-side phase of the verification walks live chunk records and asks every member; a chunk with no good shard anywhere is unreadable and its absent shards missing | the presence walk is driven by node listings and never visits a chunk whose shards are all gone (found by the drill) |
+| Verification progress | cursor and report committed in one transaction; the transitions after catch-up and after the final report re-run until they commit | separate commits could lose or double a page, or leave the cluster in `Restoring`/`VerificationPending` after a crash between them |
+| Membership intents | `("al","nstate",node)` (draining, decommissioned) and `("al","replace",group)` records; the leader's repair pass treats them like an unhealthy member, only while `Active`, durable groups first | reuses the member-replacement state machine (epoch fence, cursor, completeness) instead of adding a second one; no schema change |
+| Replacement candidates | same device class as the group's members (the replaced one included) | a durable member must not move onto a cache-tier node, nor the reverse (a pre-existing gap of auto repair) |
+| Unprotected cache groups (`cache-v1`) | replacing the member is a membership change only; reads invalidate the placements that pointed at the old copy and refill them | there is nothing to rebuild from; the reconstruction path refused the scheme and left the group `Repairing` |
+
 ## Consequences
 
 - RFC-014 §5.1/§5.3/§5.4/§5.7 and RFC-015 §5.3/§5.4/§5.6 are amended

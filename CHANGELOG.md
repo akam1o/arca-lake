@@ -8,6 +8,31 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ### Added
 
+- Phase 3.3 (operational safety, rolling upgrade, disaster recovery;
+  ADR-0016): independent wire-protocol / metadata-schema / storage-format
+  versions with startup gates, protocol window negotiation, `schema_write`
+  and `format_write` gates, process heartbeats and node capability
+  records, leader-driven `admin upgrade status|finalize|cancel|
+  check-downgrade` with an audit record, `admin init`, `admin status
+  --versions`, `storage-node check-downgrade`, and a `version-bump` build
+  for two-binary mixed-version tests.
+- Cluster recovery state (`Active`, `ReadOnly`, `Restoring`,
+  `VerificationPending`, `RecoveryRequired`) with an incarnation checked at
+  commit of every writing transaction and on node `DeleteShard`; epoch
+  catch-up; resumable restore verification with eleven finding classes
+  and a per-object report; `admin recovery status|begin|verify|resume|
+  finalize` and `admin cluster set-read-only|activate`; metadata restore
+  drill with `fdbbackup`/`fdbrestore`.
+- Storage I/O fault injection (`storage::faults`); a failed append or
+  fsync is never acknowledged and seals the segment.
+- Parallel stripe repair with a byte budget, per-node transfer slots that
+  yield to client load, and priorities (`--stripe-repair-workers`,
+  `--stripe-repair-rate-mib`, `--stripe-repair-per-node`).
+- `admin integrity status --objects`, `admin integrity verify-object`;
+  manifest scrub cursor; `arca_controller_integrity_findings_open`.
+- `admin replace-member` and `admin decommission-node` carried out by the
+  controller leader with the existing member-replacement state machine.
+
 - Architecture review documents, design decisions, technology selection,
   risk register, and open decisions.
 - RFC and ADR templates and index; ADR-0001 through ADR-0005.
