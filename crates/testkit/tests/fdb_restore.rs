@@ -16,7 +16,7 @@
 //! path as that command sees it). A `backup_agent` must be running
 //! against the cluster. Skips otherwise.
 
-#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_lines, clippy::many_single_char_names)]
 
 use std::process::Command;
 use std::sync::Arc;
@@ -50,9 +50,7 @@ struct Backup {
 
 impl Backup {
     fn from_env() -> Option<Self> {
-        if std::env::var_os("ARCA_FDB_TESTS").is_none() {
-            return None;
-        }
+        std::env::var_os("ARCA_FDB_TESTS")?;
         let url = std::env::var("ARCA_FDB_BACKUP_URL").ok()?;
         let prefix = std::env::var("ARCA_FDB_BACKUP_CMD")
             .ok()
@@ -174,9 +172,8 @@ async fn multipart_put(c: &TestCluster<FdbKv>, key: &str, parts: usize, seed: u6
             .await
             .unwrap()
             .output;
-        let etag = match out.e_tag {
-            Some(ETag::Strong(s) | ETag::Weak(s)) => s,
-            None => panic!("no etag"),
+        let Some(ETag::Strong(etag) | ETag::Weak(etag)) = out.e_tag else {
+            panic!("no etag")
         };
         done.push(CompletedPart {
             part_number: Some(i32::try_from(n).unwrap()),
