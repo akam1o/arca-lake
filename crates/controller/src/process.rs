@@ -752,30 +752,45 @@ fn is_state_refusal(e: &ControlError) -> bool {
     )
 }
 
+/// Generations collected per GC batch.
+const GC_BATCH: usize = 1000;
+/// Longest a GC pass keeps running batches.
+const GC_PASS_BUDGET: Duration = Duration::from_secs(30);
+
 async fn gc_pass<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
     cfg: &ControllerConfig,
     metrics: &Metrics,
 ) -> Result<(), ControlError> {
-    let report = gc::run_once(meta, clients, now_ms(), ms(cfg.gc_grace), 1000).await?;
-    metrics.gc_passes_total.fetch_add(1, Ordering::Relaxed);
-    metrics
-        .gc_collected_total
-        .fetch_add(report.collected as u64, Ordering::Relaxed);
-    metrics
-        .shards_deleted_total
-        .fetch_add(report.shards_deleted as u64, Ordering::Relaxed);
-    metrics
-        .gc_skipped_referenced_total
-        .fetch_add(report.skipped_referenced as u64, Ordering::Relaxed);
-    if report.skipped_referenced > 0 {
-        warn!(
-            skipped = report.skipped_referenced,
-            "retired queue names referenced generations (invariant violation)"
-        );
+    // Batches until one comes back short (the backlog is drained) or the
+    // pass has run for GC_PASS_BUDGET: one batch per interval could not
+    // keep up with a sustained overwrite/delete rate (soak test).
+    let started = std::time::Instant::now();
+    loop {
+        let report = gc::run_once(meta, clients, now_ms(), ms(cfg.gc_grace), GC_BATCH).await?;
+        metrics.gc_passes_total.fetch_add(1, Ordering::Relaxed);
+        metrics
+            .gc_collected_total
+            .fetch_add(report.collected as u64, Ordering::Relaxed);
+        metrics
+            .shards_deleted_total
+            .fetch_add(report.shards_deleted as u64, Ordering::Relaxed);
+        metrics
+            .gc_skipped_referenced_total
+            .fetch_add(report.skipped_referenced as u64, Ordering::Relaxed);
+        if report.skipped_referenced > 0 {
+            warn!(
+                skipped = report.skipped_referenced,
+                "retired queue names referenced generations (invariant violation)"
+            );
+        }
+        info!(?report, "gc pass");
+        let full = report.collected >= GC_BATCH || report.expired >= GC_BATCH;
+        if !full || started.elapsed() >= GC_PASS_BUDGET {
+            break;
+        }
     }
-    info!(?report, "gc pass");
     let expire_before = (!cfg.multipart_expiry.is_zero())
         .then(|| now_ms().saturating_sub(ms(cfg.multipart_expiry)));
     let sweep = gc::sweep_multipart(meta, now_ms(), expire_before, 1000).await?;

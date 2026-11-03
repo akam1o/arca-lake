@@ -21,8 +21,12 @@ pub struct CompactionPolicy {
     pub interval: Duration,
     /// A sealed segment is compacted once this fraction of it is dead.
     pub min_dead_fraction: f64,
-    /// Segments compacted per pass at most (bounds the I/O burst).
+    /// Segments compacted per pass at most.
     pub max_segments: usize,
+    /// Live bytes copied per pass at most (bounds the I/O burst; nearly
+    /// dead segments cost almost nothing, so many fit). The first segment
+    /// of a pass is compacted whatever its size.
+    pub max_copy_bytes: u64,
 }
 
 impl Default for CompactionPolicy {
@@ -30,7 +34,8 @@ impl Default for CompactionPolicy {
         Self {
             interval: Duration::from_secs(60),
             min_dead_fraction: 0.5,
-            max_segments: 2,
+            max_segments: 64,
+            max_copy_bytes: 512 << 20,
         }
     }
 }
@@ -77,7 +82,12 @@ pub(crate) fn pass(store: &Store, policy: &CompactionPolicy, stats: &CompactionS
         .filter(|s| !s.active && s.file_bytes > 0 && dead(s) >= policy.min_dead_fraction)
         .collect();
     candidates.sort_by(|a, b| dead(b).total_cmp(&dead(a)));
-    for s in candidates.into_iter().take(policy.max_segments) {
+    let mut budget = policy.max_copy_bytes;
+    for (i, s) in candidates.into_iter().take(policy.max_segments).enumerate() {
+        if i > 0 && s.live_bytes > budget {
+            break;
+        }
+        budget = budget.saturating_sub(s.live_bytes);
         match store.compact(s.segment_id) {
             Ok(r) => {
                 stats.compactions.fetch_add(1, Ordering::Relaxed);

@@ -528,8 +528,11 @@ struct StorageNodeArgs {
     #[arg(long, default_value_t = 0.5)]
     compaction_min_dead_fraction: f64,
     /// Segments compacted per pass at most.
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 64)]
     compaction_max_segments: usize,
+    /// Live bytes copied by compaction per pass at most, MiB.
+    #[arg(long, default_value_t = 512)]
+    compaction_max_copy_mib: u64,
     /// Capacity this node advertises for placement of replacements (bytes;
     /// default: the file system's). Free space is reported as the smaller
     /// of the file system's and this minus the segment bytes.
@@ -1386,6 +1389,7 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
         interval: Duration::from_secs(args.compaction_interval_secs),
         min_dead_fraction: args.compaction_min_dead_fraction,
         max_segments: args.compaction_max_segments.max(1),
+        max_copy_bytes: args.compaction_max_copy_mib << 20,
     };
     cfg.tls = match args.tls.context(arca_lake_protocol::tls::Role::Node) {
         Ok(t) => t,

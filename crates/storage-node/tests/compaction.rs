@@ -32,6 +32,7 @@ fn config(dir: &std::path::Path, listen: std::net::SocketAddr) -> NodeConfig {
         interval: Duration::from_millis(100),
         min_dead_fraction: 0.5,
         max_segments: 4,
+        max_copy_bytes: 64 << 20,
     };
     cfg
 }
