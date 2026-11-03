@@ -29,7 +29,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: prepare the runner (compiler, pkg-config; idempotent)
         run: |
           set -euo pipefail
@@ -67,16 +67,17 @@ jobs:
       # (`git clean -ffdx` removes target/). Build outside it so that the
       # artifacts survive between runs; restoring them from the GitHub cache
       # instead took longer than the build itself (777 MB at ~3 MB/s per job).
+      # Kept outside ~/.cache/arca-lake, which the tools cache step archives.
       - name: build in a target directory that outlives the checkout
         run: |
-          dir="$HOME/.cache/arca-lake/target"
+          dir="$HOME/.cache/arca-lake-target"
           # Start over once the directory has grown past 20 GB.
           if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       # The `fdb` feature links libfdb_c; install the client library so that
       # --all-features builds and runs.
       - name: cache downloaded tools and packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/arca-lake
           key: tools-${{ runner.os }}-fdb7.3.77-v1
@@ -126,7 +127,7 @@ jobs:
       # Per-run container name: two runners share the host.
       FDB_CONTAINER: fdb-${{ github.run_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: prepare the runner (compiler, pkg-config; idempotent)
         run: |
           set -euo pipefail
@@ -163,14 +164,15 @@ jobs:
       # (`git clean -ffdx` removes target/). Build outside it so that the
       # artifacts survive between runs; restoring them from the GitHub cache
       # instead took longer than the build itself (777 MB at ~3 MB/s per job).
+      # Kept outside ~/.cache/arca-lake, which the tools cache step archives.
       - name: build in a target directory that outlives the checkout
         run: |
-          dir="$HOME/.cache/arca-lake/target"
+          dir="$HOME/.cache/arca-lake-target"
           # Start over once the directory has grown past 20 GB.
           if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - name: cache downloaded tools and packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/arca-lake
           key: tools-${{ runner.os }}-fdb7.3.77-v1
@@ -232,7 +234,7 @@ jobs:
     env:
       FDB_VERSION: 7.3.77
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: prepare the runner (compiler, pkg-config; idempotent)
         run: |
           set -euo pipefail
@@ -269,14 +271,15 @@ jobs:
       # (`git clean -ffdx` removes target/). Build outside it so that the
       # artifacts survive between runs; restoring them from the GitHub cache
       # instead took longer than the build itself (777 MB at ~3 MB/s per job).
+      # Kept outside ~/.cache/arca-lake, which the tools cache step archives.
       - name: build in a target directory that outlives the checkout
         run: |
-          dir="$HOME/.cache/arca-lake/target"
+          dir="$HOME/.cache/arca-lake-target"
           # Start over once the directory has grown past 20 GB.
           if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - name: cache downloaded tools and packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/arca-lake
           key: tools-${{ runner.os }}-fdb7.3.77-v1
@@ -355,7 +358,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@master
@@ -365,7 +368,7 @@ jobs:
       # cache only spares the initial clone; a key per run re-uploaded it
       # every time (about a minute).
       - name: cache cargo-deny and the advisory database
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/arca-lake/cargo-deny
@@ -388,7 +391,7 @@ jobs:
       # (empty "before" SHA), so run the pinned CLI directly and scan the
       # full history plus the working tree.
       - name: cache gitleaks
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/arca-lake/gitleaks
           key: gitleaks-${{ runner.os }}-8.30.1
