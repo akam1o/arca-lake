@@ -34,6 +34,8 @@ pub struct NodeConfig {
     /// Mutual TLS and per-RPC authorization (ADR-0017); `None` serves
     /// plaintext with no authorization (explicit `--insecure-plaintext`).
     pub tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
+    /// Background segment compaction (RFC-005 §5.6).
+    pub compaction: crate::compactor::CompactionPolicy,
 }
 
 impl NodeConfig {
@@ -46,6 +48,7 @@ impl NodeConfig {
             frame_bytes: 256 << 10,
             stream_progress_timeout: Duration::from_secs(10),
             tls: None,
+            compaction: crate::compactor::CompactionPolicy::default(),
         }
     }
 }
@@ -65,6 +68,8 @@ pub struct StorageNodeService {
     cluster: Mutex<crate::cluster::ClusterFacts>,
     /// TLS state; `Some` makes every RPC require an authorised identity.
     tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
+    /// Background compaction counters.
+    compaction: Arc<crate::compactor::CompactionStats>,
 }
 
 /// Decrements a gauge when dropped (`PutShard` streams in flight).
@@ -172,6 +177,7 @@ impl StorageNodeService {
             scrub_slot: tokio::sync::Semaphore::new(1),
             cluster: Mutex::new(cluster),
             tls: cfg.tls.clone(),
+            compaction: Arc::default(),
         })
     }
 
@@ -218,6 +224,12 @@ impl StorageNodeService {
             quarantined_shards: self.store.quarantine_stats().0 as u64,
             quarantined_bytes: self.store.quarantine_stats().1,
         }
+    }
+
+    /// Background compaction counters.
+    #[must_use]
+    pub fn compaction_stats(&self) -> &Arc<crate::compactor::CompactionStats> {
+        &self.compaction
     }
 
     /// Direct access to the underlying store (tests and tooling).
@@ -870,6 +882,8 @@ pub struct NodeHandle {
     service: Arc<StorageNodeService>,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
+    compactor_stop: tokio::sync::watch::Sender<bool>,
+    compactor: JoinHandle<()>,
 }
 
 impl NodeHandle {
@@ -879,12 +893,15 @@ impl NodeHandle {
         &self.service
     }
 
-    /// Stop serving. The store stays open until the handle is dropped.
+    /// Stop serving and wait for a compaction in progress to finish. The
+    /// store stays open until the handle is dropped.
     pub async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
+        let _ = self.compactor_stop.send(true);
         let _ = self.task.await;
+        let _ = self.compactor.await;
     }
 }
 
@@ -921,10 +938,19 @@ pub async fn serve(
             })
             .await;
     });
+    let (compactor_stop, stop_rx) = tokio::sync::watch::channel(false);
+    let compactor = tokio::spawn(crate::compactor::run(
+        Arc::clone(service.store()),
+        cfg.compaction,
+        Arc::clone(service.compaction_stats()),
+        stop_rx,
+    ));
     Ok(NodeHandle {
         local_addr,
         service,
         shutdown: Some(tx),
         task,
+        compactor_stop,
+        compactor,
     })
 }

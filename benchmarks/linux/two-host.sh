@@ -65,7 +65,7 @@ start() {
 }
 stop_all() {
   local fn="$1"
-  "$fn" "for p in $RUN_DIR/*.pid; do [ -f \"\$p\" ] && kill \"\$(cat \"\$p\")\" 2>/dev/null || true; done; sleep 1; for p in $RUN_DIR/*.pid; do [ -f \"\$p\" ] && kill -9 \"\$(cat \"\$p\")\" 2>/dev/null || true; done; pkill -9 -f 'target/release/arca-lake (controller|storage-node|gateway)' 2>/dev/null || true; rm -rf $RUN_DIR" 2>/dev/null || true
+  "$fn" "for p in $RUN_DIR/*.pid; do [ -f \"\$p\" ] && kill \"\$(cat \"\$p\")\" 2>/dev/null || true; done; sleep 1; for p in $RUN_DIR/*.pid; do [ -f \"\$p\" ] && kill -9 \"\$(cat \"\$p\")\" 2>/dev/null || true; done; rm -rf $RUN_DIR" 2>/dev/null || true
 }
 
 register() { # <ssh-fn> <addr> <name> <class>

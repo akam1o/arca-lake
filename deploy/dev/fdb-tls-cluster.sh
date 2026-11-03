@@ -11,7 +11,8 @@
 #
 # Environment: ARCA_BIN (arca-lake binary, for the development PKI),
 # FDBSERVER (default /usr/sbin/fdbserver), FDBCLI (default fdbcli),
-# TRUST_DOMAIN (default fdb-test.arca-lake.invalid).
+# TRUST_DOMAIN (default fdb-test.arca-lake.invalid), FDB_EXTRA_ARGS (extra
+# fdbserver flags, e.g. memory limits; kept in DIR/extra-args for restarts).
 #
 # With tls, DIR/pki holds: ca (the cluster CA), fdb-N (server
 # certificates), admin, gateway, controller (client certificates of that
@@ -38,7 +39,7 @@ start_proc() { # N
   fi
   mkdir -p "$DIR/data/$n" "$DIR/logs"
   nohup "$FDBSERVER" -p "$addr" -l "$addr" -d "$DIR/data/$n" -L "$DIR/logs" -C "$DIR/fdb.cluster" \
-    --locality-machineid "m$n" --locality-zoneid "z$n" "${tls_args[@]}" \
+    --locality-machineid "m$n" --locality-zoneid "z$n" "${tls_args[@]}" $(cat "$DIR/extra-args" 2>/dev/null) \
     > "$DIR/logs/proc-$n.out" 2>&1 < /dev/null &
   echo $! > "$DIR/pid-$n"
 }
@@ -66,7 +67,7 @@ cli() {
 case "$cmd" in
   start)
     base="${3:?base port}"; m="${4:-plain}"
-    echo "$base" > "$DIR/baseport"; echo "$m" > "$DIR/mode"
+    echo "$base" > "$DIR/baseport"; echo "$m" > "$DIR/mode"; echo "${FDB_EXTRA_ARGS:-}" > "$DIR/extra-args"
     sfx=""; [ "$m" = tls ] && sfx=":tls"
     echo "test:arca$base@127.0.0.1:$base$sfx,127.0.0.1:$((base + 1))$sfx,127.0.0.1:$((base + 2))$sfx" > "$DIR/fdb.cluster"
     if [ "$m" = tls ]; then

@@ -507,6 +507,16 @@ struct StorageNodeArgs {
     /// storage engine's 1 GiB. Small values are for tests.
     #[arg(long)]
     segment_max_bytes: Option<u64>,
+    /// Seconds between background compaction passes (RFC-005 §5.6);
+    /// 0 disables compaction.
+    #[arg(long, default_value_t = 60)]
+    compaction_interval_secs: u64,
+    /// Compact a sealed segment once this fraction of it is dead.
+    #[arg(long, default_value_t = 0.5)]
+    compaction_min_dead_fraction: f64,
+    /// Segments compacted per pass at most.
+    #[arg(long, default_value_t = 2)]
+    compaction_max_segments: usize,
     #[command(flatten)]
     tls: TlsArgs,
     #[command(subcommand)]
@@ -546,14 +556,19 @@ enum StorageNodeCommand {
         #[arg(long)]
         dir: PathBuf,
         /// Group id.
-        #[arg(long)]
-        group: u64,
+        #[arg(long, required_unless_present = "pick")]
+        group: Option<u64>,
         /// Chunk id, 32 hex digits.
-        #[arg(long)]
-        chunk: String,
+        #[arg(long, required_unless_present = "pick")]
+        chunk: Option<String>,
         /// Shard index.
-        #[arg(long)]
-        index: u16,
+        #[arg(long, required_unless_present = "pick")]
+        index: Option<u16>,
+        /// Instead of naming a shard, corrupt the live shard at this
+        /// position (modulo their number) in key order; the chosen shard
+        /// is printed (soak tests).
+        #[arg(long, conflicts_with_all = ["group", "chunk", "index"])]
+        pick: Option<u64>,
         /// Corrupt the record header instead of the payload.
         #[arg(long)]
         header: bool,
@@ -1314,6 +1329,14 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
     if let Some(b) = args.segment_max_bytes {
         cfg.store.segment_max_bytes = b;
     }
+    if !(0.0..=1.0).contains(&args.compaction_min_dead_fraction) {
+        return fail("--compaction-min-dead-fraction must be between 0 and 1");
+    }
+    cfg.compaction = arca_lake_storage_node::compactor::CompactionPolicy {
+        interval: Duration::from_secs(args.compaction_interval_secs),
+        min_dead_fraction: args.compaction_min_dead_fraction,
+        max_segments: args.compaction_max_segments.max(1),
+    };
     cfg.tls = match args.tls.context(arca_lake_protocol::tls::Role::Node) {
         Ok(t) => t,
         Err(e) => return fail(e),
@@ -1332,6 +1355,7 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
         let service = Arc::clone(node.service());
         tokio::spawn(serve_gateway_metrics(listener, move || {
             let mut out = render_node_stats(&service.stats(), &service.store().timings());
+            render_compaction_stats(&mut out, service.compaction_stats());
             out += &arca_lake_protocol::tls::render_metrics(
                 "arca_node",
                 service.tls_stats().as_deref(),
@@ -1431,13 +1455,10 @@ fn run_storage_node_command(command: StorageNodeCommand) -> ExitCode {
             group,
             chunk,
             index,
+            pick,
             header,
         } => {
             use std::os::unix::fs::FileExt as _;
-            let chunk_id = match parse_chunk_id(&chunk) {
-                Ok(c) => c,
-                Err(e) => return fail(e),
-            };
             let cfg = arca_lake_storage_node::NodeConfig::new(
                 "127.0.0.1:0".parse().expect("literal"),
                 &dir,
@@ -1447,10 +1468,36 @@ fn run_storage_node_command(command: StorageNodeCommand) -> ExitCode {
                 Ok(s) => s,
                 Err(e) => return fail(format!("cannot open the store: {e}")),
             };
-            let key = arca_lake_storage_node::ShardKey {
-                group_id: group,
-                chunk_id,
-                shard_index: index,
+            let key = if let Some(n) = pick {
+                let mut keys = store.keys();
+                if keys.is_empty() {
+                    return fail("no live shard on this device");
+                }
+                keys.sort_by_key(|k| (k.group_id, k.chunk_id, k.shard_index));
+                let k = keys[usize::try_from(n % keys.len() as u64).unwrap_or(0)];
+                println!(
+                    "picked group {} chunk {} index {}",
+                    k.group_id,
+                    k.chunk_id.iter().fold(String::new(), |mut s, b| {
+                        let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
+                        s
+                    }),
+                    k.shard_index
+                );
+                k
+            } else {
+                let (Some(group), Some(chunk), Some(index)) = (group, chunk, index) else {
+                    return fail("--group, --chunk and --index are required without --pick");
+                };
+                let chunk_id = match parse_chunk_id(&chunk) {
+                    Ok(c) => c,
+                    Err(e) => return fail(e),
+                };
+                arca_lake_storage_node::ShardKey {
+                    group_id: group,
+                    chunk_id,
+                    shard_index: index,
+                }
             };
             let Some(loc) = store.locate(&key) else {
                 return fail("shard is not live on this device");
@@ -2821,6 +2868,60 @@ fn render_queue_and_txn_stats(
         ("arca_gateway_meta_txn_exhausted_total", t.exhausted),
     ] {
         let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
+    }
+}
+
+fn render_compaction_stats(
+    out: &mut String,
+    c: &arca_lake_storage_node::compactor::CompactionStats,
+) {
+    use std::fmt::Write as _;
+    use std::sync::atomic::Ordering::Relaxed;
+    for (name, help, v) in [
+        (
+            "arca_node_compactions_total",
+            "sealed segments compacted",
+            &c.compactions,
+        ),
+        (
+            "arca_node_compaction_errors_total",
+            "compactions that failed and were left for the next pass",
+            &c.errors,
+        ),
+        (
+            "arca_node_compaction_copied_bytes_total",
+            "live payload bytes copied by compaction",
+            &c.copied_bytes,
+        ),
+        (
+            "arca_node_compaction_reclaimed_bytes_total",
+            "segment bytes released by compaction",
+            &c.reclaimed_bytes,
+        ),
+    ] {
+        let _ = writeln!(
+            out,
+            "# HELP {name} {help}\n# TYPE {name} counter\n{name} {}",
+            v.load(Relaxed)
+        );
+    }
+    for (name, help, v) in [
+        (
+            "arca_node_segment_bytes",
+            "segment file bytes on the device at the last compaction pass",
+            &c.segment_bytes,
+        ),
+        (
+            "arca_node_live_bytes",
+            "bytes of live records at the last compaction pass",
+            &c.live_bytes,
+        ),
+    ] {
+        let _ = writeln!(
+            out,
+            "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {}",
+            v.load(Relaxed)
+        );
     }
 }
 

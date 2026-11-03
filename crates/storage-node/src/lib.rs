@@ -7,6 +7,7 @@
 //! storage engine has made the record durable.
 
 mod cluster;
+pub mod compactor;
 mod epochs;
 #[cfg(feature = "fault-injection")]
 mod fault_control;

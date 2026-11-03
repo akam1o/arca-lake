@@ -87,6 +87,10 @@ struct Args {
     /// Seed of the run (keys and contents derive from it).
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// Free-form label of the run, repeated in the final report (the soak
+    /// orchestrator passes its run directory to recognise the process).
+    #[arg(long, default_value = "")]
+    run_label: String,
 }
 
 // ---- deterministic contents ---------------------------------------------
@@ -319,6 +323,9 @@ fn matches(states: &[Option<Obj>], got: Option<&[u8]>) -> Option<usize> {
 }
 
 // ---- the worker ---------------------------------------------------------
+
+/// Acknowledged versions kept per versioned key.
+const MAX_VERSIONS: usize = 6;
 
 struct Worker {
     id: usize,
@@ -710,6 +717,11 @@ impl Worker {
     // ---- versioned bucket ----
 
     async fn put_v(&mut self, i: usize) {
+        // Keep the versioned working set bounded over a long run: past
+        // MAX_VERSIONS acknowledged versions, delete an old one instead.
+        if self.vkeys[i].1.versions.len() >= MAX_VERSIONS {
+            return self.delete_old_version(i).await;
+        }
         let key = self.vkeys[i].0.clone();
         let seed = self.new_seed();
         let len = self.rng.size().min(1 << 20);
@@ -1080,7 +1092,7 @@ async fn main() -> std::process::ExitCode {
     let v = stats.violations.load(Ordering::SeqCst);
     println!(
         "{}",
-        serde_json::json!({"final": true, "violations": v, "verified_keys": stats.verified_keys.load(Ordering::Relaxed), "elapsed_s": started.elapsed().as_secs()})
+        serde_json::json!({"final": true, "run_label": args.run_label, "violations": v, "verified_keys": stats.verified_keys.load(Ordering::Relaxed), "elapsed_s": started.elapsed().as_secs()})
     );
     if v == 0 {
         std::process::ExitCode::SUCCESS
