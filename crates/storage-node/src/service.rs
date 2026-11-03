@@ -64,7 +64,7 @@ pub struct StorageNodeService {
     epochs: Mutex<EpochTable>,
     frame_bytes: usize,
     stream_progress_timeout: Duration,
-    stats: NodeStats,
+    stats: Arc<NodeStats>,
     /// One deep verification (`ScrubShards`/`VerifyShards`) at a time per
     /// node (RFC-008 §8.3).
     scrub_slot: tokio::sync::Semaphore,
@@ -181,7 +181,7 @@ impl StorageNodeService {
             epochs: Mutex::new(epochs),
             frame_bytes: cfg.frame_bytes,
             stream_progress_timeout: cfg.stream_progress_timeout,
-            stats: NodeStats::default(),
+            stats: Arc::default(),
             scrub_slot: tokio::sync::Semaphore::new(1),
             cluster: Mutex::new(cluster),
             tls: cfg.tls.clone(),
@@ -488,6 +488,7 @@ impl StorageNode for StorageNodeService {
         self.authorize(&request, arca_lake_protocol::tls::NodeRpc::GetShard)?;
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
+        let started = std::time::Instant::now();
         self.stats.gets_in_flight.fetch_add(1, Ordering::Relaxed);
         let in_flight = InFlightGuard(&self.stats.gets_in_flight);
         let key = Self::key(req.key)?;
@@ -518,6 +519,7 @@ impl StorageNode for StorageNodeService {
         };
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let frame = self.frame_bytes;
+        let stats = Arc::clone(&self.stats);
         tokio::spawn(async move {
             let mut off = 0;
             while off < data.len() {
@@ -533,6 +535,9 @@ impl StorageNode for StorageNodeService {
                 }
                 off = end;
             }
+            // From request to the last frame handed over (the load signal
+            // of adaptive scrubbing, ADR-0018).
+            stats.get_serve.observe(started.elapsed());
         });
         drop(in_flight);
         Ok(tonic::Response::new(ReceiverStream::new(rx)))

@@ -735,3 +735,87 @@ mod fdb {
         decommission_across_groups_survives_a_controller_restart(c).await;
     }
 }
+
+/// Phase 3.4 §10 measurement (run explicitly, release build):
+/// `cargo test --release -p arca-lake-testkit --test membership_faults
+/// measure_member_move -- --ignored --nocapture`. One member of a 4+2
+/// group with `CHUNKS` chunks of 1 MiB is moved to a spare node by EC
+/// reconstruction (k shard reads per chunk) and by direct copy from the
+/// leaving member (one read per shard; falls back to reconstruction for a
+/// chunk it cannot read): time, shards read from sources, verified result.
+#[tokio::test]
+#[ignore = "measurement"]
+async fn measure_member_move() {
+    use arca_lake_controller::repair::{RepairOptions, RepairSource, replace_member_with};
+    use arca_lake_metadata::records::GroupMember;
+    const CHUNKS: u64 = 96;
+    for rep in 0..3 {
+        for source in [RepairSource::Reconstruct, RepairSource::Direct] {
+            let c = TestCluster::start(ClusterOptions {
+                groups: 1,
+                ..ClusterOptions::rs(7, 4, 2, 1 << 20, 0)
+            })
+            .await;
+            s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+            let data = Bytes::from(random_bytes(usize::try_from(CHUNKS << 20).unwrap(), rep));
+            s3::put(
+                &c.backend,
+                BUCKET,
+                "big",
+                data.clone(),
+                &PutOptions::default(),
+            )
+            .await
+            .unwrap();
+            let g0 = c
+                .groups()
+                .await
+                .into_iter()
+                .find(|g| !g.is_cache())
+                .unwrap();
+            let old = g0.members[0].node_id;
+            let spare = c
+                .nodes
+                .iter()
+                .map(|n| n.id)
+                .find(|id| !g0.members.iter().any(|m| m.node_id == *id))
+                .unwrap();
+            let gets_before: u64 = (0..c.nodes.len())
+                .map(|i| c.node_service(i).stats().get_serve.count)
+                .sum();
+            let t = Instant::now();
+            let r = replace_member_with(
+                c.meta.as_ref(),
+                &c.clients,
+                g0.id,
+                0,
+                GroupMember {
+                    node_id: spare,
+                    device_id: 0,
+                },
+                &RepairOptions {
+                    former: vec![old],
+                    source,
+                    ..RepairOptions::default()
+                },
+                async |_| Ok(()),
+            )
+            .await
+            .unwrap();
+            let took = t.elapsed();
+            let gets: u64 = (0..c.nodes.len())
+                .map(|i| c.node_service(i).stats().get_serve.count)
+                .sum::<u64>()
+                - gets_before;
+            assert!(r.complete);
+            assert_eq!(s3::get(&c.backend, BUCKET, "big").await.unwrap().0, data);
+            println!(
+                "{{\"rep\":{rep},\"source\":\"{source:?}\",\"chunks\":{},\"copied_direct\":{},\"shard_reads\":{gets},\"seconds\":{:.3}}}",
+                r.reconstructed,
+                r.copied_direct,
+                took.as_secs_f64()
+            );
+            c.shutdown().await;
+        }
+    }
+}

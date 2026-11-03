@@ -565,6 +565,22 @@ impl<S: KvStore + 'static> TestCluster<S> {
         self.nodes[i].handle.is_some()
     }
 
+    /// The running service of node `i` (counters, stores).
+    ///
+    /// # Panics
+    ///
+    /// If node `i` is stopped.
+    #[must_use]
+    pub fn node_service(&self, i: usize) -> Arc<arca_lake_storage_node::StorageNodeService> {
+        Arc::clone(
+            self.nodes[i]
+                .handle
+                .as_ref()
+                .expect("node running")
+                .service(),
+        )
+    }
+
     /// The store of a running node.
     ///
     /// # Panics
