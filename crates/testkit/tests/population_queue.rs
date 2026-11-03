@@ -161,40 +161,72 @@ async fn per_node_limit_holds() {
     c.shutdown().await;
 }
 
-/// Populations yield to shard reads in flight: with slow durable reads
-/// keeping GetShard open while the first GET's misses are queued, the
-/// queue records deferrals, every chunk is still populated, and the GET
-/// is unaffected.
+/// Populations yield to shard reads in flight: a durable read held open
+/// by the fault hook while another GET's misses are queued makes the
+/// population defer; every chunk is still populated and both GETs return
+/// their bytes.
 #[tokio::test]
 async fn populations_defer_to_durable_reads() {
+    // Deterministic (R-52): a GET of `p` is held inside the node client
+    // (its reads count as in flight) until the test releases it; a GET of
+    // `o` meanwhile completes and enqueues `o`'s population, which must
+    // find the held reads and yield. No sleeps decide the outcome.
     let c = TestCluster::start(options(64, 2, 4)).await;
     s3::create_bucket(&c.backend, BUCKET).await.unwrap();
-    c.backend.node_clients().set_fault_hook(Some(hook(|ctx| {
-        if ctx.rpc == Rpc::GetShard && ctx.group_id == Some(1) {
-            FaultAction::SlowStream(Duration::from_millis(80))
-        } else {
-            FaultAction::None
-        }
-    })));
-    let data = payload(8, 3);
-    s3::put(
-        &c.backend,
-        BUCKET,
-        "o",
-        data.clone(),
-        &PutOptions::default(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    let data_o = payload(8, 3);
+    let data_p = payload(4, 5);
+    for (k, d) in [("o", &data_o), ("p", &data_p)] {
+        s3::put(&c.backend, BUCKET, k, d.clone(), &PutOptions::default())
+            .await
+            .unwrap();
+    }
+    let held: std::collections::HashSet<[u8; 16]> = c
+        .manifest(BUCKET, "p")
+        .await
+        .chunks
+        .iter()
+        .map(|(_, ch)| ch.chunk_id)
+        .collect();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let entered = Arc::new(AtomicU64::new(0));
+    {
+        let gate = Arc::clone(&gate);
+        let entered = Arc::clone(&entered);
+        c.backend
+            .node_clients()
+            .set_fault_hook(Some(hook(move |ctx| {
+                if ctx.rpc == Rpc::GetShard && ctx.shard.is_some_and(|s| held.contains(&s.chunk_id))
+                {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    FaultAction::Hold(Arc::clone(&gate))
+                } else {
+                    FaultAction::None
+                }
+            })));
+    }
+    let backend = c.backend.clone();
+    let get_p = tokio::spawn(async move { s3::get(&backend, BUCKET, "p").await.unwrap().0 });
+    // Event wait: the held read is registered (the counter rises before the
+    // hook is consulted).
+    while entered.load(Ordering::SeqCst) == 0
+        || c.backend.node_clients().reads_in_flight_total() == 0
+    {
+        tokio::task::yield_now().await;
+    }
+    let before = c.backend.population_queue_stats().deferred_for_reads;
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data_o);
     c.wait_cached(BUCKET, "o", 8, Duration::from_secs(30)).await;
     let q = c.backend.population_queue_stats();
     assert!(
-        q.deferred_for_reads > 0,
-        "expected at least one deferral, got {q:?}"
+        q.deferred_for_reads > before,
+        "the population of o yielded to the held read of p: {q:?}"
     );
+    assert!(!get_p.is_finished(), "p is still held");
+    // Release: p completes with its bytes.
+    gate.add_permits(1 << 20);
+    assert_eq!(get_p.await.unwrap(), data_p);
     c.backend.node_clients().set_fault_hook(None);
-    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data_o);
     c.shutdown().await;
 }
 

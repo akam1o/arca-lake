@@ -851,6 +851,12 @@ mod tests {
             created_ms: 9,
         };
         let bytes = postcard::to_extend(&h1, vec![1u8]).unwrap();
+        if RECORD_VERSION_MIN > 1 {
+            // A version-bump build reads [M_cur - 1, M_cur] = [2, 3]: a
+            // version-1 record is outside its window and refused.
+            assert!(decode::<GenerationHeader>(&bytes).is_err());
+            return;
+        }
         let h = decode::<GenerationHeader>(&bytes).unwrap();
         assert_eq!(h.kind, GenKind::Object);
         assert_eq!(h.checksum, None);
@@ -931,7 +937,10 @@ mod tests {
             checksum: None,
         };
         let b = encode(&h).unwrap();
-        assert_eq!(b[0], RECORD_VERSION);
+        // Records are stamped with the cluster's schema_write (RFC-014
+        // §5.4), never above this build's newest version.
+        assert_eq!(b[0], schema_write_version());
+        assert!(b[0] <= RECORD_VERSION);
         assert_eq!(decode::<GenerationHeader>(&b).unwrap(), h);
         assert!(decode::<GenerationHeader>(&[9, 0]).is_err());
         assert!(decode::<GenerationHeader>(&[]).is_err());

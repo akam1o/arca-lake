@@ -185,7 +185,7 @@ pub struct RpcContext<'a> {
 }
 
 /// What a fault hook asks for.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum FaultAction {
     /// Proceed normally.
     None,
@@ -207,7 +207,31 @@ pub enum FaultAction {
     /// Shard streams only: delay every frame by this much (a slow node or
     /// link that still makes progress).
     SlowStream(Duration),
+    /// Wait for a permit of this semaphore before sending (a request held
+    /// until the test releases it: deterministic overlap, no timing). The
+    /// permit is consumed; release with `add_permits`.
+    Hold(Arc<tokio::sync::Semaphore>),
 }
+
+impl PartialEq for FaultAction {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::None, Self::None)
+            | (Self::Duplicate, Self::Duplicate)
+            | (Self::Reset, Self::Reset)
+            | (Self::StallStream, Self::StallStream) => true,
+            (Self::DelayBefore(a), Self::DelayBefore(b))
+            | (Self::DelayAfter(a), Self::DelayAfter(b))
+            | (Self::SlowStream(a), Self::SlowStream(b)) => a == b,
+            (Self::FailBefore(a, x), Self::FailBefore(b, y))
+            | (Self::FailAfter(a, x), Self::FailAfter(b, y)) => a == b && x == y,
+            (Self::Hold(a), Self::Hold(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for FaultAction {}
 
 /// A fault hook.
 pub type FaultHook = Arc<dyn Fn(&RpcContext<'_>) -> FaultAction + Send + Sync>;
@@ -610,6 +634,13 @@ impl NodeClients {
             FaultAction::SlowStream(d) => call(StreamFault::Slow(d)).await,
             FaultAction::DelayBefore(d) => {
                 tokio::time::sleep(d).await;
+                call(StreamFault::None).await
+            }
+            FaultAction::Hold(sem) => {
+                sem.acquire()
+                    .await
+                    .map_err(|_| tonic::Status::cancelled("hold closed"))?
+                    .forget();
                 call(StreamFault::None).await
             }
             FaultAction::FailBefore(code, msg) => Err(tonic::Status::new(code, msg)),

@@ -50,7 +50,9 @@ fn expected() -> Vec<(ShardKey, u64, Option<Vec<u8>>)> {
 /// Build the golden bytes with the current writer (used only when regenerating).
 fn build_golden() -> Vec<u8> {
     let header = SegmentHeader {
-        format_version: SEGMENT_FORMAT_VERSION,
+        // The golden file is format v1 in every build; a newer build
+        // (`version-bump`, format 2) must still open it.
+        format_version: 1,
         record_alignment: ALIGN,
         block_size: BLOCK,
         device_id: [0xA5; 16],
