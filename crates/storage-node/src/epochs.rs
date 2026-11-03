@@ -35,6 +35,11 @@ impl EpochTable {
         Self { path, epochs }
     }
 
+    /// Every known `(group, epoch)`.
+    pub(crate) fn all(&self) -> Vec<(u64, u64)> {
+        self.epochs.iter().map(|(g, e)| (*g, *e)).collect()
+    }
+
     pub(crate) fn get(&self, group: u64) -> u64 {
         self.epochs.get(&group).copied().unwrap_or(0)
     }

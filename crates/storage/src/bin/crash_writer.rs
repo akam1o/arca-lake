@@ -57,6 +57,7 @@ fn main() {
         record_alignment: 512,
         block_size: 256,
         sync,
+        format_write: arca_lake_storage::default_format_write(),
     };
     let (store, _) = Store::open(cfg).expect("open");
     let stdout = std::io::stdout();

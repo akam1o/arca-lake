@@ -10,9 +10,28 @@ pub mod groups;
 pub mod integrity;
 pub mod metrics;
 pub mod process;
+pub mod recovery;
 pub mod repair;
 pub mod tiering;
+pub mod upgrade;
 pub mod walk;
+
+/// What this controller build reads and writes on every axis (RFC-014 §5.1).
+#[must_use]
+pub fn capabilities() -> arca_lake_common::compat::Capabilities {
+    use arca_lake_metadata::keys::{SCHEMA_VERSION, SCHEMA_VERSION_MIN};
+    use arca_lake_protocol::storage::v1::{PROTOCOL_VERSION, PROTOCOL_VERSION_MIN};
+    arca_lake_common::compat::Capabilities {
+        protocol_min: PROTOCOL_VERSION_MIN,
+        protocol_max: PROTOCOL_VERSION,
+        schema_min: SCHEMA_VERSION_MIN,
+        schema_max: SCHEMA_VERSION,
+        // Controllers hold no segments; the format they may *finalize to*
+        // is whatever every node reads.
+        format_min: 1,
+        format_max: u64::MAX,
+    }
+}
 
 /// Errors from control-plane operations.
 #[derive(Debug, thiserror::Error)]

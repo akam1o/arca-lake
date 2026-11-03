@@ -6,7 +6,13 @@
 //! | Tuple | Value | Purpose |
 //! | --- | --- | --- |
 //! | `("al","meta","schema")` | u64 LE | metadata schema version (RFC-014 §5.4) |
-//! | `("al","meta","cluster")` | `ClusterState` | recovery state and incarnation (RFC-015 §5.3) |
+//! | `("al","meta","schema_write")` | u64 LE | schema writers may encode (RFC-014 §5.4) |
+//! | `("al","meta","format_write")` | u64 LE | storage format nodes may write (RFC-014 §5.3) |
+//! | `("al","meta","cluster")` | `ClusterStateRecord` | recovery state and incarnation (RFC-015 §5.3) |
+//! | `("al","meta","upgrade")` | `UpgradeCursor` | finalize in progress (RFC-014 §5.5) |
+//! | `("al","meta","restore","cursor")` | `RestoreCursor` | restore verification progress (RFC-015 §5.3.2) |
+//! | `("al","meta","restore","report",incarnation)` | `RestoreReport` | verification report per incarnation |
+//! | `("al","proc",id)` | `ProcRecord` | gateway/controller heartbeat with capabilities (RFC-014 §5.5) |
 //! | `("al","ctr","bucket")` | u64 LE | bucket ID allocator |
 //! | `("al","b",name)` | `BucketRecord` | bucket by name |
 //! | `("al","bi",bucket_id)` | `BucketRecord` | bucket by ID |
@@ -36,11 +42,103 @@ const ROOT: &str = "al";
 
 /// Metadata schema version of this build (RFC-014 §5.4): 1 = Phase 0–2
 /// layout (record version 1); 2 = Phase 3.1 (record version 2, multipart
-/// and cluster-state keys).
-pub const SCHEMA_VERSION: u64 = 2;
+/// and cluster-state keys); 3 exists only in a `version-bump` build
+/// (ADR-0016) and has the version-2 layout.
+pub const SCHEMA_VERSION: u64 = 2 + arca_lake_common::compat::BUMP;
 
-/// Oldest schema version this build serves.
-pub const SCHEMA_VERSION_MIN: u64 = 1;
+/// Oldest schema version this build serves (`M_cur − 1`, RFC-014 §5.4).
+pub const SCHEMA_VERSION_MIN: u64 = SCHEMA_VERSION - 1;
+
+/// Key holding the schema writers may encode (RFC-014 §5.4).
+#[must_use]
+pub fn schema_write() -> Key {
+    pack(&(ROOT, "meta", "schema_write"))
+}
+
+/// Key holding the storage format nodes may write (RFC-014 §5.3).
+#[must_use]
+pub fn format_write() -> Key {
+    pack(&(ROOT, "meta", "format_write"))
+}
+
+/// The upgrade finalize cursor (RFC-014 §5.5).
+#[must_use]
+pub fn upgrade_cursor() -> Key {
+    pack(&(ROOT, "meta", "upgrade"))
+}
+
+/// Audit record of a finalized upgrade (`UpgradeCursor` as it ended).
+#[must_use]
+pub fn upgrade_audit(finished_ms: u64) -> Key {
+    pack(&(ROOT, "meta", "upgrade_log", finished_ms))
+}
+
+/// Every upgrade audit record.
+#[must_use]
+pub fn upgrade_audits_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "meta", "upgrade_log")))
+}
+
+/// Restore verification cursor (RFC-015 §5.3.2).
+#[must_use]
+pub fn restore_cursor() -> Key {
+    pack(&(ROOT, "meta", "restore", "cursor"))
+}
+
+/// Restore verification report of one incarnation.
+#[must_use]
+pub fn restore_report(incarnation: &[u8; 16]) -> Key {
+    pack(&(
+        ROOT,
+        "meta",
+        "restore",
+        "report",
+        Bytes::from(&incarnation[..]),
+    ))
+}
+
+/// Every restore report.
+#[must_use]
+pub fn restore_reports_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "meta", "restore", "report")))
+}
+
+/// Heartbeat of a gateway or controller process (RFC-014 §5.5).
+#[must_use]
+pub fn proc(id: &str) -> Key {
+    pack(&(ROOT, "proc", id))
+}
+
+/// Every process heartbeat.
+#[must_use]
+pub fn procs_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "proc")))
+}
+
+/// What a node reported in `Health` (RFC-014 §5.1), written by the
+/// controller.
+#[must_use]
+pub fn node_caps(node_id: u64) -> Key {
+    pack(&(ROOT, "ncap", node_id))
+}
+
+/// Every node capability record.
+#[must_use]
+pub fn node_caps_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "ncap")))
+}
+
+/// Every bucket-by-name record (existence probe of the gate).
+#[must_use]
+pub fn buckets_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "b")))
+}
+
+/// Every node record.
+#[must_use]
+pub fn nodes_range() -> KeyRange {
+    KeyRange::prefix(&nodes_prefix())
+}
 
 /// Key holding the schema version (u64 little-endian).
 #[must_use]

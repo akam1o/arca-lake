@@ -4,8 +4,14 @@ use crate::error::{Result, StorageError};
 
 /// Segment file magic.
 pub const SEGMENT_MAGIC: [u8; 8] = *b"ARCASEG1";
-/// Segment format version written by this build.
-pub const SEGMENT_FORMAT_VERSION: u16 = 1;
+/// Newest segment format version this build reads and can write (`F_cur`);
+/// version 2 exists only in a `version-bump` build (ADR-0016) and has the
+/// version-1 layout. New segments are stamped with the store's
+/// `format_write` (RFC-014 §5.3), never above this.
+#[allow(clippy::cast_possible_truncation)]
+pub const SEGMENT_FORMAT_VERSION: u16 = 1 + arca_lake_common::compat::BUMP as u16;
+/// Oldest segment format version this build reads (all `F ≤ F_cur`).
+pub const SEGMENT_FORMAT_VERSION_MIN: u16 = 1;
 /// Encoded segment header length in bytes.
 pub const SEGMENT_HEADER_LEN: usize = 64;
 /// Record magic.
@@ -107,9 +113,9 @@ impl SegmentHeader {
             });
         }
         let format_version = le_u16(b, 8);
-        if format_version != SEGMENT_FORMAT_VERSION {
+        if !(SEGMENT_FORMAT_VERSION_MIN..=SEGMENT_FORMAT_VERSION).contains(&format_version) {
             return Err(StorageError::UnsupportedFormat(format!(
-                "segment format version {format_version}, this build supports {SEGMENT_FORMAT_VERSION}"
+                "segment format version {format_version}, this build supports {SEGMENT_FORMAT_VERSION_MIN}..={SEGMENT_FORMAT_VERSION}"
             )));
         }
         let header_len = le_u16(b, 10);

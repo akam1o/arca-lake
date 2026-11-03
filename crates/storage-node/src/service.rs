@@ -57,6 +57,8 @@ pub struct StorageNodeService {
     /// One deep verification (`ScrubShards`/`VerifyShards`) at a time per
     /// node (RFC-008 §8.3).
     scrub_slot: tokio::sync::Semaphore,
+    /// Incarnation and `format_write` learned from the controller.
+    cluster: Mutex<crate::cluster::ClusterFacts>,
 }
 
 /// Decrements a gauge when dropped (`PutShard` streams in flight).
@@ -139,6 +141,20 @@ impl StorageNodeService {
             );
         }
         let epochs = EpochTable::open(&cfg.store.dir);
+        let cluster = crate::cluster::ClusterFacts::open(&cfg.store.dir);
+        if cluster.format_write > 0 {
+            store.set_format_write(cluster.format_write);
+        }
+        tracing::info!(
+            format_write = store.format_write(),
+            format_max = arca_lake_storage::format::SEGMENT_FORMAT_VERSION,
+            protocol = pb::PROTOCOL_VERSION,
+            incarnation = cluster
+                .incarnation
+                .map(|i| crate::cluster::hex(&i))
+                .unwrap_or_default(),
+            "storage node capabilities"
+        );
         Ok(Self {
             store: Arc::new(store),
             epochs: Mutex::new(epochs),
@@ -146,7 +162,26 @@ impl StorageNodeService {
             stream_progress_timeout: cfg.stream_progress_timeout,
             stats: NodeStats::default(),
             scrub_slot: tokio::sync::Semaphore::new(1),
+            cluster: Mutex::new(cluster),
         })
+    }
+
+    /// Newest segment format on the device (`--check-downgrade`).
+    ///
+    /// # Errors
+    ///
+    /// I/O errors.
+    pub fn newest_segment_format(&self) -> Result<u16, StorageError> {
+        self.store.newest_segment_format()
+    }
+
+    /// The incarnation this node adopted, if any.
+    #[must_use]
+    pub fn incarnation(&self) -> Option<[u8; 16]> {
+        self.cluster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .incarnation
     }
 
     /// Timing counters of this node.
@@ -177,13 +212,39 @@ impl StorageNodeService {
     }
 
     fn check_version(v: u32) -> Result<(), tonic::Status> {
-        if v == pb::PROTOCOL_VERSION {
+        if (pb::PROTOCOL_VERSION_MIN..=pb::PROTOCOL_VERSION).contains(&v) {
             Ok(())
         } else {
             Err(tonic::Status::failed_precondition(format!(
-                "protocol version {v} not supported; this node speaks {}",
+                "protocol version {v} not supported; this node speaks [{}, {}]",
+                pb::PROTOCOL_VERSION_MIN,
                 pb::PROTOCOL_VERSION
             )))
+        }
+    }
+
+    /// Refuse a delete whose incarnation differs from the one this node
+    /// adopted (RFC-015 §5.3): a controller that predates a metadata
+    /// restore must not apply its decisions. An empty incarnation (a
+    /// caller that predates incarnations) is accepted.
+    fn check_incarnation(&self, incarnation: &[u8]) -> Result<(), tonic::Status> {
+        if incarnation.is_empty() {
+            return Ok(());
+        }
+        let held = self
+            .cluster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .incarnation;
+        match held {
+            Some(h) if h.as_slice() != incarnation => {
+                Err(tonic::Status::failed_precondition(format!(
+                    "incarnation rejected: node adopted {}, request carries {}",
+                    crate::cluster::hex(&h),
+                    crate::cluster::hex(incarnation)
+                )))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -401,6 +462,7 @@ impl StorageNode for StorageNodeService {
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
         let key = Self::key(req.key)?;
+        self.check_incarnation(&req.incarnation)?;
         self.check_epoch(key.group_id, req.group_epoch)?;
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || store.delete(key))
@@ -670,16 +732,61 @@ impl StorageNode for StorageNodeService {
 
     async fn health(
         &self,
-        _request: tonic::Request<pb::HealthRequest>,
+        request: tonic::Request<pb::HealthRequest>,
     ) -> Result<tonic::Response<pb::HealthResponse>, tonic::Status> {
+        let req = request.into_inner();
+        // Adopt the cluster facts the controller carries (ADR-0016): the
+        // incarnation only when not older than what is held, the format
+        // monotonically; both persisted before they take effect.
+        {
+            let mut c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Ok(inc) = <[u8; 16]>::try_from(req.incarnation.as_ref())
+                && c.adopt_incarnation(inc, req.incarnation_changed_ms)
+                    .map_err(|e| tonic::Status::internal(e.to_string()))?
+            {
+                tracing::info!(
+                    incarnation = crate::cluster::hex(&inc),
+                    "adopted cluster incarnation"
+                );
+            }
+            if req.format_write > 0
+                && c.adopt_format_write(req.format_write)
+                    .map_err(|e| tonic::Status::internal(e.to_string()))?
+            {
+                let v = self.store.set_format_write(req.format_write);
+                tracing::info!(format_write = v, "storage format write gate updated");
+            }
+        }
         let stats = self.store.stats().map_err(Self::storage_status)?;
         let (qn, qb) = self.store.quarantine_stats();
+        let (incarnation, group_epochs) = {
+            let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+            let e = self.epochs.lock().unwrap_or_else(PoisonError::into_inner);
+            (
+                c.incarnation
+                    .map(|i| Bytes::copy_from_slice(&i))
+                    .unwrap_or_default(),
+                e.all()
+                    .into_iter()
+                    .map(|(group_id, epoch)| pb::GroupEpoch { group_id, epoch })
+                    .collect(),
+            )
+        };
         Ok(tonic::Response::new(pb::HealthResponse {
             live_shards: stats.live_shards as u64,
             live_bytes: stats.live_bytes,
             segment_bytes: stats.segment_bytes,
             quarantined_shards: qn as u64,
             quarantined_bytes: qb,
+            protocol_min: pb::PROTOCOL_VERSION_MIN,
+            protocol_max: pb::PROTOCOL_VERSION,
+            format_min: u64::from(arca_lake_storage::format::SEGMENT_FORMAT_VERSION_MIN),
+            format_max: u64::from(arca_lake_storage::format::SEGMENT_FORMAT_VERSION),
+            format_write: u64::from(self.store.format_write()),
+            incarnation,
+            software: arca_lake_common::compat::software_version(),
+            group_epochs,
+            version_bump: arca_lake_common::compat::BUMP,
         }))
     }
 }

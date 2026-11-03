@@ -137,6 +137,11 @@ pub enum KvError {
     /// longer current (see `fence::FencedKv`). Never retried.
     #[error("fenced: {0}")]
     Fenced(String),
+    /// The cluster is not in a state that admits this write, or its
+    /// incarnation changed since the process started (RFC-015 §5.6,
+    /// `guard::GuardedKv`). Never retried.
+    #[error("cluster state: {0}")]
+    ClusterState(String),
     /// Any other backend failure.
     #[error("backend error: {0}")]
     Backend(String),

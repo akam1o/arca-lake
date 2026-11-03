@@ -8,6 +8,12 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+# Test-only version bump (RFC-014 §5.7, ADR-0016): the build reports
+# (P + 1, M + 1, F + 1) and is a real second binary for mixed-version tests.
+version-bump = []
+
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true

@@ -19,3 +19,19 @@ pub mod auth;
 pub mod checksum;
 /// Bucket policy subset (RFC-012 §5.3.3).
 pub mod policy;
+
+/// What this gateway build reads and writes on every axis (RFC-014 §5.1).
+#[must_use]
+pub fn capabilities() -> arca_lake_common::compat::Capabilities {
+    use arca_lake_metadata::keys::{SCHEMA_VERSION, SCHEMA_VERSION_MIN};
+    use arca_lake_protocol::storage::v1::{PROTOCOL_VERSION, PROTOCOL_VERSION_MIN};
+    arca_lake_common::compat::Capabilities {
+        protocol_min: PROTOCOL_VERSION_MIN,
+        protocol_max: PROTOCOL_VERSION,
+        schema_min: SCHEMA_VERSION_MIN,
+        schema_max: SCHEMA_VERSION,
+        // Gateways hold no segments; they read nothing of the format.
+        format_min: 1,
+        format_max: u64::MAX,
+    }
+}

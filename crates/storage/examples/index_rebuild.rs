@@ -28,6 +28,7 @@ fn main() {
         record_alignment: 512,
         block_size: 4096,
         sync: SyncPolicy::Never,
+        format_write: arca_lake_storage::default_format_write(),
     };
     let data = vec![0xA5u8; payload];
     let t = Instant::now();

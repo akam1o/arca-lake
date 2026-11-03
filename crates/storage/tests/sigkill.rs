@@ -61,6 +61,7 @@ fn config(dir: &std::path::Path) -> StoreConfig {
         record_alignment: 512,
         block_size: 256,
         sync: SyncPolicy::Group,
+        format_write: arca_lake_storage::default_format_write(),
     }
 }
 

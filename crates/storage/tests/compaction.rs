@@ -32,6 +32,7 @@ fn config(dir: &std::path::Path) -> StoreConfig {
         record_alignment: 512,
         block_size: 256,
         sync: SyncPolicy::Never, // durability is covered elsewhere; keep these fast
+        format_write: arca_lake_storage::default_format_write(),
     }
 }
 

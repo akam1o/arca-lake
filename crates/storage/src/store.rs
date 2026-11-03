@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Result, StorageError};
 use crate::format::{
-    FLAG_TOMBSTONE, RecordHeader, SEGMENT_FORMAT_VERSION, SegmentHeader, ShardKey,
-    padded_header_len, validate_geometry,
+    FLAG_TOMBSTONE, RecordHeader, SEGMENT_FORMAT_VERSION, SEGMENT_FORMAT_VERSION_MIN,
+    SegmentHeader, ShardKey, padded_header_len, validate_geometry,
 };
 use crate::index::{Location, MemIndex, QuarantineEntry, ReleaseCause};
 use crate::segment::{self, ScanEnd, SegmentWriter, segment_path, verify_blocks};
@@ -49,6 +49,12 @@ pub struct StoreConfig {
     pub block_size: u32,
     /// Durability policy.
     pub sync: SyncPolicy,
+    /// Segment format version stamped on new segments: the cluster's
+    /// `format_write` (RFC-014 §5.3), clamped into
+    /// `[SEGMENT_FORMAT_VERSION_MIN, SEGMENT_FORMAT_VERSION]`. A node that
+    /// never heard a value writes `F_cur − 1` (clamped), so that a
+    /// not-yet-upgraded reader can still open what it writes.
+    pub format_write: u16,
 }
 
 impl StoreConfig {
@@ -62,6 +68,7 @@ impl StoreConfig {
             record_alignment: 4096,
             block_size: 1 << 16,
             sync: SyncPolicy::Group,
+            format_write: default_format_write(),
         }
     }
 }
@@ -307,6 +314,27 @@ struct Recovery {
     appendable: Option<(SegmentHeader, u64, Option<u64>)>,
 }
 
+/// `F_cur − 1` clamped to the oldest writable format: what a node writes
+/// until the controller tells it the cluster's `format_write`.
+#[must_use]
+pub const fn default_format_write() -> u16 {
+    if SEGMENT_FORMAT_VERSION > SEGMENT_FORMAT_VERSION_MIN {
+        SEGMENT_FORMAT_VERSION - 1
+    } else {
+        SEGMENT_FORMAT_VERSION_MIN
+    }
+}
+
+/// Clamp a cluster `format_write` into what this build can write.
+#[must_use]
+pub fn clamp_format_write(v: u64) -> u16 {
+    u16::try_from(v.clamp(
+        u64::from(SEGMENT_FORMAT_VERSION_MIN),
+        u64::from(SEGMENT_FORMAT_VERSION),
+    ))
+    .unwrap_or(SEGMENT_FORMAT_VERSION_MIN)
+}
+
 /// A single-device store.
 #[derive(Debug)]
 pub struct Store {
@@ -318,6 +346,8 @@ pub struct Store {
     durability: Durability,
     timings: StoreTimings,
     quarantine_log: QuarantineLog,
+    /// Format stamped on the next new segment (RFC-014 §5.3).
+    format_write: std::sync::atomic::AtomicU16,
 }
 
 /// Where a write spends its time (R-48 PUT profiling).
@@ -356,6 +386,7 @@ impl Store {
     /// geometry that differs from existing segments.
     pub fn open(cfg: StoreConfig) -> Result<(Self, OpenReport)> {
         validate_geometry(cfg.record_alignment, cfg.block_size)?;
+        let cfg_format_write = cfg.format_write;
         std::fs::create_dir_all(&cfg.dir)?;
 
         let mut ids: Vec<u64> = std::fs::read_dir(&cfg.dir)?
@@ -390,7 +421,12 @@ impl Store {
                 )
             } else {
                 let id = ids.last().map_or(0, |last| last + 1);
-                let w = Self::create_segment(&cfg, device_id, id)?;
+                let w = Self::create_segment(
+                    &cfg,
+                    device_id,
+                    id,
+                    clamp_format_write(u64::from(cfg_format_write)),
+                )?;
                 rec.readers.insert(
                     id,
                     SegmentInfo {
@@ -440,6 +476,9 @@ impl Store {
             },
             timings: StoreTimings::default(),
             quarantine_log,
+            format_write: std::sync::atomic::AtomicU16::new(clamp_format_write(u64::from(
+                cfg_format_write,
+            ))),
         };
         Ok((store, rec.report))
     }
@@ -552,14 +591,19 @@ impl Store {
         Ok(())
     }
 
-    fn create_segment(cfg: &StoreConfig, device_id: [u8; 16], id: u64) -> Result<SegmentWriter> {
+    fn create_segment(
+        cfg: &StoreConfig,
+        device_id: [u8; 16],
+        id: u64,
+        format_version: u16,
+    ) -> Result<SegmentWriter> {
         let created_unix_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|d| u64::try_from(d.as_nanos()).ok())
             .unwrap_or(0);
         let header = SegmentHeader {
-            format_version: SEGMENT_FORMAT_VERSION,
+            format_version,
             record_alignment: cfg.record_alignment,
             block_size: cfg.block_size,
             device_id,
@@ -671,7 +715,7 @@ impl Store {
         w.active.sync()?;
         let old_id = w.active.header().segment_id;
         let id = w.next_segment_id;
-        let new = Self::create_segment(&self.cfg, self.device_id, id)?;
+        let new = Self::create_segment(&self.cfg, self.device_id, id, self.format_write())?;
         let start = (id, new.end());
         {
             let mut readers = self.readers.write().unwrap_or_else(PoisonError::into_inner);
@@ -753,6 +797,39 @@ impl Store {
             self.durability.cv.notify_all();
             result?;
         }
+    }
+
+    /// Set the format stamped on new segments (the cluster's `format_write`,
+    /// RFC-014 §5.3); takes effect at the next rollover. Returns the value
+    /// in force after clamping.
+    pub fn set_format_write(&self, v: u64) -> u16 {
+        let c = clamp_format_write(v);
+        self.format_write
+            .store(c, std::sync::atomic::Ordering::Relaxed);
+        c
+    }
+
+    /// The format stamped on new segments.
+    #[must_use]
+    pub fn format_write(&self) -> u16 {
+        self.format_write.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Newest segment format version present on the device (the version a
+    /// downgrade target must read, `storage-node --check-downgrade`).
+    ///
+    /// # Errors
+    ///
+    /// I/O errors.
+    pub fn newest_segment_format(&self) -> Result<u16> {
+        Ok(self
+            .readers
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|s| s.header.format_version)
+            .max()
+            .unwrap_or(SEGMENT_FORMAT_VERSION_MIN))
     }
 
     /// Whether `key` is live.
@@ -1205,7 +1282,12 @@ impl Store {
             }
             let out = match output.as_mut() {
                 Some(o) => o,
-                None => output.insert(Self::create_segment(&self.cfg, self.device_id, output_id)?),
+                None => output.insert(Self::create_segment(
+                    &self.cfg,
+                    self.device_id,
+                    output_id,
+                    self.format_write(),
+                )?),
             };
             let new_offset = out.append(&r.header, &payload)?;
             out_min_seq = Some(out_min_seq.map_or(p.sequence, |m| m.min(p.sequence)));

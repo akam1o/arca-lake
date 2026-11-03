@@ -1,6 +1,7 @@
 //! Shared types for arca-lake: configuration structures that several
 //! components interpret identically.
 
+pub mod compat;
 pub mod ec_profile;
 pub mod timing;
 

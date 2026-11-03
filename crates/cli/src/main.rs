@@ -269,6 +269,17 @@ struct StorageNodeArgs {
 
 #[derive(Debug, Subcommand)]
 enum StorageNodeCommand {
+    /// Whether a build that reads segment formats up to `--format` can
+    /// open this device (RFC-014 §5.3 downgrade check; the node must not
+    /// be running on the device). Exit code 0 = yes, 2 = no.
+    CheckDowngrade {
+        /// Device directory.
+        #[arg(long)]
+        dir: PathBuf,
+        /// Newest segment format the target build reads.
+        #[arg(long)]
+        format: u16,
+    },
     /// Offline inspection of a device's quarantine state (RFC-008 §8.2):
     /// prints `quarantine.log`, and with `--scan` opens the store and
     /// prints the open report (the node must not be running on the device).
@@ -478,12 +489,117 @@ enum AdminCommand {
         tier: String,
     },
     /// Print nodes, groups, and the leader record.
-    Status,
+    Status {
+        /// Also print every process heartbeat and node capability record
+        /// (software version and P/M/F ranges, RFC-014 §5.8).
+        #[arg(long)]
+        versions: bool,
+    },
+    /// Initialise an empty metadata store at this build's versions (RFC-014
+    /// §5.4), or stamp a store that holds data but no schema key with the
+    /// legacy versions (ADR-0016). Idempotent.
+    Init,
+    /// Rolling upgrade finalization (RFC-014 §5.5).
+    Upgrade {
+        #[command(subcommand)]
+        command: UpgradeCommand,
+    },
+    /// Cluster recovery after a metadata restore (RFC-015 §5.3).
+    Recovery {
+        #[command(subcommand)]
+        command: RecoveryCommand,
+    },
+    /// Cluster read-only switch (RFC-015 §5.3).
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommand,
+    },
     /// Data integrity: scrub progress and stripe repair tasks (RFC-008 §8.9).
     Integrity {
         #[command(subcommand)]
         command: IntegrityCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum UpgradeCommand {
+    /// Gate values, cursor, heartbeats and node capabilities.
+    Status,
+    /// Request a finalize to this binary's versions; the controller leader
+    /// executes the steps (each a fenced compare-and-set). With `--wait`
+    /// the command polls until the cursor is gone or the timeout passes.
+    Finalize {
+        /// Process ids (controller ids, gateway ids, node ids) whose absence
+        /// does not block the precondition.
+        #[arg(long = "ignore-absent")]
+        ignore_absent: Vec<String>,
+        /// Poll until done.
+        #[arg(long)]
+        wait: bool,
+        /// Seconds to wait with `--wait`.
+        #[arg(long, default_value_t = 600)]
+        timeout_secs: u64,
+    },
+    /// Cancel a finalize that has not passed the downgrade cut-off.
+    Cancel,
+    /// Whether a build reading metadata schema up to `--schema` may run on
+    /// this store (RFC-014 §5.6).
+    CheckDowngrade {
+        /// Newest schema the target build reads.
+        #[arg(long)]
+        schema: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RecoveryCommand {
+    /// Cluster state, incarnation, cursor and the latest report.
+    Status,
+    /// Mark restored metadata (`restore mark`, RFC-015 §5.3.1): writes a
+    /// fresh incarnation and `Restoring`. Run before any other arca-lake
+    /// process is started on the restored store. Destructive for every
+    /// process still running with the old incarnation (they are fenced
+    /// out); requires `--yes`.
+    Begin {
+        /// Label of the backup the metadata was restored from.
+        #[arg(long)]
+        from: Option<String>,
+        /// Confirm.
+        #[arg(long)]
+        yes: bool,
+        /// Allow marking a cluster that is not Active or ReadOnly.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Re-run the verification pass from the start (`ReadOnly` or
+    /// `RecoveryRequired` → `VerificationPending`).
+    Verify {
+        /// Confirm (the cluster leaves ReadOnly while verifying).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Continue an interrupted verification (`RecoveryRequired` →
+    /// `VerificationPending`, cursor kept).
+    Resume,
+    /// Accept the report and activate (`restore accept` + `cluster
+    /// activate`): `ReadOnly` → `Active`; `RecoveryRequired` → `Active`
+    /// only with `--force` (audited in the report).
+    Finalize {
+        /// Confirm.
+        #[arg(long)]
+        yes: bool,
+        /// Accept an incomplete or unreadable report.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClusterCommand {
+    /// `Active` → `ReadOnly`: client writes and deletes stop, repair continues.
+    SetReadOnly,
+    /// `ReadOnly` → `Active`.
+    Activate,
 }
 
 #[derive(Debug, Subcommand)]
@@ -674,6 +790,8 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 populations_per_node: args.cache.cache_populations_per_node,
                 write_pipeline: args.write_pipeline,
                 multipart_min_part_bytes: args.multipart_min_part_bytes,
+                process_id: format!("gateway@{}", args.listen),
+                heartbeat: Some(Duration::from_secs(30)),
             },
         )
         .await
@@ -774,6 +892,34 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
 #[allow(clippy::too_many_lines)]
 fn run_storage_node_command(command: StorageNodeCommand) -> ExitCode {
     match command {
+        StorageNodeCommand::CheckDowngrade { dir, format } => {
+            let cfg = arca_lake_storage_node::NodeConfig::new(
+                "127.0.0.1:0".parse().expect("literal"),
+                &dir,
+            )
+            .store;
+            match arca_lake_storage_node::Store::open(cfg) {
+                Ok((store, _)) => match store.newest_segment_format() {
+                    Ok(newest) => {
+                        println!(
+                            "newest segment format {newest}; a build reading up to {format} {}",
+                            if newest <= format {
+                                "can open this device"
+                            } else {
+                                "cannot open this device"
+                            }
+                        );
+                        if newest <= format {
+                            ExitCode::SUCCESS
+                        } else {
+                            ExitCode::from(2)
+                        }
+                    }
+                    Err(e) => fail(e),
+                },
+                Err(e) => fail(format!("cannot open the store: {e}")),
+            }
+        }
         StorageNodeCommand::QuarantineList { dir, scan } => {
             match std::fs::read_to_string(dir.join("quarantine.log")) {
                 Ok(text) => {
@@ -1080,7 +1226,86 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
             }
         }
         AdminCommand::Integrity { command } => run_admin_integrity(meta, command, now).await,
-        AdminCommand::Status => {
+        AdminCommand::Init => {
+            match arca_lake_metadata::ops::compat::check_startup(
+                meta.as_ref(),
+                &arca_lake_controller::capabilities(),
+                arca_lake_metadata::ops::compat::Stamp::Legacy,
+                "admin",
+                now,
+            )
+            .await
+            {
+                Ok(g) => {
+                    print_gate(&g);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        AdminCommand::Upgrade { command } => run_admin_upgrade(meta, command, now).await,
+        AdminCommand::Recovery { command } => run_admin_recovery(meta, command, now).await,
+        AdminCommand::Cluster { command } => run_admin_cluster(meta, command, now).await,
+        AdminCommand::Status { versions } => {
+            if versions {
+                let g = arca_lake_metadata::ops::compat::gate(meta.as_ref()).await;
+                let procs = arca_lake_metadata::ops::compat::procs(meta.as_ref()).await;
+                let caps = arca_lake_metadata::ops::recovery::node_caps(meta.as_ref()).await;
+                match (g, procs, caps) {
+                    (Ok(g), Ok(procs), Ok(caps)) => {
+                        print_gate(&g);
+                        println!(
+                            "this binary software {} protocol [{}, {}] schema [{}, {}] format max {}",
+                            arca_lake_common::compat::software_version(),
+                            arca_lake_protocol::storage::v1::PROTOCOL_VERSION_MIN,
+                            arca_lake_protocol::storage::v1::PROTOCOL_VERSION,
+                            arca_lake_metadata::keys::SCHEMA_VERSION_MIN,
+                            arca_lake_metadata::keys::SCHEMA_VERSION,
+                            arca_lake_storage::format::SEGMENT_FORMAT_VERSION
+                        );
+                        for p in procs {
+                            println!(
+                                "proc {:?} {} software {} protocol [{}, {}] schema [{}, {}] incarnation {} last_ms {}",
+                                p.kind,
+                                p.id,
+                                p.software,
+                                p.caps.protocol_min,
+                                p.caps.protocol_max,
+                                p.caps.schema_min,
+                                p.caps.schema_max,
+                                arca_lake_metadata::ops::compat::hex(&p.incarnation),
+                                p.last_ms
+                            );
+                        }
+                        for c in caps {
+                            println!(
+                                "node {} software {} protocol [{}, {}] format [{}, {}] format_write {} incarnation {} epochs {:?} seen_ms {}",
+                                c.node_id,
+                                c.software,
+                                c.caps.protocol_min,
+                                c.caps.protocol_max,
+                                c.caps.format_min,
+                                c.caps.format_max,
+                                c.format_write,
+                                c.incarnation.map_or_else(
+                                    || "-".into(),
+                                    |i| arca_lake_metadata::ops::compat::hex(&i)
+                                ),
+                                c.group_epochs,
+                                c.seen_ms
+                            );
+                        }
+                    }
+                    (g, p, c) => {
+                        return fail(
+                            g.err()
+                                .or(p.err())
+                                .or(c.err())
+                                .map_or_else(|| "unknown".to_string(), |e| e.to_string()),
+                        );
+                    }
+                }
+            }
             let nodes = arca_lake_metadata::ops::cluster::list_nodes(meta.as_ref()).await;
             let groups = arca_lake_metadata::ops::cluster::list_groups(meta.as_ref()).await;
             let leader = arca_lake_metadata::ops::leader::current(meta.as_ref()).await;
@@ -1122,6 +1347,401 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 ),
             }
         }
+    }
+}
+
+fn print_gate(g: &arca_lake_metadata::ops::compat::Gate) {
+    println!(
+        "schema {:?} schema_write {:?} format_write {:?} has_data {}",
+        g.schema, g.schema_write, g.format_write, g.has_data
+    );
+    match &g.cluster {
+        Some(c) => println!(
+            "cluster {} incarnation {} changed_ms {} by {} restored_at_ms {:?} restored_from {:?}",
+            c.state.name(),
+            arca_lake_metadata::ops::compat::hex(&c.incarnation),
+            c.changed_ms,
+            c.changed_by,
+            c.restored_at_ms,
+            c.restored_from
+        ),
+        None => println!("cluster: not initialised"),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_admin_upgrade<S: arca_lake_metadata::KvStore + 'static>(
+    meta: Arc<S>,
+    command: UpgradeCommand,
+    now: u64,
+) -> ExitCode {
+    use arca_lake_metadata::ops::compat;
+    match command {
+        UpgradeCommand::Status => {
+            match (
+                compat::gate(meta.as_ref()).await,
+                compat::upgrade_cursor(meta.as_ref()).await,
+            ) {
+                (Ok(g), Ok(cur)) => {
+                    print_gate(&g);
+                    match cur {
+                        Some(c) => println!(
+                            "upgrade target {:?} step {:?} started_ms {} updated_ms {} by {} token {} last_error {:?}\n  history: {}",
+                            c.target,
+                            c.step,
+                            c.started_ms,
+                            c.updated_ms,
+                            c.requested_by,
+                            c.by_token,
+                            c.last_error,
+                            c.history.join(" | ")
+                        ),
+                        None => println!("upgrade: none in progress"),
+                    }
+                    if let Ok(audits) =
+                        arca_lake_metadata::ops::recovery::upgrade_audits(meta.as_ref()).await
+                    {
+                        for a in audits {
+                            println!(
+                                "finalized {:?} at {} ({} steps)",
+                                a.target,
+                                a.updated_ms,
+                                a.history.len()
+                            );
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                (g, c) => fail(
+                    g.err()
+                        .or(c.err())
+                        .map_or_else(|| "unknown".to_string(), |e| e.to_string()),
+                ),
+            }
+        }
+        UpgradeCommand::Finalize {
+            ignore_absent,
+            wait,
+            timeout_secs,
+        } => {
+            let target = arca_lake_common::compat::Target {
+                protocol: arca_lake_protocol::storage::v1::PROTOCOL_VERSION,
+                schema: arca_lake_metadata::keys::SCHEMA_VERSION,
+                format: u64::from(arca_lake_storage::format::SEGMENT_FORMAT_VERSION),
+            };
+            let cur =
+                match compat::request_finalize(meta.as_ref(), target, ignore_absent, "admin", now)
+                    .await
+                {
+                    Ok(c) => c,
+                    Err(e) => return fail(e),
+                };
+            println!(
+                "finalize to {:?} requested (step {:?}); the controller leader executes it",
+                cur.target, cur.step
+            );
+            if !wait {
+                return ExitCode::SUCCESS;
+            }
+            let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                match compat::upgrade_cursor(meta.as_ref()).await {
+                    Ok(None) => {
+                        println!("finalized");
+                        return ExitCode::SUCCESS;
+                    }
+                    Ok(Some(c)) => {
+                        if let Some(e) = &c.last_error {
+                            eprintln!("step {:?}: {e}", c.step);
+                        }
+                        if std::time::Instant::now() > deadline {
+                            return fail(format!("timed out at step {:?}", c.step));
+                        }
+                    }
+                    Err(e) => return fail(e),
+                }
+            }
+        }
+        UpgradeCommand::Cancel => match compat::clear_upgrade(meta.as_ref(), true).await {
+            Ok(Some(c)) => {
+                println!("cancelled upgrade to {:?} at step {:?}", c.target, c.step);
+                ExitCode::SUCCESS
+            }
+            Ok(None) => {
+                println!("no upgrade in progress");
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e),
+        },
+        UpgradeCommand::CheckDowngrade { schema } => match compat::gate(meta.as_ref()).await {
+            Ok(g) => {
+                let stored = g.schema.unwrap_or(0);
+                let write = g.schema_write.unwrap_or(0);
+                let ok = stored <= schema && write <= schema;
+                println!(
+                    "schema {stored} schema_write {write}; a build reading up to M{schema} {}",
+                    if ok {
+                        "can run on this store"
+                    } else {
+                        "cannot run on this store (past the cut-off)"
+                    }
+                );
+                if ok {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(2)
+                }
+            }
+            Err(e) => fail(e),
+        },
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
+    meta: Arc<S>,
+    command: RecoveryCommand,
+    now: u64,
+) -> ExitCode {
+    use arca_lake_metadata::ops::{compat, recovery};
+    use arca_lake_metadata::records::ClusterPhase;
+    let state = match compat::cluster_state(meta.as_ref()).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return fail("cluster state record missing; run `admin init`"),
+        Err(e) => return fail(e),
+    };
+    match command {
+        RecoveryCommand::Status => {
+            println!(
+                "cluster {} incarnation {} changed_ms {} by {} restored_at_ms {:?} restored_from {:?}",
+                state.state.name(),
+                compat::hex(&state.incarnation),
+                state.changed_ms,
+                state.changed_by,
+                state.restored_at_ms,
+                state.restored_from
+            );
+            if let Ok(Some(c)) = recovery::cursor(meta.as_ref()).await {
+                println!(
+                    "cursor incarnation {} phase {:?} restore_point_ms {} unanswered {:?} excluded {:?} updated_ms {}",
+                    compat::hex(&c.incarnation),
+                    c.phase,
+                    c.restore_point_ms,
+                    c.unanswered_nodes,
+                    c.excluded_nodes,
+                    c.updated_ms
+                );
+            }
+            if let Ok(Some(r)) = recovery::report(meta.as_ref(), &state.incarnation).await {
+                println!(
+                    "report complete {} finished_ms {} unanswered {:?} accepted {:?}\n  counts {:?}",
+                    r.complete, r.finished_ms, r.unanswered_nodes, r.accepted, r.counts
+                );
+                for a in &r.affected {
+                    println!(
+                        "  affected {} bucket {} key {} generation {} chunk {} group {} have {} need {}",
+                        a.why,
+                        a.bucket,
+                        a.key,
+                        compat::hex(&a.generation),
+                        a.chunk_index,
+                        a.group,
+                        a.have,
+                        a.need
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        RecoveryCommand::Begin { from, yes, force } => {
+            if !yes {
+                return fail(
+                    "recovery begin fences out every running process and starts a restore; re-run with --yes",
+                );
+            }
+            if !force && !matches!(state.state, ClusterPhase::Active | ClusterPhase::ReadOnly) {
+                return fail(format!(
+                    "cluster is {}; use --force to mark again",
+                    state.state.name()
+                ));
+            }
+            match compat::mark_restoring(meta.as_ref(), from, "admin", now).await {
+                Ok(s) => {
+                    println!(
+                        "cluster Restoring, incarnation {} (restore point {}): start the controllers; writes after the backup point are lost (RPO) and objects whose shards are gone are reported, not recovered",
+                        compat::hex(&s.incarnation),
+                        now
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        RecoveryCommand::Verify { yes } => {
+            if !yes {
+                return fail("verify leaves ReadOnly for VerificationPending; re-run with --yes");
+            }
+            if !matches!(
+                state.state,
+                ClusterPhase::ReadOnly | ClusterPhase::RecoveryRequired
+            ) {
+                return fail(format!(
+                    "cluster is {}; verify needs ReadOnly or RecoveryRequired",
+                    state.state.name()
+                ));
+            }
+            // A fresh cursor at the verification start; the report of this
+            // incarnation is rewritten by the pass.
+            let c = recovery::RestoreCursor {
+                incarnation: state.incarnation,
+                phase: recovery::RecoveryPhase::Shards {
+                    group: 0,
+                    member: 0,
+                    after: None,
+                },
+                restore_point_ms: state.restored_at_ms.unwrap_or(now),
+                started_ms: now,
+                updated_ms: now,
+                unanswered_nodes: Vec::new(),
+                excluded_nodes: Vec::new(),
+            };
+            if let Err(e) = recovery::set_cursor(meta.as_ref(), &c).await {
+                return fail(e);
+            }
+            let mut r = recovery::RestoreReport {
+                incarnation: state.incarnation,
+                restore_point_ms: c.restore_point_ms,
+                counts: recovery::RestoreCounts::default(),
+                affected: Vec::new(),
+                complete: false,
+                unanswered_nodes: Vec::new(),
+                finished_ms: 0,
+                accepted: None,
+            };
+            r.counts.epochs_raised = 0;
+            if let Err(e) = recovery::set_report(meta.as_ref(), &r).await {
+                return fail(e);
+            }
+            match compat::set_phase(
+                meta.as_ref(),
+                ClusterPhase::VerificationPending,
+                "admin",
+                now,
+            )
+            .await
+            {
+                Ok(_) => {
+                    println!("VerificationPending: the controller leader verifies from the start");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        RecoveryCommand::Resume => {
+            if state.state != ClusterPhase::RecoveryRequired {
+                return fail(format!(
+                    "cluster is {}; resume needs RecoveryRequired",
+                    state.state.name()
+                ));
+            }
+            match compat::set_phase(
+                meta.as_ref(),
+                ClusterPhase::VerificationPending,
+                "admin",
+                now,
+            )
+            .await
+            {
+                Ok(_) => {
+                    println!(
+                        "VerificationPending: the controller leader continues from the cursor"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        RecoveryCommand::Finalize { yes, force } => {
+            if !yes {
+                return fail("finalize activates the cluster; re-run with --yes");
+            }
+            let report = match recovery::report(meta.as_ref(), &state.incarnation).await {
+                Ok(r) => r,
+                Err(e) => return fail(e),
+            };
+            match state.state {
+                ClusterPhase::ReadOnly => {}
+                ClusterPhase::RecoveryRequired if force => {}
+                ClusterPhase::RecoveryRequired => {
+                    return fail(
+                        "cluster is RecoveryRequired (unreadable data or an incomplete pass); fix the cause, `recovery resume`, or accept with --force",
+                    );
+                }
+                other => {
+                    return fail(format!(
+                        "cluster is {}; finalize needs ReadOnly",
+                        other.name()
+                    ));
+                }
+            }
+            if let Some(mut r) = report {
+                if r.finished_ms == 0 && !force {
+                    return fail("verification has not finished; wait or use --force");
+                }
+                r.accepted = Some(recovery::Acceptance {
+                    at_ms: now,
+                    by: "admin".into(),
+                    forced: force,
+                });
+                if let Err(e) = recovery::set_report(meta.as_ref(), &r).await {
+                    return fail(e);
+                }
+            } else if !force {
+                return fail(
+                    "no verification report for this incarnation; run `recovery verify --yes` or use --force",
+                );
+            }
+            match compat::set_phase(meta.as_ref(), ClusterPhase::Active, "admin", now).await {
+                Ok(_) => {
+                    println!(
+                        "cluster Active{}",
+                        if force {
+                            " (forced; recorded in the report)"
+                        } else {
+                            ""
+                        }
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+    }
+}
+
+async fn run_admin_cluster<S: arca_lake_metadata::KvStore + 'static>(
+    meta: Arc<S>,
+    command: ClusterCommand,
+    now: u64,
+) -> ExitCode {
+    use arca_lake_metadata::ops::compat;
+    use arca_lake_metadata::records::ClusterPhase;
+    let (from, to) = match command {
+        ClusterCommand::SetReadOnly => (ClusterPhase::Active, ClusterPhase::ReadOnly),
+        ClusterCommand::Activate => (ClusterPhase::ReadOnly, ClusterPhase::Active),
+    };
+    match compat::transition(meta.as_ref(), from, to, "admin", now).await {
+        Ok((rec, true)) => {
+            println!("cluster {}", rec.state.name());
+            ExitCode::SUCCESS
+        }
+        Ok((rec, false)) => fail(format!(
+            "cluster is {}, not {}",
+            rec.state.name(),
+            from.name()
+        )),
+        Err(e) => fail(e),
     }
 }
 

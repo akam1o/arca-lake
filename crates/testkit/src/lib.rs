@@ -122,6 +122,8 @@ pub struct ClusterOptions {
     /// Extra principals `(access key, secret key, name)` besides the
     /// cluster's default credentials (principal `tenant-a`).
     pub principals: Vec<(String, String, String)>,
+    /// Gateway heartbeat interval (RFC-014 §5.5); `None` disables it.
+    pub heartbeat: Option<Duration>,
     /// Use this credential store instead of one built from `principals`
     /// (a file-backed store for rotation tests); the cluster's generated
     /// `credentials` are then not registered anywhere.
@@ -183,6 +185,7 @@ impl ClusterOptions {
             multipart_min_part_bytes: 1024,
             authorize: false,
             principals: Vec::new(),
+            heartbeat: None,
             credential_store: None,
         }
     }
@@ -195,6 +198,7 @@ fn node_store_config(dir: &std::path::Path) -> StoreConfig {
         record_alignment: 512,
         block_size: 4096,
         sync: SyncPolicy::Group,
+        format_write: arca_lake_storage::default_format_write(),
     }
 }
 
@@ -329,6 +333,8 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 populations_per_node: opts.populations_per_node,
                 write_pipeline: opts.write_pipeline,
                 multipart_min_part_bytes: opts.multipart_min_part_bytes,
+                process_id: format!("gateway-test-{}", uuid::Uuid::new_v4().simple()),
+                heartbeat: opts.heartbeat,
             },
         )
         .await

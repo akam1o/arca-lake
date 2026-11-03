@@ -6,12 +6,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arca_lake_common::EcProfile;
 use arca_lake_common::timing::{Histogram, HistogramSnapshot};
+use arca_lake_metadata::guard::{GuardedKv, OpClass};
+use arca_lake_metadata::ops::compat;
 use arca_lake_metadata::ops::object::Precondition;
 use arca_lake_metadata::ops::{bucket, list, multipart, object};
 use arca_lake_metadata::records::{
     Checksum, ChecksumAlgorithm, ChecksumType, GenId, UploadId, Versioning, new_gen_id,
     upload_id_from_str, upload_id_to_string,
 };
+use arca_lake_metadata::records::{ClusterPhase, ClusterStateRecord};
 use arca_lake_metadata::{KvStore, MetaError};
 use arca_lake_protocol::client::NodeClients;
 use arca_lake_tiering::cache::CacheTierConfig;
@@ -81,6 +84,11 @@ pub struct ClusterConfig {
     /// Minimum size of every multipart part but the last (AWS: 5 MiB;
     /// smaller values are a documented non-AWS extension for labs).
     pub multipart_min_part_bytes: u64,
+    /// Process id of this gateway's heartbeat record (RFC-014 §5.5);
+    /// usually the listen address.
+    pub process_id: String,
+    /// Heartbeat interval; `None` disables the heartbeat (unit tests).
+    pub heartbeat: Option<Duration>,
 }
 
 /// Fault-injection points in the write path (tests only).
@@ -104,7 +112,13 @@ pub enum FaultPoint {
 /// takes ownership of its backend, while tests and tooling keep a handle
 /// for fault injection and map refresh).
 pub struct ClusterBackend<S> {
-    pub(super) meta: Arc<S>,
+    /// Every transaction is guarded by the cluster state (RFC-015 §5.6):
+    /// client writes need `Active`.
+    pub(super) meta: Arc<GuardedKv<S>>,
+    /// Repair-class writes (integrity reports) admitted in `ReadOnly` too.
+    pub(super) meta_repair: Arc<GuardedKv<S>>,
+    /// Cluster facts refreshed every 2 s (admission checks).
+    pub(super) cluster: Arc<ClusterWatch>,
     pub(super) clients: NodeClients,
     pub(super) map: Arc<RwLock<Arc<ClusterMap>>>,
     pub(super) cfg: Arc<ClusterConfig>,
@@ -115,6 +129,79 @@ pub struct ClusterBackend<S> {
     pub(super) put_stats: Arc<PutStats>,
     pub(super) pop_queue: Arc<PopulationQueue>,
     pub(super) integrity: Arc<IntegrityState>,
+}
+
+/// The cluster state as this gateway last saw it (RFC-015 §5.6 admission;
+/// refreshed every [`CLUSTER_REFRESH`]), with the incarnation the process
+/// started under.
+#[derive(Debug)]
+pub struct ClusterWatch {
+    /// Incarnation at start.
+    pub incarnation: [u8; 16],
+    state: RwLock<Option<ClusterStateRecord>>,
+    /// Admission refusals by phase.
+    pub refused: std::sync::atomic::AtomicU64,
+}
+
+/// Interval of the cluster-state refresh.
+pub const CLUSTER_REFRESH: Duration = Duration::from_secs(2);
+
+impl ClusterWatch {
+    /// Current phase, if known.
+    #[must_use]
+    pub fn phase(&self) -> Option<ClusterPhase> {
+        self.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|s| s.state)
+    }
+
+    /// The record.
+    #[must_use]
+    pub fn record(&self) -> Option<ClusterStateRecord> {
+        self.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replace the record (the refresher, and tests that flip the state
+    /// without waiting for the refresh interval).
+    pub fn set(&self, rec: Option<ClusterStateRecord>) {
+        *self.state.write().unwrap_or_else(PoisonError::into_inner) = rec;
+    }
+
+    /// Admission: client writes need `Active`; reads need anything but
+    /// `Restoring`; an unknown state or a changed incarnation refuses.
+    fn admit(&self, write: bool) -> Result<(), s3s::S3Error> {
+        let refuse = |why: String| {
+            self.refused
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            s3_error!(
+                ServiceUnavailable,
+                "cluster not available for this request: {why}"
+            )
+        };
+        let Some(rec) = self.record() else {
+            return Err(refuse("cluster state unknown".into()));
+        };
+        if rec.incarnation != self.incarnation {
+            return Err(refuse(
+                "cluster incarnation changed since this gateway started; restart it".into(),
+            ));
+        }
+        let ok = if write {
+            rec.state.admits(OpClass::ClientWrite)
+        } else {
+            rec.state.admits_client_reads()
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(refuse(format!("cluster is {}", rec.state.name())))
+        }
+    }
 }
 
 /// Read-path integrity counters (RFC-008 §8.7).
@@ -501,6 +588,8 @@ impl<S> Clone for ClusterBackend<S> {
             pop_queue: Arc::clone(&self.pop_queue),
             integrity: Arc::clone(&self.integrity),
             meta: Arc::clone(&self.meta),
+            meta_repair: Arc::clone(&self.meta_repair),
+            cluster: Arc::clone(&self.cluster),
             clients: self.clients.clone(),
             map: Arc::clone(&self.map),
             cfg: Arc::clone(&self.cfg),
@@ -540,6 +629,46 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         cfg.profile
             .validate()
             .map_err(|e| MetaError::InvalidArgument(e.to_string()))?;
+        // Startup gate (RFC-014 §5.4): refuse a schema outside this build's
+        // window; initialise an empty store; never stamp a store with data.
+        let gate = compat::check_startup(
+            meta.as_ref(),
+            &crate::capabilities(),
+            compat::Stamp::FreshOnly,
+            &cfg.process_id,
+            now_ms(),
+        )
+        .await?;
+        let state = gate
+            .cluster
+            .clone()
+            .ok_or_else(|| MetaError::InvalidArgument("cluster state record missing".into()))?;
+        arca_lake_metadata::records::set_schema_write(gate.schema_write.unwrap_or(0));
+        tracing::info!(
+            schema = ?gate.schema,
+            schema_write = ?gate.schema_write,
+            format_write = ?gate.format_write,
+            phase = state.state.name(),
+            incarnation = %compat::hex(&state.incarnation),
+            "gateway startup gate passed"
+        );
+        let cluster = Arc::new(ClusterWatch {
+            incarnation: state.incarnation,
+            state: RwLock::new(Some(state.clone())),
+            refused: std::sync::atomic::AtomicU64::new(0),
+        });
+        let base = Arc::clone(&meta);
+        let meta_repair = Arc::new(GuardedKv::new(
+            Arc::clone(&base),
+            state.incarnation,
+            OpClass::Repair,
+        ));
+        let meta = Arc::new(GuardedKv::new(
+            base,
+            state.incarnation,
+            OpClass::ClientWrite,
+        ));
+        Self::spawn_cluster_refresh(Arc::clone(meta.inner()), Arc::downgrade(&cluster));
         let map = ClusterMap::load(meta.as_ref()).await?;
         let permits = cfg
             .cache
@@ -548,14 +677,26 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let clients = NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
             arca_lake_protocol::client::RpcPolicy::from_timeout(cfg.node_timeout)
         }));
+        clients.set_incarnation(Some(state.incarnation));
         let pop_queue = Arc::new(PopulationQueue::new(
             clients.clone(),
             permits,
             cfg.population_queue_depth,
             cfg.populations_per_node,
         ));
+        if let Some(every) = cfg.heartbeat {
+            Self::spawn_heartbeat(
+                Arc::clone(meta.inner()),
+                cfg.process_id.clone(),
+                state.incarnation,
+                every,
+                Arc::downgrade(&cluster),
+            );
+        }
         Ok(Self {
             meta,
+            meta_repair,
+            cluster,
             clients,
             pop_queue,
             map: Arc::new(RwLock::new(Arc::new(map))),
@@ -584,10 +725,82 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }
     }
 
-    /// The metadata store.
+    /// The metadata store (unguarded; authorizer and tests).
     #[must_use]
     pub fn metadata(&self) -> &Arc<S> {
-        &self.meta
+        self.meta.inner()
+    }
+
+    /// The cluster state watch (phase, incarnation, refusals).
+    #[must_use]
+    pub fn cluster(&self) -> &Arc<ClusterWatch> {
+        &self.cluster
+    }
+
+    /// Refuse a client write unless the cluster is `Active` (RFC-015 §5.6).
+    pub(super) fn admit_write(&self) -> Result<(), s3s::S3Error> {
+        self.cluster.admit(true)
+    }
+
+    /// Refuse a client read while the cluster is `Restoring`.
+    pub(super) fn admit_read(&self) -> Result<(), s3s::S3Error> {
+        self.cluster.admit(false)
+    }
+
+    /// Refresh the cluster state and `schema_write` every
+    /// [`CLUSTER_REFRESH`] while the backend lives.
+    fn spawn_cluster_refresh(meta: Arc<S>, watch: std::sync::Weak<ClusterWatch>) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(CLUSTER_REFRESH).await;
+                let Some(w) = watch.upgrade() else {
+                    return;
+                };
+                match compat::gate(meta.as_ref()).await {
+                    Ok(g) => {
+                        if let Some(sw) = g.schema_write {
+                            arca_lake_metadata::records::set_schema_write(sw);
+                        }
+                        w.set(g.cluster);
+                    }
+                    Err(e) => {
+                        // Fail closed: an unreadable state admits nothing.
+                        tracing::warn!(error = %e, "cluster state refresh failed");
+                        w.set(None);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Write this process's heartbeat (RFC-014 §5.5) every `every`.
+    fn spawn_heartbeat(
+        meta: Arc<S>,
+        id: String,
+        incarnation: [u8; 16],
+        every: Duration,
+        watch: std::sync::Weak<ClusterWatch>,
+    ) {
+        tokio::spawn(async move {
+            loop {
+                if watch.upgrade().is_none() {
+                    let _ = compat::remove_heartbeat(meta.as_ref(), &id).await;
+                    return;
+                }
+                let rec = arca_lake_metadata::records::ProcRecord {
+                    id: id.clone(),
+                    kind: arca_lake_metadata::records::ProcKind::Gateway,
+                    software: arca_lake_common::compat::software_version(),
+                    caps: crate::capabilities(),
+                    incarnation,
+                    last_ms: now_ms(),
+                };
+                if let Err(e) = compat::heartbeat(meta.as_ref(), &rec).await {
+                    tracing::debug!(error = %e, "heartbeat failed");
+                }
+                tokio::time::sleep(every).await;
+            }
+        });
     }
 
     /// The storage node clients (tests install transport fault hooks here).
@@ -671,6 +884,9 @@ pub(super) fn meta_err(e: MetaError) -> s3s::S3Error {
         }
         MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r)) => {
             s3_error!(ServiceUnavailable, "metadata commit outcome unknown: {r}")
+        }
+        MetaError::Kv(arca_lake_metadata::KvError::ClusterState(r)) => {
+            s3_error!(ServiceUnavailable, "cluster not writable: {r}")
         }
         MetaError::NoSuchUpload => s3_error!(NoSuchUpload),
         MetaError::NoSuchVersion => s3_error!(NoSuchVersion),
@@ -945,6 +1161,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<CreateBucketInput>,
     ) -> S3Result<S3Response<CreateBucketOutput>> {
+        self.admit_write()?;
         let owner = principal_of(&req);
         bucket::create_bucket_owned(
             self.meta.as_ref(),
@@ -962,6 +1179,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<DeleteBucketInput>,
     ) -> S3Result<S3Response<DeleteBucketOutput>> {
+        self.admit_write()?;
         bucket::delete_bucket(self.meta.as_ref(), &req.input.bucket)
             .await
             .map_err(meta_err)?;
@@ -1040,6 +1258,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<PutBucketVersioningInput>,
     ) -> S3Result<S3Response<PutBucketVersioningOutput>> {
+        self.admit_write()?;
         let cfg = req.input.versioning_configuration;
         if cfg.mfa_delete.is_some() || req.input.mfa.is_some() {
             return Err(s3_error!(NotImplemented, "MFA delete is not supported"));
@@ -1083,6 +1302,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<PutBucketPolicyInput>,
     ) -> S3Result<S3Response<PutBucketPolicyOutput>> {
+        self.admit_write()?;
         // Rule 5: every unsupported element is rejected here, with its name.
         Policy::parse(&req.input.bucket, &req.input.policy)
             .map_err(|e| s3_error!(MalformedPolicy, "{}", e.0))?;
@@ -1100,6 +1320,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<DeleteBucketPolicyInput>,
     ) -> S3Result<S3Response<DeleteBucketPolicyOutput>> {
+        self.admit_write()?;
         bucket::set_policy(self.meta.as_ref(), &req.input.bucket, None)
             .await
             .map_err(meta_err)?;
@@ -1110,6 +1331,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<PutObjectInput>,
     ) -> S3Result<S3Response<PutObjectOutput>> {
+        self.admit_write()?;
         let trailing = req.trailing_headers.clone();
         let input = req.input;
         let Some(body) = input.body else {
@@ -1160,6 +1382,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<GetObjectInput>,
     ) -> S3Result<S3Response<GetObjectOutput>> {
+        self.admit_read()?;
         self.read_object(req.input).await
     }
 
@@ -1167,6 +1390,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<HeadObjectInput>,
     ) -> S3Result<S3Response<HeadObjectOutput>> {
+        self.admit_read()?;
         self.head_object_impl(req.input).await
     }
 
@@ -1174,6 +1398,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<DeleteObjectInput>,
     ) -> S3Result<S3Response<DeleteObjectOutput>> {
+        self.admit_write()?;
         let input = req.input;
         if let Some(v) = &input.version_id {
             let d =
@@ -1222,6 +1447,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<DeleteObjectsInput>,
     ) -> S3Result<S3Response<DeleteObjectsOutput>> {
+        self.admit_write()?;
         let input = req.input;
         if input.delete.objects.len() > 1000 {
             return Err(s3_error!(MalformedXML, "at most 1000 keys per request"));
@@ -1286,6 +1512,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<CopyObjectInput>,
     ) -> S3Result<S3Response<CopyObjectOutput>> {
+        self.admit_write()?;
         let input = req.input;
         let CopySource::Bucket {
             bucket: src_bucket,
@@ -1408,6 +1635,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<ListObjectsV2Input>,
     ) -> S3Result<S3Response<ListObjectsV2Output>> {
+        self.admit_read()?;
         let input = req.input;
         let continuation = match &input.continuation_token {
             Some(t) => {
@@ -1541,6 +1769,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<CreateMultipartUploadInput>,
     ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
+        self.admit_write()?;
         let owner = principal_of(&req);
         let input = req.input;
         let (algorithm, kind) = multipart_checksum_spec(
@@ -1590,6 +1819,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<UploadPartInput>,
     ) -> S3Result<S3Response<UploadPartOutput>> {
+        self.admit_write()?;
         let trailing = req.trailing_headers.clone();
         let input = req.input;
         let Some(body) = input.body else {
@@ -1641,6 +1871,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<UploadPartCopyInput>,
     ) -> S3Result<S3Response<UploadPartCopyOutput>> {
+        self.admit_write()?;
         let input = req.input;
         let CopySource::Bucket {
             bucket: src_bucket,
@@ -1740,6 +1971,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<CompleteMultipartUploadInput>,
     ) -> S3Result<S3Response<CompleteMultipartUploadOutput>> {
+        self.admit_write()?;
         let input = req.input;
         let upload_id = parse_upload_id(&input.upload_id)?;
         let Some(listed) = input.multipart_upload.and_then(|m| m.parts) else {
@@ -1880,6 +2112,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         &self,
         req: S3Request<AbortMultipartUploadInput>,
     ) -> S3Result<S3Response<AbortMultipartUploadOutput>> {
+        self.admit_write()?;
         let input = req.input;
         let upload_id = parse_upload_id(&input.upload_id)?;
         multipart::abort_and_discard(

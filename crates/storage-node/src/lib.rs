@@ -6,6 +6,7 @@
 //! an older epoch (fencing, RFC-004 §5.4). Every acknowledgment means the
 //! storage engine has made the record durable.
 
+mod cluster;
 mod epochs;
 mod service;
 

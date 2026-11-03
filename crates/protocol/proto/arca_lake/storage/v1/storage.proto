@@ -54,6 +54,10 @@ message DeleteShardRequest {
   uint32 protocol_version = 1;
   ShardKey key = 2;
   uint64 group_epoch = 3;
+  // Cluster incarnation of the caller (RFC-015 §5.3, ADR-0016). A node
+  // that has adopted an incarnation rejects a different one; empty is
+  // accepted (a caller that predates incarnations).
+  bytes incarnation = 4;
 }
 
 message DeleteShardResponse {}
@@ -165,7 +169,23 @@ message UpdateGroupEpochResponse {
   uint64 epoch = 1;
 }
 
-message HealthRequest {}
+// Also the controller's channel to the node for cluster facts the node
+// cannot read itself (RFC-014 §5.3, RFC-015 §5.3): every field is optional
+// and a zero value means "not carried".
+message HealthRequest {
+  // Storage format nodes may write; 0 = not carried.
+  uint64 format_write = 1;
+  // Cluster incarnation with the cluster state's change time; the node
+  // adopts a value only when `incarnation_changed_ms` is not older than
+  // what it holds.
+  bytes incarnation = 2;
+  uint64 incarnation_changed_ms = 3;
+}
+
+message GroupEpoch {
+  uint64 group_id = 1;
+  uint64 epoch = 2;
+}
 
 message HealthResponse {
   uint64 live_shards = 1;
@@ -173,6 +193,21 @@ message HealthResponse {
   uint64 segment_bytes = 3;
   uint64 quarantined_shards = 4;
   uint64 quarantined_bytes = 5;
+  // Capabilities (RFC-014 §5.1). Absent (0) on nodes that predate them,
+  // which readers treat as (1, 1).
+  uint32 protocol_min = 6;
+  uint32 protocol_max = 7;
+  uint64 format_min = 8;
+  uint64 format_max = 9;
+  // Format this node stamps on new segments now.
+  uint64 format_write = 10;
+  // Incarnation the node has adopted (empty = none yet).
+  bytes incarnation = 11;
+  string software = 12;
+  // Every group epoch the node enforces (RFC-015 §5.4 epoch catch-up).
+  repeated GroupEpoch group_epochs = 13;
+  // Test-only additive field of the version-bump build (ADR-0016).
+  uint64 version_bump = 14;
 }
 
 service StorageNode {

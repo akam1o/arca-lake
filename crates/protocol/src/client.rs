@@ -301,6 +301,62 @@ pub struct RpcStats {
     pub retries: AtomicU64,
     /// Shard RPCs that failed after the last attempt.
     pub exhausted: AtomicU64,
+    /// Nodes refused because their protocol window does not intersect ours
+    /// (RFC-014 §5.2).
+    pub incompatible: AtomicU64,
+}
+
+/// What a node reported in `Health` (RFC-014 §5.1) and the protocol
+/// version negotiated with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeCaps {
+    /// Capabilities; a node that predates them reports `(1, 1)` everywhere.
+    pub caps: arca_lake_common::compat::Capabilities,
+    /// Protocol version this client sends to the node, if the windows
+    /// intersect.
+    pub protocol: Option<u32>,
+    /// Software version string.
+    pub software: String,
+    /// Format the node stamps on new segments.
+    pub format_write: u64,
+    /// Incarnation the node adopted, if any.
+    pub incarnation: Option<[u8; 16]>,
+}
+
+impl NodeCaps {
+    /// Interpret a `Health` response (zero fields = version 1 node).
+    #[must_use]
+    pub fn from_health(h: &pb::HealthResponse) -> Self {
+        let caps = arca_lake_common::compat::Capabilities {
+            protocol_min: h.protocol_min.max(1),
+            protocol_max: h.protocol_max.max(1),
+            schema_min: 0,
+            schema_max: 0,
+            format_min: h.format_min.max(1),
+            format_max: h.format_max.max(1),
+        };
+        let v = pb::PROTOCOL_VERSION.min(caps.protocol_max);
+        let protocol = (v >= pb::PROTOCOL_VERSION_MIN && v >= caps.protocol_min).then_some(v);
+        Self {
+            caps,
+            protocol,
+            software: h.software.clone(),
+            format_write: h.format_write,
+            incarnation: <[u8; 16]>::try_from(h.incarnation.as_ref()).ok(),
+        }
+    }
+
+    fn compatible(&self) -> Result<u32, tonic::Status> {
+        self.protocol.ok_or_else(|| {
+            tonic::Status::failed_precondition(format!(
+                "incompatible protocol: node speaks [{}, {}], this process [{}, {}]",
+                self.caps.protocol_min,
+                self.caps.protocol_max,
+                pb::PROTOCOL_VERSION_MIN,
+                pb::PROTOCOL_VERSION
+            ))
+        })
+    }
 }
 
 /// A copy of [`RpcStats`].
@@ -316,6 +372,8 @@ pub struct RpcStatsSnapshot {
     pub retries: u64,
     /// See [`RpcStats::exhausted`].
     pub exhausted: u64,
+    /// See [`RpcStats::incompatible`].
+    pub incompatible: u64,
 }
 
 /// How a fault hook shapes a shard stream (see [`FaultAction`]).
@@ -358,6 +416,11 @@ pub struct NodeClients {
     policy: RpcPolicy,
     stats: Arc<RpcStats>,
     hook: Arc<Mutex<Option<FaultHook>>>,
+    /// Negotiated protocol version and capabilities per node address
+    /// (RFC-014 §5.2): filled by `Health` on first use.
+    negotiated: Arc<Mutex<HashMap<String, NodeCaps>>>,
+    /// Cluster incarnation stamped on `DeleteShard` (RFC-015 §5.3).
+    incarnation: Arc<Mutex<Option<[u8; 16]>>>,
     /// `GetShard` RPCs in flight per node address (durable-read priority
     /// for cache populations).
     reads_in_flight: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
@@ -387,7 +450,83 @@ impl NodeClients {
             stats: Arc::default(),
             hook: Arc::default(),
             reads_in_flight: Arc::default(),
+            negotiated: Arc::default(),
+            incarnation: Arc::default(),
         }
+    }
+
+    /// Stamp `DeleteShard` requests with the cluster incarnation this
+    /// process started under (RFC-015 §5.3). Set once after the startup
+    /// gate; a node that adopted a different incarnation then rejects the
+    /// deletes of this process.
+    pub fn set_incarnation(&self, incarnation: Option<[u8; 16]>) {
+        *self
+            .incarnation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = incarnation;
+    }
+
+    /// The incarnation stamped on deletes.
+    #[must_use]
+    pub fn incarnation(&self) -> Option<[u8; 16]> {
+        *self
+            .incarnation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Capabilities learned from `addr` (after any RPC to it).
+    #[must_use]
+    pub fn node_caps(&self, addr: &str) -> Option<NodeCaps> {
+        self.negotiated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(addr)
+            .cloned()
+    }
+
+    /// The protocol version to send to `addr` (RFC-014 §5.2): on first use
+    /// `Health` is called and `min(P_cur, node.protocol_max)` cached; a
+    /// node whose window does not intersect ours is refused with
+    /// `FailedPrecondition "incompatible protocol"` and counted.
+    ///
+    /// # Errors
+    ///
+    /// The `Health` RPC's error, or the incompatibility.
+    pub async fn version_for(&self, addr: &str) -> Result<u32, tonic::Status> {
+        if let Some(c) = self.node_caps(addr) {
+            return c.compatible();
+        }
+        let resp = self
+            .unary(async {
+                let mut client = self.client(addr)?;
+                Ok(client
+                    .health(pb::HealthRequest::default())
+                    .await?
+                    .into_inner())
+            })
+            .await?;
+        let caps = NodeCaps::from_health(&resp);
+        self.negotiated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(addr.to_string(), caps.clone());
+        let v = caps.compatible();
+        if v.is_err() {
+            self.stats
+                .incompatible
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        v
+    }
+
+    /// Remember the capabilities a `Health` response carried (the
+    /// controller's health pass calls `Health` anyway).
+    pub fn note_health(&self, addr: &str, resp: &pb::HealthResponse) {
+        self.negotiated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(addr.to_string(), NodeCaps::from_health(resp));
     }
 
     /// `GetShard` RPCs currently in flight to `addr` from this pool.
@@ -437,6 +576,7 @@ impl NodeClients {
             unary_timeouts: self.stats.unary_timeouts.load(Relaxed),
             retries: self.stats.retries.load(Relaxed),
             exhausted: self.stats.exhausted.load(Relaxed),
+            incompatible: self.stats.incompatible.load(Relaxed),
         }
     }
 
@@ -687,7 +827,7 @@ impl NodeClients {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let header = pb::PutShardRequest {
             body: Some(pb::put_shard_request::Body::Header(pb::PutShardHeader {
-                protocol_version: pb::PROTOCOL_VERSION,
+                protocol_version: self.version_for(addr).await?,
                 key: Some(shard.pb()),
                 group_epoch: epoch,
                 payload_len: data.len() as u64,
@@ -799,7 +939,7 @@ impl NodeClients {
     ) -> Result<Vec<Bytes>, tonic::Status> {
         let mut client = self.client(addr)?;
         let req = pb::GetShardRequest {
-            protocol_version: pb::PROTOCOL_VERSION,
+            protocol_version: self.version_for(addr).await?,
             key: Some(shard.pb()),
             offset,
             len,
@@ -862,9 +1002,13 @@ impl NodeClients {
             self.unary(async {
                 let mut client = self.client(addr)?;
                 let req = pb::DeleteShardRequest {
-                    protocol_version: pb::PROTOCOL_VERSION,
+                    protocol_version: self.version_for(addr).await?,
                     key: Some(shard.pb()),
                     group_epoch: epoch,
+                    incarnation: self
+                        .incarnation()
+                        .map(|i| Bytes::copy_from_slice(&i))
+                        .unwrap_or_default(),
                 };
                 client.delete_shard(req).await?;
                 Ok(())
@@ -914,7 +1058,7 @@ impl NodeClients {
             self.unary(async {
                 let mut client = self.client(addr)?;
                 let req = pb::ListShardsRequest {
-                    protocol_version: pb::PROTOCOL_VERSION,
+                    protocol_version: self.version_for(addr).await?,
                     group_id,
                     after: after.map(|s| s.pb()),
                     limit,
@@ -992,7 +1136,7 @@ impl NodeClients {
             self.unary(async {
                 let mut client = self.client(addr)?;
                 let req = pb::VerifyShardsRequest {
-                    protocol_version: pb::PROTOCOL_VERSION,
+                    protocol_version: self.version_for(addr).await?,
                     group_id,
                     after: after.map(|s| s.pb()),
                     limit,
@@ -1046,7 +1190,7 @@ impl NodeClients {
             self.unary(async {
                 let mut client = self.client(addr)?;
                 let req = pb::ScrubShardsRequest {
-                    protocol_version: pb::PROTOCOL_VERSION,
+                    protocol_version: self.version_for(addr).await?,
                     group_id,
                     after: after.map(|s| s.pb()),
                     limit,
@@ -1101,7 +1245,7 @@ impl NodeClients {
             self.unary(async {
                 let mut client = self.client(addr)?;
                 let req = pb::UpdateGroupEpochRequest {
-                    protocol_version: pb::PROTOCOL_VERSION,
+                    protocol_version: self.version_for(addr).await?,
                     group_id,
                     epoch,
                 };
@@ -1117,18 +1261,46 @@ impl NodeClients {
     ///
     /// RPC errors.
     pub async fn health(&self, addr: &str) -> Result<pb::HealthResponse, tonic::Status> {
+        self.health_with(addr, pb::HealthRequest::default()).await
+    }
+
+    /// `Health` carrying cluster facts for the node (`format_write`, the
+    /// incarnation; RFC-014 §5.3, RFC-015 §5.3). The response's
+    /// capabilities are remembered for [`Self::node_caps`].
+    ///
+    /// # Errors
+    ///
+    /// RPC errors.
+    pub async fn health_with(
+        &self,
+        addr: &str,
+        req: pb::HealthRequest,
+    ) -> Result<pb::HealthResponse, tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::Health,
             shard: None,
             group_id: None,
         };
-        self.with_faults(ctx, |_| {
-            self.unary(async {
-                let mut client = self.client(addr)?;
-                Ok(client.health(pb::HealthRequest {}).await?.into_inner())
+        let resp = self
+            .with_faults(ctx, |_| {
+                let req = req.clone();
+                self.unary(async {
+                    let mut client = self.client(addr)?;
+                    Ok(client.health(req).await?.into_inner())
+                })
             })
-        })
-        .await
+            .await?;
+        self.note_health(addr, &resp);
+        Ok(resp)
+    }
+
+    /// Whether a status is a node's protocol or incarnation refusal.
+    #[must_use]
+    pub fn is_incompatible(status: &tonic::Status) -> bool {
+        status.code() == tonic::Code::FailedPrecondition
+            && (status.message().starts_with("incompatible protocol")
+                || status.message().starts_with("protocol version")
+                || status.message().starts_with("incarnation rejected"))
     }
 }

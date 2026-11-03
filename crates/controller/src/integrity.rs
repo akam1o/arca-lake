@@ -39,8 +39,14 @@ use crate::walk::GroupWalker;
 /// cursor or task state resumes it later.
 pub type Cancel<'a> = Option<&'a tokio::sync::watch::Receiver<bool>>;
 
-fn cancelled(cancel: Cancel<'_>) -> bool {
+/// Whether the shutdown signal fired.
+#[must_use]
+pub fn is_cancelled(cancel: Cancel<'_>) -> bool {
     cancel.is_some_and(|c| *c.borrow())
+}
+
+fn cancelled(cancel: Cancel<'_>) -> bool {
+    is_cancelled(cancel)
 }
 
 /// Scrub scheduler options (RFC-008 §8.3).

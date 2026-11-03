@@ -111,6 +111,7 @@ dependencies = [
  "arca-lake-gateway",
  "arca-lake-metadata",
  "arca-lake-protocol",
+ "arca-lake-storage",
  "arca-lake-storage-node",
  "arca-lake-tiering",
  "clap",
@@ -225,6 +226,7 @@ dependencies = [
 name = "arca-lake-protocol"
 version = "0.0.0"
 dependencies = [
+ "arca-lake-common",
  "bytes",
  "prost",
  "prost-build",

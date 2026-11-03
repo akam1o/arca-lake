@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+arca-lake-common.workspace = true
 tonic = { workspace = true, features = ["codegen", "server", "channel", "transport"] }
 tonic-prost.workspace = true
 prost.workspace = true

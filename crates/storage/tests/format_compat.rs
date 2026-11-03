@@ -98,6 +98,7 @@ fn golden_segment_v1_opens_and_matches() {
         record_alignment: ALIGN,
         block_size: BLOCK,
         sync: SyncPolicy::Never,
+        format_write: arca_lake_storage::default_format_write(),
     };
     let (store, report) = Store::open(cfg).unwrap();
     assert_eq!(report.segments, 1);

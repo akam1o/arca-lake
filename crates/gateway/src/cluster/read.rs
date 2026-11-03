@@ -682,7 +682,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .collect();
         tokio::spawn(async move {
             match arca_lake_metadata::ops::integrity::enqueue(
-                backend.meta.as_ref(),
+                backend.meta_repair.as_ref(),
                 group_id,
                 chunk_id,
                 reason,

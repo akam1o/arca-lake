@@ -15,6 +15,7 @@ fn config(dir: &Path) -> StoreConfig {
         record_alignment: 64,
         block_size: 256,
         sync: SyncPolicy::Group,
+        format_write: arca_lake_storage::default_format_write(),
     }
 }
 

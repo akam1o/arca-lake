@@ -9,12 +9,14 @@
 pub mod bucket;
 pub mod cache;
 pub mod cluster;
+pub mod compat;
 pub mod gc;
 pub mod integrity;
 pub mod leader;
 pub mod list;
 pub mod multipart;
 pub mod object;
+pub mod recovery;
 
 use crate::error::Result;
 use crate::kv::Txn;

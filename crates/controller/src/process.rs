@@ -16,7 +16,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use arca_lake_metadata::fence::FencedKv;
+use arca_lake_metadata::guard::{GuardedKv, OpClass};
 use arca_lake_metadata::ops::cluster;
+use arca_lake_metadata::ops::compat;
 use arca_lake_metadata::ops::leader;
 use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord};
 use arca_lake_metadata::{KvError, KvStore, MetaError};
@@ -87,6 +89,15 @@ pub struct ControllerConfig {
     pub stripe_repair: crate::integrity::RepairWorkerOptions,
     /// Interval between stripe repair worker passes.
     pub stripe_repair_interval: Duration,
+    /// Heartbeat interval of the `("al","proc",id)` record (RFC-014 §5.5);
+    /// `None` disables it.
+    pub heartbeat: Option<Duration>,
+    /// Interval between recovery state machine passes (RFC-015 §5.3).
+    pub recovery_interval: Duration,
+    /// Recovery pass options.
+    pub recovery: crate::recovery::RecoveryOptions,
+    /// Interval between upgrade finalize passes (RFC-014 §5.5).
+    pub upgrade_interval: Duration,
 }
 
 impl ControllerConfig {
@@ -120,6 +131,10 @@ impl ControllerConfig {
             scrub_tick: Duration::from_secs(60),
             stripe_repair: crate::integrity::RepairWorkerOptions::default(),
             stripe_repair_interval: Duration::from_secs(15),
+            heartbeat: Some(Duration::from_secs(30)),
+            recovery_interval: Duration::from_secs(2),
+            recovery: crate::recovery::RecoveryOptions::default(),
+            upgrade_interval: Duration::from_secs(5),
         }
     }
 }
@@ -180,7 +195,35 @@ pub async fn spawn<S: KvStore + 'static>(
     meta: Arc<S>,
     cfg: ControllerConfig,
 ) -> std::io::Result<ControllerHandle> {
+    // Startup gate (RFC-014 §5.4): refuse a schema outside this build's
+    // window; initialise an empty store; stamp a legacy store.
+    let gate = compat::check_startup(
+        meta.as_ref(),
+        &crate::capabilities(),
+        compat::Stamp::Legacy,
+        &cfg.id,
+        now_ms(),
+    )
+    .await
+    .map_err(|e| std::io::Error::other(format!("startup gate: {e}")))?;
+    let state = gate
+        .cluster
+        .clone()
+        .ok_or_else(|| std::io::Error::other("cluster state record missing"))?;
+    arca_lake_metadata::records::set_schema_write(gate.schema_write.unwrap_or(0));
+    info!(
+        controller = %cfg.id,
+        schema = ?gate.schema,
+        schema_write = ?gate.schema_write,
+        format_write = ?gate.format_write,
+        phase = state.state.name(),
+        incarnation = %compat::hex(&state.incarnation),
+        "controller startup gate passed"
+    );
     let metrics = Arc::new(Metrics::default());
+    metrics
+        .cluster_phase
+        .store(phase_code(state.state), Ordering::Relaxed);
     let (tx, rx) = watch::channel(false);
     let mut http_addr = None;
     if let Some(addr) = cfg.http_listen {
@@ -189,7 +232,7 @@ pub async fn spawn<S: KvStore + 'static>(
         tokio::spawn(serve_http(listener, Arc::clone(&metrics), rx.clone()));
     }
     let m = Arc::clone(&metrics);
-    let task = tokio::spawn(run(meta, cfg, m, rx));
+    let task = tokio::spawn(run(meta, cfg, m, rx, state.incarnation));
     Ok(ControllerHandle {
         shutdown: tx,
         task,
@@ -205,8 +248,40 @@ async fn run<S: KvStore + 'static>(
     cfg: ControllerConfig,
     metrics: Arc<Metrics>,
     mut shutdown: watch::Receiver<bool>,
+    incarnation: [u8; 16],
 ) {
     let renew_every = cfg.lease / 3;
+    // Heartbeat (RFC-014 §5.5) and `schema_write` refresh, leader or not.
+    if let Some(every) = cfg.heartbeat {
+        let meta = Arc::clone(&meta);
+        let id = cfg.id.clone();
+        let mut stop = shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                let rec = arca_lake_metadata::records::ProcRecord {
+                    id: id.clone(),
+                    kind: arca_lake_metadata::records::ProcKind::Controller,
+                    software: arca_lake_common::compat::software_version(),
+                    caps: crate::capabilities(),
+                    incarnation,
+                    last_ms: now_ms(),
+                };
+                let _ = compat::heartbeat(meta.as_ref(), &rec).await;
+                if let Ok(g) = compat::gate(meta.as_ref()).await
+                    && let Some(sw) = g.schema_write
+                {
+                    arca_lake_metadata::records::set_schema_write(sw);
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(every) => {}
+                    _ = stop.changed() => {
+                        let _ = compat::remove_heartbeat(meta.as_ref(), &id).await;
+                        return;
+                    }
+                }
+            }
+        });
+    }
     loop {
         if *shutdown.borrow() {
             return;
@@ -239,7 +314,7 @@ async fn run<S: KvStore + 'static>(
         // Leader: fenced store, scheduler tasks, renewal loop.
         let fenced = Arc::new(FencedKv::new(Arc::clone(&meta), leadership.clone()));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let tasks = start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx);
+        let tasks = start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx, incarnation);
         let lost = loop {
             tokio::select! {
                 () = tokio::time::sleep(renew_every) => {}
@@ -275,25 +350,37 @@ async fn run<S: KvStore + 'static>(
 
 #[allow(clippy::too_many_lines)]
 fn start_leader_tasks<S: KvStore + 'static>(
-    meta: &Arc<FencedKv<S>>,
+    fenced: &Arc<FencedKv<S>>,
     cfg: &ControllerConfig,
     metrics: &Arc<Metrics>,
     stop: &watch::Receiver<bool>,
+    incarnation: [u8; 16],
 ) -> Vec<JoinHandle<()>> {
     let clients =
         NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
             arca_lake_protocol::client::RpcPolicy::from_timeout(cfg.node_timeout)
         }));
+    clients.set_incarnation(Some(incarnation));
     let coders = crate::integrity::coders();
+    // One guarded store per operation class (RFC-015 §5.6, ADR-0016): every
+    // write of a task is checked against the cluster state at commit.
+    let guarded = |class: OpClass| Arc::new(GuardedKv::new(Arc::clone(fenced), incarnation, class));
+    let meta_delete = guarded(OpClass::Delete);
+    let meta_repair = guarded(OpClass::Repair);
+    let meta_book = guarded(OpClass::Bookkeeping);
+    let meta_admin = guarded(OpClass::Admin);
+    let raw = Arc::clone(fenced);
     vec![
         tokio::spawn(scheduler(
             "gc",
             cfg.gc_interval,
             stop.clone(),
             Arc::clone(metrics),
+            OpClass::Delete,
+            Arc::clone(&raw),
             {
                 let metrics = Arc::clone(metrics);
-                let meta = Arc::clone(meta);
+                let meta = Arc::clone(&meta_delete);
                 let clients = clients.clone();
                 let cfg = cfg.clone();
                 move || {
@@ -310,9 +397,11 @@ fn start_leader_tasks<S: KvStore + 'static>(
             cfg.reconcile_interval,
             stop.clone(),
             Arc::clone(metrics),
+            OpClass::Delete,
+            Arc::clone(&raw),
             {
                 let metrics = Arc::clone(metrics);
-                let meta = Arc::clone(meta);
+                let meta = Arc::clone(&meta_delete);
                 let clients = clients.clone();
                 let cfg = cfg.clone();
                 move || {
@@ -329,9 +418,11 @@ fn start_leader_tasks<S: KvStore + 'static>(
             cfg.health_interval,
             stop.clone(),
             Arc::clone(metrics),
+            OpClass::Bookkeeping,
+            Arc::clone(&raw),
             {
                 let metrics = Arc::clone(metrics);
-                let meta = Arc::clone(meta);
+                let meta = Arc::clone(&meta_book);
                 let clients = clients.clone();
                 let cfg = cfg.clone();
                 move || {
@@ -348,9 +439,11 @@ fn start_leader_tasks<S: KvStore + 'static>(
             cfg.evict_interval,
             stop.clone(),
             Arc::clone(metrics),
+            OpClass::Delete,
+            Arc::clone(&raw),
             {
                 let metrics = Arc::clone(metrics);
-                let meta = Arc::clone(meta);
+                let meta = Arc::clone(&meta_delete);
                 let clients = clients.clone();
                 let cfg = cfg.clone();
                 move || {
@@ -367,9 +460,11 @@ fn start_leader_tasks<S: KvStore + 'static>(
             cfg.tiering_interval,
             stop.clone(),
             Arc::clone(metrics),
+            OpClass::Delete,
+            Arc::clone(&raw),
             {
                 let metrics = Arc::clone(metrics);
-                let meta = Arc::clone(meta);
+                let meta = Arc::clone(&meta_delete);
                 let clients = clients.clone();
                 let cfg = cfg.clone();
                 move || {
@@ -386,9 +481,11 @@ fn start_leader_tasks<S: KvStore + 'static>(
             cfg.repair_interval,
             stop.clone(),
             Arc::clone(metrics),
+            OpClass::Repair,
+            Arc::clone(&raw),
             {
                 let metrics = Arc::clone(metrics);
-                let meta = Arc::clone(meta);
+                let meta = Arc::clone(&meta_repair);
                 let clients = clients.clone();
                 let cfg = cfg.clone();
                 move || {
@@ -405,9 +502,11 @@ fn start_leader_tasks<S: KvStore + 'static>(
             cfg.scrub_tick,
             stop.clone(),
             Arc::clone(metrics),
+            OpClass::Bookkeeping,
+            Arc::clone(&raw),
             {
                 let metrics = Arc::clone(metrics);
-                let meta = Arc::clone(meta);
+                let meta = Arc::clone(&meta_book);
                 let clients = clients.clone();
                 let cfg = cfg.clone();
                 let coders = Arc::clone(&coders);
@@ -440,9 +539,12 @@ fn start_leader_tasks<S: KvStore + 'static>(
             cfg.stripe_repair_interval,
             stop.clone(),
             Arc::clone(metrics),
+            OpClass::Repair,
+            Arc::clone(&raw),
             {
                 let metrics = Arc::clone(metrics);
-                let meta = Arc::clone(meta);
+                let meta = Arc::clone(&meta_repair);
+                let clients = clients.clone();
                 let cfg = cfg.clone();
                 let stop = stop.clone();
                 move || {
@@ -468,24 +570,141 @@ fn start_leader_tasks<S: KvStore + 'static>(
                 }
             },
         )),
+        tokio::spawn(scheduler(
+            "recovery",
+            cfg.recovery_interval,
+            stop.clone(),
+            Arc::clone(metrics),
+            OpClass::Admin,
+            Arc::clone(&raw),
+            {
+                let metrics = Arc::clone(metrics);
+                let meta = Arc::clone(&meta_admin);
+                let clients = clients.clone();
+                let cfg = cfg.clone();
+                let stop = stop.clone();
+                move || {
+                    let meta = Arc::clone(&meta);
+                    let clients = clients.clone();
+                    let cfg = cfg.clone();
+                    let metrics = Arc::clone(&metrics);
+                    let stop = stop.clone();
+                    async move {
+                        let r = crate::recovery::recovery_pass(
+                            meta.as_ref(),
+                            &clients,
+                            &cfg.recovery,
+                            Some(&stop),
+                            &cfg.id,
+                            now_ms(),
+                        )
+                        .await?;
+                        if r.epochs_raised > 0 || r.finished || r.phase_before != r.phase_after {
+                            metrics
+                                .recovery_passes_total
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        if let Some(p) = r.phase_after {
+                            metrics
+                                .cluster_phase
+                                .store(phase_code(p), Ordering::Relaxed);
+                        }
+                        Ok(())
+                    }
+                }
+            },
+        )),
+        tokio::spawn(scheduler(
+            "upgrade",
+            cfg.upgrade_interval,
+            stop.clone(),
+            Arc::clone(metrics),
+            OpClass::Admin,
+            Arc::clone(&raw),
+            {
+                let metrics = Arc::clone(metrics);
+                let meta = Arc::clone(&meta_admin);
+                let clients = clients.clone();
+                let token = fenced.leadership().token;
+                move || {
+                    let meta = Arc::clone(&meta);
+                    let clients = clients.clone();
+                    let metrics = Arc::clone(&metrics);
+                    async move {
+                        let r = crate::upgrade::upgrade_pass(
+                            meta.as_ref(),
+                            &clients,
+                            &crate::capabilities(),
+                            token,
+                            now_ms(),
+                        )
+                        .await?;
+                        metrics
+                            .upgrade_step
+                            .store(r.after.map_or(0, |st| st as u64 + 1), Ordering::Relaxed);
+                        Ok(())
+                    }
+                }
+            },
+        )),
     ]
+}
+
+/// Metric code of a phase.
+fn phase_code(p: arca_lake_metadata::records::ClusterPhase) -> u64 {
+    use arca_lake_metadata::records::ClusterPhase as P;
+    match p {
+        P::Active => 0,
+        P::ReadOnly => 1,
+        P::Restoring => 2,
+        P::VerificationPending => 3,
+        P::RecoveryRequired => 4,
+    }
 }
 
 /// Run `pass` every `interval`, with exponential backoff (capped at eight
 /// intervals) after errors, until `stop` fires. A fenced error ends the
 /// task at once: leadership is gone.
-async fn scheduler<F, Fut>(
+async fn scheduler<S, F, Fut>(
     name: &'static str,
     interval: Duration,
     mut stop: watch::Receiver<bool>,
     metrics: Arc<Metrics>,
+    class: OpClass,
+    state_store: Arc<S>,
     mut pass: F,
 ) where
+    S: KvStore + 'static,
     F: FnMut() -> Fut + Send,
     Fut: std::future::Future<Output = Result<(), ControlError>> + Send,
 {
     let mut failures: u32 = 0;
     loop {
+        // RFC-015 §5.6: a pass runs only in a state that admits its class
+        // (every write inside is checked again at commit by the guard).
+        let admitted = match compat::cluster_state(state_store.as_ref()).await {
+            Ok(Some(st)) => {
+                metrics
+                    .cluster_phase
+                    .store(phase_code(st.state), Ordering::Relaxed);
+                st.state.admits(class)
+            }
+            Ok(None) => false,
+            Err(e) => {
+                warn!(task = name, error = %e, "cluster state unreadable; pass skipped");
+                false
+            }
+        };
+        if !admitted {
+            metrics
+                .passes_skipped_by_state_total
+                .fetch_add(1, Ordering::Relaxed);
+            tokio::select! {
+                () = tokio::time::sleep(interval) => {}
+                _ = stop.changed() => return,
+            }
+            continue;
+        }
         match pass().await {
             Ok(()) => failures = 0,
             Err(e) => {
@@ -493,6 +712,9 @@ async fn scheduler<F, Fut>(
                 if is_fenced(&e) {
                     warn!(task = name, error = %e, "fenced; stopping task");
                     return;
+                }
+                if is_state_refusal(&e) {
+                    metrics.guard_refusals_total.fetch_add(1, Ordering::Relaxed);
                 }
                 failures = failures.saturating_add(1);
                 warn!(task = name, failures, error = %e, "pass failed");
@@ -508,6 +730,13 @@ async fn scheduler<F, Fut>(
 
 fn is_fenced(e: &ControlError) -> bool {
     matches!(e, ControlError::Meta(MetaError::Kv(KvError::Fenced(_))))
+}
+
+fn is_state_refusal(e: &ControlError) -> bool {
+    matches!(
+        e,
+        ControlError::Meta(MetaError::Kv(KvError::ClusterState(_)))
+    )
 }
 
 async fn gc_pass<S: KvStore>(
@@ -589,10 +818,40 @@ async fn health_pass<S: KvStore>(
     let nodes = cluster::list_nodes(meta).await?;
     let now = now_ms();
     let mut unhealthy = 0u64;
+    // Cluster facts for the nodes (RFC-014 §5.3, RFC-015 §5.3): the format
+    // they may write and the incarnation, with its change time.
+    let gate = compat::gate(meta).await?;
+    let req = arca_lake_protocol::storage::v1::HealthRequest {
+        format_write: gate.format_write.unwrap_or(0),
+        incarnation: gate
+            .cluster
+            .as_ref()
+            .map(|c| bytes::Bytes::copy_from_slice(&c.incarnation))
+            .unwrap_or_default(),
+        incarnation_changed_ms: gate.cluster.as_ref().map_or(0, |c| c.changed_ms),
+    };
     for n in &nodes {
-        match clients.health(&n.address).await {
-            Ok(_) => {
+        match clients.health_with(&n.address, req.clone()).await {
+            Ok(h) => {
                 cluster::touch_node(meta, n.id, now).await?;
+                let caps = arca_lake_protocol::client::NodeCaps::from_health(&h);
+                arca_lake_metadata::ops::recovery::set_node_caps(
+                    meta,
+                    &arca_lake_metadata::ops::recovery::NodeCapRecord {
+                        node_id: n.id,
+                        caps: caps.caps,
+                        software: caps.software,
+                        format_write: caps.format_write,
+                        incarnation: caps.incarnation,
+                        group_epochs: h
+                            .group_epochs
+                            .iter()
+                            .map(|g| (g.group_id, g.epoch))
+                            .collect(),
+                        seen_ms: now,
+                    },
+                )
+                .await?;
             }
             Err(_) => {
                 if now.saturating_sub(n.last_seen_ms) > ms(cfg.unhealthy_after) {

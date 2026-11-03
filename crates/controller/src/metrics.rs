@@ -90,6 +90,19 @@ pub struct Metrics {
     pub manifest_findings_total: AtomicU64,
     /// Manifest findings of the last manifest scrub.
     pub manifest_findings: AtomicU64,
+    /// Cluster phase as last read (0 Active, 1 ReadOnly, 2 Restoring,
+    /// 3 VerificationPending, 4 RecoveryRequired; RFC-015 §5.3).
+    pub cluster_phase: AtomicU64,
+    /// Scheduler passes skipped because the cluster state did not admit
+    /// them (RFC-015 §5.6).
+    pub passes_skipped_by_state_total: AtomicU64,
+    /// Recovery passes that did work (catch-up or verification pages).
+    pub recovery_passes_total: AtomicU64,
+    /// Upgrade finalize step in progress (0 none, 1 requested … 5 format
+    /// write raised; RFC-014 §5.5).
+    pub upgrade_step: AtomicU64,
+    /// Writes refused by the cluster-state guard in controller passes.
+    pub guard_refusals_total: AtomicU64,
 }
 
 /// Metric label of each finding class, in `Finding::ALL` order.
@@ -268,8 +281,26 @@ impl Metrics {
                 &self.data_integrity_status,
             ),
             ("arca_controller_manifest_findings", &self.manifest_findings),
+            ("arca_controller_cluster_phase", &self.cluster_phase),
+            ("arca_controller_upgrade_step", &self.upgrade_step),
         ] {
             out += &g(name, v.load(Ordering::Relaxed));
+        }
+        for (name, v) in [
+            (
+                "arca_controller_passes_skipped_by_state_total",
+                &self.passes_skipped_by_state_total,
+            ),
+            (
+                "arca_controller_recovery_passes_total",
+                &self.recovery_passes_total,
+            ),
+            (
+                "arca_controller_guard_refusals_total",
+                &self.guard_refusals_total,
+            ),
+        ] {
+            out += &c(name, v.load(Ordering::Relaxed));
         }
         out
     }

@@ -13,11 +13,36 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::MetaError;
 use crate::kv::Value;
 
-/// Record encoding version written by this build.
-pub const RECORD_VERSION: u8 = 2;
+/// Newest record encoding version this build can write (`M_cur`).
+#[allow(clippy::cast_possible_truncation)]
+pub const RECORD_VERSION: u8 = 2 + arca_lake_common::compat::BUMP as u8;
 
-/// Oldest record encoding version this build decodes.
-pub const RECORD_VERSION_MIN: u8 = 1;
+/// Oldest record encoding version this build decodes (`M_cur − 1`).
+pub const RECORD_VERSION_MIN: u8 = RECORD_VERSION - 1;
+
+/// Oldest record encoding version this build can *write*: versions 2 and
+/// 3 share one body, so a writer told `schema_write = 2` by a build with
+/// `M_cur = 3` stamps the byte 2 (ADR-0016). A future layout change needs
+/// a down-encoder before this constant may stay below `RECORD_VERSION`.
+pub const RECORD_WRITE_MIN: u8 = 2;
+
+static SCHEMA_WRITE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(RECORD_WRITE_MIN);
+
+/// Tell this process the cluster's `schema_write` (RFC-014 §5.4); the
+/// value is clamped into `[RECORD_WRITE_MIN, RECORD_VERSION]`. Called at
+/// start and on every refresh; a stale value is always the older one.
+pub fn set_schema_write(schema: u64) {
+    let v = u8::try_from(schema.clamp(u64::from(RECORD_WRITE_MIN), u64::from(RECORD_VERSION)))
+        .unwrap_or(RECORD_WRITE_MIN);
+    SCHEMA_WRITE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The record version this process currently writes.
+#[must_use]
+pub fn schema_write_version() -> u8 {
+    SCHEMA_WRITE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Generation identifier: a UUID (version 7, time ordered) as raw bytes.
 pub type GenId = [u8; 16];
@@ -80,7 +105,8 @@ pub trait Record: DeserializeOwned {
 ///
 /// Returns [`MetaError::Codec`] if serialization fails.
 pub fn encode<T: Serialize>(v: &T) -> Result<Value, MetaError> {
-    postcard::to_extend(v, vec![RECORD_VERSION]).map_err(|e| MetaError::Codec(e.to_string()))
+    postcard::to_extend(v, vec![schema_write_version()])
+        .map_err(|e| MetaError::Codec(e.to_string()))
 }
 
 /// Decode a record of the current or the previous encoding version.
@@ -90,18 +116,169 @@ pub fn encode<T: Serialize>(v: &T) -> Result<Value, MetaError> {
 /// Returns [`MetaError::Codec`] on an unknown version or malformed bytes.
 pub fn decode<T: Record>(b: &[u8]) -> Result<T, MetaError> {
     match b.split_first() {
-        Some((&RECORD_VERSION, rest)) => {
+        // Versions 2 and 3 share one body (ADR-0016).
+        Some((&v, rest)) if (2..=RECORD_VERSION).contains(&v) => {
             postcard::from_bytes(rest).map_err(|e| MetaError::Codec(e.to_string()))
         }
-        Some((&1, rest)) => T::decode_v1(rest),
-        Some((v, _)) => Err(MetaError::Codec(format!("unknown record version {v}"))),
+        Some((&1, rest)) if RECORD_VERSION_MIN <= 1 => T::decode_v1(rest),
+        Some((v, _)) => Err(MetaError::Codec(format!(
+            "unknown record version {v} (this build reads {RECORD_VERSION_MIN}..={RECORD_VERSION})"
+        ))),
         None => Err(MetaError::Codec("empty record".into())),
     }
+}
+
+// ---- cluster state, heartbeats, upgrade cursor (RFC-014/015, ADR-0016) ----
+
+/// Cluster recovery phase (RFC-015 §5.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClusterPhase {
+    /// Normal service.
+    Active,
+    /// Reads and repair only; no client writes, no deletes.
+    ReadOnly,
+    /// Metadata restored, processes being started; nothing but recovery.
+    Restoring,
+    /// Epochs caught up; verification running; reads may fail with an
+    /// integrity error, never with wrong bytes.
+    VerificationPending,
+    /// Verification found unreadable or missing data or did not complete.
+    RecoveryRequired,
+}
+
+impl ClusterPhase {
+    /// Which operation classes this phase admits (RFC-015 §5.3 table).
+    #[must_use]
+    pub fn admits(self, class: crate::guard::OpClass) -> bool {
+        use crate::guard::OpClass as C;
+        match self {
+            Self::Active => true,
+            Self::ReadOnly => matches!(
+                class,
+                C::Repair | C::Verification | C::Admin | C::Bookkeeping
+            ),
+            Self::Restoring => matches!(class, C::Admin),
+            Self::VerificationPending => matches!(class, C::Verification | C::Admin),
+            Self::RecoveryRequired => matches!(
+                class,
+                C::Repair | C::Verification | C::Admin | C::Bookkeeping
+            ),
+        }
+    }
+
+    /// Whether clients may read (RFC-015 §5.3 table).
+    #[must_use]
+    pub fn admits_client_reads(self) -> bool {
+        self != Self::Restoring
+    }
+
+    /// Short name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::ReadOnly => "ReadOnly",
+            Self::Restoring => "Restoring",
+            Self::VerificationPending => "VerificationPending",
+            Self::RecoveryRequired => "RecoveryRequired",
+        }
+    }
+}
+
+/// `("al","meta","cluster")`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterStateRecord {
+    /// Changes on every restore; every writer checks it (RFC-015 §5.3).
+    pub incarnation: [u8; 16],
+    /// Phase.
+    pub state: ClusterPhase,
+    /// When the last restore was marked, Unix milliseconds.
+    pub restored_at_ms: Option<u64>,
+    /// Backup the metadata was restored from (operator-supplied label).
+    pub restored_from: Option<String>,
+    /// Last change, Unix milliseconds.
+    pub changed_ms: u64,
+    /// Who changed it (controller id or `admin`).
+    pub changed_by: String,
+}
+
+/// Kind of a heartbeating process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProcKind {
+    /// S3 gateway.
+    Gateway,
+    /// Controller.
+    Controller,
+}
+
+/// `("al","proc",id)`: a gateway or controller heartbeat (RFC-014 §5.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcRecord {
+    /// Process id (controller id, or gateway listen address).
+    pub id: String,
+    /// Kind.
+    pub kind: ProcKind,
+    /// Software version string.
+    pub software: String,
+    /// Capabilities.
+    pub caps: arca_lake_common::compat::Capabilities,
+    /// Incarnation the process started under.
+    pub incarnation: [u8; 16],
+    /// Last heartbeat, Unix milliseconds.
+    pub last_ms: u64,
+}
+
+/// Steps of `admin upgrade finalize` (RFC-014 §5.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UpgradeStep {
+    /// Written by the admin command; the leader picks it up.
+    Requested,
+    /// Step 1 passed: every node and process reaches the target.
+    Preconditioned,
+    /// Step 2 done: migrations complete (none for the test bump).
+    Migrated,
+    /// Step 3 done: `schema_write` raised (the downgrade cut-off).
+    SchemaWriteRaised,
+    /// Step 4 done: `format_write` raised.
+    FormatWriteRaised,
+}
+
+impl UpgradeStep {
+    /// Whether rollback is no longer possible (RFC-014 §5.6).
+    #[must_use]
+    pub const fn past_cut_off(self) -> bool {
+        matches!(self, Self::SchemaWriteRaised | Self::FormatWriteRaised)
+    }
+}
+
+/// `("al","meta","upgrade")`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeCursor {
+    /// Versions to finalize to.
+    pub target: arca_lake_common::compat::Target,
+    /// Last completed step.
+    pub step: UpgradeStep,
+    /// Process ids whose absence does not block the precondition.
+    pub ignore_absent: Vec<String>,
+    /// When requested, Unix milliseconds.
+    pub started_ms: u64,
+    /// Last change.
+    pub updated_ms: u64,
+    /// Who requested.
+    pub requested_by: String,
+    /// Fencing token of the leader that took the last step.
+    pub by_token: u64,
+    /// Why the next step is blocked, if it is.
+    pub last_error: Option<String>,
+    /// Audit trail of steps.
+    pub history: Vec<String>,
 }
 
 macro_rules! unchanged_since_v1 {
     ($($t:ty),* $(,)?) => { $(impl Record for $t {})* };
 }
+
+unchanged_since_v1!(ClusterStateRecord, ProcRecord, UpgradeCursor);
 
 /// Bucket versioning state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

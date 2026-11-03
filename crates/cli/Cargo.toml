@@ -24,6 +24,7 @@ arca-lake-gateway.workspace = true
 arca-lake-metadata.workspace = true
 arca-lake-protocol.workspace = true
 arca-lake-storage-node.workspace = true
+arca-lake-storage.workspace = true
 arca-lake-tiering.workspace = true
 clap.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
