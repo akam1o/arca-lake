@@ -18,6 +18,8 @@
 
 use std::collections::HashMap;
 
+use futures::StreamExt as _;
+
 use arca_lake_common::{split_chunk_id, uuid_v7_unix_ms};
 use arca_lake_metadata::ops::{cluster, gc, multipart, object};
 use arca_lake_metadata::records::{
@@ -102,49 +104,89 @@ pub async fn run_once<S: KvStore>(
         .map(|g| (g.id, g))
         .collect();
 
-    for generation in gc::collectable(meta, now_ms, grace_ms, limit).await? {
-        // A multipart root first retires its parts in bounded steps (I-MP2);
-        // its own metadata is finished only once no reference remains.
-        match finish_root_parts(meta, &generation, now_ms).await {
-            Ok(()) => {}
-            Err(e) if is_deferrable(&e) => {
-                report.deferred += 1;
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        }
-        let (chunks, cached) = match verify_unreferenced(meta, &generation).await {
-            Ok(Some(found)) => found,
-            Ok(None) => {
-                report.skipped_referenced += 1;
-                continue;
-            }
-            Err(e) if is_deferrable(&e) => {
-                report.deferred += 1;
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        };
-        let deleted = match delete_shards(clients, &nodes, &groups, &chunks).await {
-            Ok(n) => delete_cache_copies(clients, &nodes, &groups, &generation, &cached)
-                .await
-                .map(|c| n + c),
-            Err(e) => Err(e),
-        };
-        match deleted {
-            Ok(n) => {
+    // Generations are independent (each is verified, its shards deleted,
+    // then finished, every step re-read and idempotent), so several are
+    // collected at once: one at a time, every shard delete waited for a
+    // device sync and GC fell behind a sustained write rate (soak test).
+    let gens = gc::collectable(meta, now_ms, grace_ms, limit).await?;
+    let work: Vec<_> = gens
+        .iter()
+        .map(|g| Box::pin(collect_one(meta, clients, &nodes, &groups, g, now_ms)))
+        .collect();
+    let outcomes: Vec<Result<Outcome, ControlError>> = futures::stream::iter(work)
+        .buffer_unordered(GC_CONCURRENCY)
+        .collect()
+        .await;
+    for o in outcomes {
+        match o? {
+            Outcome::Collected(n) => {
+                report.collected += 1;
                 report.shards_deleted += n;
-                match gc::finish(meta, &generation).await {
-                    Ok(()) => report.collected += 1,
-                    Err(e) if is_deferrable(&e) => report.deferred += 1,
-                    Err(e) => return Err(e.into()),
-                }
             }
-            Err(ControlError::Node { .. }) => report.deferred += 1,
-            Err(e) => return Err(e),
+            Outcome::Deleted(n) => {
+                report.deferred += 1;
+                report.shards_deleted += n;
+            }
+            Outcome::Deferred => report.deferred += 1,
+            Outcome::Referenced => report.skipped_referenced += 1,
         }
     }
     Ok(report)
+}
+
+/// Generations collected at once.
+const GC_CONCURRENCY: usize = 8;
+/// Shard deletes of one generation in flight at once.
+const DELETE_CONCURRENCY: usize = 16;
+
+/// What happened to one generation.
+enum Outcome {
+    /// Shards deleted (this many) and the generation finished.
+    Collected(usize),
+    /// Shards deleted, finishing deferred.
+    Deleted(usize),
+    /// Left for the next pass.
+    Deferred,
+    /// Still referenced (invariant violation: nothing deleted).
+    Referenced,
+}
+
+async fn collect_one<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+    groups: &HashMap<u64, GroupRecord>,
+    generation: &GenId,
+    now_ms: u64,
+) -> Result<Outcome, ControlError> {
+    // A multipart root first retires its parts in bounded steps (I-MP2);
+    // its own metadata is finished only once no reference remains.
+    match finish_root_parts(meta, generation, now_ms).await {
+        Ok(()) => {}
+        Err(e) if is_deferrable(&e) => return Ok(Outcome::Deferred),
+        Err(e) => return Err(e.into()),
+    }
+    let (chunks, cached) = match verify_unreferenced(meta, generation).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return Ok(Outcome::Referenced),
+        Err(e) if is_deferrable(&e) => return Ok(Outcome::Deferred),
+        Err(e) => return Err(e.into()),
+    };
+    let deleted = match delete_shards(clients, nodes, groups, &chunks).await {
+        Ok(n) => delete_cache_copies(clients, nodes, groups, generation, &cached)
+            .await
+            .map(|c| n + c),
+        Err(e) => Err(e),
+    };
+    match deleted {
+        Ok(n) => match gc::finish(meta, generation).await {
+            Ok(()) => Ok(Outcome::Collected(n)),
+            Err(e) if is_deferrable(&e) => Ok(Outcome::Deleted(n)),
+            Err(e) => Err(e.into()),
+        },
+        Err(ControlError::Node { .. }) => Ok(Outcome::Deferred),
+        Err(e) => Err(e),
+    }
 }
 
 /// Part references and records retired per transaction when a multipart
@@ -361,13 +403,26 @@ async fn delete_cache_copies(
 
 /// Delete every shard of `chunks` on the current members of their groups.
 /// Returns the number of delete RPCs that succeeded (NotFound counts).
+async fn delete_gc_shard(
+    clients: &NodeClients,
+    addr: String,
+    shard: ShardRef,
+    epoch: u64,
+) -> Result<(), ControlError> {
+    match clients.delete_shard(&addr, shard, epoch).await {
+        Ok(()) => Ok(()),
+        Err(s) if s.code() == tonic::Code::NotFound => Ok(()),
+        Err(status) => Err(ControlError::Node { addr, status }),
+    }
+}
+
 async fn delete_shards(
     clients: &NodeClients,
     nodes: &HashMap<u64, NodeRecord>,
     groups: &HashMap<u64, GroupRecord>,
     chunks: &[ChunkRecord],
 ) -> Result<usize, ControlError> {
-    let mut deleted = 0;
+    let mut targets = Vec::new();
     for chunk in chunks {
         let Some(group) = groups.get(&chunk.placement.group_id) else {
             continue;
@@ -381,20 +436,21 @@ async fn delete_shards(
                 chunk_id: chunk.chunk_id,
                 shard_index: u16::try_from(i).unwrap_or(0),
             };
-            match clients
-                .delete_shard(&node.address, shard, group.epoch)
-                .await
-            {
-                Ok(()) => deleted += 1,
-                Err(s) if s.code() == tonic::Code::NotFound => deleted += 1,
-                Err(status) => {
-                    return Err(ControlError::Node {
-                        addr: node.address.clone(),
-                        status,
-                    });
-                }
-            }
+            targets.push((node.address.clone(), shard, group.epoch));
         }
+    }
+    let work: Vec<_> = targets
+        .into_iter()
+        .map(|(addr, shard, epoch)| Box::pin(delete_gc_shard(clients, addr, shard, epoch)))
+        .collect();
+    let results: Vec<Result<(), ControlError>> = futures::stream::iter(work)
+        .buffer_unordered(DELETE_CONCURRENCY)
+        .collect()
+        .await;
+    let mut deleted = 0;
+    for r in results {
+        r?;
+        deleted += 1;
     }
     Ok(deleted)
 }
