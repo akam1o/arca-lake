@@ -3053,12 +3053,14 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
                     )
                 }),
             };
-            match arca_lake_controller::integrity::scrub_group_now(
+            let m = arca_lake_controller::metrics::Metrics::default();
+            match arca_lake_controller::integrity::scrub_group_now_with(
                 meta.as_ref(),
                 &clients,
                 &coders,
                 group,
                 &opts,
+                Some(&m),
                 now,
             )
             .await
@@ -3068,6 +3070,14 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
                         "scrub group {group} verified {} bytes {} findings {:?} enqueued {} errors {}",
                         r.verified, r.bytes, r.findings, r.enqueued, r.errors
                     );
+                    if opts.adaptive.is_some() {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        println!(
+                            "adaptive: last rate {} MiB/s, throttles {}",
+                            m.scrub_rate_bytes_per_second.load(Relaxed) >> 20,
+                            m.scrub_throttles_total.load(Relaxed)
+                        );
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(e),

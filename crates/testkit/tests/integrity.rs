@@ -1352,3 +1352,42 @@ async fn an_adaptive_scrub_reads_the_node_load_and_completes_its_pass() {
     );
     c.shutdown().await;
 }
+
+#[tokio::test]
+async fn an_operator_scrub_applies_the_adaptive_policy() {
+    // `admin integrity scrub --wait --adaptive` goes through
+    // scrub_group_now: the policy must reach its pacer (it was ignored).
+    use arca_lake_controller::adaptive::AdaptivePolicy;
+    use arca_lake_controller::integrity::scrub_group_now_with;
+    use arca_lake_controller::metrics::Metrics;
+    let c = cluster(3, 2, 1).await;
+    seed_objects(&c, 8, 300 << 10).await;
+    let gid = c.groups().await[0].id;
+    let opts = ScrubOptions {
+        page: 1,
+        page_bytes: 32 << 10,
+        rate_bytes_per_s: 1 << 20,
+        adaptive: Some(AdaptivePolicy::around(1 << 20)),
+        ..unpaced()
+    };
+    let m = Metrics::default();
+    let r = scrub_group_now_with(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders(),
+        gid,
+        &opts,
+        Some(&m),
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.verified, 24, "{r:?}");
+    assert!(
+        m.scrub_rate_bytes_per_second
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0,
+        "the adaptive pacer sampled the node"
+    );
+    c.shutdown().await;
+}

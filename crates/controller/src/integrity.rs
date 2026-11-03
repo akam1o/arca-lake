@@ -537,6 +537,14 @@ impl Pacer {
         let before = a.aimd.throttles;
         let rate = a.aimd.observe(signals, repair_active);
         let throttled = a.aimd.throttles - before;
+        if rate != self.rate {
+            tracing::info!(
+                rate_mib_s = rate >> 20,
+                signals = ?signals,
+                repair_active,
+                "adaptive scrub rate"
+            );
+        }
         if let Some(m) = metrics {
             m.scrub_rate_bytes_per_second.store(rate, Ordering::Relaxed);
             m.scrub_throttles_total
@@ -1428,6 +1436,24 @@ pub async fn scrub_group_now<S: KvStore>(
     opts: &ScrubOptions,
     now_ms: u64,
 ) -> Result<ScrubReport, ControlError> {
+    scrub_group_now_with(meta, clients, coders, group_id, opts, None, now_ms).await
+}
+
+/// [`scrub_group_now`], recording into `metrics` (the adaptive rate and
+/// throttles among them).
+///
+/// # Errors
+///
+/// As [`scrub_group_now`].
+pub async fn scrub_group_now_with<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    coders: &Coders,
+    group_id: u64,
+    opts: &ScrubOptions,
+    metrics: Option<&Metrics>,
+    now_ms: u64,
+) -> Result<ScrubReport, ControlError> {
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
         .into_iter()
@@ -1439,9 +1465,11 @@ pub async fn scrub_group_now<S: KvStore>(
         Some(c) => ScrubCursor::start(c.pass + 1, c.finished_ms, now_ms),
         None => ScrubCursor::start(1, 0, now_ms),
     };
-    let mut pacer = Pacer::new(opts.rate_bytes_per_s);
+    // The adaptive policy applies here too (it was ignored, so a
+    // `scrub --wait --adaptive` ran at the fixed rate).
+    let mut pacer = Pacer::new(opts.rate_bytes_per_s).with_adaptive(opts.adaptive);
     let (_, report) = scrub_group(
-        meta, clients, coders, &nodes, &group, cursor, opts, &mut pacer, None, None, now_ms,
+        meta, clients, coders, &nodes, &group, cursor, opts, &mut pacer, metrics, None, now_ms,
     )
     .await?;
     Ok(report)

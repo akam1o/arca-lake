@@ -74,6 +74,8 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 - A chunk stamped in the restore point's millisecond is a post-T orphan.
 - `arca_node_phase_seconds{phase="get_serve"}` was never observed (the
   series stayed empty, and adaptive scrubbing had no GET signal).
+- `admin integrity scrub --wait --adaptive` ignored the adaptive policy
+  and ran at the fixed rate (found by the Phase 3.4 measurement).
 
 - Phase 3.3 (operational safety, rolling upgrade, disaster recovery;
   ADR-0016): independent wire-protocol / metadata-schema / storage-format
