@@ -985,3 +985,108 @@ async fn a_pass_that_crashed_before_its_transition_is_finished_by_the_next() {
     assert_eq!(after, before, "the finished report is not recounted");
     c.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_node_that_does_not_answer_makes_the_verification_incomplete() {
+    // RFC-015 B-A4: a member stopped during the pass leaves the report
+    // incomplete, so the cluster goes to RecoveryRequired even though
+    // nothing unreadable was found, and nothing is recounted when it
+    // returns and the pass is re-run.
+    let mut c = cluster(3, 2, 1).await;
+    for i in 0..4u64 {
+        put(&c, &format!("obj{i}"), 10 + i).await;
+    }
+    let group = group_of(&c, "obj0").await;
+    let marked = compat::mark_restoring(c.meta.as_ref(), None, None, "admin", now_ms())
+        .await
+        .unwrap();
+    let admin = GuardedKv::new(Arc::clone(&c.meta), marked.incarnation, OpClass::Admin);
+    let opts = RecoveryOptions {
+        page: 2,
+        page_bytes: 0,
+        pages_per_pass: 1,
+    };
+    // Catch-up with every node up, then one page of verification.
+    recovery_pass(&admin, &c.clients, &opts, None, "ctl", now_ms())
+        .await
+        .unwrap();
+    recovery_pass(&admin, &c.clients, &opts, None, "ctl", now_ms())
+        .await
+        .unwrap();
+    let down = member_node(&c, &group, 1);
+    let down_id = c.nodes[down].id;
+    c.stop_node(down).await;
+    let mut finished = false;
+    for _ in 0..200 {
+        let r = recovery_pass(&admin, &c.clients, &opts, None, "ctl", now_ms())
+            .await
+            .unwrap();
+        if r.finished {
+            finished = true;
+            break;
+        }
+    }
+    assert!(finished);
+    assert_eq!(state(&c).await.state, ClusterPhase::RecoveryRequired);
+    let rep = recovery::report(c.meta.as_ref(), &marked.incarnation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!rep.complete, "{rep:?}");
+    assert_eq!(rep.unanswered_nodes, vec![down_id]);
+    assert_eq!(rep.counts.unreadable_chunks, 0, "{:?}", rep.counts);
+    // The node comes back; `recovery verify` re-runs the pass from the
+    // start (fresh cursor and counts) and it completes clean.
+    c.start_node(down).await;
+    let fresh = recovery::RestoreCursor {
+        incarnation: marked.incarnation,
+        phase: recovery::RecoveryPhase::Shards {
+            group: 0,
+            member: 0,
+            after: None,
+        },
+        restore_point_ms: marked.restore_point_ms().unwrap(),
+        started_ms: now_ms(),
+        updated_ms: now_ms(),
+        unanswered_nodes: Vec::new(),
+        excluded_nodes: Vec::new(),
+    };
+    let blank = recovery::RestoreReport {
+        incarnation: marked.incarnation,
+        restore_point_ms: fresh.restore_point_ms,
+        counts: recovery::RestoreCounts::default(),
+        affected: Vec::new(),
+        complete: false,
+        unanswered_nodes: Vec::new(),
+        finished_ms: 0,
+        accepted: None,
+    };
+    recovery::set_progress(c.meta.as_ref(), &fresh, &blank)
+        .await
+        .unwrap();
+    compat::set_phase(
+        c.meta.as_ref(),
+        ClusterPhase::VerificationPending,
+        "admin",
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    for _ in 0..200 {
+        if recovery_pass(&admin, &c.clients, &opts, None, "ctl", now_ms())
+            .await
+            .unwrap()
+            .finished
+        {
+            break;
+        }
+    }
+    let rep = recovery::report(c.meta.as_ref(), &marked.incarnation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rep.complete, "{rep:?}");
+    assert_eq!(rep.counts.matched, 4 * 3, "{:?}", rep.counts);
+    assert_eq!(state(&c).await.state, ClusterPhase::ReadOnly);
+    c.shutdown().await;
+}
