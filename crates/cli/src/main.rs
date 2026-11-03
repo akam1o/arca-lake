@@ -626,7 +626,30 @@ enum ClusterCommand {
 enum IntegrityCommand {
     /// Scrub cursors per group, repair queue summary, and every task that
     /// is unrecoverable or failed.
-    Status,
+    Status {
+        /// Resolve every unrecoverable or failed task to its bucket, key,
+        /// version, part and chunk (R-54; one lookup per task, bounded by
+        /// the versions of the affected key).
+        #[arg(long)]
+        objects: bool,
+    },
+    /// Verify every shard of one object version on its members with the
+    /// nodes' deep verification (a corrupt shard is quarantined, as a
+    /// scrub would). Exit code 0 healthy, 1 degraded or incomplete, 2
+    /// unreadable.
+    VerifyObject {
+        /// Bucket.
+        #[arg(long)]
+        bucket: String,
+        /// Key.
+        #[arg(long)]
+        key: String,
+        /// Version id (default: the current version).
+        #[arg(long)]
+        version_id: Option<String>,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
     /// Start a scrub pass of a group now: resets its cursor so the leader's
     /// next tick picks it up, or runs the pass from this process with
     /// `--wait` (the group's nodes must be reachable from here).
@@ -1811,7 +1834,93 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
 ) -> ExitCode {
     use arca_lake_metadata::ops::integrity::{self, RepairState};
     match command {
-        IntegrityCommand::Status => {
+        IntegrityCommand::VerifyObject {
+            bucket,
+            key,
+            version_id,
+            rpc,
+        } => {
+            use arca_lake_controller::objects::{ShardState, Verdict, verify_object};
+            let clients = arca_lake_protocol::client::NodeClients::with_policy(rpc.policy());
+            match verify_object(
+                meta.as_ref(),
+                &clients,
+                &bucket,
+                &key,
+                version_id.as_deref(),
+            )
+            .await
+            {
+                Ok(r) => {
+                    println!(
+                        "object {}/{} version {} generation {} multipart {} chunks {} verdict {:?}",
+                        r.bucket,
+                        r.key,
+                        r.version_id,
+                        hex(&r.generation),
+                        r.multipart,
+                        r.chunks.len(),
+                        r.verdict
+                    );
+                    for p in &r.dangling_parts {
+                        println!("  part {p}: generation gone (dangling reference)");
+                    }
+                    for c in &r.chunks {
+                        if c.good() == c.shards.len() {
+                            continue;
+                        }
+                        let bad: Vec<String> = c
+                            .shards
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, (_, st))| *st != ShardState::Ok)
+                            .map(|(i, (node, st))| format!("{i}@node{node}:{st:?}"))
+                            .collect();
+                        println!(
+                            "  part {:?} chunk {} id {} group {} good {}/{} need {} affected [{}]",
+                            c.part_number,
+                            c.chunk_index,
+                            hex(&c.chunk_id),
+                            c.group,
+                            c.good(),
+                            c.shards.len(),
+                            c.need,
+                            bad.join(", ")
+                        );
+                    }
+                    match r.verdict {
+                        Verdict::Healthy => ExitCode::SUCCESS,
+                        Verdict::Degraded | Verdict::Incomplete => ExitCode::from(1),
+                        Verdict::Unreadable => ExitCode::from(2),
+                    }
+                }
+                Err(e) => fail(e),
+            }
+        }
+        IntegrityCommand::Status { objects } => {
+            if objects {
+                match arca_lake_controller::objects::affected_objects(meta.as_ref()).await {
+                    Ok(list) => {
+                        for a in &list {
+                            println!(
+                                "affected bucket {} key {} version {} current {} part {:?} chunk {} generation {} group {} chunk_id {} shards {:?} state {:?}",
+                                if a.bucket.is_empty() { "?" } else { &a.bucket },
+                                if a.key.is_empty() { "?" } else { &a.key },
+                                a.version_id.as_deref().unwrap_or("?"),
+                                a.is_current,
+                                a.part_number,
+                                a.chunk_index,
+                                a.generation.map_or_else(|| "?".into(), |g| hex(&g)),
+                                a.group,
+                                hex(&a.chunk_id),
+                                a.shards,
+                                a.state
+                            );
+                        }
+                    }
+                    Err(e) => return fail(e),
+                }
+            }
             let cursors = match integrity::scrub_cursors(meta.as_ref()).await {
                 Ok(c) => c,
                 Err(e) => return fail(e),

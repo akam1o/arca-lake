@@ -9,6 +9,7 @@ pub mod gc;
 pub mod groups;
 pub mod integrity;
 pub mod metrics;
+pub mod objects;
 pub mod process;
 pub mod recovery;
 pub mod repair;

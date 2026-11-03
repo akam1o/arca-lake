@@ -437,3 +437,124 @@ async fn the_background_manifest_scrub_pages_through_a_persisted_cursor() {
     assert_eq!((cur.pass, cur.roots, cur.done), (2, 2, false));
     c.shutdown().await;
 }
+
+#[tokio::test]
+async fn object_level_status_names_the_version_part_and_shard_of_a_loss() {
+    use arca_lake_controller::objects::{ShardState, Verdict, affected_objects, verify_object};
+    use arca_lake_metadata::ops::object::{self, ManifestFound};
+    let c = cluster().await;
+    let mut b = PutBucketVersioningInput::builder();
+    b.set_bucket(BUCKET.into());
+    b.set_versioning_configuration(VersioningConfiguration {
+        status: Some(BucketVersioningStatus::from_static(
+            BucketVersioningStatus::ENABLED,
+        )),
+        ..Default::default()
+    });
+    c.backend
+        .put_bucket_versioning(request(b.build().unwrap()))
+        .await
+        .unwrap();
+    // v1: a two-part multipart object; then a plain current version.
+    let (_, v1_id) = multipart_put(&c, "obj", 2, 31).await;
+    let v1_id = v1_id.unwrap();
+    let current = Bytes::from(random_bytes(PART, 32));
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "obj",
+        current.clone(),
+        &s3::PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let ManifestFound::Manifest(m1) =
+        object::read_manifest_version(c.meta.as_ref(), BUCKET, "obj", Some(&v1_id), None)
+            .await
+            .unwrap()
+    else {
+        panic!("v1 missing")
+    };
+    let group = c.groups().await.remove(0);
+    let part_chunk = |n: usize| {
+        let g = m1.parts[n].generation;
+        let meta = std::sync::Arc::clone(&c.meta);
+        async move {
+            object::read_part_manifest(meta.as_ref(), &g)
+                .await
+                .unwrap()
+                .unwrap()
+                .0[0]
+                .1
+                .clone()
+        }
+    };
+    let (p1, p2) = (part_chunk(0).await, part_chunk(1).await);
+    let del = |ch: &records::ChunkRecord, i: usize| {
+        let n = c.node_index(&group.members[i]).unwrap();
+        c.node_store(n)
+            .delete(arca_lake_storage_node::ShardKey {
+                group_id: group.id,
+                chunk_id: ch.chunk_id,
+                shard_index: u16::try_from(i).unwrap(),
+            })
+            .unwrap();
+    };
+    // Part 1 loses two of three shards (unreadable); part 2 loses one.
+    del(&p1, 0);
+    del(&p1, 1);
+    del(&p2, 2);
+
+    let r = verify_object(c.meta.as_ref(), &c.clients, BUCKET, "obj", Some(&v1_id))
+        .await
+        .unwrap();
+    assert!(r.multipart);
+    assert_eq!(r.version_id, v1_id);
+    assert_eq!(r.verdict, Verdict::Unreadable);
+    let c1 = r.chunks.iter().find(|x| x.part_number == Some(1)).unwrap();
+    assert_eq!((c1.good(), c1.need), (1, 2));
+    assert_eq!(c1.shards[0].1, ShardState::Missing);
+    assert_eq!(c1.shards[1].1, ShardState::Missing);
+    let c2 = r.chunks.iter().find(|x| x.part_number == Some(2)).unwrap();
+    assert_eq!(c2.good(), 2);
+    assert_eq!(c2.shards[2].1, ShardState::Missing);
+    // The current version is untouched.
+    let cur = verify_object(c.meta.as_ref(), &c.clients, BUCKET, "obj", None)
+        .await
+        .unwrap();
+    assert_eq!((cur.verdict, cur.multipart), (Verdict::Healthy, false));
+    assert_ne!(cur.version_id, v1_id);
+
+    // Scrub finds both, repair rebuilds part 2 and records part 1 as
+    // unrecoverable; the object-level status resolves it to the
+    // noncurrent version and the part.
+    scrub(&c).await;
+    let rep = repair_pass(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders(),
+        &RepairWorkerOptions::default(),
+        None,
+        None,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((rep.succeeded, rep.unrecoverable), (1, 1), "{rep:?}");
+    let affected = affected_objects(c.meta.as_ref()).await.unwrap();
+    assert_eq!(affected.len(), 1, "{affected:?}");
+    let a = &affected[0];
+    assert_eq!((a.bucket.as_str(), a.key.as_str()), (BUCKET, "obj"));
+    assert_eq!(a.version_id.as_deref(), Some(v1_id.as_str()));
+    assert!(!a.is_current);
+    assert_eq!((a.part_number, a.chunk_index), (Some(1), 0));
+    assert_eq!(a.chunk_id, p1.chunk_id);
+    let r = verify_object(c.meta.as_ref(), &c.clients, BUCKET, "obj", Some(&v1_id))
+        .await
+        .unwrap();
+    let c2 = r.chunks.iter().find(|x| x.part_number == Some(2)).unwrap();
+    assert_eq!(c2.good(), 3, "part 2 repaired");
+    assert_eq!(r.verdict, Verdict::Unreadable, "part 1 is lost");
+    assert_eq!(s3::get(&c.backend, BUCKET, "obj").await.unwrap().0, current);
+    c.shutdown().await;
+}

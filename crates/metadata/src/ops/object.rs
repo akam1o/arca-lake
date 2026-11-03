@@ -1273,3 +1273,97 @@ pub async fn read_manifest_of<S: KvStore>(
     })
     .await
 }
+
+/// Where a generation sits in its key's history (R-54).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    /// The object version's generation: the generation itself, or for a
+    /// multipart part the root that references it.
+    pub root: GenId,
+    /// S3 version id (`null` for an unversioned key), when a version of
+    /// the key references the root.
+    pub version_id: Option<String>,
+    /// Whether that version is the current one.
+    pub is_current: bool,
+    /// Part number, when the generation is a multipart part.
+    pub part_number: Option<u32>,
+}
+
+/// Find which version of its key a generation belongs to. Reads only the
+/// key's current pointer and version records (and, for a part, their
+/// generation headers): the cost is bounded by the versions of one key,
+/// never a scan of the bucket.
+///
+/// # Errors
+///
+/// Backend or codec errors; `Ok(None)` when the header is gone.
+pub async fn locate_generation<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+) -> Result<Option<Located>> {
+    transact(store, *generation, |tx, generation| {
+        Box::pin(async move {
+            let header: Option<GenerationHeader> = read(tx, &keys::gen_header(generation)).await?;
+            let Some(header) = header else {
+                return Ok(None);
+            };
+            let (part_upload, part_number) = match header.kind {
+                GenKind::Part {
+                    upload_id,
+                    part_number,
+                } => (Some(upload_id), Some(part_number)),
+                _ => (None, None),
+            };
+            // Candidate versions: the current pointer first, then the
+            // version records newest first.
+            let mut candidates: Vec<(GenId, String, bool)> = Vec::new();
+            if let Some(p) = current_pointer(tx, header.bucket_id, &header.key).await?
+                && !p.delete_marker
+            {
+                candidates.push((p.generation, p.version_id.clone(), true));
+            }
+            for (_, v) in tx
+                .get_range(
+                    &keys::versions_range(header.bucket_id, &header.key),
+                    usize::MAX,
+                    false,
+                )
+                .await?
+            {
+                let r = crate::records::decode::<VersionRecord>(&v)?;
+                if !r.delete_marker && !candidates.iter().any(|c| c.0 == r.generation) {
+                    candidates.push((r.generation, r.version_id, false));
+                }
+            }
+            for (g, version_id, is_current) in candidates {
+                let matches = match part_upload {
+                    None => g == *generation,
+                    Some(upload) => {
+                        let h: Option<GenerationHeader> = read(tx, &keys::gen_header(&g)).await?;
+                        h.is_some_and(|h| {
+                            matches!(
+                                h.kind,
+                                GenKind::MultipartRoot { upload_id, .. } if upload_id == upload
+                            )
+                        })
+                    }
+                };
+                if matches {
+                    return Ok(Some(Located {
+                        root: g,
+                        version_id: Some(version_id),
+                        is_current,
+                        part_number,
+                    }));
+                }
+            }
+            Ok(Some(Located {
+                root: *generation,
+                version_id: None,
+                is_current: false,
+                part_number,
+            }))
+        })
+    })
+    .await
+}
