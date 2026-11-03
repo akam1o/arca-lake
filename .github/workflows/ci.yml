@@ -123,6 +123,8 @@ jobs:
     timeout-minutes: 45
     env:
       FDB_VERSION: 7.3.77
+      # Per-run container name: two runners share the host.
+      FDB_CONTAINER: fdb-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
       - name: prepare the runner (compiler, pkg-config; idempotent)
@@ -184,41 +186,49 @@ jobs:
         run: |
           set -euo pipefail
           docker() { sudo docker "$@"; }
-          docker rm -f fdb >/dev/null 2>&1 || true
-          docker run -d --name fdb --network host -e FDB_NETWORKING_MODE=host \
+          docker rm -f "$FDB_CONTAINER" >/dev/null 2>&1 || true
+          # Bridge network, with the server advertising its container
+          # address (reachable from the runner host): no port shared with a
+          # concurrent run on the same host. Same topology as the failover
+          # job and deploy/dev/fdb-test.sh.
+          docker run -d --name "$FDB_CONTAINER" -e FDB_NETWORKING_MODE=container \
             "foundationdb/foundationdb:${FDB_VERSION}"
           # The image starts fdbserver without a database, and `status` on
           # an unconfigured cluster prints nothing until fdbcli's timeout
           # (polling it this way cost 30 x 30 s per run). Create the database
           # right away and retry until the process answers.
           for _ in $(seq 1 30); do
-            out="$(docker exec fdb fdbcli --timeout 10 --exec "configure new single memory" 2>&1 || true)"
+            out="$(docker exec "$FDB_CONTAINER" fdbcli --timeout 10 --exec "configure new single memory" 2>&1 || true)"
             echo "$out"
             grep -qE "Database created|already exists" <<<"$out" && break
             sleep 1
           done
           for _ in $(seq 1 60); do
-            docker exec fdb fdbcli --timeout 10 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+            docker exec "$FDB_CONTAINER" fdbcli --timeout 10 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
             sleep 1
           done
-          docker exec fdb fdbcli --timeout 30 --exec "status minimal"
-          docker exec fdb cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
+          docker exec "$FDB_CONTAINER" fdbcli --timeout 30 --exec "status minimal"
+          docker exec "$FDB_CONTAINER" cat /var/fdb/fdb.cluster | tee "$RUNNER_TEMP/fdb.cluster"
       - name: run tests
         env:
           ARCA_FDB_TESTS: "1"
-          ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
+          ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
         run: |
           set -euo pipefail
           cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
           cargo test -p arca-lake-testkit --features fdb --test e2e_fdb --test faults_fdb --test cache_fdb --test cache_ec_fdb -- --nocapture --test-threads=1
       - name: stop FoundationDB server
         if: always()
-        run: sudo docker rm -f fdb >/dev/null 2>&1 || true
+        run: sudo docker rm -f "$FDB_CONTAINER" >/dev/null 2>&1 || true
 
   fdb-failover:
     name: FoundationDB failover (3 processes)
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
+    # The failover test addresses the container as `arca-fdb` by name, so
+    # two of these jobs cannot share a host: a later run waits for this one.
+    concurrency:
+      group: fdb-failover-host
     env:
       FDB_VERSION: 7.3.77
     steps:
