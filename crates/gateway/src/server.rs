@@ -33,6 +33,8 @@ pub struct GatewayConfig {
     pub store: Option<Arc<CredentialStore>>,
     /// Emit an audit record per request on target `arca.audit`.
     pub audit: bool,
+    /// Request accounting for `/metrics` (RFC-013 §7), if wanted.
+    pub stats: Option<Arc<crate::requests::S3Stats>>,
 }
 
 impl GatewayConfig {
@@ -44,6 +46,7 @@ impl GatewayConfig {
             credentials,
             store: None,
             audit: true,
+            stats: None,
         }
     }
 }
@@ -108,6 +111,9 @@ where
                 .map(|(ak, sk)| Arc::new(CredentialStore::from_keys(&[(ak, sk, ak)])))
         });
         if let Some(store) = store {
+            if let Some(s) = &cfg.stats {
+                s.set_credentials(Arc::clone(&store));
+            }
             b.set_auth(StoreAuth(store));
         }
         if let Some(a) = access {
@@ -119,6 +125,7 @@ where
     let local_addr = listener.local_addr()?;
     let (tx, mut rx) = oneshot::channel::<()>();
     let audit = cfg.audit;
+    let stats = cfg.stats.clone();
 
     let task = tokio::spawn(async move {
         let http = ConnBuilder::new(TokioExecutor::new());
@@ -135,6 +142,7 @@ where
                 inner: service.clone(),
                 peer: Some(peer),
                 audit,
+                stats: stats.clone(),
             };
             let conn = http.serve_connection(TokioIo::new(socket), svc);
             let conn = graceful.watch(conn.into_owned());
@@ -192,6 +200,7 @@ struct Audited {
     inner: S3Service,
     peer: Option<SocketAddr>,
     audit: bool,
+    stats: Option<Arc<crate::requests::S3Stats>>,
 }
 
 impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
@@ -224,6 +233,7 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
         let started = Instant::now();
         let fut = hyper::service::Service::call(&self.inner, req);
         let audit = self.audit;
+        let s3_stats = self.stats.clone();
         Box::pin(async move {
             let mut res = fut.await;
             let status = match &res {
@@ -235,14 +245,23 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
             {
                 r.headers_mut().insert("x-amz-request-id", v);
             }
+            let bytes_out = res
+                .as_ref()
+                .ok()
+                .and_then(|r| r.headers().get(http::header::CONTENT_LENGTH))
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            if let Some(s) = &s3_stats {
+                s.record(
+                    &record.fields().operation,
+                    status,
+                    bytes_in,
+                    bytes_out,
+                    started.elapsed(),
+                );
+            }
             if audit {
-                let bytes_out = res
-                    .as_ref()
-                    .ok()
-                    .and_then(|r| r.headers().get(http::header::CONTENT_LENGTH))
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(0);
                 record.emit(status, bytes_in, bytes_out, started.elapsed().as_millis());
             }
             res

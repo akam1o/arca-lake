@@ -233,6 +233,21 @@ impl StorageNodeService {
         }
     }
 
+    /// `(free, total)` bytes the node advertises for placement: the file
+    /// system's, capped by `capacity_bytes`.
+    #[must_use]
+    pub fn device_space(&self) -> Option<(u64, u64)> {
+        let segment_bytes = self.store.stats().map_or(0, |s| s.segment_bytes);
+        self.device_space_with(segment_bytes)
+    }
+
+    fn device_space_with(&self, segment_bytes: u64) -> Option<(u64, u64)> {
+        device_space(self.store.dir()).map(|(free, total)| match self.capacity_bytes {
+            Some(cap) => (free.min(cap.saturating_sub(segment_bytes)), total.min(cap)),
+            None => (free, total),
+        })
+    }
+
     /// Background compaction counters.
     #[must_use]
     pub fn compaction_stats(&self) -> &Arc<crate::compactor::CompactionStats> {
@@ -854,13 +869,7 @@ impl StorageNode for StorageNodeService {
                     .collect(),
             )
         };
-        let space = device_space(self.store.dir()).map(|(free, total)| match self.capacity_bytes {
-            Some(cap) => (
-                free.min(cap.saturating_sub(stats.segment_bytes)),
-                total.min(cap),
-            ),
-            None => (free, total),
-        });
+        let space = self.device_space_with(stats.segment_bytes);
         Ok(tonic::Response::new(pb::HealthResponse {
             live_shards: stats.live_shards as u64,
             live_bytes: stats.live_bytes,

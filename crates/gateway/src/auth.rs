@@ -91,6 +91,9 @@ pub struct CredentialStore {
     loaded_mtime: Mutex<Option<SystemTime>>,
     /// Failed reloads (`arca_gateway_credentials_reload_failures_total`).
     pub reload_failures: std::sync::atomic::AtomicU64,
+    /// Refused access keys by [`KeyRefusal`] (unknown, inactive, expired;
+    /// `arca_gateway_auth_failures_total{reason}`).
+    pub refusals: [std::sync::atomic::AtomicU64; 3],
 }
 
 #[allow(clippy::missing_fields_in_debug)]
@@ -124,6 +127,7 @@ impl CredentialStore {
             path: None,
             loaded_mtime: Mutex::new(None),
             reload_failures: std::sync::atomic::AtomicU64::new(0),
+            refusals: Default::default(),
         }
     }
 
@@ -139,6 +143,7 @@ impl CredentialStore {
             path: Some(path.to_path_buf()),
             loaded_mtime: Mutex::new(mtime),
             reload_failures: std::sync::atomic::AtomicU64::new(0),
+            refusals: Default::default(),
         })
     }
 
@@ -346,6 +351,12 @@ impl S3Auth for StoreAuth {
             Ok(k) => Ok(k.secret),
             Err(refusal) => {
                 tracing::debug!(?refusal, "access key refused");
+                let i = match refusal {
+                    KeyRefusal::Unknown => 0,
+                    KeyRefusal::Inactive => 1,
+                    KeyRefusal::Expired => 2,
+                };
+                self.0.refusals[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Err(s3_error!(InvalidAccessKeyId))
             }
         }

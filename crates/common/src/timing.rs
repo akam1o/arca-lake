@@ -68,8 +68,9 @@ impl Histogram {
 
 impl HistogramSnapshot {
     /// Append the Prometheus text representation: `<name>_bucket{<labels>,le="…"}`
-    /// (cumulative, seconds), `<name>_sum`, `<name>_count` and
-    /// `<name>_max_seconds`. `labels` is `key="value"` pairs or empty.
+    /// (cumulative, seconds), `<name>_sum` and `<name>_count`. `labels` is
+    /// `key="value"` pairs or empty. The maximum is a separate gauge family
+    /// ([`Self::render_max`]): a histogram family has no other series.
     #[allow(clippy::cast_precision_loss)]
     pub fn render_prometheus(&self, out: &mut String, name: &str, labels: &str) {
         use std::fmt::Write as _;
@@ -92,7 +93,19 @@ impl HistogramSnapshot {
         };
         let _ = writeln!(out, "{name}_sum{lab} {}", self.sum_ns as f64 / 1e9);
         let _ = writeln!(out, "{name}_count{lab} {}", self.count);
-        let _ = writeln!(out, "{name}_max_seconds{lab} {}", self.max_ns as f64 / 1e9);
+    }
+
+    /// Append `<name>{<labels>} <max seconds>` (a gauge family the caller
+    /// declares).
+    #[allow(clippy::cast_precision_loss)]
+    pub fn render_max(&self, out: &mut String, name: &str, labels: &str) {
+        use std::fmt::Write as _;
+        let lab = if labels.is_empty() {
+            String::new()
+        } else {
+            format!("{{{labels}}}")
+        };
+        let _ = writeln!(out, "{name}{lab} {}", self.max_ns as f64 / 1e9);
     }
 
     /// Mean observation in seconds (0 when empty).

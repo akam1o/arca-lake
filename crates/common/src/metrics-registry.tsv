@@ -1,0 +1,144 @@
+# arca-lake metric registry (RFC-013 §7, normative). One row per metric family.
+# Columns: name, type, process, unit, labels, help. labels: comma-separated
+# label=value|value|... (closed set) or label=~s3op (an S3 operation name),
+# - for none. Every exported family must be listed with the same type and
+# labels, and every listed family must be exported (crates/cli tests);
+# the HELP lines of /metrics come from the help column.
+arca_controller_cache_chunks_reconstructed_total	counter	controller	chunks	-	cache chunks rebuilt by cache-group repair
+arca_controller_cache_evicted_total	counter	controller	chunks	-	cache copies evicted by the LRU pass
+arca_controller_cache_over_watermark	gauge	controller	bool	-	1 while cache usage is above the high watermark
+arca_controller_cache_repairs_completed_total	counter	controller	repairs	-	cache-group member repairs completed
+arca_controller_cache_repairs_started_total	counter	controller	repairs	-	cache-group member repairs started
+arca_controller_cache_usage_bytes	gauge	controller	bytes	-	bytes recorded as cached on the cache tier
+arca_controller_chunks_demoted_total	counter	controller	chunks	-	chunks moved to a colder tier by automatic tiering
+arca_controller_chunks_promoted_total	counter	controller	chunks	-	chunks moved to a hotter tier by automatic tiering
+arca_controller_chunks_reconstructed_total	counter	controller	chunks	-	durable chunks rebuilt by member replacement
+arca_controller_cluster_phase	gauge	controller	enum	-	cluster phase: 0 Active, 1 ReadOnly, 2 Restoring, 3 VerificationPending, 4 RecoveryRequired
+arca_controller_data_integrity_status	gauge	controller	enum	-	0 clean, 1 repairs pending or failed, 2 unrecoverable stripes
+arca_controller_gc_collected_total	counter	controller	generations	-	retired generations whose shards GC deleted
+arca_controller_gc_passes_total	counter	controller	passes	-	GC batches run
+arca_controller_gc_skipped_referenced_total	counter	controller	generations	-	retired-queue entries naming a referenced generation (invariant violation when > 0)
+arca_controller_groups_repairing	gauge	controller	groups	-	groups in Repairing at the last repair pass
+arca_controller_guard_refusals_total	counter	controller	transactions	-	metadata writes refused by the cluster-state guard at commit
+arca_controller_integrity_findings_open	gauge	controller	tasks	class=missing_shard|checksum_mismatch|truncated_shard|invalid_header|unexpected_shard|stale_placement_epoch|metadata_data_mismatch|unrecoverable_stripe	open stripe repair tasks by finding class
+arca_controller_integrity_findings_total	counter	controller	findings	class=missing_shard|checksum_mismatch|truncated_shard|invalid_header|unexpected_shard|stale_placement_epoch|metadata_data_mismatch|unrecoverable_stripe	integrity findings detected, by class
+arca_controller_leader	gauge	controller	bool	-	1 on the controller leader
+arca_controller_leader_acquired_total	counter	controller	elections	-	leaderships acquired
+arca_controller_leader_lost_total	counter	controller	elections	-	leaderships lost
+arca_controller_leader_token	gauge	controller	token	-	fencing token of the current leadership
+arca_controller_manifest_findings	gauge	controller	findings	-	multipart manifest findings of the last scrub page
+arca_controller_manifest_findings_total	counter	controller	findings	-	multipart manifest findings detected
+arca_controller_manifest_roots_verified_total	counter	controller	roots	-	multipart roots verified against their parts
+arca_controller_nodes_registered	gauge	controller	nodes	-	registered storage nodes
+arca_controller_nodes_unhealthy	gauge	controller	nodes	-	storage nodes not seen within the unhealthy threshold
+arca_controller_passes_skipped_by_state_total	counter	controller	passes	-	scheduler passes the cluster phase did not admit
+arca_controller_recovery_passes_total	counter	controller	passes	-	restore recovery passes that did work
+arca_controller_repair_bytes_total	counter	controller	bytes	-	bytes written by stripe repair
+arca_controller_repair_queue_depth	gauge	controller	tasks	-	open stripe repair tasks
+arca_controller_repair_tasks_failed	gauge	controller	tasks	-	stripe repair tasks in Failed state
+arca_controller_repair_tasks_unrecoverable	gauge	controller	tasks	-	stripe repair tasks in Unrecoverable state
+arca_controller_repairs_completed_total	counter	controller	repairs	-	durable member replacements completed
+arca_controller_repairs_started_total	counter	controller	repairs	-	durable member replacements started
+arca_controller_scrub_bytes_total	counter	controller	bytes	-	bytes verified by background scrubbing
+arca_controller_scrub_errors_total	counter	controller	errors	-	scrub requests that failed
+arca_controller_scrub_groups_overdue	gauge	controller	groups	-	groups past their scrub interval at the last tick
+arca_controller_scrub_passes_total	counter	controller	passes	-	complete scrub passes over a group
+arca_controller_scrub_shards_verified_total	counter	controller	shards	-	shards verified by background scrubbing
+arca_controller_shards_deleted_total	counter	controller	shards	-	shards deleted by GC
+arca_controller_shards_rewritten_total	counter	controller	shards	-	shards rewritten by stripe repair
+arca_controller_stripe_repairs_failed_total	counter	controller	repairs	-	stripe repair attempts that failed
+arca_controller_stripe_repairs_succeeded_total	counter	controller	repairs	-	stripe repairs that succeeded
+arca_controller_task_errors_total	counter	controller	errors	-	scheduler task passes that ended with an error
+arca_controller_tls_cert_not_after_seconds	gauge	controller	unix_seconds	-	expiry of the own certificate
+arca_controller_tls_connections_revoked_total	counter	controller	connections	-	connections closed because their trust was withdrawn
+arca_controller_tls_enabled	gauge	controller	bool	-	1 when node RPCs use mutual TLS, 0 when explicitly plaintext
+arca_controller_tls_handshake_failures_total	counter	controller	handshakes	-	TLS handshakes refused or failed
+arca_controller_tls_reload_failures_total	counter	controller	reloads	-	TLS reloads refused because the new material did not validate
+arca_controller_tls_reloads_total	counter	controller	reloads	-	TLS material reloads that changed it
+arca_controller_tls_rpcs_denied_total	counter	controller	rpcs	-	RPCs refused by the role authorization table
+arca_controller_upgrade_step	gauge	controller	enum	-	rolling-upgrade finalize step (0 none … 5)
+arca_gateway_auth_failures_total	counter	gateway	requests	reason=unknown_key|inactive_key|expired_key	requests refused for their access key, by reason
+arca_gateway_cache_admission_rejected_capacity_total	counter	gateway	events	-	read-through cache: admission rejected capacity (RFC-006 §5.3)
+arca_gateway_cache_admission_rejected_generation_total	counter	gateway	events	-	read-through cache: admission rejected generation (RFC-006 §5.3)
+arca_gateway_cache_admission_rejected_size_total	counter	gateway	events	-	read-through cache: admission rejected size (RFC-006 §5.3)
+arca_gateway_cache_admission_rejected_threshold_total	counter	gateway	events	-	read-through cache: admission rejected threshold (RFC-006 §5.3)
+arca_gateway_cache_admissions_rejected_total	counter	gateway	events	-	read-through cache: admissions rejected (RFC-006 §5.3)
+arca_gateway_cache_degraded_hits_total	counter	gateway	events	-	read-through cache: degraded hits (RFC-006 §5.3)
+arca_gateway_cache_fallback_corrupt_total	counter	gateway	events	-	read-through cache: fallback corrupt (RFC-006 §5.3)
+arca_gateway_cache_fallback_node_total	counter	gateway	events	-	read-through cache: fallback node (RFC-006 §5.3)
+arca_gateway_cache_fallback_unknown_group_total	counter	gateway	events	-	read-through cache: fallback unknown group (RFC-006 §5.3)
+arca_gateway_cache_fallback_unreadable_total	counter	gateway	events	-	read-through cache: fallback unreadable (RFC-006 §5.3)
+arca_gateway_cache_fallbacks_total	counter	gateway	events	-	read-through cache: fallbacks (RFC-006 §5.3)
+arca_gateway_cache_hits_total	counter	gateway	events	-	read-through cache: hits (RFC-006 §5.3)
+arca_gateway_cache_invalidations_total	counter	gateway	events	-	read-through cache: invalidations (RFC-006 §5.3)
+arca_gateway_cache_lookup_hits_total	counter	gateway	events	-	read-through cache: lookup hits (RFC-006 §5.3)
+arca_gateway_cache_misses_total	counter	gateway	events	-	read-through cache: misses (RFC-006 §5.3)
+arca_gateway_cache_populated_total	counter	gateway	events	-	read-through cache: populated (RFC-006 §5.3)
+arca_gateway_cache_population_failures_corrupt_total	counter	gateway	events	-	read-through cache: population failures corrupt (RFC-006 §5.3)
+arca_gateway_cache_population_failures_meta_total	counter	gateway	events	-	read-through cache: population failures meta (RFC-006 §5.3)
+arca_gateway_cache_population_failures_node_total	counter	gateway	events	-	read-through cache: population failures node (RFC-006 §5.3)
+arca_gateway_cache_population_failures_total	counter	gateway	events	-	read-through cache: population failures (RFC-006 §5.3)
+arca_gateway_cache_populations_deduplicated_total	counter	gateway	events	-	read-through cache: populations deduplicated (RFC-006 §5.3)
+arca_gateway_cache_populations_skipped_total	counter	gateway	events	-	read-through cache: populations skipped (RFC-006 §5.3)
+arca_gateway_cache_shard_repair_failures_total	counter	gateway	events	-	read-through cache: shard repair failures (RFC-006 §5.3)
+arca_gateway_cache_shard_repairs_skipped_total	counter	gateway	events	-	read-through cache: shard repairs skipped (RFC-006 §5.3)
+arca_gateway_cache_shards_repaired_total	counter	gateway	events	-	read-through cache: shards repaired (RFC-006 §5.3)
+arca_gateway_credentials_reload_failures_total	counter	gateway	reloads	-	credential file reloads refused
+arca_gateway_degraded_reads_total	counter	gateway	reads	-	GETs decoded around a missing or corrupt shard
+arca_gateway_integrity_reports_dropped_total	counter	gateway	reports	-	read-path integrity reports dropped (queue full or error)
+arca_gateway_integrity_reports_total	counter	gateway	reports	-	integrity findings reported to metadata by the read path
+arca_gateway_meta_txn_attempts_total	counter	gateway	transactions	-	metadata transaction attempts
+arca_gateway_meta_txn_conflicts_total	counter	gateway	transactions	-	metadata transaction conflicts (retried)
+arca_gateway_meta_txn_exhausted_total	counter	gateway	transactions	-	metadata transactions that ran out of retries
+arca_gateway_meta_txn_unknown_retries_total	counter	gateway	transactions	-	commits with an unknown outcome that were resolved
+arca_gateway_node_rpc_deadline_exceeded_total	counter	gateway	rpcs	-	shard streams that missed their deadline
+arca_gateway_node_rpc_exhausted_total	counter	gateway	rpcs	-	node RPCs that ran out of retries
+arca_gateway_node_rpc_retries_total	counter	gateway	rpcs	-	node RPC retries
+arca_gateway_node_rpc_stalled_total	counter	gateway	rpcs	-	shard streams aborted for lack of progress
+arca_gateway_node_rpc_unary_timeouts_total	counter	gateway	rpcs	-	unary node RPCs that timed out
+arca_gateway_population_queue_completed_total	counter	gateway	populations	-	cache populations completed
+arca_gateway_population_queue_deferred_for_reads_total	counter	gateway	populations	-	cache populations deferred while reads were busy
+arca_gateway_population_queue_dropped_full_total	counter	gateway	populations	-	cache populations dropped: queue full
+arca_gateway_population_queue_dropped_shutdown_total	counter	gateway	populations	-	cache populations dropped at shutdown
+arca_gateway_population_queue_enqueued_total	counter	gateway	populations	-	cache populations enqueued
+arca_gateway_population_queue_queued	gauge	gateway	populations	-	cache populations waiting
+arca_gateway_population_queue_retries_total	counter	gateway	populations	-	cache population retries
+arca_gateway_population_queue_running	gauge	gateway	populations	-	cache populations running
+arca_gateway_put_in_flight	gauge	gateway	requests	-	PUTs being written now
+arca_gateway_put_phase_max_seconds	gauge	gateway	seconds	phase=body_read|encode|shard_write|append|lease_renew|commit|total	longest PUT phase observed
+arca_gateway_put_phase_seconds	histogram	gateway	seconds	phase=body_read|encode|shard_write|append|lease_renew|commit|total	PUT time per phase
+arca_gateway_s3_bytes_total	counter	gateway	bytes	dir=in|out	S3 body bytes received and sent
+arca_gateway_s3_request_seconds	histogram	gateway	seconds	op=~s3op	S3 request time by operation
+arca_gateway_s3_requests_total	counter	gateway	requests	op=~s3op,status=2xx|3xx|4xx|5xx	S3 requests by operation and status class
+arca_gateway_tls_cert_not_after_seconds	gauge	gateway	unix_seconds	-	expiry of the own certificate
+arca_gateway_tls_connections_revoked_total	counter	gateway	connections	-	connections closed because their trust was withdrawn
+arca_gateway_tls_enabled	gauge	gateway	bool	-	1 when node RPCs use mutual TLS, 0 when explicitly plaintext
+arca_gateway_tls_handshake_failures_total	counter	gateway	handshakes	-	TLS handshakes refused or failed
+arca_gateway_tls_reload_failures_total	counter	gateway	reloads	-	TLS reloads refused because the new material did not validate
+arca_gateway_tls_reloads_total	counter	gateway	reloads	-	TLS material reloads that changed it
+arca_gateway_tls_rpcs_denied_total	counter	gateway	rpcs	-	RPCs refused by the role authorization table
+arca_gateway_unreadable_reads_total	counter	gateway	reads	-	GETs that failed with an integrity error
+arca_node_compaction_copied_bytes_total	counter	node	bytes	-	live payload bytes copied by compaction
+arca_node_compaction_errors_total	counter	node	errors	-	compactions that failed and were left for the next pass
+arca_node_compaction_reclaimed_bytes_total	counter	node	bytes	-	segment bytes released by compaction
+arca_node_compactions_total	counter	node	segments	-	sealed segments compacted
+arca_node_corrupt_reads_total	counter	node	reads	-	reads that found a corrupt record
+arca_node_device_free_bytes	gauge	node	bytes	-	bytes free for placement on the device (capped by --capacity-bytes)
+arca_node_device_total_bytes	gauge	node	bytes	-	size of the device for placement (capped by --capacity-bytes)
+arca_node_live_bytes	gauge	node	bytes	-	bytes of live records at the last compaction pass
+arca_node_phase_max_seconds	gauge	node	seconds	phase=put_recv|put_queue|put_store|get_serve|store_append|store_rollover|store_sync_wait|store_fsync	longest node phase observed
+arca_node_phase_seconds	histogram	node	seconds	phase=put_recv|put_queue|put_store|get_serve|store_append|store_rollover|store_sync_wait|store_fsync	node RPC and storage time per phase
+arca_node_put_in_flight	gauge	node	streams	-	PutShard streams open now
+arca_node_quarantined_bytes	gauge	node	bytes	-	payload bytes of quarantined shards
+arca_node_quarantined_shards	gauge	node	shards	-	quarantined shards on the device
+arca_node_scrub_bytes_total	counter	node	bytes	-	bytes read by ScrubShards
+arca_node_scrub_corrupt_total	counter	node	shards	-	shards ScrubShards found corrupt
+arca_node_scrub_shards_total	counter	node	shards	-	shards verified by ScrubShards
+arca_node_segment_bytes	gauge	node	bytes	-	segment file bytes at the last compaction pass
+arca_node_tls_cert_not_after_seconds	gauge	node	unix_seconds	-	expiry of the own certificate
+arca_node_tls_connections_revoked_total	counter	node	connections	-	connections closed because their trust was withdrawn
+arca_node_tls_enabled	gauge	node	bool	-	1 when node RPCs use mutual TLS, 0 when explicitly plaintext
+arca_node_tls_handshake_failures_total	counter	node	handshakes	-	TLS handshakes refused or failed
+arca_node_tls_reload_failures_total	counter	node	reloads	-	TLS reloads refused because the new material did not validate
+arca_node_tls_reloads_total	counter	node	reloads	-	TLS material reloads that changed it
+arca_node_tls_rpcs_denied_total	counter	node	rpcs	-	RPCs refused by the role authorization table

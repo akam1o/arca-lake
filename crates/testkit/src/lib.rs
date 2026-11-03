@@ -397,6 +397,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             credentials: None,
             store: Some(Arc::clone(&store)),
             audit: true,
+            stats: None,
         };
         let gateway = if opts.authorize {
             serve_with_access(

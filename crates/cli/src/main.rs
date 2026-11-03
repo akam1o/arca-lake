@@ -1258,11 +1258,13 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
         Ok(c) => c,
         Err(e) => return fail(e),
     };
+    let s3_stats = std::sync::Arc::new(arca_lake_gateway::requests::S3Stats::default());
     let cfg = arca_lake_gateway::GatewayConfig {
         listen: args.listen,
         credentials,
         store: store.clone(),
         audit: !args.no_audit,
+        stats: Some(std::sync::Arc::clone(&s3_stats)),
     };
     let mut queue_shutdown: Option<(
         tokio::sync::oneshot::Sender<()>,
@@ -1321,11 +1323,12 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 render_put_stats(&mut out, &stats_backend.put_stats());
                 render_queue_and_txn_stats(&mut out, &stats_backend.population_queue_stats());
                 render_integrity_stats(&mut out, &stats_backend.integrity_stats());
+                s3_stats.render(&mut out);
                 out += &arca_lake_protocol::tls::render_metrics(
                     "arca_gateway",
                     stats_backend.node_clients().tls().map(|t| &*t.stats),
                 );
-                out
+                arca_lake_common::metrics::annotate(&out)
             }));
         }
         let queue_backend = backend.clone();
@@ -1410,11 +1413,12 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
         tokio::spawn(serve_gateway_metrics(listener, move || {
             let mut out = render_node_stats(&service.stats(), &service.store().timings());
             render_compaction_stats(&mut out, service.compaction_stats());
+            render_device_space(&mut out, service.device_space());
             out += &arca_lake_protocol::tls::render_metrics(
                 "arca_node",
                 service.tls_stats().as_deref(),
             );
-            out
+            arca_lake_common::metrics::annotate(&out)
         }));
     }
     wait_for_shutdown().await;
@@ -2982,8 +2986,7 @@ fn render_put_stats(out: &mut String, p: &arca_lake_gateway::cluster::PutStatsSn
         "# TYPE arca_gateway_put_in_flight gauge\narca_gateway_put_in_flight {}",
         p.in_flight
     );
-    let _ = writeln!(out, "# TYPE arca_gateway_put_phase_seconds histogram");
-    for (phase, h) in [
+    let phases = [
         ("body_read", &p.body_read),
         ("encode", &p.encode),
         ("shard_write", &p.shard_write),
@@ -2991,10 +2994,20 @@ fn render_put_stats(out: &mut String, p: &arca_lake_gateway::cluster::PutStatsSn
         ("lease_renew", &p.lease_renew),
         ("commit", &p.commit),
         ("total", &p.total),
-    ] {
+    ];
+    let _ = writeln!(out, "# TYPE arca_gateway_put_phase_seconds histogram");
+    for (phase, h) in phases {
         h.render_prometheus(
             out,
             "arca_gateway_put_phase_seconds",
+            &format!("phase=\"{phase}\""),
+        );
+    }
+    let _ = writeln!(out, "# TYPE arca_gateway_put_phase_max_seconds gauge");
+    for (phase, h) in phases {
+        h.render_max(
+            out,
+            "arca_gateway_put_phase_max_seconds",
             &format!("phase=\"{phase}\""),
         );
     }
@@ -3042,6 +3055,19 @@ fn render_queue_and_txn_stats(
     ] {
         let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
     }
+}
+
+fn render_device_space(out: &mut String, space: Option<(u64, u64)>) {
+    use std::fmt::Write as _;
+    let (free, total) = space.unwrap_or((0, 0));
+    let _ = writeln!(
+        out,
+        "# TYPE arca_node_device_free_bytes gauge\narca_node_device_free_bytes {free}"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE arca_node_device_total_bytes gauge\narca_node_device_total_bytes {total}"
+    );
 }
 
 fn render_compaction_stats(
@@ -3123,8 +3149,7 @@ fn render_node_stats(
     ] {
         let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
     }
-    let _ = writeln!(out, "# TYPE arca_node_phase_seconds histogram");
-    for (phase, h) in [
+    let phases = [
         ("put_recv", &n.put_recv),
         ("put_queue", &n.put_queue),
         ("put_store", &n.put_store),
@@ -3133,10 +3158,20 @@ fn render_node_stats(
         ("store_rollover", &t.rollover),
         ("store_sync_wait", &t.sync_wait),
         ("store_fsync", &t.fsync),
-    ] {
+    ];
+    let _ = writeln!(out, "# TYPE arca_node_phase_seconds histogram");
+    for (phase, h) in phases {
         h.render_prometheus(
             &mut out,
             "arca_node_phase_seconds",
+            &format!("phase=\"{phase}\""),
+        );
+    }
+    let _ = writeln!(out, "# TYPE arca_node_phase_max_seconds gauge");
+    for (phase, h) in phases {
+        h.render_max(
+            &mut out,
+            "arca_node_phase_max_seconds",
             &format!("phase=\"{phase}\""),
         );
     }
@@ -3167,5 +3202,99 @@ async fn serve_gateway_metrics(
             let _ = socket.write_all(resp.as_bytes()).await;
             let _ = socket.shutdown().await;
         });
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::default_trait_access)]
+mod metrics_registry {
+    //! Every exported metric family matches the registry (RFC-013 §7,
+    //! R-62): the expositions below are built by the same renderers the
+    //! processes serve, with every optional part enabled.
+    use super::*;
+
+    fn tls(on: bool) -> Option<arca_lake_protocol::tls::TlsStats> {
+        on.then(arca_lake_protocol::tls::TlsStats::default)
+    }
+
+    fn gateway_text(tls_on: bool) -> String {
+        let mut out = render_cache_stats(&Default::default(), &Default::default());
+        render_put_stats(&mut out, &Default::default());
+        render_queue_and_txn_stats(&mut out, &Default::default());
+        render_integrity_stats(&mut out, &Default::default());
+        let s3 = arca_lake_gateway::requests::S3Stats::default();
+        s3.record("PutObject", 200, 10, 0, Duration::from_millis(3));
+        s3.record("", 403, 0, 0, Duration::from_millis(1));
+        s3.render(&mut out);
+        out += &arca_lake_protocol::tls::render_metrics("arca_gateway", tls(tls_on).as_ref());
+        arca_lake_common::metrics::annotate(&out)
+    }
+
+    fn node_text(tls_on: bool) -> String {
+        let mut out = render_node_stats(&Default::default(), &Default::default());
+        render_compaction_stats(&mut out, &Default::default());
+        render_device_space(&mut out, Some((1, 2)));
+        out += &arca_lake_protocol::tls::render_metrics("arca_node", tls(tls_on).as_ref());
+        arca_lake_common::metrics::annotate(&out)
+    }
+
+    fn controller_text(tls_on: bool) -> String {
+        let m = arca_lake_controller::metrics::Metrics::default();
+        if let Some(t) = tls(tls_on) {
+            let _ = m.tls.set(std::sync::Arc::new(t));
+        }
+        m.render()
+    }
+
+    #[test]
+    fn every_exported_family_is_registered_and_every_registered_family_is_exported() {
+        for (process, text) in [
+            ("gateway", gateway_text(true)),
+            ("node", node_text(true)),
+            ("controller", controller_text(true)),
+        ] {
+            let problems = arca_lake_common::metrics::validate(process, &text);
+            assert!(problems.is_empty(), "{process}:\n{}", problems.join("\n"));
+        }
+        // Explicitly plaintext processes export `_tls_enabled 0` and none
+        // of the other TLS families.
+        for (process, text) in [
+            ("gateway", gateway_text(false)),
+            ("node", node_text(false)),
+            ("controller", controller_text(false)),
+        ] {
+            let problems = arca_lake_common::metrics::validate(process, &text);
+            assert!(
+                problems
+                    .iter()
+                    .all(|p| p.contains("_tls_") && p.contains("not exported")),
+                "{process}:\n{}",
+                problems.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn alert_rules_reference_registered_metrics_only() {
+        let rules = include_str!("../../../deploy/prometheus/arca-lake-alerts.yml");
+        let mut n = 0;
+        for word in rules.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if !word.starts_with("arca_") {
+                continue;
+            }
+            n += 1;
+            let base = ["_bucket", "_sum", "_count"]
+                .iter()
+                .find_map(|s| word.strip_suffix(*s))
+                .filter(|b| {
+                    arca_lake_common::metrics::family(b).is_some_and(|f| f.kind == "histogram")
+                })
+                .unwrap_or(word);
+            assert!(
+                arca_lake_common::metrics::family(base).is_some(),
+                "alert rule uses {word}, which no process exports"
+            );
+        }
+        assert!(n >= 10, "the rules reference {n} metrics");
     }
 }

@@ -109,6 +109,8 @@ pub struct Metrics {
     pub guard_refusals_total: AtomicU64,
     /// TLS counters of the node clients (ADR-0017); unset = plaintext.
     pub tls: std::sync::OnceLock<std::sync::Arc<arca_lake_protocol::tls::TlsStats>>,
+    /// Groups in `Repairing` at the last repair pass.
+    pub groups_repairing: AtomicU64,
 }
 
 /// Metric label of each finding class, in `Finding::ALL` order.
@@ -180,8 +182,12 @@ impl Metrics {
             self.nodes_unhealthy.load(Ordering::Relaxed),
         );
         out += &g(
-            "arca_controller_nodes_total",
+            "arca_controller_nodes_registered",
             self.nodes_total.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_groups_repairing",
+            self.groups_repairing.load(Ordering::Relaxed),
         );
         out += &c(
             "arca_controller_cache_evicted_total",
@@ -320,7 +326,8 @@ impl Metrics {
             "arca_controller",
             self.tls.get().map(|t| &**t),
         );
-        out
+        // HELP lines from the metric registry (RFC-013 §7).
+        arca_lake_common::metrics::annotate(&out)
     }
 
     /// `/healthz` body.

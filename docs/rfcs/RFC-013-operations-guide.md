@@ -95,7 +95,7 @@ written to the metadata store.
    new writes. Existing groups are not rebalanced automatically; to move
    data, replace a member (`admin replace-member --group G --index I
    --node M --yes`, Phase 3.3) which runs the repair path.
-3. Verify: `arca_controller_nodes_total` increments; the new node's
+3. Verify: `arca_controller_nodes_registered` increments; the new node's
    `live_bytes` grows; no `task_errors`.
 
 ### 5.4 Node removal (decommission)
@@ -233,59 +233,61 @@ Restore runbook (exercised by `fdb_restore.rs`, real
 ## 7. Monitoring: metric registry
 
 All processes export Prometheus text on `--metrics-listen` /
-`--http`. The registry below is normative; a test asserts that every
-exported series is listed.
+`--http`. The registry is
+[`crates/common/src/metrics-registry.tsv`](../../crates/common/src/metrics-registry.tsv)
+(normative since Phase 3.4, R-62 closed): one row per metric family with
+its type, process, unit, labels and help. It is enforced in CI
+(`crates/cli` test `metrics_registry`, `arca-lake-common` tests):
 
-| Series | Type | Process | Meaning |
-| --- | --- | --- | --- |
-| `arca_controller_leader`, `_leader_token` | gauge | controller | 1 on the leader; fencing token |
-| `arca_controller_leader_acquired_total`, `_lost_total` | counter | controller | elections |
-| `arca_controller_nodes_total`, `_nodes_unhealthy` | gauge | controller | membership health |
-| `arca_controller_gc_passes_total`, `_gc_collected_total`, `_shards_deleted_total`, `_gc_skipped_referenced_total` | counter | controller | GC; `skipped_referenced > 0` is an invariant violation |
-| `arca_controller_repairs_started_total`, `_completed_total`, `_chunks_reconstructed_total`, `_task_errors_total` | counter | controller | repair |
-| `arca_controller_cache_usage_bytes`, `_cache_over_watermark`, `_cache_evicted_total`, `_chunks_promoted_total`, `_chunks_demoted_total`, `_cache_repairs_*` | mixed | controller | cache tier |
-| `arca_controller_scrub_passes_total`, `_scrub_shards_verified_total`, `_scrub_bytes_total`, `_scrub_errors_total` | counter | controller | background scrub progress and errors (RFC-008 §8.3) |
-| `arca_controller_scrub_groups_overdue` | gauge | controller | groups past `--scrub-interval-secs` at the last tick |
-| `arca_controller_integrity_findings_total{class}` | counter | controller | findings by class; `class` has eight values (RFC-008 §8.4) |
-| `arca_controller_repair_queue_depth`, `_repair_tasks_unrecoverable`, `_repair_tasks_failed`, `_data_integrity_status` | gauge | controller | stripe repair queue; status 0 = clean, 1 = repairs pending or failed, 2 = unrecoverable stripes |
-| `arca_controller_stripe_repairs_succeeded_total`, `_stripe_repairs_failed_total`, `_shards_rewritten_total`, `_repair_bytes_total` | counter | controller | stripe repair outcomes (RFC-008 §8.5) |
-| `arca_controller_manifest_roots_verified_total`, `_manifest_findings_total`, `_manifest_findings` | counter, gauge | controller | multipart manifest scrub (RFC-008 §8.6); one page per scrub pass from a persisted cursor (Phase 3.3) |
-| `arca_controller_integrity_findings_open{class}` | gauge | controller | open repair tasks by class: distinct stripes unresolved now, as opposed to the cumulative detections of `_findings_total` (Phase 3.3, R-56) |
-| `arca_controller_cluster_phase`, `_upgrade_step` | gauge | controller | 0 Active, 1 ReadOnly, 2 Restoring, 3 VerificationPending, 4 RecoveryRequired; finalize step 0 none … 5 (RFC-014/015, Phase 3.3) |
-| `arca_controller_passes_skipped_by_state_total`, `_recovery_passes_total`, `_guard_refusals_total` | counter | controller | scheduler passes the cluster state did not admit; recovery passes that did work; writes refused by the commit-time guard |
-| `arca_gateway_degraded_reads_total`, `_unreadable_reads_total`, `_integrity_reports_total`, `_integrity_reports_dropped_total` | counter | gateway | read-path integrity reports (RFC-008 §8.7) |
-| `arca_gateway_cache_*_total` (25 series, RFC-006 §5.3) | counter | gateway | hit accounting |
-| `arca_gateway_node_rpc_{stalled,deadline_exceeded,unary_timeouts,retries,exhausted}_total` | counter | gateway | ADR-0011 |
-| `arca_gateway_put_phase_seconds{phase}`, `arca_gateway_put_in_flight` | histogram, gauge | gateway | RFC-009 §6.14 |
-| `arca_gateway_population_queue_*` | counter, gauge | gateway | RFC-006 §5.3.1 |
-| `arca_gateway_meta_txn_{attempts,conflicts,unknown_retries,exhausted}_total` | counter | gateway | metadata transaction loop |
-| `arca_gateway_s3_requests_total{op,status}`, `arca_gateway_s3_request_seconds{op}`, `arca_gateway_s3_bytes_total{dir}` (Phase 3.1) | counter, histogram | gateway | request accounting (no key or principal labels) |
-| `arca_gateway_auth_failures_total{reason}`, `_rate_limited_total`, `_over_budget_total`, `_credentials_reload_failures_total`, `_tls_cert_not_after_seconds` (Phase 3.1) | counter, gauge | gateway | RFC-012 |
-| `arca_node_phase_seconds{phase}`, `arca_node_put_in_flight` | histogram, gauge | node | RFC-009 §6.14 |
-| `arca_node_quarantined_shards`, `_quarantined_bytes` | gauge | node | durable quarantine (RFC-008 §8.2) |
-| `arca_node_corrupt_reads_total`, `_scrub_shards_total`, `_scrub_bytes_total`, `_scrub_corrupt_total` | counter | node | node-side detections and `ScrubShards` work |
+- every family a process exports is in the registry with the same type
+  and process, and every registered family is exported (with TLS on;
+  an explicitly plaintext process exports `_tls_enabled 0` and no other
+  TLS family);
+- a family is declared once and its series are contiguous; a histogram
+  family has only `_bucket`, `_sum` and `_count` series (the per-phase
+  maxima are separate `…_max_seconds` gauges since Phase 3.4);
+- labels are declared, and their values come from a closed set or, for
+  `op`, an S3 operation name; a value that looks like an address, a path
+  or a key fails the test (no bucket, key, principal, host or address
+  ever becomes a label);
+- counters end in `_total` and only counters do; time is in seconds;
+- every family has a `# HELP` line: processes take it from the registry
+  at export time.
 
-No test asserts the registry yet (R-62); it is maintained by hand.
-Labels never carry addresses, host names, key ids, bucket names or
-object keys (`docs/security/public-artifacts.md` applies to exported
-series too).
+Main families by process (see the registry for every row):
+
+| Process | Families |
+| --- | --- |
+| controller | leadership and fencing token; node counts (`_nodes_registered`, renamed from `_nodes_total` in Phase 3.4, and `_nodes_unhealthy`); GC; member repair (`_groups_repairing`); cache tier and tiering; scrubbing; integrity findings and stripe repair queue (`_data_integrity_status`); manifest scrub; cluster phase and upgrade step; scheduler/guard counters; TLS |
+| gateway | read-path integrity; read-through cache (25 counters); node RPC retries and timeouts; PUT phases; population queue; metadata transactions; S3 requests by operation and status class, latency by operation, bytes (Phase 3.4); access-key refusals by reason and credential reload failures (Phase 3.4); TLS |
+| node | node phases; quarantine; corrupt reads and node scrub work; compaction and segment/live bytes (Phase 3.4); device free/total bytes for placement (Phase 3.4); TLS |
+
+Not implemented (listed before Phase 3.4, removed from the registry until
+they exist): request rate limiting and per-principal budgets, and a TLS
+certificate gauge for the S3 listener (the gateway serves S3 over plain
+HTTP behind a TLS terminator).
 
 ## 8. Alerting
 
+Rules: [`deploy/prometheus/arca-lake-alerts.yml`](../../deploy/prometheus/arca-lake-alerts.yml)
+(Prometheus rule groups; a test fails when a rule names a metric that no
+process exports). Severity `page` = data at risk or service down, `ticket`
+= the working day.
+
 | Alert | Condition | Severity | Runbook |
 | --- | --- | --- | --- |
-| No controller leader | `sum(arca_controller_leader) == 0` for 1 min | page | §5.6; check FoundationDB |
-| Node unhealthy | `arca_controller_nodes_unhealthy > 0` for 5 min | page if `≥ m` in one group's domain set, else ticket | §5.5 |
-| GC invariant violation | `increase(arca_controller_gc_skipped_referenced_total[1h]) > 0` | page | §10.4 |
-| Repair stuck | group `Repairing` and `repair_cursor` unchanged for 1 h | ticket | §10.5 |
-| Unrecoverable chunk | `arca_controller_scrub_unrecoverable_total > 0` | page | §10.6 |
-| Metadata conflicts | `rate(arca_gateway_meta_txn_conflicts_total[5m]) / rate(_attempts_total[5m]) > 0.05` | ticket | RFC-009 §6.17 |
-| Metadata unavailable | `rate(arca_gateway_s3_requests_total{status="503"}[5m])` high and FoundationDB status not available | page | §5.7 |
-| Capacity | node `segment_bytes` > 80 % of device | ticket at 80 %, page at 90 % | §5.3 |
-| Cache over watermark for long | `arca_controller_cache_over_watermark == 1` for 30 min | ticket | RFC-006 §5.4 |
-| Certificate expiry | `arca_*_tls_cert_not_after_seconds - time() < 14d` | ticket | RFC-012 §5.2 |
-| Auth failures spike | `rate(arca_gateway_auth_failures_total[5m])` > baseline × 10 | ticket | audit log |
-| RPC exhaustion | `rate(arca_gateway_node_rpc_exhausted_total[5m]) > 0` | ticket | network, node health |
+| `ArcaUnrecoverableData` | `max(arca_controller_data_integrity_status) == 2` | page | §10.6 |
+| `ArcaGcInvariantViolation` | `increase(arca_controller_gc_skipped_referenced_total[1h]) > 0` | page | §10.4 |
+| `ArcaNoControllerLeader` | `sum(arca_controller_leader) == 0` for 1 min | page | §5.6 |
+| `ArcaGatewayErrors` | 5xx share of S3 requests > 5 % for 10 min | page | §10.1, §5.7 |
+| `ArcaDeviceFull` / `ArcaDeviceFilling` | device more than 90 % / 80 % full | page / ticket | §5.3, §6 |
+| `ArcaRepairStuck` | a group `Repairing` for 1 h with no chunk rebuilt | ticket | §10.5 |
+| `ArcaStripeRepairFailing`, `ArcaQuarantinedShards`, `ArcaCompactionFailing` | failed repair tasks 30 min; quarantined shards 6 h; compaction errors | ticket | §10.6a, §10.6b, RFC-005 §5.6 |
+| `ArcaNodeUnhealthy` | a node unhealthy for 5 min (page when several in one group) | ticket | §5.5 |
+| `ArcaClusterNotActive` | cluster not Active for 30 min | ticket | §5.9 |
+| `ArcaNodeRpcExhaustion`, `ArcaMetadataConflicts` | node RPCs out of retries; > 5 % metadata conflicts | ticket | ADR-0011, RFC-009 §6.17 |
+| `ArcaCacheOverWatermark` | cache above its high watermark for 30 min | ticket | RFC-006 §5.4 |
+| `ArcaCertificateExpiring`, `ArcaTlsReloadRefused`, `ArcaRpcsDenied`, `ArcaPlaintextNodeRpcs`, `ArcaAuthFailureSpike` | certificate within 14 days; refused reload; RPCs refused by role; plaintext node; access-key refusals | ticket | §10.8, ADR-0017, audit log |
 
 ## 9. CI and runner security (public repository)
 

@@ -1,0 +1,153 @@
+# Prometheus alerting rules for arca-lake (RFC-013 §8). Every metric used
+# here is in the metric registry (crates/common/src/metrics-registry.tsv);
+# a test fails when a rule names a metric no process exports. Thresholds
+# are starting points: tune them to the cluster.
+#
+# Severity: page = act now (data at risk or service down); ticket = act
+# within the working day.
+groups:
+  - name: arca-lake-data
+    rules:
+      - alert: ArcaUnrecoverableData
+        expr: max(arca_controller_data_integrity_status) == 2
+        labels: { severity: page }
+        annotations:
+          summary: "A stripe is unrecoverable; reads of the affected objects fail with an integrity error"
+          runbook: "RFC-013 §10.6"
+      - alert: ArcaGcInvariantViolation
+        expr: increase(arca_controller_gc_skipped_referenced_total[1h]) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "GC found a referenced generation in its retired queue (it did not delete it)"
+          runbook: "RFC-013 §10.4"
+      - alert: ArcaStripeRepairFailing
+        expr: max(arca_controller_repair_tasks_failed) > 0
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Stripe repair tasks keep failing"
+          runbook: "RFC-013 §10.6a"
+      - alert: ArcaRepairStuck
+        expr: max(arca_controller_groups_repairing) > 0 and increase(arca_controller_chunks_reconstructed_total[1h]) == 0
+        for: 1h
+        labels: { severity: ticket }
+        annotations:
+          summary: "A group has been Repairing for an hour without rebuilding a chunk"
+          runbook: "RFC-013 §10.5"
+      - alert: ArcaQuarantinedShards
+        expr: max(arca_node_quarantined_shards) > 0
+        for: 6h
+        labels: { severity: ticket }
+        annotations:
+          summary: "Quarantined shards remain on a node (repair has not replaced them)"
+          runbook: "RFC-013 §10.6b"
+      - alert: ArcaCompactionFailing
+        expr: increase(arca_node_compaction_errors_total[1h]) > 3
+        labels: { severity: ticket }
+        annotations:
+          summary: "Segment compaction keeps failing; deleted space is not reclaimed"
+          runbook: "RFC-005 §5.6"
+
+  - name: arca-lake-availability
+    rules:
+      - alert: ArcaNoControllerLeader
+        expr: sum(arca_controller_leader) == 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "No controller leader: GC, repair and scrubbing have stopped"
+          runbook: "RFC-013 §5.6"
+      - alert: ArcaNodeUnhealthy
+        expr: max(arca_controller_nodes_unhealthy) > 0
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "A storage node has not answered health checks; page if several in one group"
+          runbook: "RFC-013 §5.5"
+      - alert: ArcaGatewayErrors
+        expr: sum(rate(arca_gateway_s3_requests_total{status="5xx"}[5m])) / sum(rate(arca_gateway_s3_requests_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "More than 5 % of S3 requests fail with a server error"
+          runbook: "RFC-013 §10.1, §5.7"
+      - alert: ArcaClusterNotActive
+        expr: max(arca_controller_cluster_phase) > 0
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "The cluster is ReadOnly, restoring or awaiting recovery finalize"
+          runbook: "RFC-013 §5.9"
+      - alert: ArcaNodeRpcExhaustion
+        expr: sum(rate(arca_gateway_node_rpc_exhausted_total[5m])) > 0
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Node RPCs run out of retries (network or node health)"
+          runbook: "ADR-0011"
+      - alert: ArcaMetadataConflicts
+        expr: sum(rate(arca_gateway_meta_txn_conflicts_total[5m])) / sum(rate(arca_gateway_meta_txn_attempts_total[5m])) > 0.05
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "More than 5 % of metadata transactions conflict"
+          runbook: "RFC-009 §6.17"
+
+  - name: arca-lake-capacity
+    rules:
+      - alert: ArcaDeviceFilling
+        expr: (1 - arca_node_device_free_bytes / arca_node_device_total_bytes) > 0.8 and arca_node_device_total_bytes > 0
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "A storage device is more than 80 % full"
+          runbook: "RFC-013 §5.3, §6"
+      - alert: ArcaDeviceFull
+        expr: (1 - arca_node_device_free_bytes / arca_node_device_total_bytes) > 0.9 and arca_node_device_total_bytes > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "A storage device is more than 90 % full"
+          runbook: "RFC-013 §5.3, §6"
+      - alert: ArcaCacheOverWatermark
+        expr: max(arca_controller_cache_over_watermark) == 1
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "The cache tier stays above its high watermark (eviction does not keep up)"
+          runbook: "RFC-006 §5.4"
+
+  - name: arca-lake-security
+    rules:
+      - alert: ArcaCertificateExpiring
+        expr: min(arca_node_tls_cert_not_after_seconds) - time() < 14 * 86400 or min(arca_gateway_tls_cert_not_after_seconds) - time() < 14 * 86400 or min(arca_controller_tls_cert_not_after_seconds) - time() < 14 * 86400
+        labels: { severity: ticket }
+        annotations:
+          summary: "A service certificate expires within 14 days"
+          runbook: "RFC-013 §10.8"
+      - alert: ArcaTlsReloadRefused
+        expr: increase(arca_node_tls_reload_failures_total[1h]) > 0 or increase(arca_gateway_tls_reload_failures_total[1h]) > 0 or increase(arca_controller_tls_reload_failures_total[1h]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: "New TLS material did not validate; the process keeps the previous one"
+          runbook: "RFC-013 §10.8"
+      - alert: ArcaRpcsDenied
+        expr: increase(arca_node_tls_rpcs_denied_total[15m]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: "A storage node refused RPCs of an authenticated identity (wrong role or a stale process)"
+          runbook: "ADR-0017"
+      - alert: ArcaPlaintextNodeRpcs
+        expr: min(arca_node_tls_enabled) == 0
+        for: 1h
+        labels: { severity: ticket }
+        annotations:
+          summary: "A storage node runs node RPCs in plaintext (--insecure-plaintext)"
+          runbook: "ADR-0017"
+      - alert: ArcaAuthFailureSpike
+        expr: sum(rate(arca_gateway_auth_failures_total[5m])) > 1
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Requests with unknown, inactive or expired access keys"
+          runbook: "audit log (target arca.audit)"

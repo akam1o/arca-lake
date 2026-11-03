@@ -912,6 +912,13 @@ async fn repair_pass<S: KvStore>(
         .map(|n| (n.id, n))
         .collect();
     let all_groups = cluster::list_groups(meta).await?;
+    metrics.groups_repairing.store(
+        all_groups
+            .iter()
+            .filter(|g| g.state == GroupState::Repairing)
+            .count() as u64,
+        Ordering::Relaxed,
+    );
     let now = now_ms();
     let healthy = |id: u64| {
         nodes
