@@ -777,7 +777,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 k,
                 m,
                 &tried,
-                u64::from(index) + u64::from(attempt),
+                // Spread by the chunk id (random bits of the generation id),
+                // not by the chunk index: index 0 of every object would
+                // otherwise always land in the same group.
+                placement_salt(&cid).wrapping_add(u64::from(attempt)),
             ) else {
                 return Err(match last_reason {
                     Some(reason) => s3_error!(
@@ -832,6 +835,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn choose_group(
         &self,
         map: &ClusterMap,
@@ -841,9 +845,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         exclude: &[u64],
         salt: u64,
     ) -> Option<GroupRecord> {
-        let candidates: Vec<WritableGroup> = map
-            .groups
-            .values()
+        let mut groups: Vec<&GroupRecord> = map.groups.values().collect();
+        // A stable order: the map's iteration order differs per process.
+        groups.sort_by_key(|g| g.id);
+        let candidates: Vec<WritableGroup> = groups
+            .into_iter()
             .filter(|g| {
                 matches!(
                     g.state,
@@ -937,4 +943,16 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
 enum WriteError {
     StaleEpoch,
     Failed(String),
+}
+
+/// Group-choice salt of a chunk: a mix of its id's bytes (the generation id
+/// carries random bits), so that chunks spread over the eligible groups.
+fn placement_salt(cid: &[u8; 16]) -> u64 {
+    let a = u64::from_le_bytes(cid[..8].try_into().unwrap_or_default());
+    let b = u64::from_le_bytes(cid[8..].try_into().unwrap_or_default());
+    // splitmix64 finalizer
+    let mut z = a ^ b.rotate_left(29);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }

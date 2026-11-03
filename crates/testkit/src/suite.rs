@@ -283,9 +283,9 @@ pub async fn concurrent_writers_same_key_leave_exactly_one_committed_version<
             .state,
         GenState::Committed
     );
-    let group = m.chunks[0].1.placement.group_id;
+    // The writers' chunks may be in different groups.
     assert_eq!(
-        counts(&c, group).iter().sum::<usize>(),
+        node_counts(&c).await.iter().sum::<usize>(),
         3 * writers,
         "all shards still present before GC"
     );
@@ -296,7 +296,7 @@ pub async fn concurrent_writers_same_key_leave_exactly_one_committed_version<
         "displaced generations collected"
     );
     assert_eq!(
-        counts(&c, group),
+        node_counts(&c).await,
         vec![1, 1, 1],
         "only the winner's shards remain"
     );
@@ -873,10 +873,6 @@ pub async fn crash_after_shards_before_manifest_leaves_orphans_that_reconcile_re
     )
     .await
     .unwrap();
-    let group = c.manifest(BUCKET, "obj").await.chunks[0]
-        .1
-        .placement
-        .group_id;
     let baseline = c.total_shards().await;
 
     c.backend
@@ -931,7 +927,8 @@ pub async fn crash_after_shards_before_manifest_leaves_orphans_that_reconcile_re
     assert_eq!(c.reconcile(now_ms(), 60_000).await, 0);
     assert_eq!(c.reconcile(now_ms() + 3_600_000, 60_000).await, 3);
     assert_eq!(c.total_shards().await, baseline);
-    assert_eq!(counts(&c, group), vec![1, 1, 1]);
+    // One object of one chunk (in whichever group it was placed).
+    assert_eq!(node_counts(&c).await, vec![1, 1, 1]);
     assert_eq!(
         s3::get(&c.backend, BUCKET, "obj").await.unwrap().0,
         new,

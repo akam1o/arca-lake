@@ -89,6 +89,13 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   no longer leaves an untracked segment file behind. New node gauges for
   compaction backlog, blocked segments, dead records and the active
   segment.
+- Write placement put the first chunk of every object (every chunk of a
+  single-chunk object) into one group per gateway process: the group was
+  chosen by the chunk index from candidates in a per-process hash-map
+  order, and a gateway restart moved all new writes to another group
+  (present since Phase 1; found by the Phase 3.4 soak as one node draining
+  to 0.2 GB while another doubled). Chunks are now spread by their id over
+  the eligible groups in group-id order.
 - `admin integrity scrub --wait --adaptive` ignored the adaptive policy
   and ran at the fixed rate (found by the Phase 3.4 measurement).
 
