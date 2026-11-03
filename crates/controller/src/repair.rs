@@ -169,6 +169,7 @@ pub async fn replace_member<S: KvStore>(
 /// # Errors
 ///
 /// As [`replace_member`], plus whatever the hook returns.
+#[allow(clippy::too_many_lines)]
 pub async fn replace_member_with<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -234,6 +235,29 @@ pub async fn replace_member_with<S: KvStore>(
         (updated, false)
     };
 
+    // An unprotected cache group (one copy, `cache-v1`) has nothing to
+    // rebuild from: the new member starts empty, reads invalidate the
+    // placements that pointed at the old copy and refill them from the
+    // durable tier (RFC-006 §5.9). The membership change is the repair.
+    if group.is_cache() && group.parity_shards == 0 && group.members.len() == 1 {
+        let epoch = group.epoch;
+        let after = cluster::update_group(meta, group_id, |g| {
+            if g.epoch == epoch && g.state == GroupState::Repairing {
+                g.state = GroupState::Active;
+                g.repair_cursor = None;
+                true
+            } else {
+                false
+            }
+        })
+        .await?;
+        return Ok(RepairReport {
+            epoch: after.epoch,
+            resumed,
+            complete: after.state == GroupState::Active,
+            ..RepairReport::default()
+        });
+    }
     let mut report =
         reconstruct_member(meta, clients, &nodes, &group, index, opts, &mut hook).await?;
     report.resumed = resumed;

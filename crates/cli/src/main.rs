@@ -523,6 +523,45 @@ enum AdminCommand {
         #[command(subcommand)]
         command: RecoveryCommand,
     },
+    /// Replace one member of a group (RFC-013 device replacement): the
+    /// controller leader picks a replacement (or uses `--node`), fences the
+    /// group's epoch, rebuilds the member's shards and verifies them; the
+    /// request survives a controller crash. Only while the cluster is
+    /// Active. Requires `--yes`; `--cancel` withdraws a request that has
+    /// not started rebuilding.
+    ReplaceMember {
+        /// Group id.
+        #[arg(long)]
+        group: u64,
+        /// Member index.
+        #[arg(long)]
+        index: u16,
+        /// Replacement node id (default: the controller chooses).
+        #[arg(long)]
+        node: Option<u64>,
+        /// Confirm.
+        #[arg(long)]
+        yes: bool,
+        /// Withdraw the request.
+        #[arg(long)]
+        cancel: bool,
+    },
+    /// Drain a node (RFC-013 decommission): every group member on it is
+    /// replaced one at a time, durable groups first; the node is reported
+    /// decommissioned only when no group lists it and no group is still
+    /// rebuilding. Only while the cluster is Active. Requires `--yes`;
+    /// `--cancel` stops the drain (members already moved stay moved).
+    DecommissionNode {
+        /// Node id.
+        #[arg(long)]
+        node: u64,
+        /// Confirm.
+        #[arg(long)]
+        yes: bool,
+        /// Stop draining.
+        #[arg(long)]
+        cancel: bool,
+    },
     /// Cluster read-only switch (RFC-015 §5.3).
     Cluster {
         #[command(subcommand)]
@@ -1296,6 +1335,84 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
         AdminCommand::Upgrade { command } => run_admin_upgrade(meta, command, now).await,
         AdminCommand::Recovery { command } => run_admin_recovery(meta, command, now).await,
         AdminCommand::Cluster { command } => run_admin_cluster(meta, command, now).await,
+        AdminCommand::ReplaceMember {
+            group,
+            index,
+            node,
+            yes,
+            cancel,
+        } => {
+            use arca_lake_metadata::ops::membership;
+            if cancel {
+                return match membership::clear_replace(meta.as_ref(), group).await {
+                    Ok(Some(r)) => {
+                        println!(
+                            "withdrew the request for member {} of group {group} (a rebuild already started continues until the group is complete)",
+                            r.index
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Ok(None) => {
+                        println!("no request for group {group}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => fail(e),
+                };
+            }
+            if !yes {
+                return fail(
+                    "replace-member moves a member and rebuilds its shards; re-run with --yes",
+                );
+            }
+            match membership::request_replace(meta.as_ref(), group, index, node, "admin", now).await
+            {
+                Ok(r) => {
+                    println!(
+                        "requested: group {} member {} (node {}) -> {}; the controller leader carries it out (admin status shows progress)",
+                        r.group,
+                        r.index,
+                        r.from_node,
+                        r.to_node.map_or_else(
+                            || "a node it chooses".to_string(),
+                            |n| format!("node {n}")
+                        )
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        AdminCommand::DecommissionNode { node, yes, cancel } => {
+            use arca_lake_metadata::ops::membership;
+            if cancel {
+                return match membership::cancel_drain(meta.as_ref(), node).await {
+                    Ok(true) => {
+                        println!("node {node}: drain stopped (members already moved stay moved)");
+                        ExitCode::SUCCESS
+                    }
+                    Ok(false) => {
+                        println!("node {node} is not draining");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => fail(e),
+                };
+            }
+            if !yes {
+                return fail(
+                    "decommission-node moves every member off the node; re-run with --yes",
+                );
+            }
+            match membership::drain_node(meta.as_ref(), node, "admin", now).await {
+                Ok(r) => {
+                    println!(
+                        "node {node}: {:?}; the controller leader replaces its members (admin status shows progress)",
+                        r.state
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
         AdminCommand::Status { versions } => {
             if versions {
                 let g = arca_lake_metadata::ops::compat::gate(meta.as_ref()).await;
@@ -1386,6 +1503,31 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                             l.holder, l.token, l.lease_until_ms
                         ),
                         None => println!("leader: none"),
+                    }
+                    if let Ok(states) =
+                        arca_lake_metadata::ops::membership::node_states(meta.as_ref()).await
+                    {
+                        for r in states {
+                            println!(
+                                "node {} lifecycle {:?} blocked {:?}",
+                                r.node_id, r.state, r.blocked
+                            );
+                        }
+                    }
+                    if let Ok(reqs) =
+                        arca_lake_metadata::ops::membership::replace_requests(meta.as_ref()).await
+                    {
+                        for r in reqs {
+                            println!(
+                                "replace group {} member {} from node {} to {:?} requested_ms {} last_error {:?}",
+                                r.group,
+                                r.index,
+                                r.from_node,
+                                r.to_node,
+                                r.requested_ms,
+                                r.last_error
+                            );
+                        }
                     }
                     ExitCode::SUCCESS
                 }

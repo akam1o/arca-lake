@@ -461,6 +461,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             vec![
                 ("host".into(), format!("host{i}")),
                 ("rack".into(), format!("rack{}", i % 2)),
+                ("device_class".into(), "hdd".into()),
             ],
             vec![0],
             1,

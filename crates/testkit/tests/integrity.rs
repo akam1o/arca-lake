@@ -1251,27 +1251,32 @@ async fn controller_processes_scrub_and_repair_and_a_leader_failover_resumes_the
     assert_eq!(counter("arca_controller_repair_queue_depth "), 0);
     assert!(counter("arca_controller_scrub_passes_total ") >= 1);
 
-    // Fail the leader over with a second corruption outstanding: the new
-    // leader's scrub finds it and its worker repairs it.
-    let (_, chunk1) = first_chunk(&c, "obj1").await;
-    assert_eq!(
-        c.corrupt_chunk_on_node(member_node(&c, &group, 2), group.id, chunk1.chunk_id),
-        1
-    );
+    // Fail the leader over, then corrupt a second shard: only the new
+    // leader can find and repair it (corrupting first raced with the old
+    // leader's scrub ticks).
     let (old, new) = if a.is_leader() { (a, b) } else { (b, a) };
     old.shutdown().await;
     wait_until("the new leader", Duration::from_secs(5), async || {
         new.is_leader()
     })
     .await;
+    let (_, chunk1) = first_chunk(&c, "obj1").await;
+    assert_eq!(
+        c.corrupt_chunk_on_node(member_node(&c, &group, 2), group.id, chunk1.chunk_id),
+        1
+    );
     wait_until(
         "the repair by the new leader",
         Duration::from_secs(20),
         async || {
-            itasks::tasks(meta.as_ref(), usize::MAX)
+            metrics_of(&new)
                 .await
-                .unwrap()
-                .is_empty()
+                .lines()
+                .any(|l| l == "arca_controller_stripe_repairs_succeeded_total 1")
+                && itasks::tasks(meta.as_ref(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .is_empty()
                 && c.node_store(member_node(&c, &group, 2))
                     .quarantine_entry(&shard_key(&group, &chunk1, 2))
                     .is_none()

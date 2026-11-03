@@ -170,6 +170,30 @@ pub fn scrub_group_from(key: &[u8]) -> Option<u64> {
     unpack::<(String, String, u64)>(key).ok().map(|t| t.2)
 }
 
+/// Lifecycle of a node (draining, decommissioned; Phase 3.3 §6).
+#[must_use]
+pub fn node_state(node_id: u64) -> Key {
+    pack(&(ROOT, "nstate", node_id))
+}
+
+/// Every node lifecycle record.
+#[must_use]
+pub fn node_states_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "nstate")))
+}
+
+/// Operator request to replace a member of a group.
+#[must_use]
+pub fn replace_request(group_id: u64) -> Key {
+    pack(&(ROOT, "replace", group_id))
+}
+
+/// Every replacement request.
+#[must_use]
+pub fn replace_requests_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "replace")))
+}
+
 /// Cursor of the multipart manifest scrub (RFC-008 §8.6, R-55).
 #[must_use]
 pub fn manifest_cursor() -> Key {

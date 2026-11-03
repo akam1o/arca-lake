@@ -18,8 +18,8 @@ use std::time::Duration;
 use arca_lake_metadata::fence::FencedKv;
 use arca_lake_metadata::guard::{GuardedKv, OpClass};
 use arca_lake_metadata::ops::cluster;
-use arca_lake_metadata::ops::compat;
 use arca_lake_metadata::ops::leader;
+use arca_lake_metadata::ops::{compat, membership};
 use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord};
 use arca_lake_metadata::{KvError, KvStore, MetaError};
 use arca_lake_placement::{GroupSpec, choose_replacement};
@@ -893,6 +893,12 @@ async fn repair_pass<S: KvStore>(
         verify_all_members: false,
         max_chunks: 0,
     };
+    // Operator intents (Phase 3.3 §6): draining nodes and replacement
+    // requests. They change placement on purpose, so they progress only
+    // while the cluster is Active (RFC-015 §5.6); repairs of unhealthy
+    // members and resumed repairs run in every state that admits repair.
+    let intents = Intents::load(meta, &all_groups).await?;
+    intents.complete_drains(meta, &all_groups, now).await?;
     // Durable groups first; cache groups only when no durable group needed
     // attention in this pass, and with a per-pass budget (RFC-006 §5.9).
     let mut durable_busy = false;
@@ -907,6 +913,7 @@ async fn repair_pass<S: KvStore>(
             g,
             &opts,
             &healthy,
+            &intents,
         )
         .await?
         {
@@ -931,10 +938,99 @@ async fn repair_pass<S: KvStore>(
             g,
             &cache_opts,
             &healthy,
+            &intents,
         )
         .await?;
     }
     Ok(())
+}
+
+/// Draining nodes and open replacement requests, as read at the start of
+/// a repair pass.
+struct Intents {
+    active: bool,
+    draining: BTreeSet<u64>,
+    retired: BTreeSet<u64>,
+    requests: HashMap<u64, membership::ReplaceRequest>,
+}
+
+impl Intents {
+    async fn load<S: KvStore>(meta: &S, groups: &[GroupRecord]) -> Result<Self, ControlError> {
+        let active = compat::cluster_state(meta)
+            .await?
+            .is_some_and(|c| c.state == arca_lake_metadata::records::ClusterPhase::Active);
+        let mut draining = BTreeSet::new();
+        let mut retired = BTreeSet::new();
+        for r in membership::node_states(meta).await? {
+            match r.state {
+                membership::NodeLifecycle::Draining { .. } => draining.insert(r.node_id),
+                membership::NodeLifecycle::Decommissioned { .. } => retired.insert(r.node_id),
+            };
+        }
+        let mut requests = HashMap::new();
+        for r in membership::replace_requests(meta).await? {
+            // Satisfied: another node holds the index and the group is
+            // Active again (the replacement passed its completeness check).
+            let done = groups.iter().find(|g| g.id == r.group).is_none_or(|g| {
+                g.state == GroupState::Active
+                    && g.members
+                        .get(usize::from(r.index))
+                        .is_none_or(|m| m.node_id != r.from_node)
+            });
+            if done {
+                membership::clear_replace(meta, r.group).await?;
+                info!(
+                    group = r.group,
+                    index = r.index,
+                    "replacement request completed"
+                );
+            } else {
+                requests.insert(r.group, r);
+            }
+        }
+        Ok(Self {
+            active,
+            draining,
+            retired,
+            requests,
+        })
+    }
+
+    /// Whether `node` may receive a new member.
+    fn may_host(&self, node: u64) -> bool {
+        !self.draining.contains(&node) && !self.retired.contains(&node)
+    }
+
+    /// A draining node is decommissioned once no group lists it and no
+    /// group is still rebuilding (its shards may still be the better
+    /// source until every replacement has passed its completeness check).
+    async fn complete_drains<S: KvStore>(
+        &self,
+        meta: &S,
+        groups: &[GroupRecord],
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let repairing = groups.iter().any(|g| g.state == GroupState::Repairing);
+        for &n in &self.draining {
+            let member_of = groups
+                .iter()
+                .filter(|g| g.members.iter().any(|m| m.node_id == n))
+                .count();
+            if member_of == 0 && !repairing {
+                membership::update_drain(meta, n, Some(now), None).await?;
+                info!(node = n, "node decommissioned: no group lists it");
+            } else if !self.active {
+                membership::update_drain(
+                    meta,
+                    n,
+                    None,
+                    Some("cluster not Active; drain paused".into()),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Resume or start the repair of one group when needed. Returns whether a
@@ -950,7 +1046,9 @@ async fn repair_one<S: KvStore>(
     g: &GroupRecord,
     opts: &RepairOptions,
     healthy: &impl Fn(u64) -> bool,
+    intents: &Intents,
 ) -> Result<bool, ControlError> {
+    let candidate = |id: u64| healthy(id) && intents.may_host(id);
     match g.state {
         GroupState::Repairing => {
             let Some(cursor) = g.repair_cursor else {
@@ -977,22 +1075,60 @@ async fn repair_one<S: KvStore>(
             .await?;
             Ok(true)
         }
-        GroupState::Active if cfg.auto_repair => {
-            let Some(index) = g.members.iter().position(|m| !healthy(m.node_id)) else {
-                return Ok(false);
+        GroupState::Active => {
+            // Unhealthy members first (auto repair), then an operator
+            // request, then members on draining nodes.
+            let unhealthy = cfg
+                .auto_repair
+                .then(|| g.members.iter().position(|m| !healthy(m.node_id)))
+                .flatten();
+            let request = intents.requests.get(&g.id).filter(|r| {
+                g.members
+                    .get(usize::from(r.index))
+                    .is_some_and(|m| m.node_id == r.from_node)
+            });
+            let drained = g
+                .members
+                .iter()
+                .position(|m| intents.draining.contains(&m.node_id));
+            let (index, why, to_node) = match (unhealthy, request, drained) {
+                (Some(i), _, _) => (i, "auto repair", None),
+                (None, Some(r), _) if intents.active => {
+                    (usize::from(r.index), "replace request", r.to_node)
+                }
+                (None, _, Some(i)) if intents.active => (i, "drain", None),
+                _ => return Ok(false),
             };
-            let replacement =
-                choose_for(nodes, all_groups, g, index, &cfg.failure_domain, healthy)?;
+            let replacement = match to_node {
+                Some(n) => choose_for(nodes, all_groups, g, index, &cfg.failure_domain, &|id| {
+                    id == n && candidate(id)
+                })?,
+                None => choose_for(nodes, all_groups, g, index, &cfg.failure_domain, &candidate)?,
+            };
             let Some(replacement) = replacement else {
-                warn!(group = g.id, index, "no healthy replacement available");
-                return Ok(true);
+                let msg = match to_node {
+                    Some(n) => format!(
+                        "requested node {n} is unhealthy, draining, or breaks the failure domain"
+                    ),
+                    None => "no healthy replacement with free failure domain".to_string(),
+                };
+                warn!(group = g.id, index, why, "{msg}");
+                if why == "replace request" {
+                    membership::note_replace_error(meta, g.id, Some(msg)).await?;
+                } else if why == "drain" {
+                    let node = g.members[index].node_id;
+                    membership::update_drain(meta, node, None, Some(msg)).await?;
+                }
+                // Only an unhealthy member keeps cache repair waiting.
+                return Ok(why == "auto repair");
             };
             info!(
                 group = g.id,
                 index,
                 node = replacement.node_id,
                 cache = g.is_cache(),
-                "auto repair"
+                why,
+                "member replacement"
             );
             run_repair(
                 meta,
@@ -1031,11 +1167,25 @@ fn choose_for(
             device_id: m.device_id,
         })
         .collect();
-    // Never pick a node that is already a member.
+    // Never pick a node that is already a member, and stay on the device
+    // class the group's other members use (a durable member must not move
+    // onto a cache-tier node, nor the reverse).
     let member_nodes: BTreeSet<u64> = g.members.iter().map(|m| m.node_id).collect();
+    let class_of = |id: u64| {
+        nodes.get(&id).and_then(|n| {
+            n.labels
+                .iter()
+                .find(|(k, _)| k == "device_class")
+                .map(|(_, v)| v.clone())
+        })
+    };
+    // Every member, the one being replaced included (its node record keeps
+    // its labels after it died): a one-member cache group has no other.
+    let classes: BTreeSet<Option<String>> = g.members.iter().map(|m| class_of(m.node_id)).collect();
     let candidates: Vec<_> = devices
         .into_iter()
         .filter(|d| !member_nodes.contains(&d.node_id))
+        .filter(|d| classes.is_empty() || classes.contains(&class_of(d.node_id)))
         .collect();
     let spec = GroupSpec {
         total_shards: g.members.len(),
