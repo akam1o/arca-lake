@@ -4,6 +4,7 @@
 //! end-to-end suite lives in [`suite`] and is instantiated per backend with
 //! [`e2e_suite!`].
 
+pub mod chaos;
 #[cfg(feature = "fdb")]
 pub mod fdb;
 pub mod pki;
@@ -44,6 +45,7 @@ pub struct TestNode {
     pub addr: SocketAddr,
     handle: Option<NodeHandle>,
     tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
+    capacity: Option<u64>,
 }
 
 impl TestNode {
@@ -293,6 +295,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 addr,
                 handle: Some(handle),
                 tls,
+                capacity: None,
             });
         }
         groups::create_groups(meta.as_ref(), &opts.profile, "default", opts.groups)
@@ -330,6 +333,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 addr,
                 handle: Some(handle),
                 tls,
+                capacity: None,
             });
         }
         let cache = if opts.cache_nodes > 0 {
@@ -429,6 +433,16 @@ impl<S: KvStore + 'static> TestCluster<S> {
         }
     }
 
+    /// Advertise `bytes` as node `i`'s capacity (`None`: the file
+    /// system's) from its next start; restarts it now if it runs.
+    pub async fn set_node_capacity(&mut self, i: usize, bytes: Option<u64>) {
+        self.nodes[i].capacity = bytes;
+        if self.nodes[i].handle.is_some() {
+            self.stop_node(i).await;
+            self.start_node(i).await;
+        }
+    }
+
     /// The gateway's TLS context on a TLS cluster.
     #[must_use]
     pub fn gateway_tls(&self) -> Option<Arc<arca_lake_protocol::tls::TlsContext>> {
@@ -485,6 +499,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         let mut cfg = NodeConfig::new(n.addr, &n.dir);
         cfg.store = node_store_config(&n.dir);
         cfg.tls = n.tls.clone();
+        cfg.capacity_bytes = n.capacity;
         let mut last_err = None;
         for _ in 0..50 {
             match arca_lake_storage_node::serve(cfg.clone()).await {
@@ -538,6 +553,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             addr,
             handle: Some(handle),
             tls,
+            capacity: None,
         });
         i
     }
@@ -782,6 +798,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             addr,
             handle: Some(handle),
             tls,
+            capacity: None,
         });
         i
     }

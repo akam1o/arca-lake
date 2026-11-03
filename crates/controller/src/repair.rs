@@ -58,6 +58,27 @@ pub struct RepairOptions {
     /// the budget is spent the cursor is persisted, the completeness check
     /// is skipped, and the group stays `Repairing` (RFC-006 §5.9).
     pub max_chunks: usize,
+    /// Nodes that held the member being rebuilt and may still answer (the
+    /// node a replacement request or a drain moves the member off): a
+    /// source of its own shard of each chunk (Phase 3.4 §4, §10).
+    pub former: Vec<u64>,
+    /// How shards are obtained when a former member answers.
+    pub source: RepairSource,
+}
+
+/// Where a rebuilt shard comes from (Phase 3.4 §10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RepairSource {
+    /// EC reconstruction from `k` current members, validated against the
+    /// chunk's metadata checksum; the former member's shard is used only
+    /// when fewer than `k` current members have a good shard (then it is
+    /// one of the `k` inputs and the same validation applies).
+    #[default]
+    Reconstruct,
+    /// Copy the former member's shard (verified by its node's block
+    /// checksums when read, and by the target's CRC when written); EC
+    /// reconstruction when it does not answer.
+    Direct,
 }
 
 /// Result of a repair.
@@ -73,6 +94,11 @@ pub struct RepairReport {
     pub resumed: bool,
     /// Whether this run stopped because `max_chunks` was reached.
     pub budget_exhausted: bool,
+    /// Shards copied from the former member as they were.
+    pub copied_direct: usize,
+    /// Reconstructions that needed the former member's shard (fewer than
+    /// `k` current members had a good one).
+    pub used_former: usize,
     /// Whether the group is `Active` again.
     pub complete: bool,
     /// What the completeness check found.
@@ -92,6 +118,9 @@ pub struct Completeness {
     pub corrupt: Vec<(usize, usize)>,
     /// Members that did not answer.
     pub unavailable: Vec<usize>,
+    /// Chunks missing on members other than the one rebuilt, with those
+    /// members (the move hands them to stripe repair, bounded per check).
+    pub missing_elsewhere: Vec<([u8; 16], Vec<u16>)>,
 }
 
 impl Completeness {
@@ -268,15 +297,39 @@ pub async fn replace_member_with<S: KvStore>(
 
     let completeness = check_completeness(clients, &nodes, &group, index, opts).await?;
     let complete = completeness.is_complete();
+    // Shards missing on the other members (a corrupt one quarantined when
+    // the move read it, a member that lost one) are stripe repair's work:
+    // queue it, so that the next check can pass (otherwise the group would
+    // wait for a repair nobody started).
+    for (cid, members) in &completeness.missing_elsewhere {
+        arca_lake_metadata::ops::integrity::enqueue_or_wake(
+            meta,
+            group.id,
+            *cid,
+            arca_lake_metadata::ops::integrity::Finding::MissingShard,
+            members,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0)),
+        )
+        .await?;
+    }
     if !complete {
         // The next run must walk from the start again: the cursor only
         // records how far reconstruction got, and the check found something
         // (a corrupt or missing shard, an unreachable member) that a resumed
         // walk from the cursor would never revisit.
+        // Reset to the start of the same member (`chunk_id` zero), not to
+        // no cursor: the resume path needs the member index, and a group
+        // Repairing without a cursor waited for an operator forever.
         let epoch = group.epoch;
+        let member = u16::try_from(index).unwrap_or(u16::MAX);
         cluster::update_group(meta, group_id, |g| {
-            if g.epoch == epoch && g.state == GroupState::Repairing && g.repair_cursor.is_some() {
-                g.repair_cursor = None;
+            if g.epoch == epoch && g.state == GroupState::Repairing {
+                g.repair_cursor = Some(RepairCursor {
+                    member,
+                    chunk_id: [0; 16],
+                });
                 true
             } else {
                 false
@@ -385,6 +438,7 @@ fn coder_for(group: &GroupRecord) -> Result<(Box<dyn ErasureCoder>, CodeParams),
     Ok((coder, params))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn reconstruct_member<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -423,7 +477,7 @@ async fn reconstruct_member<S: KvStore>(
             persist_cursor(meta, group, index, cid).await?;
             continue;
         }
-        let Some(bytes) = reconstruct_one(
+        let Some((bytes, how)) = reconstruct_one(
             meta,
             clients,
             nodes,
@@ -432,6 +486,7 @@ async fn reconstruct_member<S: KvStore>(
             &chunk,
             coder.as_ref(),
             params,
+            opts,
         )
         .await?
         else {
@@ -473,6 +528,11 @@ async fn reconstruct_member<S: KvStore>(
             }
         }
         persist_cursor(meta, group, index, cid).await?;
+        match how {
+            Source::Direct => report.copied_direct += 1,
+            Source::WithFormer => report.used_former += 1,
+            Source::Members => {}
+        }
         let index_in_run = report.reconstructed;
         report.reconstructed += 1;
         hook(RepairStep::Chunk {
@@ -499,7 +559,7 @@ async fn reconstruct_member<S: KvStore>(
 ///
 /// `None` when fewer than `k` shards exist and metadata has no live
 /// generation for the chunk (deleted while the repair ran).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn reconstruct_one<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -509,9 +569,48 @@ async fn reconstruct_one<S: KvStore>(
     chunk: &ChunkPresence,
     coder: &dyn ErasureCoder,
     params: CodeParams,
-) -> Result<Option<Bytes>, ControlError> {
+    opts: &RepairOptions,
+) -> Result<Option<(Bytes, Source)>, ControlError> {
     let cid = chunk.chunk_id;
     let k = params.data;
+    let own = ShardRef {
+        group_id: group.id,
+        chunk_id: cid,
+        shard_index: u16::try_from(index).unwrap_or(0),
+    };
+    // The former member's copy of the shard being rebuilt, if it answers
+    // (its node verifies the block checksums on the way out).
+    let former_shard = async || -> Option<Vec<u8>> {
+        for id in &opts.former {
+            if group.members.iter().any(|m| m.node_id == *id) {
+                continue;
+            }
+            if let Some(n) = nodes.get(id)
+                && let Ok(b) = clients.get_shard(&n.address, own, 0, 0).await
+            {
+                return Some(b.to_vec());
+            }
+        }
+        None
+    };
+    if opts.source == RepairSource::Direct && !group.is_cache() {
+        let (prefix, chunk_index) = split_chunk_id(&cid);
+        // Only for a chunk of a live generation recorded in this group, and
+        // only a shard of the length its layout gives.
+        if let Some(record) =
+            gc::chunk_record_in_group(meta, &prefix, chunk_index, group.id).await?
+            && let Some(b) = former_shard().await
+        {
+            let layout = StripeLayout::new(
+                usize::try_from(record.len).unwrap_or(0),
+                k,
+                coder.shard_alignment(),
+            );
+            if b.len() == layout.shard_len() {
+                return Ok(Some((Bytes::from(b), Source::Direct)));
+            }
+        }
+    }
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; params.total()];
     let mut have = 0;
     // Prefer members that list the shard; try the others too (the listing
@@ -566,7 +665,20 @@ async fn reconstruct_one<S: KvStore>(
                 have
             )));
         }
-        return Ok(Some(Bytes::from(shards[index].take().unwrap_or_default())));
+        return Ok(Some((
+            Bytes::from(shards[index].take().unwrap_or_default()),
+            Source::Members,
+        )));
+    }
+    let mut how = Source::Members;
+    if have < k
+        && let Some(b) = former_shard().await
+    {
+        // One of the `k` inputs; the reconstruction below is validated
+        // against the recorded checksum like any other.
+        shards[index] = Some(b);
+        have += 1;
+        how = Source::WithFormer;
     }
     if have < k {
         if !gc::generation_is_live(meta, &prefix).await? {
@@ -609,8 +721,31 @@ async fn reconstruct_one<S: KvStore>(
                 have
             )));
         }
+    } else if how == Source::WithFormer {
+        // Without a record there is nothing to validate the former copy
+        // against: do not write it.
+        return Err(ControlError::Unrecoverable {
+            group: group.id,
+            chunk: hex(&cid),
+            have: have - 1,
+            need: k,
+        });
     }
-    Ok(Some(Bytes::from(shards[index].take().unwrap_or_default())))
+    Ok(Some((
+        Bytes::from(shards[index].take().unwrap_or_default()),
+        how,
+    )))
+}
+
+/// How a shard was obtained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// Reconstructed from current members.
+    Members,
+    /// Reconstructed with the former member's shard as one input.
+    WithFormer,
+    /// Copied from the former member.
+    Direct,
 }
 
 /// Whether the joined data shards have the recorded length and CRC.
@@ -650,6 +785,16 @@ async fn check_completeness(
         c.chunks += 1;
         if chunk.present.iter().any(Option::is_none) {
             c.missing += 1;
+            let others: Vec<u16> = chunk
+                .present
+                .iter()
+                .enumerate()
+                .filter(|(i, p)| *i != index && p.is_none())
+                .map(|(i, _)| u16::try_from(i).unwrap_or(u16::MAX))
+                .collect();
+            if !others.is_empty() && c.missing_elsewhere.len() < 1000 {
+                c.missing_elsewhere.push((chunk.chunk_id, others));
+            }
         }
         let lens: BTreeSet<u64> = chunk.present.iter().flatten().copied().collect();
         if lens.len() > 1 {

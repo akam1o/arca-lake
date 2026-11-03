@@ -237,6 +237,19 @@ struct NodeRpcArgs {
     tls: TlsArgs,
 }
 
+/// Dry runs of member moves: node access and the controller's settings.
+#[derive(Debug, clap::Args)]
+struct PlanArgs {
+    /// Failure domain label the controller uses.
+    #[arg(long = "failure-domain", default_value = "host")]
+    plan_failure_domain: String,
+    /// Estimated rebuild rate for the time estimate, MiB/s.
+    #[arg(long, default_value_t = 64)]
+    rate_mib: u64,
+    #[command(flatten)]
+    rpc: NodeRpcArgs,
+}
+
 /// Mutual TLS to and from storage nodes (RFC-012 §5.5, ADR-0017).
 #[derive(Debug, Clone, clap::Args)]
 struct TlsArgs {
@@ -517,6 +530,11 @@ struct StorageNodeArgs {
     /// Segments compacted per pass at most.
     #[arg(long, default_value_t = 2)]
     compaction_max_segments: usize,
+    /// Capacity this node advertises for placement of replacements (bytes;
+    /// default: the file system's). Free space is reported as the smaller
+    /// of the file system's and this minus the segment bytes.
+    #[arg(long)]
+    capacity_bytes: Option<u64>,
     #[command(flatten)]
     tls: TlsArgs,
     #[command(subcommand)]
@@ -617,6 +635,13 @@ struct ControllerArgs {
     /// Failure domain label for replacement choice.
     #[arg(long, default_value = "host")]
     failure_domain: String,
+    /// How a member move obtains shards while the leaving member still
+    /// answers: `reconstruct` (EC from k members, validated against the
+    /// chunk checksum; the leaving member's shard only when fewer than k
+    /// members have one) or `direct` (copy the leaving member's shard,
+    /// checked by block checksums and the target's CRC).
+    #[arg(long, default_value = "reconstruct", value_parser = ["reconstruct", "direct"])]
+    repair_source: String,
     #[command(flatten)]
     cache: CacheArgs,
     /// Eviction pass interval in seconds.
@@ -806,6 +831,12 @@ enum AdminCommand {
         /// Withdraw the request.
         #[arg(long)]
         cancel: bool,
+        /// Show what would happen (target, capacity, bytes to move, what
+        /// would block it) without writing metadata or touching a shard.
+        #[arg(long, conflicts_with_all = ["yes", "cancel"])]
+        dry_run: bool,
+        #[command(flatten)]
+        plan: PlanArgs,
     },
     /// Drain a node (RFC-013 decommission): every group member on it is
     /// replaced one at a time, durable groups first; the node is reported
@@ -822,6 +853,12 @@ enum AdminCommand {
         /// Stop draining.
         #[arg(long)]
         cancel: bool,
+        /// Show every move the drain would make without writing metadata
+        /// or touching a shard.
+        #[arg(long, conflicts_with_all = ["yes", "cancel"])]
+        dry_run: bool,
+        #[command(flatten)]
+        plan: PlanArgs,
     },
     /// Cluster read-only switch (RFC-015 §5.3).
     Cluster {
@@ -1344,6 +1381,7 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
     if !(0.0..=1.0).contains(&args.compaction_min_dead_fraction) {
         return fail("--compaction-min-dead-fraction must be between 0 and 1");
     }
+    cfg.capacity_bytes = args.capacity_bytes;
     cfg.compaction = arca_lake_storage_node::compactor::CompactionPolicy {
         interval: Duration::from_secs(args.compaction_interval_secs),
         min_dead_fraction: args.compaction_min_dead_fraction,
@@ -1572,6 +1610,11 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.repair_interval = Duration::from_secs(args.repair_interval_secs);
     cfg.health_interval = Duration::from_secs(args.health_interval_secs);
     cfg.failure_domain = args.failure_domain;
+    cfg.repair_source = if args.repair_source == "direct" {
+        arca_lake_controller::repair::RepairSource::Direct
+    } else {
+        arca_lake_controller::repair::RepairSource::Reconstruct
+    };
     cfg.http_listen = args.http;
     match args.cache.config() {
         Ok(Some(c)) => cfg.cache_tiers = vec![c],
@@ -1779,8 +1822,25 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
             node,
             yes,
             cancel,
+            dry_run,
+            plan,
         } => {
             use arca_lake_metadata::ops::membership;
+            if dry_run {
+                return dry_run_plan(&plan, async |clients| {
+                    arca_lake_controller::plan::plan_replace(
+                        meta.as_ref(),
+                        clients,
+                        group,
+                        index,
+                        node,
+                        &plan.plan_failure_domain,
+                        1000,
+                    )
+                    .await
+                })
+                .await;
+            }
             if cancel {
                 return match membership::clear_replace(meta.as_ref(), group).await {
                     Ok(Some(r)) => {
@@ -1820,8 +1880,27 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 Err(e) => fail(e),
             }
         }
-        AdminCommand::DecommissionNode { node, yes, cancel } => {
+        AdminCommand::DecommissionNode {
+            node,
+            yes,
+            cancel,
+            dry_run,
+            plan,
+        } => {
             use arca_lake_metadata::ops::membership;
+            if dry_run {
+                return dry_run_plan(&plan, async |clients| {
+                    arca_lake_controller::plan::plan_decommission(
+                        meta.as_ref(),
+                        clients,
+                        node,
+                        &plan.plan_failure_domain,
+                        1000,
+                    )
+                    .await
+                })
+                .await;
+            }
             if cancel {
                 return match membership::cancel_drain(meta.as_ref(), node).await {
                     Ok(true) => {
@@ -1977,6 +2056,85 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 ),
             }
         }
+    }
+}
+
+/// Run a dry-run planner and print the plan; exit 0 when nothing blocks
+/// it, 2 when something would (the plan is printed either way).
+#[allow(clippy::cast_precision_loss)]
+async fn dry_run_plan(
+    args: &PlanArgs,
+    planner: impl AsyncFnOnce(
+        &arca_lake_protocol::client::NodeClients,
+    ) -> Result<
+        arca_lake_controller::plan::Plan,
+        arca_lake_controller::ControlError,
+    >,
+) -> ExitCode {
+    let clients = match args.rpc.tls.context(arca_lake_protocol::tls::Role::Admin) {
+        Ok(t) => {
+            arca_lake_protocol::client::NodeClients::with_policy(args.rpc.policy()).with_tls(t)
+        }
+        Err(e) => return fail(e),
+    };
+    let p = match planner(&clients).await {
+        Ok(p) => p,
+        Err(e) => return fail(e),
+    };
+    let mib = |b: u64| b as f64 / f64::from(1u32 << 20);
+    println!(
+        "DRY RUN (nothing was changed): cluster {}",
+        p.phase.map_or("unknown", |p| p.name())
+    );
+    for m in &p.moves {
+        println!(
+            "move group {} (tier {}{}) member {}: node {} -> {} | chunks {} | write {:.1} MiB | read {:.1} MiB | sources {}/{} | target free {}",
+            m.group,
+            m.tier,
+            if m.cache { ", cache" } else { "" },
+            m.index,
+            m.from_node,
+            m.to_node
+                .map_or_else(|| "NONE".to_string(), |n| format!("node {n}")),
+            m.size
+                .map_or_else(|| "?".to_string(), |s| s.shards.to_string()),
+            mib(m.size.map_or(0, |s| s.bytes)),
+            mib(m.read_bytes),
+            m.sources.0,
+            m.sources.1,
+            m.to_free
+                .map_or_else(|| "unknown".to_string(), |f| format!("{:.1} MiB", mib(f)))
+        );
+        for b in &m.blockers {
+            println!("  BLOCKED: {b}");
+        }
+        for n in &m.notes {
+            println!("  note: {n}");
+        }
+    }
+    for b in &p.blockers {
+        println!("BLOCKED: {b}");
+    }
+    for n in &p.notes {
+        println!("note: {n}");
+    }
+    let secs = mib(p.read_bytes().max(p.write_bytes())) / args.rate_mib.max(1) as f64;
+    println!(
+        "total: write {:.1} MiB, read {:.1} MiB, about {:.0} s at {} MiB/s; {}",
+        mib(p.write_bytes()),
+        mib(p.read_bytes()),
+        secs,
+        args.rate_mib,
+        if p.blocked() {
+            "would be BLOCKED"
+        } else {
+            "would proceed"
+        }
+    );
+    if p.blocked() {
+        ExitCode::from(2)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

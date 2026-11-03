@@ -298,6 +298,7 @@ dependencies = [
  "arca-lake-protocol",
  "arca-lake-storage",
  "bytes",
+ "rustix",
  "tempfile",
  "thiserror",
  "tokio",

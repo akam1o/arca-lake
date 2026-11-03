@@ -16,6 +16,7 @@ fault-injection = []
 tracing.workspace = true
 arca-lake-common.workspace = true
 arca-lake-storage.workspace = true
+rustix.workspace = true
 arca-lake-protocol.workspace = true
 tonic = { workspace = true, features = ["codegen", "server", "channel", "transport", "router"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time"] }

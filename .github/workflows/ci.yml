@@ -385,6 +385,12 @@ jobs:
           sudo docker exec -d arca-fdb backup_agent -C /var/fdb/fdb.cluster
           ARCA_FDB_BACKUP_CMD="sudo docker exec arca-fdb" \
             cargo test -p arca-lake-testkit --features fdb --test fdb_restore -- --nocapture --test-threads=1
+      - name: member moves under FoundationDB process and quorum loss (Phase 3.4 §4)
+        env:
+          ARCA_FDB_TESTS: "1"
+          ARCA_CHAOS_DOCKER: "1"
+          ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
+        run: cargo test -p arca-lake-testkit --features fdb --test membership_faults fdb:: -- --nocapture --test-threads=1
       - name: run the failover test
         env:
           ARCA_FDB_TESTS: "1"

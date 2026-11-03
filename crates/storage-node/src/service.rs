@@ -36,6 +36,9 @@ pub struct NodeConfig {
     pub tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
     /// Background segment compaction (RFC-005 §5.6).
     pub compaction: crate::compactor::CompactionPolicy,
+    /// Capacity this node advertises for placement (`Health` free and
+    /// total bytes are capped by it); `None` = the file system's.
+    pub capacity_bytes: Option<u64>,
 }
 
 impl NodeConfig {
@@ -49,6 +52,7 @@ impl NodeConfig {
             stream_progress_timeout: Duration::from_secs(10),
             tls: None,
             compaction: crate::compactor::CompactionPolicy::default(),
+            capacity_bytes: None,
         }
     }
 }
@@ -70,6 +74,8 @@ pub struct StorageNodeService {
     tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
     /// Background compaction counters.
     compaction: Arc<crate::compactor::CompactionStats>,
+    /// Advertised capacity cap.
+    capacity_bytes: Option<u64>,
 }
 
 /// Decrements a gauge when dropped (`PutShard` streams in flight).
@@ -178,6 +184,7 @@ impl StorageNodeService {
             cluster: Mutex::new(cluster),
             tls: cfg.tls.clone(),
             compaction: Arc::default(),
+            capacity_bytes: cfg.capacity_bytes,
         })
     }
 
@@ -847,6 +854,13 @@ impl StorageNode for StorageNodeService {
                     .collect(),
             )
         };
+        let space = device_space(self.store.dir()).map(|(free, total)| match self.capacity_bytes {
+            Some(cap) => (
+                free.min(cap.saturating_sub(stats.segment_bytes)),
+                total.min(cap),
+            ),
+            None => (free, total),
+        });
         Ok(tonic::Response::new(pb::HealthResponse {
             live_shards: stats.live_shards as u64,
             live_bytes: stats.live_bytes,
@@ -864,8 +878,24 @@ impl StorageNode for StorageNodeService {
             version_bump: arca_lake_common::compat::BUMP,
             puts_in_flight: self.stats.puts_in_flight.load(Ordering::Relaxed),
             gets_in_flight: self.stats.gets_in_flight.load(Ordering::Relaxed),
+            device_free_bytes: space.map_or(0, |s| s.0),
+            device_total_bytes: space.map_or(0, |s| s.1),
         }))
     }
+}
+
+/// `(available, total)` bytes of the file system holding `dir`.
+fn device_space(dir: &std::path::Path) -> Option<(u64, u64)> {
+    let s = rustix::fs::statvfs(dir).ok()?;
+    let unit = if s.f_frsize > 0 {
+        s.f_frsize
+    } else {
+        s.f_bsize
+    };
+    Some((
+        s.f_bavail.saturating_mul(unit),
+        s.f_blocks.saturating_mul(unit),
+    ))
 }
 
 fn crc32c_of(data: &[u8]) -> u32 {

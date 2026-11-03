@@ -51,6 +51,9 @@ pub struct ControllerConfig {
     pub unhealthy_after: Duration,
     /// Replace unhealthy members automatically.
     pub auto_repair: bool,
+    /// How member moves obtain shards when the leaving member answers
+    /// (Phase 3.4 §10).
+    pub repair_source: crate::repair::RepairSource,
     /// Grace period before a retired generation's shards are deleted.
     pub gc_grace: Duration,
     /// Open multipart uploads older than this are aborted by the sweep
@@ -116,6 +119,7 @@ impl ControllerConfig {
             health_interval: Duration::from_secs(5),
             unhealthy_after: Duration::from_secs(60),
             auto_repair: false,
+            repair_source: crate::repair::RepairSource::Reconstruct,
             gc_grace: Duration::from_mins(10),
             multipart_expiry: Duration::from_hours(7 * 24),
             min_orphan_age: Duration::from_mins(15),
@@ -495,12 +499,14 @@ fn start_leader_tasks<S: KvStore + 'static>(
                 let meta = Arc::clone(&meta_repair);
                 let clients = clients.clone();
                 let cfg = cfg.clone();
+                let estimates = Arc::new(crate::capacity::Estimates::default());
                 move || {
                     let meta = Arc::clone(&meta);
                     let clients = clients.clone();
                     let cfg = cfg.clone();
                     let metrics = Arc::clone(&metrics);
-                    async move { repair_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
+                    let estimates = Arc::clone(&estimates);
+                    async move { repair_pass(meta.as_ref(), &clients, &cfg, &metrics, &estimates).await }
                 }
             },
         )),
@@ -883,6 +889,7 @@ async fn repair_pass<S: KvStore>(
     clients: &NodeClients,
     cfg: &ControllerConfig,
     metrics: &Metrics,
+    estimates: &crate::capacity::Estimates,
 ) -> Result<(), ControlError> {
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
@@ -900,6 +907,8 @@ async fn repair_pass<S: KvStore>(
         page_size: cfg.page_size,
         verify_all_members: false,
         max_chunks: 0,
+        former: Vec::new(),
+        source: cfg.repair_source,
     };
     // Operator intents (Phase 3.3 §6): draining nodes and replacement
     // requests. They change placement on purpose, so they progress only
@@ -922,6 +931,7 @@ async fn repair_pass<S: KvStore>(
             &opts,
             &healthy,
             &intents,
+            estimates,
         )
         .await?
         {
@@ -947,6 +957,7 @@ async fn repair_pass<S: KvStore>(
             &cache_opts,
             &healthy,
             &intents,
+            estimates,
         )
         .await?;
     }
@@ -1043,7 +1054,7 @@ impl Intents {
 
 /// Resume or start the repair of one group when needed. Returns whether a
 /// repair ran (or was needed and could not start).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn repair_one<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -1055,6 +1066,7 @@ async fn repair_one<S: KvStore>(
     opts: &RepairOptions,
     healthy: &impl Fn(u64) -> bool,
     intents: &Intents,
+    estimates: &crate::capacity::Estimates,
 ) -> Result<bool, ControlError> {
     let candidate = |id: u64| healthy(id) && intents.may_host(id);
     match g.state {
@@ -1070,13 +1082,27 @@ async fn repair_one<S: KvStore>(
             let Some(&member) = g.members.get(index) else {
                 return Ok(true);
             };
+            // The node the member left, when an intent names it and it
+            // still answers: a source of its own shards.
+            let former: Vec<u64> = intents
+                .requests
+                .get(&g.id)
+                .map(|r| r.from_node)
+                .into_iter()
+                .chain(intents.draining.iter().copied())
+                .filter(|&n| healthy(n) && !g.members.iter().any(|m| m.node_id == n))
+                .collect();
+            let opts = RepairOptions {
+                former,
+                ..opts.clone()
+            };
             run_repair(
                 meta,
                 clients,
                 g.id,
                 index,
                 member,
-                opts,
+                &opts,
                 metrics,
                 g.is_cache(),
             )
@@ -1107,18 +1133,43 @@ async fn repair_one<S: KvStore>(
                 (None, _, Some(i)) if intents.active => (i, "drain", None),
                 _ => return Ok(false),
             };
-            let replacement = match to_node {
-                Some(n) => choose_for(nodes, all_groups, g, index, &cfg.failure_domain, &|id| {
-                    id == n && candidate(id)
-                })?,
-                None => choose_for(nodes, all_groups, g, index, &cfg.failure_domain, &candidate)?,
+            // Capacity (Phase 3.4 §4): the member's bytes, measured on a
+            // surviving member, must fit on the target with headroom; a
+            // node that does not report its free space is not judged.
+            let one_copy_cache = g.is_cache() && g.parity_shards == 0 && g.members.len() == 1;
+            let need = if one_copy_cache {
+                0
+            } else {
+                estimates
+                    .member_size(clients, nodes, g, index, cfg.page_size)
+                    .await
+                    .map_or(0, |s| s.bytes)
             };
+            let mut free: HashMap<u64, Option<u64>> = HashMap::new();
+            for n in nodes.values().filter(|n| candidate(n.id)) {
+                if !g.members.iter().any(|m| m.node_id == n.id) {
+                    free.insert(n.id, crate::capacity::node_free(clients, &n.address).await);
+                }
+            }
+            let roomy = |id: u64| crate::capacity::fits(free.get(&id).copied().flatten(), need);
+            let pick = |with_room: bool| {
+                choose_for(nodes, all_groups, g, index, &cfg.failure_domain, &|id| {
+                    to_node.is_none_or(|n| n == id) && candidate(id) && (!with_room || roomy(id))
+                })
+            };
+            let replacement = pick(true)?;
             let Some(replacement) = replacement else {
-                let msg = match to_node {
-                    Some(n) => format!(
+                let msg = match (pick(false)?, to_node) {
+                    (Some(m), _) => format!(
+                        "insufficient capacity: node {} has {} bytes free, the member needs {}; paused until a node has room",
+                        m.node_id,
+                        free.get(&m.node_id).copied().flatten().unwrap_or(0),
+                        crate::capacity::needed(need)
+                    ),
+                    (None, Some(n)) => format!(
                         "requested node {n} is unhealthy, draining, or breaks the failure domain"
                     ),
-                    None => "no healthy replacement with free failure domain".to_string(),
+                    (None, None) => "no healthy replacement with free failure domain".to_string(),
                 };
                 warn!(group = g.id, index, why, "{msg}");
                 if why == "replace request" {
@@ -1138,13 +1189,29 @@ async fn repair_one<S: KvStore>(
                 why,
                 "member replacement"
             );
+            // A move that was paused (capacity, no target) resumes: drop
+            // the reason it showed.
+            if why == "replace request" {
+                membership::note_replace_error(meta, g.id, None).await?;
+            } else if why == "drain" {
+                membership::update_drain(meta, g.members[index].node_id, None, None).await?;
+            }
+            let leaving = g.members[index].node_id;
+            let opts = RepairOptions {
+                former: if healthy(leaving) {
+                    vec![leaving]
+                } else {
+                    Vec::new()
+                },
+                ..opts.clone()
+            };
             run_repair(
                 meta,
                 clients,
                 g.id,
                 index,
                 replacement,
-                opts,
+                &opts,
                 metrics,
                 g.is_cache(),
             )
@@ -1155,7 +1222,7 @@ async fn repair_one<S: KvStore>(
     }
 }
 
-fn choose_for(
+pub(crate) fn choose_for(
     nodes: &HashMap<u64, NodeRecord>,
     all_groups: &[GroupRecord],
     g: &GroupRecord,

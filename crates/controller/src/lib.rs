@@ -5,11 +5,13 @@
 //! tooling). Leader election, scheduling, and the admin API come with the
 //! controller process.
 
+pub mod capacity;
 pub mod gc;
 pub mod groups;
 pub mod integrity;
 pub mod metrics;
 pub mod objects;
+pub mod plan;
 pub mod process;
 pub mod recovery;
 pub mod repair;

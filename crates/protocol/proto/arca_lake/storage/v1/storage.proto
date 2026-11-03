@@ -211,6 +211,11 @@ message HealthResponse {
   // Client load right now (repair yields to it, RFC-008 §8.5 budgets).
   uint64 puts_in_flight = 15;
   uint64 gets_in_flight = 16;
+  // Device space (statvfs of the store directory): bytes available to the
+  // node and the file system size. 0 = unknown (older nodes); placement
+  // of replacements then cannot check capacity.
+  uint64 device_free_bytes = 17;
+  uint64 device_total_bytes = 18;
 }
 
 service StorageNode {

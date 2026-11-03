@@ -458,6 +458,7 @@ pub async fn controller_cache_repair_rebuilds_a_lost_member_within_budget<S: KvS
         page_size: 0,
         verify_all_members: false,
         max_chunks: 1,
+        ..RepairOptions::default()
     };
     let mut passes = 0;
     let mut reconstructed = 0;

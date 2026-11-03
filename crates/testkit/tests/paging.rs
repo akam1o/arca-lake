@@ -27,6 +27,7 @@ async fn cluster() -> TestCluster {
         page_size: 7,
         verify_all_members: false,
         max_chunks: 0,
+        ..RepairOptions::default()
     };
     c
 }

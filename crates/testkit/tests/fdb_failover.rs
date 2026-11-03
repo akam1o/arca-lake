@@ -20,7 +20,6 @@
 #![allow(clippy::too_many_lines, clippy::many_single_char_names)]
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use arca_lake_controller::ControlError;
@@ -29,6 +28,7 @@ use arca_lake_controller::repair::RepairStep;
 use arca_lake_metadata::Txn;
 use arca_lake_metadata::fdb::FdbKv;
 use arca_lake_metadata::records::GroupState;
+use arca_lake_testkit::chaos::Chaos;
 use arca_lake_testkit::s3::{self, PutOptions, request};
 use arca_lake_testkit::{ClusterOptions, TestCluster, now_ms, random_bytes};
 use bytes::Bytes;
@@ -41,56 +41,6 @@ use s3s::{S3, S3Result};
 
 const MIB: u64 = 1 << 20;
 const BUCKET: &str = "failover";
-
-struct Chaos {
-    dir: Option<std::path::PathBuf>,
-    docker: bool,
-}
-
-/// Request sequence of the file driver, shared by every test of the binary
-/// (the driver answers `req-0`, `req-1`, … in order).
-static CHAOS_SEQ: AtomicUsize = AtomicUsize::new(0);
-
-impl Chaos {
-    fn from_env() -> Option<Self> {
-        let docker = std::env::var_os("ARCA_CHAOS_DOCKER").is_some();
-        let dir = std::env::var_os("ARCA_CHAOS_DIR").map(std::path::PathBuf::from);
-        (docker || dir.is_some()).then_some(Self { dir, docker })
-    }
-
-    /// `kill N` or `start N`.
-    async fn run(&self, action: &str) {
-        eprintln!("chaos: {action}");
-        if self.docker {
-            let mut parts = action.split_whitespace();
-            let verb = parts.next().unwrap();
-            let n = parts.next().unwrap();
-            let status = tokio::process::Command::new("docker")
-                .args(["exec", "arca-fdb", "fdbproc", verb, n])
-                .status()
-                .await
-                .expect("docker");
-            assert!(
-                status.success(),
-                "docker exec arca-fdb fdbproc {verb} {n} failed"
-            );
-            return;
-        }
-        let dir = self.dir.as_ref().unwrap();
-        let n = CHAOS_SEQ.fetch_add(1, Ordering::SeqCst);
-        let req = dir.join(format!("req-{n}"));
-        let ack = dir.join(format!("ack-{n}"));
-        std::fs::write(&req, action).unwrap();
-        let start = Instant::now();
-        while !ack.exists() {
-            assert!(
-                start.elapsed() < Duration::from_secs(180),
-                "chaos driver did not answer {action}"
-            );
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    }
-}
 
 fn payload(len: usize, seed: u64) -> Bytes {
     Bytes::from(random_bytes(len, seed))

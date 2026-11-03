@@ -289,6 +289,50 @@ pub async fn enqueue<S: KvStore>(
     .await
 }
 
+/// [`enqueue`], or make an existing task due now: a task that ended
+/// `Unrecoverable` or `Failed` goes back to `Detected` (new information,
+/// e.g. a member was just rebuilt and can serve as a source); a task being
+/// worked on (`Planned`) is left alone. Returns whether a task was created
+/// or woken.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn enqueue_or_wake<S: KvStore>(
+    store: &S,
+    group_id: u64,
+    chunk_id: [u8; 16],
+    reason: Finding,
+    hint_targets: &[u16],
+    now_ms: u64,
+) -> Result<bool> {
+    if enqueue(store, group_id, chunk_id, reason, hint_targets, now_ms).await? {
+        return Ok(true);
+    }
+    transact(store, (group_id, chunk_id, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (group_id, chunk_id, now_ms) = *env;
+            let key = keys::repair_task(group_id, &chunk_id);
+            let Some(mut t): Option<RepairTask> = read(tx, &key).await? else {
+                return Ok(false);
+            };
+            match t.state {
+                RepairState::Planned { .. } => return Ok(false),
+                RepairState::Unrecoverable { .. } | RepairState::Failed { .. } => {
+                    t.state = RepairState::Detected;
+                }
+                RepairState::Detected if t.next_attempt_ms <= now_ms => return Ok(false),
+                RepairState::Detected => {}
+            }
+            t.next_attempt_ms = now_ms;
+            t.updated_ms = now_ms;
+            write(tx, &key, &t)?;
+            Ok(true)
+        })
+    })
+    .await
+}
+
 /// A repair task, if any.
 ///
 /// # Errors
