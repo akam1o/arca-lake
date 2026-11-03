@@ -45,18 +45,17 @@ const BUCKET: &str = "failover";
 struct Chaos {
     dir: Option<std::path::PathBuf>,
     docker: bool,
-    seq: AtomicUsize,
 }
+
+/// Request sequence of the file driver, shared by every test of the binary
+/// (the driver answers `req-0`, `req-1`, … in order).
+static CHAOS_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 impl Chaos {
     fn from_env() -> Option<Self> {
         let docker = std::env::var_os("ARCA_CHAOS_DOCKER").is_some();
         let dir = std::env::var_os("ARCA_CHAOS_DIR").map(std::path::PathBuf::from);
-        (docker || dir.is_some()).then_some(Self {
-            dir,
-            docker,
-            seq: AtomicUsize::new(0),
-        })
+        (docker || dir.is_some()).then_some(Self { dir, docker })
     }
 
     /// `kill N` or `start N`.
@@ -78,7 +77,7 @@ impl Chaos {
             return;
         }
         let dir = self.dir.as_ref().unwrap();
-        let n = self.seq.fetch_add(1, Ordering::SeqCst);
+        let n = CHAOS_SEQ.fetch_add(1, Ordering::SeqCst);
         let req = dir.join(format!("req-{n}"));
         let ack = dir.join(format!("ack-{n}"));
         std::fs::write(&req, action).unwrap();
@@ -653,5 +652,351 @@ async fn scenario() {
             "{key}"
         );
     }
+    c.shutdown().await;
+}
+
+/// Cluster recovery under FoundationDB process and coordinator failures
+/// (RFC-015 §5.3–§5.6, Phase 3.3 O5/O6/O8/O9): verification survives a
+/// lost process, a lost quorum and a controller leader failover and
+/// resumes from its cursor without losing or doubling a page; nothing is
+/// deleted while the cluster is not Active; a process of the previous
+/// incarnation is fenced in metadata and on the nodes throughout.
+#[tokio::test]
+async fn recovery_survives_foundationdb_failures_and_fences_the_old_incarnation() {
+    if std::env::var_os("ARCA_FDB_TESTS").is_none()
+        || std::env::var_os("ARCA_FDB_FAILOVER").is_none()
+    {
+        eprintln!("ARCA_FDB_FAILOVER not set; skipping");
+        return;
+    }
+    tokio::time::timeout(Duration::from_mins(15), recovery_scenario())
+        .await
+        .expect("the recovery scenario exceeded 15 minutes");
+}
+
+/// Live shards on every node, asked of the nodes alone (works while the
+/// metadata store has no quorum).
+async fn node_shards(c: &TestCluster<FdbKv>) -> u64 {
+    let mut n = 0;
+    for node in &c.nodes {
+        n += c
+            .clients
+            .health(&node.addr.to_string())
+            .await
+            .unwrap()
+            .live_shards;
+    }
+    n
+}
+
+async fn recovery_scenario() {
+    use arca_lake_controller::recovery::RecoveryOptions;
+    use arca_lake_metadata::guard::{GuardedKv, OpClass};
+    use arca_lake_metadata::ops::{compat, recovery};
+    use arca_lake_metadata::records::ClusterPhase;
+    use arca_lake_metadata::{KvError, KvStore};
+    use arca_lake_protocol::client::{NodeClients, ShardRef};
+    use arca_lake_storage_node::ShardKey;
+
+    let Some(chaos) = Chaos::from_env() else {
+        eprintln!("no chaos driver configured; skipping");
+        return;
+    };
+    let path = std::env::var("ARCA_FDB_CLUSTER_FILE").ok();
+    let kv = FdbKv::open_with_timeout(path.as_deref(), 5_000).expect("open FoundationDB");
+    kv.clear_range_blocking(&arca_lake_metadata::keys::all_range())
+        .await
+        .unwrap();
+    let mut c = TestCluster::start_with(
+        Arc::new(kv),
+        ClusterOptions {
+            groups: 1,
+            ..ClusterOptions::rs(3, 2, 1, MIB, 64 << 10)
+        },
+    )
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let mut objects = Vec::new();
+    for i in 0..12u64 {
+        let d = payload(512 << 10, 200 + i);
+        s3::put(
+            &c.backend,
+            BUCKET,
+            &format!("r{i}"),
+            d.clone(),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+        objects.push((format!("r{i}"), d));
+    }
+    let group = c.groups().await.remove(0);
+    let chunk_of =
+        async |c: &TestCluster<FdbKv>, k: &str| c.manifest(BUCKET, k).await.chunks[0].1.clone();
+    let shard = |ch: &arca_lake_metadata::records::ChunkRecord, i: u16| ShardKey {
+        group_id: group.id,
+        chunk_id: ch.chunk_id,
+        shard_index: i,
+    };
+    // The divergence a restore leaves: r0 lost every shard (unreadable),
+    // r1 one (degraded), and an orphan written after the backup point.
+    let r0 = chunk_of(&c, "r0").await;
+    let r1 = chunk_of(&c, "r1").await;
+    for i in 0..3u16 {
+        let n = c.node_index(&group.members[usize::from(i)]).unwrap();
+        c.node_store(n).delete(shard(&r0, i)).unwrap();
+    }
+    let n2 = c.node_index(&group.members[2]).unwrap();
+    c.node_store(n2).delete(shard(&r1, 2)).unwrap();
+    let backup_point = now_ms();
+    let mut orphan = [0u8; 16];
+    orphan[0..6].copy_from_slice(&(backup_point + 60_000).to_be_bytes()[2..8]);
+    orphan[6] = 0x70;
+    orphan[8] = 0x80;
+    let n0 = c.node_index(&group.members[0]).unwrap();
+    c.node_store(n0)
+        .put(
+            ShardKey {
+                group_id: group.id,
+                chunk_id: orphan,
+                shard_index: 0,
+            },
+            &[9u8; 4096],
+        )
+        .unwrap();
+    let shards_before = node_shards(&c).await;
+
+    // The previous incarnation's processes: a gateway backend, guarded
+    // stores of every class, and node clients stamping it on deletes.
+    let old = compat::cluster_state(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap();
+    for n in &c.nodes {
+        c.clients
+            .health_with(
+                &n.addr.to_string(),
+                arca_lake_protocol::storage::v1::HealthRequest {
+                    format_write: 0,
+                    incarnation: Bytes::copy_from_slice(&old.incarnation),
+                    incarnation_changed_ms: old.changed_ms,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let stale_clients = NodeClients::new(Duration::from_secs(5));
+    stale_clients.set_incarnation(Some(old.incarnation));
+    let stale: Vec<GuardedKv<FdbKv>> = [OpClass::ClientWrite, OpClass::Delete, OpClass::Repair]
+        .into_iter()
+        .map(|cls| GuardedKv::new(Arc::clone(&c.meta), old.incarnation, cls))
+        .collect();
+    let probe_stale = async || {
+        for s in &stale {
+            let mut tx = s.begin().await.unwrap();
+            tx.set(b"al-probe-stale", b"1");
+            match tx.commit().await {
+                Err(KvError::ClusterState(m)) => assert!(m.contains("incarnation"), "{m}"),
+                other => panic!("a stale-incarnation write was not fenced: {other:?}"),
+            }
+        }
+    };
+
+    let marked = compat::mark_restoring(
+        c.meta.as_ref(),
+        Some("failover-drill".into()),
+        Some(backup_point),
+        "admin",
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    probe_stale().await;
+
+    // Two controllers on the new incarnation; one page per pass so that
+    // the failures land in the middle of the verification. Deleting
+    // passes run often with no grace: they must all be skipped.
+    let ctl = |id: &str| {
+        let mut cfg = ControllerConfig::new(id);
+        cfg.lease = Duration::from_secs(3);
+        cfg.gc_interval = Duration::from_millis(300);
+        cfg.reconcile_interval = Duration::from_millis(300);
+        cfg.min_orphan_age = Duration::ZERO;
+        cfg.gc_grace = Duration::ZERO;
+        cfg.repair_interval = Duration::from_millis(300);
+        cfg.stripe_repair_interval = Duration::from_millis(300);
+        cfg.scrub.interval_ms = 0;
+        cfg.health_interval = Duration::from_millis(300);
+        cfg.recovery_interval = Duration::from_millis(100);
+        cfg.recovery = RecoveryOptions {
+            page: 2,
+            page_bytes: 0,
+            pages_per_pass: 1,
+        };
+        cfg
+    };
+    let a = spawn(Arc::clone(&c.meta), ctl("rec-a")).await.unwrap();
+    let b = spawn(Arc::clone(&c.meta), ctl("rec-b")).await.unwrap();
+    let meta = Arc::clone(&c.meta);
+    let phase = async || {
+        compat::cluster_state(meta.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.state)
+    };
+    wait_until(
+        "verification to start",
+        Duration::from_secs(60),
+        async || phase().await == Some(ClusterPhase::VerificationPending),
+    )
+    .await;
+
+    // One process lost (the cluster tolerates it), then the quorum.
+    chaos.run("kill 2").await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(node_shards(&c).await >= shards_before, "nothing deleted");
+    chaos.run("start 2").await;
+    chaos.run("kill 1").await;
+    chaos.run("kill 3").await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(node_shards(&c).await >= shards_before, "nothing deleted");
+    chaos.run("start 1").await;
+    chaos.run("start 3").await;
+    wait_for_store(&c).await;
+    probe_stale().await;
+    // The leader goes away mid-verification.
+    let (gone, kept) = if a.is_leader() { (a, b) } else { (b, a) };
+    gone.shutdown().await;
+    wait_until(
+        "verification to finish",
+        Duration::from_mins(5),
+        async || {
+            matches!(
+                phase().await,
+                Some(ClusterPhase::ReadOnly | ClusterPhase::RecoveryRequired)
+            )
+        },
+    )
+    .await;
+    assert_eq!(phase().await, Some(ClusterPhase::RecoveryRequired));
+    let rep = recovery::report(c.meta.as_ref(), &marked.incarnation)
+        .await
+        .unwrap()
+        .unwrap();
+    eprintln!("report {:?} affected {:?}", rep.counts, rep.affected);
+    let k = &rep.counts;
+    assert!(rep.complete, "{rep:?}");
+    // 12 objects × 3 shards, minus r0's three and r1's one: every page was
+    // counted exactly once across the failures and the failover.
+    assert_eq!(k.matched, 12 * 3 - 4, "{k:?}");
+    assert_eq!(
+        (k.unreadable_chunks, k.degraded_chunks, k.missing),
+        (1, 1, 4),
+        "{k:?}"
+    );
+    assert_eq!((k.orphan_post_t, k.orphan_pre_t), (1, 0), "{k:?}");
+    assert_eq!(rep.affected.len(), 1);
+    assert_eq!(rep.affected[0].key, "r0");
+
+    // RecoveryRequired admits repair: r1 is rebuilt; still nothing deleted
+    // (the orphan stays until the cluster is Active).
+    wait_until("r1 repaired", Duration::from_secs(120), async || {
+        node_shards(&c).await == shards_before + 1
+    })
+    .await;
+    // Stale processes stay fenced: metadata writes and node deletes.
+    probe_stale().await;
+    let addr0 = c.nodes[n0].addr.to_string();
+    let cur = compat::cluster_state(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap();
+    wait_until(
+        "node 0 adopted the new incarnation",
+        Duration::from_secs(30),
+        async || {
+            c.clients
+                .health(&addr0)
+                .await
+                .is_ok_and(|h| h.incarnation.as_ref() == cur.incarnation)
+        },
+    )
+    .await;
+    let e = stale_clients
+        .delete_shard(
+            &addr0,
+            ShardRef {
+                group_id: group.id,
+                chunk_id: orphan,
+                shard_index: 0,
+            },
+            u64::MAX,
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message().starts_with("incarnation rejected"), "{e}");
+    assert!(
+        c.backend.cluster().incarnation == old.incarnation,
+        "the in-process gateway predates the restore"
+    );
+    assert!(
+        s3::put(
+            &c.backend,
+            BUCKET,
+            "stale",
+            payload(1024, 1),
+            &PutOptions::default()
+        )
+        .await
+        .is_err()
+    );
+
+    // The operator accepts the loss of r0 (`recovery finalize --force`);
+    // Active again: reconciliation reclaims the orphan, a restarted gateway
+    // writes, every other object reads.
+    let mut accepted = rep.clone();
+    accepted.accepted = Some(recovery::Acceptance {
+        at_ms: now_ms(),
+        by: "admin".into(),
+        forced: true,
+    });
+    recovery::set_report(c.meta.as_ref(), &accepted)
+        .await
+        .unwrap();
+    compat::set_phase(c.meta.as_ref(), ClusterPhase::Active, "admin", now_ms())
+        .await
+        .unwrap();
+    wait_until(
+        "the orphan reclaimed",
+        Duration::from_secs(120),
+        async || {
+            !c.node_store(n0).contains(&ShardKey {
+                group_id: group.id,
+                chunk_id: orphan,
+                shard_index: 0,
+            })
+        },
+    )
+    .await;
+    c.restart_backend().await.unwrap();
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "after",
+        payload(4096, 2),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    for (key, data) in objects.iter().skip(1) {
+        assert_eq!(
+            &s3::get(&c.backend, BUCKET, key).await.unwrap().0,
+            data,
+            "{key}"
+        );
+    }
+    assert!(s3::get(&c.backend, BUCKET, "r0").await.is_err());
+    kept.shutdown().await;
     c.shutdown().await;
 }

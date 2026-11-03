@@ -367,6 +367,19 @@ jobs:
           printf '#!/usr/bin/env bash\nexec sudo /usr/bin/docker "$@"\n' > "$HOME/.local/bin/docker"
           chmod +x "$HOME/.local/bin/docker"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: metadata restore drill on the three-process cluster (fdbbackup/fdbrestore)
+        env:
+          ARCA_FDB_TESTS: "1"
+          ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
+          ARCA_FDB_BACKUP_URL: file:///var/fdb/backup
+          ARCA_FDB_BACKUP_CLUSTER_FILE: /var/fdb/fdb.cluster
+        run: |
+          set -euo pipefail
+          # Runs before the failover test: fdbrestore needs an empty database.
+          sudo docker exec arca-fdb mkdir -p /var/fdb/backup
+          sudo docker exec -d arca-fdb backup_agent -C /var/fdb/fdb.cluster
+          ARCA_FDB_BACKUP_CMD="sudo docker exec arca-fdb" \
+            cargo test -p arca-lake-testkit --features fdb --test fdb_restore -- --nocapture --test-threads=1
       - name: run the failover test
         env:
           ARCA_FDB_TESTS: "1"

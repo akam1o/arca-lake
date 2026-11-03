@@ -927,3 +927,61 @@ async fn startup_gate_refuses_newer_schemas_and_stamps_legacy_stores() {
     let e = records::decode::<records::NodeRecord>(&newer).unwrap_err();
     assert!(e.to_string().contains("unknown record version"), "{e}");
 }
+
+#[tokio::test]
+async fn a_pass_that_crashed_before_its_transition_is_finished_by_the_next() {
+    let c = cluster(3, 2, 1).await;
+    put(&c, "obj", 1).await;
+    let marked = compat::mark_restoring(c.meta.as_ref(), None, None, "admin", now_ms())
+        .await
+        .unwrap();
+    let admin = GuardedKv::new(Arc::clone(&c.meta), marked.incarnation, OpClass::Admin);
+    let opts = RecoveryOptions::default();
+    // Catch-up finished and its cursor committed, the transition did not:
+    // the cursor already points at verification while the phase is still
+    // Restoring.
+    let r = recovery_pass(&admin, &c.clients, &opts, None, "ctl", now_ms())
+        .await
+        .unwrap();
+    assert_eq!(r.phase_after, Some(ClusterPhase::VerificationPending));
+    compat::set_phase(c.meta.as_ref(), ClusterPhase::Restoring, "test", now_ms())
+        .await
+        .unwrap();
+    let r = recovery_pass(&admin, &c.clients, &opts, None, "ctl", now_ms())
+        .await
+        .unwrap();
+    assert_eq!(
+        r.phase_after,
+        Some(ClusterPhase::VerificationPending),
+        "{r:?}"
+    );
+    // Verification finished and its report committed, the transition did
+    // not.
+    let r = recovery_pass(&admin, &c.clients, &opts, None, "ctl", now_ms())
+        .await
+        .unwrap();
+    assert!(r.finished, "{r:?}");
+    assert_eq!(state(&c).await.state, ClusterPhase::ReadOnly);
+    let before = recovery::report(c.meta.as_ref(), &marked.incarnation)
+        .await
+        .unwrap()
+        .unwrap();
+    compat::set_phase(
+        c.meta.as_ref(),
+        ClusterPhase::VerificationPending,
+        "test",
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    let r = recovery_pass(&admin, &c.clients, &opts, None, "ctl", now_ms())
+        .await
+        .unwrap();
+    assert_eq!(r.phase_after, Some(ClusterPhase::ReadOnly), "{r:?}");
+    let after = recovery::report(c.meta.as_ref(), &marked.incarnation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after, before, "the finished report is not recounted");
+    c.shutdown().await;
+}

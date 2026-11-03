@@ -244,6 +244,29 @@ pub async fn set_cursor<S: KvStore>(store: &S, c: &RestoreCursor) -> Result<()> 
     .await
 }
 
+/// Replace the cursor and the report in one transaction: a crash (or an
+/// unknown commit outcome) between pages can neither advance the cursor
+/// without the page's counts nor count a page twice. Both values are
+/// absolute, so a retried commit is idempotent.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn set_progress<S: KvStore>(
+    store: &S,
+    c: &RestoreCursor,
+    r: &RestoreReport,
+) -> Result<()> {
+    transact(store, (c, r), |tx, env| {
+        Box::pin(async move {
+            let (c, r) = *env;
+            write(tx, &keys::restore_cursor(), c)?;
+            write(tx, &keys::restore_report(&r.incarnation), r)
+        })
+    })
+    .await
+}
+
 /// The report of an incarnation.
 ///
 /// # Errors

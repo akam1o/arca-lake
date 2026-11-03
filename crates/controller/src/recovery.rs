@@ -157,8 +157,7 @@ pub async fn recovery_pass<S: KvStore>(
                     after_group: Some(g.id),
                 };
                 cursor.updated_ms = now_ms;
-                recovery::set_cursor(meta, &cursor).await?;
-                recovery::set_report(meta, &rep).await?;
+                recovery::set_progress(meta, &cursor, &rep).await?;
             }
             if crate::integrity::is_cancelled(cancel) {
                 return Ok(report);
@@ -178,23 +177,24 @@ pub async fn recovery_pass<S: KvStore>(
                 after: None,
             };
             cursor.updated_ms = now_ms;
-            recovery::set_cursor(meta, &cursor).await?;
-            recovery::set_report(meta, &rep).await?;
-            let (_, changed) = compat::transition(
-                meta,
-                ClusterPhase::Restoring,
-                ClusterPhase::VerificationPending,
-                who,
-                now_ms,
-            )
-            .await?;
-            if changed {
-                info!(
-                    epochs_raised = report.epochs_raised,
-                    "epoch catch-up complete; verifying"
-                );
-                report.phase_after = Some(ClusterPhase::VerificationPending);
-            }
+            recovery::set_progress(meta, &cursor, &rep).await?;
+        }
+        // Catch-up is done (now, or by a pass that crashed before this
+        // transition committed): move on. Idempotent.
+        let (_, changed) = compat::transition(
+            meta,
+            ClusterPhase::Restoring,
+            ClusterPhase::VerificationPending,
+            who,
+            now_ms,
+        )
+        .await?;
+        if changed {
+            info!(
+                epochs_raised = rep.counts.epochs_raised,
+                "epoch catch-up complete; verifying"
+            );
+            report.phase_after = Some(ClusterPhase::VerificationPending);
         }
         return Ok(report);
     }
@@ -367,21 +367,25 @@ pub async fn recovery_pass<S: KvStore>(
             RecoveryPhase::Done => break,
         }
         cursor.updated_ms = now_ms;
-        recovery::set_cursor(meta, &cursor).await?;
-        recovery::set_report(meta, &rep).await?;
+        recovery::set_progress(meta, &cursor, &rep).await?;
     }
     let _ = &cache_groups;
     report.pages = pages;
-    if cursor.phase == RecoveryPhase::Done && rep.finished_ms == 0 {
-        rep.unanswered_nodes = cursor
-            .unanswered_nodes
-            .iter()
-            .copied()
-            .filter(|n| !cursor.excluded_nodes.contains(n))
-            .collect();
-        rep.complete = rep.unanswered_nodes.is_empty();
-        rep.finished_ms = now_ms;
-        recovery::set_report(meta, &rep).await?;
+    if cursor.phase == RecoveryPhase::Done {
+        // Finish the report once; the transition below is re-run by every
+        // pass until it commits (a crash between the two must not leave
+        // the cluster in VerificationPending).
+        if rep.finished_ms == 0 {
+            rep.unanswered_nodes = cursor
+                .unanswered_nodes
+                .iter()
+                .copied()
+                .filter(|n| !cursor.excluded_nodes.contains(n))
+                .collect();
+            rep.complete = rep.unanswered_nodes.is_empty();
+            rep.finished_ms = now_ms;
+            recovery::set_report(meta, &rep).await?;
+        }
         let clean = rep.complete
             && rep.counts.unreadable_chunks == 0
             && !rep.affected.iter().any(|a| a.why == "dangling-part");
