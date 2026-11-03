@@ -403,14 +403,14 @@ async fn metadata_restore_drill_with_fdbbackup() {
     assert!(rep.complete, "{rep:?}");
     assert_eq!(k.epochs_raised, 1);
     assert_eq!(k.unreadable_chunks, 2, "both chunks of pre2: {k:?}");
-    assert_eq!(k.missing, u64::from(pre_shard_loss), "{k:?}");
+    assert_eq!(k.missing, pre_shard_loss, "{k:?}");
     // Post-T shards: post0..2 (2 chunks each), pre1 v2 (2), mp2 (2 parts × 2 chunks): 2+2+2+2+4 = 12 chunks × 3.
     assert_eq!(k.orphan_post_t, 12 * 3, "{k:?}");
     assert_eq!(k.orphan_pre_t, 0, "{k:?}");
     assert_eq!(k.corrupt, 0);
     assert_eq!(k.degraded_chunks, 0);
     assert_eq!(k.manifest_findings, 0, "the pre-T multipart root verifies");
-    assert_eq!(k.matched, shards_at_t - u64::from(pre_shard_loss));
+    assert_eq!(k.matched, shards_at_t - pre_shard_loss);
     assert_eq!(rep.affected.len(), 2);
     assert!(
         rep.affected
@@ -509,7 +509,7 @@ async fn metadata_restore_drill_with_fdbbackup() {
     wait_until(
         "reconciliation of the post-T orphans",
         Duration::from_secs(60),
-        async || shards_total(&c).await <= shards_at_t - u64::from(pre_shard_loss) + 3,
+        async || shards_total(&c).await <= shards_at_t - pre_shard_loss + 3,
     )
     .await;
     for (key, data) in pre.iter().filter(|(k, _)| k != "pre2") {

@@ -364,7 +364,7 @@ fn write_orphan(c: &TestCluster, node: usize, group: u64, unix_ms: u64, index: u
     id[0..6].copy_from_slice(&unix_ms.to_be_bytes()[2..8]);
     id[6] = 0x70;
     id[8] = 0x80;
-    id[9] = index as u8;
+    id[9] = u8::try_from(index).unwrap();
     let key = ShardKey {
         group_id: group,
         chunk_id: id,
