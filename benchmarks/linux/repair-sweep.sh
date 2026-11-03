@@ -9,7 +9,8 @@
 #   HOST_A=.. HOST_B=.. benchmarks/linux/repair-sweep.sh <out-dir>
 #
 # Environment: OBJECTS (128) SIZE (16 MiB) WORKERS ("1 2 4 8")
-# HOT_OBJECTS (16) HOT_SIZE (4 MiB) LOAD_CONC (4).
+# HOT_OBJECTS (16) HOT_SIZE (4 MiB) LOAD_CONC (4). NOLOAD=1 runs the repairs
+# without client load (clean disk/network amplification; no baseline).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT="${1:?output directory}"
@@ -61,9 +62,11 @@ EOF
   sb "chmod +x $RUN_DIR/load.sh"
 }
 start_load() { # <tag>
+  [ -n "${NOLOAD:-}" ] && return 0
   sb "rm -f $RUN_DIR/load-stop $RUN_DIR/load-$1.jsonl; cd $RUN_DIR && { nohup ./load.sh get $S3LOAD $EP $1 $HOT_OBJECTS $HOT_SIZE $LOAD_CONC $RUN_DIR/load-$1.jsonl > /dev/null 2>&1 & echo \$! > load-get.pid; nohup ./load.sh put $S3LOAD $EP $1 8 $HOT_SIZE 2 $RUN_DIR/load-$1.jsonl > /dev/null 2>&1 & echo \$! > load-put.pid; }"
 }
 stop_load() { # <tag>
+  [ -n "${NOLOAD:-}" ] && { : > "$OUT/load-$1.jsonl"; return 0; }
   sb "touch $RUN_DIR/load-stop; for p in load-get load-put; do while kill -0 \$(cat $RUN_DIR/\$p.pid) 2>/dev/null; do sleep 0.5; done; done; cat $RUN_DIR/load-$1.jsonl" > "$OUT/load-$1.jsonl"
 }
 
@@ -86,7 +89,7 @@ run_one() { # <tag> <workers> <rate-mib>
   sb "cd $RUN_DIR && { nohup $BIN storage-node --listen $ADDR_B:9100 --dir $RUN_DIR/d2 --metrics-listen 127.0.0.1:9910 > $RUN_DIR/logs/d2.log 2>&1 < /dev/null & echo \$! > $RUN_DIR/d2.pid; }"
   sleep 2
   start_load "$tag"
-  sleep 10
+  [ -n "${NOLOAD:-}" ] || sleep 10
   snapshot sa "$dir/a-before.txt"; snapshot sb "$dir/b-before.txt"
   local m0 r0 b0 t0 t1 depth r peak_rss=0 peak_depth=0 rss
   m0="$(ctl_metrics)"
@@ -124,7 +127,7 @@ EOF
   bash "$TH" teardown > /dev/null 2>&1 || true
 }
 
-run_one baseline 1 0
+[ -n "${NOLOAD:-}" ] || run_one baseline 1 0
 for w in $WORKERS; do run_one "w$w" "$w" 0; done
 run_one default 4 64
 

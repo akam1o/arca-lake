@@ -1,0 +1,80 @@
+{
+  "objects": 1024,
+  "size": 16777216,
+  "shard_bytes_host_a": 17179869184,
+  "none": {
+    "host_a": {
+      "disk_read_mib_s": 753.8,
+      "disk_util": 0.63,
+      "avg_queue_depth": 6.09,
+      "cpu_iowait_pct": 30.5,
+      "scrub_mib_s": 0.0,
+      "ram_gib": 7.8
+    },
+    "host_b": {
+      "disk_read_mib_s": 0.0,
+      "disk_util": 0.29,
+      "avg_queue_depth": 0.4,
+      "cpu_iowait_pct": 5.0,
+      "scrub_mib_s": 0.0,
+      "ram_gib": 7.8
+    },
+    "get_p50_ms": 28.7,
+    "get_p95_ms": 47.9,
+    "get_p99_ms": 98.9,
+    "get_passes": 16,
+    "put_mib_s": 51.3,
+    "put_p99_ms": 189.6,
+    "errors": 0
+  },
+  "budget32": {
+    "host_a": {
+      "disk_read_mib_s": 704.1,
+      "disk_util": 0.62,
+      "avg_queue_depth": 7.58,
+      "cpu_iowait_pct": 30.7,
+      "scrub_mib_s": 32.0,
+      "ram_gib": 7.8
+    },
+    "host_b": {
+      "disk_read_mib_s": 0.2,
+      "disk_util": 0.34,
+      "avg_queue_depth": 0.51,
+      "cpu_iowait_pct": 6.4,
+      "scrub_mib_s": 0.0,
+      "ram_gib": 7.8
+    },
+    "get_p50_ms": 30.5,
+    "get_p95_ms": 82.3,
+    "get_p99_ms": 107.2,
+    "get_passes": 15,
+    "put_mib_s": 54.5,
+    "put_p99_ms": 198.0,
+    "errors": 0
+  },
+  "unpaced": {
+    "host_a": {
+      "disk_read_mib_s": 752.3,
+      "disk_util": 0.64,
+      "avg_queue_depth": 8.66,
+      "cpu_iowait_pct": 31.2,
+      "scrub_mib_s": 116.7,
+      "ram_gib": 7.8
+    },
+    "host_b": {
+      "disk_read_mib_s": 0.3,
+      "disk_util": 0.35,
+      "avg_queue_depth": 0.51,
+      "cpu_iowait_pct": 6.8,
+      "scrub_mib_s": 0.0,
+      "ram_gib": 7.8
+    },
+    "get_p50_ms": 33.1,
+    "get_p95_ms": 93.1,
+    "get_p99_ms": 110.8,
+    "get_passes": 14,
+    "put_mib_s": 49.6,
+    "put_p99_ms": 215.3,
+    "errors": 0
+  }
+}

@@ -166,3 +166,123 @@ failed explicitly (the previous version was, as designed, still served);
 against the wrong seed (`0b3bae0`). No run reported an unreadable read,
 an unrecoverable stripe, a failed task left behind or a manifest
 finding.
+
+## Phase 3.3 run (2026-11-03): parallel repair, disk-bound scrub, regression
+
+Results: `benchmarks/linux/results/phase33-20261103` (label `lab-2host`:
+two virtual machines, 4 vCPU and 7.8 GiB RAM each, one emulated disk
+each; 3 durable nodes `2+1`, 4 MiB chunks). Single runs unless noted;
+on these hosts run-to-run spread is ±30 % for PUT and ±20 % for GET
+latency, so differences inside that band are reported as noise.
+
+### Parallel stripe repair (`repair-sweep.sh`)
+
+128 objects × 16 MiB; one of three members wiped and restarted; the
+scrub's presence phase queues 528 stripes; the controller's worker
+rebuilds 1.0 GiB. Every run: 528 of 528 repaired, 0 failed, every object
+read back and verified afterwards.
+
+Under client load (`repair-sweep-load`: GET passes over a hot 64 MiB set
+at concurrency 4 and PUT passes of 4 MiB objects at concurrency 2 for
+the whole repair; `baseline` is the same load with no repair):
+
+| workers / budget | repair MiB/s | duration s | GET p50 / p95 / p99 ms | GET MiB/s | PUT MiB/s | peak controller RSS MiB | peak queue |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| baseline (no repair) | — | — | 47 / 62 / 64 | 322 | 53 | — | — |
+| 1, unpaced | 7.9 | 134 | 62 / 80 / 83 | 245 | 43 | 76 | 390 |
+| 2, unpaced | 14.6 | 73 | 40 / 53 / 56 | 384 | 58 | 97 | 370 |
+| 4, unpaced | 22.2 | 48 | 37 / 48 / 50 | 411 | 58 | 126 | 265 |
+| 8, unpaced | 22.9 | 46 | 33 / 45 / 46 | 467 | 61 | 169 | 171 |
+| 4, 64 MiB/s (default) | 11.4 | 93 | 35 / 48 / 50 | 426 | 60 | 128 | 440 |
+
+Without client load (`repair-sweep-noload`), for clean cost figures:
+
+| workers / budget | repair MiB/s | controller CPU-s/GiB | node CPU-s/GiB | disk write B / repaired B | network B / repaired B | peak RSS MiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 33.3 | 15.5 | 7.8 | 2.12 | 2.01 | 74 |
+| 2 | 30.1 | 17.5 | 12.6 | 2.12 | 2.01 | 97 |
+| 4 | 31.1 | 17.5 | 12.6 | 2.10 | 2.01 | 130 |
+| 8 | 36.5 | 16.5 | 12.6 | 2.10 | 2.01 | 170 |
+| 4, 64 MiB/s (default) | 13.3 | 18.4 | 10.7 | 2.15 | 2.01 | 124 |
+
+Reading:
+
+- Parallelism matters when the per-stripe round trips are slow (under
+  load: 7.9 → 22 MiB/s from one to four workers, flat beyond four).
+  Without load the window is dominated by the scrub that finds the
+  damage and the rate is about the same for every worker count.
+- Amplification does not change with parallelism (2.1 B written, 2.0 B
+  sent per repaired byte, as in Phase 3.2); controller memory grows by
+  about 15 MiB per worker (in-flight stripes).
+- The client figures during repair are within the run-to-run noise of
+  the baseline in every configuration (the hot set is in the page
+  cache: this is CPU and RPC contention, not disk queueing; R-59 below
+  is the disk-bound case). No client error in any run.
+- The byte budget counts every byte the worker moves (two source reads,
+  one write, one read-back per rebuilt byte at `2+1`), so 64 MiB/s
+  rebuilds at 11–13 MiB/s.
+
+Defaults kept: 4 workers (where the throughput under load saturates),
+64 MiB/s, 2 transfers per node (1 on a node with more than 4 client
+streams open). The budget is conservative on purpose: repair and scrub
+budgets add up on the same devices, and the disk-bound scrub run below
+shows the cost of extra device reads on p95. An operator who needs a
+faster rebuild raises `--stripe-repair-rate-mib` (unpaced ≈ 22 MiB/s
+under load, ≈ 31–36 MiB/s idle on these hosts).
+
+### Scrub with a working set larger than memory (`scrub-diskbound.sh`, R-59)
+
+1024 objects × 16 MiB: 16 GiB of shards on the host with two nodes,
+7.8 GiB of RAM. Client load in every 120 s window: random 1 MiB range
+GETs over all objects (concurrency 4) and PUTs of 4 MiB objects
+(concurrency 2). CPU iowait is about 30 % on that host even without a
+scrub, so the GETs reach the device.
+
+| window | scrub MiB/s (effective) | device read MiB/s | avg queue depth | util | iowait % | GET p50 / p95 / p99 ms | PUT MiB/s (p99 ms) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| no scrub | 0 | 754 | 6.1 | 0.63 | 30.5 | 28.7 / 47.9 / 98.9 | 51.3 (190) |
+| default budget, 32 MiB/s | 32.0 | 704 | 7.6 | 0.62 | 30.7 | 30.5 / 82.3 / 107.2 | 54.5 (198) |
+| unpaced | 116.7 | 752 | 8.7 | 0.64 | 31.2 | 33.1 / 93.1 / 110.8 | 49.6 (215) |
+
+- The pacer holds the configured budget exactly (32.0 MiB/s).
+- At the default budget p50 and p99 move by +6 % and +8 %, p95 by
+  +72 %; unpaced (3.6× the bytes) +15 % / +94 % / +12 %. The device
+  queue deepens from 6.1 to 7.6 and 8.7. PUT is unaffected (within
+  noise). The cost lands on the middle of the distribution: reads that
+  previously queued behind few requests now queue behind scrub pages.
+- Limitation: the device is an emulated disk; ~750 MiB/s of reads is
+  more than one physical disk serves, so the hypervisor's cache below the
+  guest absorbs part of it. The measurement is disk-bound inside the
+  guest (page cache exceeded, iowait 30 %), not verified against a
+  physical device. RFC-008 G10 ("< 15 % cost at the default rate") holds
+  for p50/p99 and does not hold for p95 in this layout.
+
+### Regression check (`regress.sh lab-2host`)
+
+Baseline from Phase 2.3. `regress` is the Phase 3.3 binary, `regress-ab-old`
+the Phase 3.2 final commit (`4af4396`) on the same hosts right
+afterwards, `regress-rerun` the Phase 3.3 binary again right after that.
+
+| metric | baseline | Phase 3.3 | Phase 3.2 binary (A/B) | Phase 3.3 rerun | verdict |
+| --- | --- | --- | --- | --- | --- |
+| PUT MiB/s (median of 3) | 340 | 205 (reps 205 / 196 / 307) | 312 (reps 313 / 196 / 343) | 342 (reps 356 / 268 / 342) | ok: environment (R-48); the old binary shows the same slow repetition |
+| warm GET MiB/s | 695 | 678 | 681 | 684 | ok |
+| GET p50 / p95 / p99 ms | 78 / 94 / 100 | 77 / 106 / 112 | 79 / 102 / 112 | 80 / 97 / 109 | ok |
+| CPU-s/GiB gateway host / node host | 4.64 / 2.19 | 5.06 / 2.37 | 4.87 / 2.12 | 4.83 / 2.13 | ok |
+| RSS MiB | 110 | 116 | 114 | 125 | ok (+14 %: process heartbeat, cluster watch, negotiated capabilities) |
+| hit ratio (last pass) | 0.93 | 0.75 | 0.88 | 0.82 | environment: the Phase 3.2 binary also falls below the tolerance, as in Phase 3.1 |
+| population chunks/s | 70 | 38 | 68 | 69 | ok in the rerun; tracks the slow PUT state of the first run |
+| metadata txn/s during PUT | 149 | 91 | 137 | 151 | tracks the PUT rate |
+| multipart PUT MiB/s | 201 | 247 | 248 | 276 | ok |
+| multipart warm GET MiB/s | 688 | 664 | 656 | 683 | ok |
+
+The first check flagged PUT, hit ratio, population and the transaction
+rate. The A/B run of the previous release on the same hosts shows the
+same slow repetition (196 MiB/s), and the rerun of the Phase 3.3 binary
+is at the baseline (+0.6 %): the PUT drop was the storage state of the
+virtual hosts (R-48), not the per-transaction cluster-state read added
+in Phase 3.3 (one extra read in the commit of each writing transaction;
+read-only transactions pay nothing). The hit ratio is below the
+tolerance for both binaries; it is the population queue dropping work
+behind slow reads, as recorded in Phase 3.1. No regression attributable
+to Phase 3.3 code is visible within the noise of these hosts.

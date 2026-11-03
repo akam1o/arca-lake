@@ -1,0 +1,107 @@
+{
+  "default": {
+    "load": {
+      "get_passes": 0,
+      "put_passes": 0,
+      "errors": 0
+    },
+    "workers": 4,
+    "rate_mib": 64,
+    "repaired": 528,
+    "failed": 0,
+    "repair_bytes": 1107296256,
+    "seconds": 79.2,
+    "repair_mib_s": 13.3,
+    "controller_cpu_s_per_gib": 18.42,
+    "node_cpu_s_per_gib": 10.67,
+    "disk_read_per_repaired_byte": 0.0,
+    "disk_write_per_repaired_byte": 2.15,
+    "net_tx_per_repaired_byte": 2.01,
+    "peak_controller_rss_mib": 123.8,
+    "peak_queue_depth": 464
+  },
+  "w1": {
+    "load": {
+      "get_passes": 0,
+      "put_passes": 0,
+      "errors": 0
+    },
+    "workers": 1,
+    "rate_mib": 0,
+    "repaired": 528,
+    "failed": 0,
+    "repair_bytes": 1107296256,
+    "seconds": 31.7,
+    "repair_mib_s": 33.3,
+    "controller_cpu_s_per_gib": 15.52,
+    "node_cpu_s_per_gib": 7.76,
+    "disk_read_per_repaired_byte": 0.01,
+    "disk_write_per_repaired_byte": 2.12,
+    "net_tx_per_repaired_byte": 2.01,
+    "peak_controller_rss_mib": 74.0,
+    "peak_queue_depth": 528
+  },
+  "w2": {
+    "load": {
+      "get_passes": 0,
+      "put_passes": 0,
+      "errors": 0
+    },
+    "workers": 2,
+    "rate_mib": 0,
+    "repaired": 528,
+    "failed": 0,
+    "repair_bytes": 1107296256,
+    "seconds": 35.0,
+    "repair_mib_s": 30.1,
+    "controller_cpu_s_per_gib": 17.45,
+    "node_cpu_s_per_gib": 12.61,
+    "disk_read_per_repaired_byte": 0.0,
+    "disk_write_per_repaired_byte": 2.12,
+    "net_tx_per_repaired_byte": 2.01,
+    "peak_controller_rss_mib": 97.3,
+    "peak_queue_depth": 462
+  },
+  "w4": {
+    "load": {
+      "get_passes": 0,
+      "put_passes": 0,
+      "errors": 0
+    },
+    "workers": 4,
+    "rate_mib": 0,
+    "repaired": 528,
+    "failed": 0,
+    "repair_bytes": 1107296256,
+    "seconds": 33.9,
+    "repair_mib_s": 31.1,
+    "controller_cpu_s_per_gib": 17.45,
+    "node_cpu_s_per_gib": 12.61,
+    "disk_read_per_repaired_byte": 0.0,
+    "disk_write_per_repaired_byte": 2.1,
+    "net_tx_per_repaired_byte": 2.01,
+    "peak_controller_rss_mib": 130.2,
+    "peak_queue_depth": 376
+  },
+  "w8": {
+    "load": {
+      "get_passes": 0,
+      "put_passes": 0,
+      "errors": 0
+    },
+    "workers": 8,
+    "rate_mib": 0,
+    "repaired": 528,
+    "failed": 0,
+    "repair_bytes": 1107296256,
+    "seconds": 28.9,
+    "repair_mib_s": 36.5,
+    "controller_cpu_s_per_gib": 16.48,
+    "node_cpu_s_per_gib": 12.61,
+    "disk_read_per_repaired_byte": 0.0,
+    "disk_write_per_repaired_byte": 2.1,
+    "net_tx_per_repaired_byte": 2.01,
+    "peak_controller_rss_mib": 169.7,
+    "peak_queue_depth": 363
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "results_dir": "regress",
+  "cores": 4,
+  "durable_config": "durable-c4",
+  "put_mib_s": 205.03114440302895,
+  "get_warm_mib_s": 677.7606477206014,
+  "get_warm_p50_ms": 77.22693699999999,
+  "get_warm_p95_ms": 105.903543,
+  "get_warm_p99_ms": 112.047539,
+  "cpu_s_per_gib_gateway_host": 5.056,
+  "cpu_s_per_gib_node_host": 2.3733333333333335,
+  "rss_mib": 115.65625,
+  "meta_txn_per_s": 90.76899622009094,
+  "repetitions": 3,
+  "multipart_config": "durable-c4-multipart",
+  "multipart_put_mib_s": 246.9594575474161,
+  "multipart_get_warm_mib_s": 664.3305985759129,
+  "cache_config": "none-c4",
+  "hit_ratio": 0.7526041666666666,
+  "population_chunks_per_s": 38.25515602856328
+}

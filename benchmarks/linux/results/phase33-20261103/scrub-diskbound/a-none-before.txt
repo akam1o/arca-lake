@@ -1,0 +1,8 @@
+rd_sectors 2138908641
+io_ms 4347164
+weighted_ms 15347724
+iowait_ticks 449553
+total_ticks 49899527
+t_ms 1793683429288
+mem_total_kib 8126464
+scrub_bytes 0

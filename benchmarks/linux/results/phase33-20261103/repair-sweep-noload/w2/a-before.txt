@@ -1,0 +1,7 @@
+disk_read_bytes 2182421513216
+disk_write_bytes 1373028853760
+net_rx_bytes 1864969146166
+net_tx_bytes 2551281938900
+cpu_controller 0
+cpu_d0 5
+cpu_d1 5
