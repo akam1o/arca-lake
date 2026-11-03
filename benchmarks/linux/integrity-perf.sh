@@ -21,7 +21,10 @@ sa() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_A" "$@"; }
 sb() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_B" "$@"; }
 addr_of() { ssh -o BatchMode=yes "$1" "hostname -I | awk '{print \$1}'"; }
 ADDR_B="$(addr_of "$HOST_B")"
-BIN="$REMOTE_REPO/target/release/arca-lake"
+# Transport of node RPCs and metadata (ADR-0017): explicit plaintext unless
+# ARCA_ENV says otherwise (for example the TLS flags as environment).
+ARCA_ENV="${ARCA_ENV:-ARCA_INSECURE_PLAINTEXT=1 ARCA_FDB_INSECURE_PLAINTEXT=1}"
+BIN="env $ARCA_ENV $REMOTE_REPO/target/release/arca-lake"
 S3LOAD="$REMOTE_REPO/target/release/s3load"
 CLUSTER_FILE="$RUN_DIR/fdb.cluster"
 ADMIN="$BIN admin --cluster-file $CLUSTER_FILE"

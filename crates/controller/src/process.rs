@@ -67,6 +67,8 @@ pub struct ControllerConfig {
     pub node_timeout: Duration,
     /// Deadlines and retries of node RPCs (R-47).
     pub rpc_policy: Option<arca_lake_protocol::client::RpcPolicy>,
+    /// Mutual TLS to storage nodes (ADR-0017); `None` = plaintext.
+    pub tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
     /// Metrics and health endpoint; `None` disables it.
     pub http_listen: Option<SocketAddr>,
     /// Cache tiers to evict (RFC-006 §5.4).
@@ -121,6 +123,7 @@ impl ControllerConfig {
             page_size: 0,
             node_timeout: Duration::from_secs(5),
             rpc_policy: None,
+            tls: None,
             http_listen: None,
             cache_tiers: Vec::new(),
             evict_interval: Duration::from_secs(10),
@@ -221,6 +224,9 @@ pub async fn spawn<S: KvStore + 'static>(
         "controller startup gate passed"
     );
     let metrics = Arc::new(Metrics::default());
+    if let Some(t) = &cfg.tls {
+        let _ = metrics.tls.set(Arc::clone(&t.stats));
+    }
     metrics
         .cluster_phase
         .store(phase_code(state.state), Ordering::Relaxed);
@@ -359,7 +365,8 @@ fn start_leader_tasks<S: KvStore + 'static>(
     let clients =
         NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
             arca_lake_protocol::client::RpcPolicy::from_timeout(cfg.node_timeout)
-        }));
+        }))
+        .with_tls(cfg.tls.clone());
     clients.set_incarnation(Some(incarnation));
     let coders = crate::integrity::coders();
     // One guarded store per operation class (RFC-015 §5.6, ADR-0016): every
@@ -831,6 +838,7 @@ async fn health_pass<S: KvStore>(
         incarnation_changed_ms: gate.cluster.as_ref().map_or(0, |c| c.changed_ms),
     };
     for n in &nodes {
+        clients.note_node_id(&n.address, n.id);
         match clients.health_with(&n.address, req.clone()).await {
             Ok(h) => {
                 cluster::touch_node(meta, n.id, now).await?;

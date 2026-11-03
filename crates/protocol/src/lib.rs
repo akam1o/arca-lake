@@ -5,6 +5,9 @@
 //! version so that call sites name the version explicitly.
 
 pub mod client;
+#[cfg(feature = "pki")]
+pub mod pki;
+pub mod tls;
 
 /// Storage node API, version 1.
 pub mod storage {

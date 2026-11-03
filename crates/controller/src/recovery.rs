@@ -136,6 +136,11 @@ pub async fn recovery_pass<S: KvStore>(
         .collect();
     let mut groups = cluster::list_groups(meta).await?;
     groups.sort_by_key(|g| g.id);
+    // Tell every node the new incarnation first (ADR-0016): from then on a
+    // node refuses deletes stamped by any process of the previous
+    // incarnation, including RPCs that were already in flight. The health
+    // pass that normally carries it is not admitted while restoring.
+    push_cluster_facts(meta, clients, &nodes).await?;
 
     // ---- Restoring: epoch catch-up (§5.4).
     if state.state == ClusterPhase::Restoring {
@@ -426,6 +431,32 @@ fn push_affected(rep: &mut RestoreReport, a: AffectedObject) {
     {
         rep.affected.push(a);
     }
+}
+
+/// Push `format_write` and the incarnation (with its change time) to
+/// every registered node. Unreachable nodes are noted by the catch-up and
+/// the verification that follow; they adopt the facts when they answer.
+async fn push_cluster_facts<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+) -> Result<(), ControlError> {
+    let gate = compat::gate(meta).await?;
+    let Some(state) = gate.cluster.as_ref() else {
+        return Ok(());
+    };
+    let req = arca_lake_protocol::storage::v1::HealthRequest {
+        format_write: gate.format_write.unwrap_or(0),
+        incarnation: bytes::Bytes::copy_from_slice(&state.incarnation),
+        incarnation_changed_ms: state.changed_ms,
+    };
+    for n in nodes.values() {
+        clients.note_node_id(&n.address, n.id);
+        if let Err(e) = clients.health_with(&n.address, req.clone()).await {
+            tracing::debug!(node = n.id, code = ?e.code(), "incarnation push failed");
+        }
+    }
+    Ok(())
 }
 
 /// Epoch catch-up of one group (RFC-015 §5.4): the new epoch is one above

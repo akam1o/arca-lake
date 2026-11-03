@@ -7,8 +7,6 @@
 
 #![allow(clippy::too_many_lines, clippy::missing_panics_doc)]
 
-use std::time::Duration;
-
 use arca_lake_gateway::cluster::FaultPoint;
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::ops::cluster;
@@ -780,7 +778,8 @@ pub async fn stale_epoch_writes_are_fenced_until_membership_commits<S: KvStore +
     let c = cluster(&start, 3).await;
     let groups = c.groups().await;
     let rs: Vec<_> = groups.iter().filter(|g| g.scheme == "rs-gf8-v1").collect();
-    let clients = NodeClients::new(Duration::from_secs(5));
+    // The cluster's own clients (admin identity on a TLS cluster).
+    let clients = c.clients.clone();
     // The controller fenced every member at epoch 5 but crashed before
     // committing the new membership (RFC-004 §7).
     for g in &rs {

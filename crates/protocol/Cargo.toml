@@ -14,8 +14,26 @@ tonic = { workspace = true, features = ["codegen", "server", "channel", "transpo
 tonic-prost.workspace = true
 prost.workspace = true
 bytes.workspace = true
-tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
-tokio-stream.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "time", "macros", "net", "io-util"] }
+tokio-stream = { workspace = true, features = ["net"] }
+rustls.workspace = true
+tokio-rustls.workspace = true
+x509-parser.workspace = true
+tower = { workspace = true, features = ["util"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+rcgen = { workspace = true, optional = true, features = ["x509-parser"] }
+time = { workspace = true, optional = true }
+
+[features]
+# Development PKI (CA, SPIFFE leaf certificates, CRLs) for tests and the
+# operator's lab tool; not needed at runtime.
+pki = ["dep:rcgen", "dep:time"]
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true

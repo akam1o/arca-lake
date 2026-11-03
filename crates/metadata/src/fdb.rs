@@ -20,6 +20,108 @@ use foundationdb::{Database, FdbError, KeySelector, RangeOption, Transaction};
 use crate::kv::{Key, KeyRange, KvError, KvStore, Limits, Txn, Value};
 
 static NETWORK: OnceLock<NetworkAutoStop> = OnceLock::new();
+static NETWORK_TLS: OnceLock<Option<FdbTls>> = OnceLock::new();
+
+/// Client TLS for the metadata connection (ADR-0017): FoundationDB's own
+/// network options, set once before the client network starts.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FdbTls {
+    /// Trust bundle (PEM).
+    pub ca: std::path::PathBuf,
+    /// Client certificate chain (PEM).
+    pub cert: std::path::PathBuf,
+    /// Client private key (PEM).
+    pub key: std::path::PathBuf,
+    /// FoundationDB peer verification string (`TLS_verify_peers`), e.g.
+    /// `Check.Valid=1,S.subjectAltName>=URI:spiffe://<td>/fdb/`; `None`
+    /// keeps FoundationDB's default (`Check.Valid=1`: chain and dates).
+    pub verify_peers: Option<String>,
+}
+
+impl std::fmt::Debug for FdbTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FdbTls")
+            .field("ca", &self.ca)
+            .field("cert", &self.cert)
+            .field("key", &self.key)
+            .field("verify_peers", &self.verify_peers)
+            .finish()
+    }
+}
+
+/// Decide the metadata transport before the first connection: `Some`
+/// enables client TLS, `None` declares plaintext. Must be called before
+/// [`ensure_network`] (any `FdbKv::open`); a second call with a different
+/// value is refused (the network starts once per process).
+///
+/// # Errors
+///
+/// Unreadable TLS files, or a conflicting earlier decision.
+pub fn configure_network_tls(tls: Option<FdbTls>) -> Result<(), String> {
+    if let Some(t) = &tls {
+        for (what, p) in [("CA", &t.ca), ("certificate", &t.cert), ("key", &t.key)] {
+            std::fs::metadata(p)
+                .map_err(|e| format!("FoundationDB TLS {what} {}: {e}", p.display()))?;
+        }
+    }
+    match NETWORK_TLS.set(tls) {
+        Ok(()) => Ok(()),
+        Err(v) if NETWORK_TLS.get() == Some(&v) => Ok(()),
+        Err(_) => Err("FoundationDB network TLS already configured differently".into()),
+    }
+}
+
+/// Whether metadata connections use TLS in this process.
+#[must_use]
+pub fn network_tls_enabled() -> bool {
+    NETWORK_TLS.get().is_some_and(Option::is_some)
+}
+
+/// Coordinators of a cluster file and whether each is a `:tls` address.
+///
+/// # Errors
+///
+/// An unreadable or malformed cluster file.
+pub fn cluster_file_tls(cluster_file: &str) -> Result<Vec<(String, bool)>, String> {
+    let text = std::fs::read_to_string(cluster_file).map_err(|e| format!("{cluster_file}: {e}"))?;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .ok_or_else(|| format!("{cluster_file}: empty cluster file"))?;
+    let (_, coords) = line
+        .split_once('@')
+        .ok_or_else(|| format!("{cluster_file}: no '@' in the connection string"))?;
+    Ok(coords
+        .split(',')
+        .map(|c| (c.trim().to_string(), c.trim().ends_with(":tls")))
+        .collect())
+}
+
+/// Refuse a cluster file whose transport does not match the configured
+/// one: with TLS every coordinator must be `:tls`; without TLS none may be
+/// (a mixed file belongs to a migration, which this process must not
+/// paper over).
+///
+/// # Errors
+///
+/// The mismatch.
+pub fn check_cluster_file_transport(cluster_file: &str, tls: bool) -> Result<(), String> {
+    let coords = cluster_file_tls(cluster_file)?;
+    let n_tls = coords.iter().filter(|(_, t)| *t).count();
+    match (tls, n_tls) {
+        (true, n) if n == coords.len() => Ok(()),
+        (false, 0) => Ok(()),
+        (true, _) => Err(format!(
+            "FoundationDB TLS is configured but {} of {} coordinators in {cluster_file} are not ':tls' addresses",
+            coords.len() - n_tls,
+            coords.len()
+        )),
+        (false, _) => Err(format!(
+            "{cluster_file} lists ':tls' coordinators but no FoundationDB TLS is configured (--fdb-tls-*)"
+        )),
+    }
+}
 
 /// Default per-transaction timeout (overridable with `ARCA_FDB_TX_TIMEOUT_MS`).
 pub const DEFAULT_TX_TIMEOUT_MS: i32 = 10_000;
@@ -28,15 +130,38 @@ pub const DEFAULT_TX_TIMEOUT_MS: i32 = 10_000;
 ///
 /// The guard is kept in a process-wide static, so the network thread runs
 /// until the process exits.
+///
+/// # Panics
+///
+/// If the client library cannot start or refuses the TLS options (the
+/// files were checked by [`configure_network_tls`]).
 #[allow(unsafe_code)]
 pub fn ensure_network() {
     NETWORK.get_or_init(|| {
+        let tls = NETWORK_TLS.get_or_init(|| None).clone();
+        let mut b = foundationdb::api::FdbApiBuilder::default()
+            .build()
+            .expect("foundationdb API to be initialized");
+        if let Some(t) = tls {
+            use foundationdb::options::NetworkOption as O;
+            let s = |p: &std::path::Path| p.display().to_string();
+            b = b
+                .set_option(O::TLSCaPath(s(&t.ca)))
+                .and_then(|b| b.set_option(O::TLSCertPath(s(&t.cert))))
+                .and_then(|b| b.set_option(O::TLSKeyPath(s(&t.key))))
+                .expect("FoundationDB TLS network options");
+            if let Some(v) = t.verify_peers {
+                b = b
+                    .set_option(O::TLSVerifyPeers(v.into_bytes()))
+                    .expect("FoundationDB TLS verify peers");
+            }
+        }
         // SAFETY: `boot` is unsafe because the network must be started at
         // most once per process and stopped before exit. `OnceLock` ensures
         // a single start; the guard lives in a static, so the network runs
         // until process exit, which the client library tolerates for
         // short-lived processes such as tests and tools.
-        unsafe { foundationdb::boot() }
+        unsafe { b.boot() }.expect("fdb network running")
     });
 }
 
@@ -75,6 +200,12 @@ impl FdbKv {
     ///
     /// Returns a backend error if the database handle cannot be created.
     pub fn open_with_timeout(cluster_file: Option<&str>, timeout_ms: i32) -> Result<Self, KvError> {
+        if let Some(cf) = cluster_file {
+            // Fail closed on a transport mismatch instead of letting the
+            // client library time out (or silently mix transports).
+            let tls = NETWORK_TLS.get().is_some_and(Option::is_some);
+            check_cluster_file_transport(cf, tls).map_err(KvError::Backend)?;
+        }
         ensure_network();
         let db = Database::new(cluster_file).map_err(map_err)?;
         db.set_option(foundationdb::options::DatabaseOption::TransactionTimeout(

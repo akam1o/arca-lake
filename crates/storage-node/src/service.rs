@@ -31,6 +31,9 @@ pub struct NodeConfig {
     /// A `PutShard` stream whose client sends no frame for this long is
     /// aborted (slow or stalled client detection, R-47).
     pub stream_progress_timeout: Duration,
+    /// Mutual TLS and per-RPC authorization (ADR-0017); `None` serves
+    /// plaintext with no authorization (explicit `--insecure-plaintext`).
+    pub tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
 }
 
 impl NodeConfig {
@@ -42,6 +45,7 @@ impl NodeConfig {
             store: StoreConfig::new(dir),
             frame_bytes: 256 << 10,
             stream_progress_timeout: Duration::from_secs(10),
+            tls: None,
         }
     }
 }
@@ -59,6 +63,8 @@ pub struct StorageNodeService {
     scrub_slot: tokio::sync::Semaphore,
     /// Incarnation and `format_write` learned from the controller.
     cluster: Mutex<crate::cluster::ClusterFacts>,
+    /// TLS state; `Some` makes every RPC require an authorised identity.
+    tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
 }
 
 /// Decrements a gauge when dropped (`PutShard` streams in flight).
@@ -165,6 +171,7 @@ impl StorageNodeService {
             stats: NodeStats::default(),
             scrub_slot: tokio::sync::Semaphore::new(1),
             cluster: Mutex::new(cluster),
+            tls: cfg.tls.clone(),
         })
     }
 
@@ -175,6 +182,12 @@ impl StorageNodeService {
     /// I/O errors.
     pub fn newest_segment_format(&self) -> Result<u16, StorageError> {
         self.store.newest_segment_format()
+    }
+
+    /// TLS counters, when the node serves mutual TLS.
+    #[must_use]
+    pub fn tls_stats(&self) -> Option<Arc<arca_lake_protocol::tls::TlsStats>> {
+        self.tls.as_ref().map(|t| Arc::clone(&t.stats))
     }
 
     /// The incarnation this node adopted, if any.
@@ -211,6 +224,32 @@ impl StorageNodeService {
     #[must_use]
     pub fn store(&self) -> &Arc<Store> {
         &self.store
+    }
+
+    /// Per-RPC authorization (ADR-0017) before any argument is read.
+    fn authorize<T>(
+        &self,
+        request: &tonic::Request<T>,
+        rpc: arca_lake_protocol::tls::NodeRpc,
+    ) -> Result<(), tonic::Status> {
+        let peer = request
+            .extensions()
+            .get::<arca_lake_protocol::tls::PeerInfo>();
+        let r = arca_lake_protocol::tls::authorize(peer, rpc, self.tls.is_some());
+        if r.is_err()
+            && let Some(t) = &self.tls
+        {
+            t.stats.rpcs_denied.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                ?rpc,
+                peer = peer
+                    .and_then(|p| p.identity.as_ref())
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                "RPC refused by the authorization table"
+            );
+        }
+        r
     }
 
     fn check_version(v: u32) -> Result<(), tonic::Status> {
@@ -326,6 +365,7 @@ impl StorageNode for StorageNodeService {
         &self,
         request: tonic::Request<tonic::Streaming<pb::PutShardRequest>>,
     ) -> Result<tonic::Response<pb::PutShardResponse>, tonic::Status> {
+        self.authorize(&request, arca_lake_protocol::tls::NodeRpc::PutShard)?;
         let mut stream = request.into_inner();
         let started = Instant::now();
         self.stats
@@ -408,6 +448,7 @@ impl StorageNode for StorageNodeService {
         &self,
         request: tonic::Request<pb::GetShardRequest>,
     ) -> Result<tonic::Response<Self::GetShardStream>, tonic::Status> {
+        self.authorize(&request, arca_lake_protocol::tls::NodeRpc::GetShard)?;
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
         self.stats.gets_in_flight.fetch_add(1, Ordering::Relaxed);
@@ -464,6 +505,7 @@ impl StorageNode for StorageNodeService {
         &self,
         request: tonic::Request<pb::DeleteShardRequest>,
     ) -> Result<tonic::Response<pb::DeleteShardResponse>, tonic::Status> {
+        self.authorize(&request, arca_lake_protocol::tls::NodeRpc::DeleteShard)?;
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
         let key = Self::key(req.key)?;
@@ -481,6 +523,7 @@ impl StorageNode for StorageNodeService {
         &self,
         request: tonic::Request<pb::ListShardsRequest>,
     ) -> Result<tonic::Response<pb::ListShardsResponse>, tonic::Status> {
+        self.authorize(&request, arca_lake_protocol::tls::NodeRpc::ListShards)?;
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
         let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
@@ -529,6 +572,7 @@ impl StorageNode for StorageNodeService {
         &self,
         request: tonic::Request<pb::VerifyShardsRequest>,
     ) -> Result<tonic::Response<pb::VerifyShardsResponse>, tonic::Status> {
+        self.authorize(&request, arca_lake_protocol::tls::NodeRpc::VerifyShards)?;
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
         let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
@@ -588,6 +632,7 @@ impl StorageNode for StorageNodeService {
         &self,
         request: tonic::Request<pb::ScrubShardsRequest>,
     ) -> Result<tonic::Response<pb::ScrubShardsResponse>, tonic::Status> {
+        self.authorize(&request, arca_lake_protocol::tls::NodeRpc::ScrubShards)?;
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
         let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
@@ -724,6 +769,7 @@ impl StorageNode for StorageNodeService {
         &self,
         request: tonic::Request<pb::UpdateGroupEpochRequest>,
     ) -> Result<tonic::Response<pb::UpdateGroupEpochResponse>, tonic::Status> {
+        self.authorize(&request, arca_lake_protocol::tls::NodeRpc::UpdateGroupEpoch)?;
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
         let epoch = self
@@ -739,6 +785,18 @@ impl StorageNode for StorageNodeService {
         &self,
         request: tonic::Request<pb::HealthRequest>,
     ) -> Result<tonic::Response<pb::HealthResponse>, tonic::Status> {
+        let facts = {
+            let r = request.get_ref();
+            r.format_write > 0 || !r.incarnation.is_empty()
+        };
+        self.authorize(
+            &request,
+            if facts {
+                arca_lake_protocol::tls::NodeRpc::HealthWithFacts
+            } else {
+                arca_lake_protocol::tls::NodeRpc::Health
+            },
+        )?;
         let req = request.into_inner();
         // Adopt the cluster facts the controller carries (ADR-0016): the
         // incarnation only when not older than what is held, the format
@@ -848,14 +906,9 @@ pub async fn serve(
     // and Nagle plus delayed ACK stalls each small frame that follows
     // unacknowledged data (trailers, window updates) for ~40 ms (RFC-009
     // §6.11). Set it per accepted connection.
-    let incoming = tokio_stream::StreamExt::map(
-        tokio_stream::wrappers::TcpListenerStream::new(listener),
-        |conn| {
-            conn.inspect(|sock| {
-                let _ = sock.set_nodelay(true);
-            })
-        },
-    );
+    // Every accepted socket gets `tcp_nodelay` inside `incoming`, and with
+    // TLS a completed mutual handshake carrying the peer identity.
+    let incoming = arca_lake_protocol::tls::incoming(listener, cfg.tls.clone());
     let task = tokio::spawn(async move {
         let _ = tonic::transport::Server::builder()
             .initial_stream_window_size(Some(arca_lake_protocol::client::STREAM_WINDOW))

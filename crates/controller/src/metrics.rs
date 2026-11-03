@@ -107,6 +107,8 @@ pub struct Metrics {
     pub upgrade_step: AtomicU64,
     /// Writes refused by the cluster-state guard in controller passes.
     pub guard_refusals_total: AtomicU64,
+    /// TLS counters of the node clients (ADR-0017); unset = plaintext.
+    pub tls: std::sync::OnceLock<std::sync::Arc<arca_lake_protocol::tls::TlsStats>>,
 }
 
 /// Metric label of each finding class, in `Finding::ALL` order.
@@ -314,6 +316,10 @@ impl Metrics {
         ] {
             out += &c(name, v.load(Ordering::Relaxed));
         }
+        out += &arca_lake_protocol::tls::render_metrics(
+            "arca_controller",
+            self.tls.get().map(|t| &**t),
+        );
         out
     }
 

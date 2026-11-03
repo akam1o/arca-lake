@@ -65,6 +65,8 @@ pub struct ClusterConfig {
     /// Deadlines and retries of node RPCs (R-47); `None` derives them from
     /// `node_timeout`.
     pub rpc_policy: Option<arca_lake_protocol::client::RpcPolicy>,
+    /// Mutual TLS to storage nodes (ADR-0017); `None` = plaintext.
+    pub tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
     /// Read-through cache tier (RFC-006); `None` disables caching.
     pub cache: Option<CacheTierConfig>,
     /// Chunks read ahead of the one being streamed to the client (1 =
@@ -129,6 +131,14 @@ pub struct ClusterBackend<S> {
     pub(super) put_stats: Arc<PutStats>,
     pub(super) pop_queue: Arc<PopulationQueue>,
     pub(super) integrity: Arc<IntegrityState>,
+}
+
+/// Tell the node clients which node serves each address: over TLS a node
+/// must then present exactly its own identity (ADR-0017).
+fn note_node_ids(clients: &NodeClients, map: &ClusterMap) {
+    for n in map.nodes.values() {
+        clients.note_node_id(&n.address, n.id);
+    }
 }
 
 /// The cluster state as this gateway last saw it (RFC-015 §5.6 admission;
@@ -679,8 +689,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .map_or(8, CacheTierConfig::population_permits);
         let clients = NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
             arca_lake_protocol::client::RpcPolicy::from_timeout(cfg.node_timeout)
-        }));
+        }))
+        .with_tls(cfg.tls.clone());
         clients.set_incarnation(Some(state.incarnation));
+        note_node_ids(&clients, &map);
         let pop_queue = Arc::new(PopulationQueue::new(
             clients.clone(),
             permits,
@@ -829,6 +841,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// Metadata errors.
     pub async fn refresh_map(&self) -> Result<Arc<ClusterMap>, MetaError> {
         let fresh = Arc::new(ClusterMap::load(self.meta.as_ref()).await?);
+        note_node_ids(&self.clients, &fresh);
         *self.map.write().unwrap_or_else(PoisonError::into_inner) = Arc::clone(&fresh);
         Ok(fresh)
     }

@@ -6,6 +6,7 @@
 
 #[cfg(feature = "fdb")]
 pub mod fdb;
+pub mod pki;
 pub mod s3;
 pub mod suite;
 pub mod suite_cache;
@@ -42,6 +43,7 @@ pub struct TestNode {
     /// Address (stable across restarts).
     pub addr: SocketAddr,
     handle: Option<NodeHandle>,
+    tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
 }
 
 impl TestNode {
@@ -80,6 +82,8 @@ pub struct TestCluster<S: KvStore + 'static = MemKv> {
     /// Repair options used by [`TestCluster::repair`].
     pub repair_options: repair::RepairOptions,
     cluster_cfg: ClusterConfig,
+    /// The development CA of a TLS cluster.
+    pub pki: Option<Arc<pki::TestPki>>,
     tmp: tempfile::TempDir,
 }
 
@@ -125,6 +129,9 @@ pub struct ClusterOptions {
     pub principals: Vec<(String, String, String)>,
     /// Gateway heartbeat interval (RFC-014 §5.5); `None` disables it.
     pub heartbeat: Option<Duration>,
+    /// Run every node, the gateway and the test's own clients over mutual
+    /// TLS with a development CA (ADR-0017).
+    pub tls: bool,
     /// Use this credential store instead of one built from `principals`
     /// (a file-backed store for rotation tests); the cluster's generated
     /// `credentials` are then not registered anywhere.
@@ -187,6 +194,7 @@ impl ClusterOptions {
             authorize: false,
             principals: Vec::new(),
             heartbeat: None,
+            tls: false,
             credential_store: None,
         }
     }
@@ -217,6 +225,15 @@ pub fn mem_starter() -> impl suite::Starter<MemKv> {
     }
 }
 
+/// Starter for the in-memory backend with every node RPC over mutual TLS
+/// (ADR-0017), for running the end-to-end suite authenticated.
+pub fn mem_tls_starter() -> impl suite::Starter<MemKv> {
+    |mut opts: ClusterOptions| -> futures::future::BoxFuture<'static, TestCluster<MemKv>> {
+        opts.tls = true;
+        Box::pin(TestCluster::start(opts))
+    }
+}
+
 /// Starter for the in-memory backend wrapped in a fault injector, for
 /// [`fault_suite!`].
 pub fn fault_mem_starter() -> impl suite_faults::FaultStarter<MemKv> {
@@ -238,13 +255,20 @@ impl<S: KvStore + 'static> TestCluster<S> {
     #[allow(clippy::too_many_lines)]
     pub async fn start_with(meta: Arc<S>, opts: ClusterOptions) -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let clients = NodeClients::new(Duration::from_secs(5));
+        let pki = opts.tls.then(|| pki::TestPki::new(&tmp.path().join("pki")));
+        // The test's own clients act as an operator (admin role).
+        let clients = NodeClients::new(Duration::from_secs(5)).with_tls(
+            pki.as_ref()
+                .map(|p| p.ctx(arca_lake_protocol::tls::Role::Admin, "test")),
+        );
         let mut nodes = Vec::new();
         for i in 0..opts.nodes {
             let dir = tmp.path().join(format!("node{i}"));
             std::fs::create_dir_all(&dir).unwrap();
             let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
             cfg.store = node_store_config(&dir);
+            let tls = pki.as_ref().map(|p| p.pending_node(&dir));
+            cfg.tls = tls.clone();
             let handle = arca_lake_storage_node::serve(cfg).await.unwrap();
             let addr = handle.local_addr;
             let record = cluster::register_node(
@@ -260,11 +284,15 @@ impl<S: KvStore + 'static> TestCluster<S> {
             )
             .await
             .unwrap();
+            if let (Some(p), Some(t)) = (pki.as_ref(), tls.as_ref()) {
+                p.name_node(&dir, record.id, t);
+            }
             nodes.push(TestNode {
                 id: record.id,
                 dir,
                 addr,
                 handle: Some(handle),
+                tls,
             });
         }
         groups::create_groups(meta.as_ref(), &opts.profile, "default", opts.groups)
@@ -277,6 +305,8 @@ impl<S: KvStore + 'static> TestCluster<S> {
             std::fs::create_dir_all(&dir).unwrap();
             let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
             cfg.store = node_store_config(&dir);
+            let tls = pki.as_ref().map(|p| p.pending_node(&dir));
+            cfg.tls = tls.clone();
             let handle = arca_lake_storage_node::serve(cfg).await.unwrap();
             let addr = handle.local_addr;
             let record = cluster::register_node(
@@ -291,11 +321,15 @@ impl<S: KvStore + 'static> TestCluster<S> {
             )
             .await
             .unwrap();
+            if let (Some(p), Some(t)) = (pki.as_ref(), tls.as_ref()) {
+                p.name_node(&dir, record.id, t);
+            }
             nodes.push(TestNode {
                 id: record.id,
                 dir,
                 addr,
                 handle: Some(handle),
+                tls,
             });
         }
         let cache = if opts.cache_nodes > 0 {
@@ -326,6 +360,9 @@ impl<S: KvStore + 'static> TestCluster<S> {
             shard_frame_bytes: 256 << 10,
             node_timeout: Duration::from_secs(5),
             rpc_policy: None,
+            tls: pki
+                .as_ref()
+                .map(|p| p.ctx(arca_lake_protocol::tls::Role::Gateway, "gateway")),
             cache,
             read_parallelism: opts.read_parallelism,
             population_queue_depth: opts.population_queue_depth,
@@ -387,8 +424,29 @@ impl<S: KvStore + 'static> TestCluster<S> {
             page_size: 0,
             repair_options: repair::RepairOptions::default(),
             cluster_cfg,
+            pki,
             tmp,
         }
+    }
+
+    /// The gateway's TLS context on a TLS cluster.
+    #[must_use]
+    pub fn gateway_tls(&self) -> Option<Arc<arca_lake_protocol::tls::TlsContext>> {
+        self.cluster_cfg.tls.clone()
+    }
+
+    /// Re-issue node `i`'s certificate (same CA, new serial) and reload it
+    /// in the running node: a leaf rotation.
+    ///
+    /// # Panics
+    ///
+    /// On a non-TLS cluster or failures.
+    pub fn rotate_node_cert(&self, i: usize) {
+        let n = &self.nodes[i];
+        let (Some(p), Some(t)) = (self.pki.as_ref(), n.tls.as_ref()) else {
+            panic!("not a TLS cluster");
+        };
+        p.name_node(&n.dir, n.id, t);
     }
 
     /// Replace `backend` with a freshly constructed one (a gateway restarted
@@ -426,6 +484,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         let n = &mut self.nodes[i];
         let mut cfg = NodeConfig::new(n.addr, &n.dir);
         cfg.store = node_store_config(&n.dir);
+        cfg.tls = n.tls.clone();
         let mut last_err = None;
         for _ in 0..50 {
             match arca_lake_storage_node::serve(cfg.clone()).await {
@@ -453,6 +512,8 @@ impl<S: KvStore + 'static> TestCluster<S> {
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
         cfg.store = node_store_config(&dir);
+        let tls = self.pki.as_ref().map(|p| p.pending_node(&dir));
+        cfg.tls = tls.clone();
         let handle = arca_lake_storage_node::serve(cfg).await.unwrap();
         let addr = handle.local_addr;
         let record = cluster::register_node(
@@ -468,11 +529,15 @@ impl<S: KvStore + 'static> TestCluster<S> {
         )
         .await
         .unwrap();
+        if let (Some(p), Some(t)) = (self.pki.as_ref(), tls.as_ref()) {
+            p.name_node(&dir, record.id, t);
+        }
         self.nodes.push(TestNode {
             id: record.id,
             dir,
             addr,
             handle: Some(handle),
+            tls,
         });
         i
     }
@@ -692,6 +757,8 @@ impl<S: KvStore + 'static> TestCluster<S> {
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
         cfg.store = node_store_config(&dir);
+        let tls = self.pki.as_ref().map(|p| p.pending_node(&dir));
+        cfg.tls = tls.clone();
         let handle = arca_lake_storage_node::serve(cfg).await.unwrap();
         let addr = handle.local_addr;
         let record = cluster::register_node(
@@ -706,11 +773,15 @@ impl<S: KvStore + 'static> TestCluster<S> {
         )
         .await
         .unwrap();
+        if let (Some(p), Some(t)) = (self.pki.as_ref(), tls.as_ref()) {
+            p.name_node(&dir, record.id, t);
+        }
         self.nodes.push(TestNode {
             id: record.id,
             dir,
             addr,
             handle: Some(handle),
+            tls,
         });
         i
     }

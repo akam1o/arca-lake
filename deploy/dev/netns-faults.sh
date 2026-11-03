@@ -26,7 +26,10 @@ NS1=arca1 NS2=arca2 V1=arca-v1 V2=arca-v2
 IP1=10.77.0.1 IP2=10.77.0.2
 REPO="${REPO:-$HOME/arca-lake}"
 RUN="${RUN:-$HOME/arca-ns}"
-BIN="$REPO/target/release/arca-lake"
+# Explicit plaintext node RPCs and metadata (ADR-0017) unless ARCA_ENV says
+# otherwise.
+ARCA_ENV="${ARCA_ENV:-ARCA_INSECURE_PLAINTEXT=1 ARCA_FDB_INSECURE_PLAINTEXT=1}"
+BIN="env $ARCA_ENV $REPO/target/release/arca-lake"
 S3LOAD="$REPO/target/release/s3load"
 CF="$RUN/fdb.cluster"
 ADMIN="$BIN admin --cluster-file $CF"

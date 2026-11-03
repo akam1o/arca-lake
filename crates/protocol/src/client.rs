@@ -445,6 +445,10 @@ pub struct NodeClients {
     negotiated: Arc<Mutex<HashMap<String, NodeCaps>>>,
     /// Cluster incarnation stamped on `DeleteShard` (RFC-015 §5.3).
     incarnation: Arc<Mutex<Option<[u8; 16]>>>,
+    /// Mutual TLS (ADR-0017); `None` = explicitly plaintext.
+    tls: Option<Arc<crate::tls::TlsContext>>,
+    /// Node id per address: the identity a node must present.
+    node_ids: Arc<Mutex<HashMap<String, u64>>>,
     /// `GetShard` RPCs in flight per node address (durable-read priority
     /// for cache populations).
     reads_in_flight: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
@@ -476,6 +480,36 @@ impl NodeClients {
             reads_in_flight: Arc::default(),
             negotiated: Arc::default(),
             incarnation: Arc::default(),
+            tls: None,
+            node_ids: Arc::default(),
+        }
+    }
+
+    /// Use mutual TLS for every connection (ADR-0017). Call before the
+    /// first RPC: cached channels keep their transport.
+    #[must_use]
+    pub fn with_tls(mut self, tls: Option<Arc<crate::tls::TlsContext>>) -> Self {
+        self.tls = tls;
+        self
+    }
+
+    /// The TLS context, if any.
+    #[must_use]
+    pub fn tls(&self) -> Option<&Arc<crate::tls::TlsContext>> {
+        self.tls.as_ref()
+    }
+
+    /// Record which node serves `addr`: TLS connections to it then require
+    /// `spiffe://<td>/node/<id>` exactly (otherwise any node identity of
+    /// the trust domain). A change drops the cached channel.
+    pub fn note_node_id(&self, addr: &str, node_id: u64) {
+        let prev = self
+            .node_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(addr.to_string(), node_id);
+        if prev.is_some_and(|p| p != node_id) {
+            self.forget(addr);
         }
     }
 
@@ -792,7 +826,30 @@ impl NodeClients {
             .initial_stream_window_size(Some(STREAM_WINDOW))
             .initial_connection_window_size(Some(CONNECTION_WINDOW))
             .connect_timeout(self.policy.connect_timeout);
-        let ch = ep.connect_lazy();
+        let ch = match &self.tls {
+            None => ep.connect_lazy(),
+            Some(ctx) => {
+                let ctx = Arc::clone(ctx);
+                let target = addr.to_string();
+                let node_id = self
+                    .node_ids
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(addr)
+                    .copied();
+                ep.connect_with_connector_lazy(tower::service_fn(
+                    move |_uri: tonic::codegen::http::Uri| {
+                        let ctx = Arc::clone(&ctx);
+                        let target = target.clone();
+                        async move {
+                            crate::tls::connect(&ctx, &target, node_id)
+                                .await
+                                .map(hyper_util::rt::TokioIo::new)
+                        }
+                    },
+                ))
+            }
+        };
         map.insert(addr.to_string(), ch.clone());
         Ok(ch)
     }

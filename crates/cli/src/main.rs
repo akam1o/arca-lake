@@ -36,6 +36,75 @@ enum Command {
     Controller(ControllerArgs),
     /// Cluster administration.
     Admin(AdminArgs),
+    /// Development PKI for test and lab clusters: a CA, SPIFFE role
+    /// certificates and CRLs (ADR-0017). Production clusters use their own
+    /// CA or SPIRE.
+    Tls {
+        #[command(subcommand)]
+        command: TlsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TlsCommand {
+    /// Create a CA in `--dir` (`ca.pem`, `ca-key.pem` with mode 0600).
+    InitCa {
+        /// Output directory.
+        #[arg(long)]
+        dir: PathBuf,
+        /// CA common name.
+        #[arg(long, default_value = "arca-lake development CA")]
+        name: String,
+        /// Validity in days.
+        #[arg(long, default_value_t = 365)]
+        days: u64,
+    },
+    /// Issue `spiffe://<trust-domain>/<role>/<name>` into `--out`
+    /// (`cert.pem`, `key.pem` mode 0600, `ca.pem`).
+    Issue {
+        /// Directory of the CA (`ca.pem`, `ca-key.pem`).
+        #[arg(long)]
+        ca_dir: PathBuf,
+        /// Trust domain.
+        #[arg(long)]
+        trust_domain: String,
+        /// Role: node, gateway, controller or admin.
+        #[arg(long)]
+        role: String,
+        /// Name (the node id for nodes).
+        #[arg(long)]
+        name: String,
+        /// Output directory.
+        #[arg(long)]
+        out: PathBuf,
+        /// Validity in days.
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+        /// Serial number (default: from the clock).
+        #[arg(long)]
+        serial: Option<u64>,
+    },
+    /// Write a CRL revoking `--revoke` serials.
+    Crl {
+        /// Directory of the CA.
+        #[arg(long)]
+        ca_dir: PathBuf,
+        /// Serials to revoke.
+        #[arg(long)]
+        revoke: Vec<u64>,
+        /// CRL number (monotonic).
+        #[arg(long)]
+        number: u64,
+        /// Output file.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Print the SPIFFE identities and expiry of a certificate.
+    Show {
+        /// Certificate (PEM).
+        #[arg(long)]
+        cert: PathBuf,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -159,6 +228,170 @@ struct NodeRpcArgs {
     /// Attempts per shard RPC on transport errors (1 = no retry).
     #[arg(long = "node-max-attempts", default_value_t = 3)]
     node_max_attempts: u32,
+    #[command(flatten)]
+    tls: TlsArgs,
+}
+
+/// Mutual TLS to and from storage nodes (RFC-012 §5.5, ADR-0017).
+#[derive(Debug, Clone, clap::Args)]
+struct TlsArgs {
+    /// Trust bundle: PEM file with one or more CA certificates (two during
+    /// a CA rotation).
+    #[arg(long, env = "ARCA_TLS_CA")]
+    tls_ca: Option<PathBuf>,
+    /// This process's certificate chain (PEM, leaf first) carrying a
+    /// `spiffe://<trust-domain>/<role>/<name>` URI SAN.
+    #[arg(long, env = "ARCA_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+    /// This process's private key (PEM). Never logged.
+    #[arg(long, env = "ARCA_TLS_KEY")]
+    tls_key: Option<PathBuf>,
+    /// Certificate revocation lists (PEM), optional.
+    #[arg(long, env = "ARCA_TLS_CRL")]
+    tls_crl: Option<PathBuf>,
+    /// SPIFFE trust domain every peer must belong to.
+    #[arg(long, env = "ARCA_TRUST_DOMAIN")]
+    trust_domain: Option<String>,
+    /// Seconds between checks of the TLS files for changes (rotation).
+    #[arg(long, default_value_t = 30)]
+    tls_reload_secs: u64,
+    /// Run node RPCs in plaintext with no authentication or authorization
+    /// (test and lab clusters only). Refused together with TLS flags.
+    #[arg(long, env = "ARCA_INSECURE_PLAINTEXT")]
+    insecure_plaintext: bool,
+}
+
+impl TlsArgs {
+    /// The TLS context for a process of `role`; `None` only when plaintext
+    /// was requested explicitly.
+    fn context(
+        &self,
+        role: arca_lake_protocol::tls::Role,
+    ) -> Result<Option<Arc<arca_lake_protocol::tls::TlsContext>>, String> {
+        let any = self.tls_ca.is_some()
+            || self.tls_cert.is_some()
+            || self.tls_key.is_some()
+            || self.tls_crl.is_some()
+            || self.trust_domain.is_some();
+        if self.insecure_plaintext {
+            if any {
+                return Err("--insecure-plaintext cannot be combined with TLS flags".into());
+            }
+            tracing::warn!(
+                role = role.as_str(),
+                "node RPCs run in PLAINTEXT with no authentication or authorization (--insecure-plaintext)"
+            );
+            return Ok(None);
+        }
+        let (Some(ca), Some(cert), Some(key), Some(td)) = (
+            self.tls_ca.clone(),
+            self.tls_cert.clone(),
+            self.tls_key.clone(),
+            self.trust_domain.clone(),
+        ) else {
+            return Err(if any {
+                "TLS needs --tls-ca, --tls-cert, --tls-key and --trust-domain".into()
+            } else {
+                "no TLS configuration for node RPCs: give --tls-ca, --tls-cert, --tls-key and --trust-domain, or --insecure-plaintext for a test cluster".into()
+            });
+        };
+        let ctx = arca_lake_protocol::tls::TlsContext::load(
+            arca_lake_protocol::tls::TlsFiles {
+                ca,
+                cert,
+                key,
+                crl: self.tls_crl.clone(),
+                trust_domain: td,
+            },
+            role,
+        )
+        .map_err(|e| format!("TLS: {e}"))?;
+        tracing::info!(
+            identity = %ctx.identity(),
+            not_after = ctx.not_after(),
+            "mutual TLS enabled for node RPCs"
+        );
+        ctx.spawn_reloader(Duration::from_secs(self.tls_reload_secs.max(1)));
+        Ok(Some(ctx))
+    }
+}
+
+/// TLS of the FoundationDB metadata connection (ADR-0017).
+#[derive(Debug, Clone, clap::Args)]
+#[allow(clippy::struct_field_names)]
+struct FdbTlsArgs {
+    /// Trust bundle for the FoundationDB servers (PEM).
+    #[arg(long, env = "ARCA_FDB_TLS_CA")]
+    fdb_tls_ca: Option<PathBuf>,
+    /// Client certificate for FoundationDB (PEM).
+    #[arg(long, env = "ARCA_FDB_TLS_CERT")]
+    fdb_tls_cert: Option<PathBuf>,
+    /// Client private key for FoundationDB (PEM). Never logged.
+    #[arg(long, env = "ARCA_FDB_TLS_KEY")]
+    fdb_tls_key: Option<PathBuf>,
+    /// FoundationDB peer verification string (`TLS_verify_peers`).
+    #[arg(long, env = "ARCA_FDB_TLS_VERIFY_PEERS")]
+    fdb_tls_verify_peers: Option<String>,
+    /// Connect to FoundationDB in plaintext (test and lab clusters only).
+    #[arg(long, env = "ARCA_FDB_INSECURE_PLAINTEXT")]
+    fdb_insecure_plaintext: bool,
+}
+
+impl FdbTlsArgs {
+    /// Decide the metadata transport before any connection.
+    fn configure(&self) -> Result<(), String> {
+        let any = self.fdb_tls_ca.is_some()
+            || self.fdb_tls_cert.is_some()
+            || self.fdb_tls_key.is_some()
+            || self.fdb_tls_verify_peers.is_some();
+        let tls = if self.fdb_insecure_plaintext {
+            if any {
+                return Err(
+                    "--fdb-insecure-plaintext cannot be combined with --fdb-tls-* flags".into(),
+                );
+            }
+            tracing::warn!(
+                "metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)"
+            );
+            None
+        } else {
+            let (Some(ca), Some(cert), Some(key)) = (
+                self.fdb_tls_ca.clone(),
+                self.fdb_tls_cert.clone(),
+                self.fdb_tls_key.clone(),
+            ) else {
+                return Err(if any {
+                    "FoundationDB TLS needs --fdb-tls-ca, --fdb-tls-cert and --fdb-tls-key".into()
+                } else {
+                    "no TLS configuration for FoundationDB: give --fdb-tls-ca, --fdb-tls-cert and --fdb-tls-key, or --fdb-insecure-plaintext for a test cluster".into()
+                });
+            };
+            tracing::info!(ca = %ca.display(), cert = %cert.display(), "metadata connection uses FoundationDB TLS");
+            Some((ca, cert, key, self.fdb_tls_verify_peers.clone()))
+        };
+        configure_fdb_tls(tls)
+    }
+}
+
+#[cfg(feature = "fdb")]
+fn configure_fdb_tls(
+    tls: Option<(PathBuf, PathBuf, PathBuf, Option<String>)>,
+) -> Result<(), String> {
+    arca_lake_metadata::fdb::configure_network_tls(tls.map(|(ca, cert, key, verify_peers)| {
+        arca_lake_metadata::fdb::FdbTls {
+            ca,
+            cert,
+            key,
+            verify_peers,
+        }
+    }))
+}
+
+#[cfg(not(feature = "fdb"))]
+fn configure_fdb_tls(
+    _tls: Option<(PathBuf, PathBuf, PathBuf, Option<String>)>,
+) -> Result<(), String> {
+    Ok(())
 }
 
 impl NodeRpcArgs {
@@ -232,6 +465,8 @@ struct GatewayArgs {
     cache: CacheArgs,
     #[command(flatten)]
     rpc: NodeRpcArgs,
+    #[command(flatten)]
+    fdb_tls: FdbTlsArgs,
     /// Chunks read ahead of the one being streamed per GET (1 = sequential);
     /// bounds buffered bytes per GET to about this many chunks.
     #[arg(long, default_value_t = 4)]
@@ -267,6 +502,8 @@ struct StorageNodeArgs {
     /// storage engine's 1 GiB. Small values are for tests.
     #[arg(long)]
     segment_max_bytes: Option<u64>,
+    #[command(flatten)]
+    tls: TlsArgs,
     #[command(subcommand)]
     command: Option<StorageNodeCommand>,
 }
@@ -425,6 +662,8 @@ struct ControllerArgs {
     stripe_repair_per_node: usize,
     #[command(flatten)]
     rpc: NodeRpcArgs,
+    #[command(flatten)]
+    fdb_tls: FdbTlsArgs,
 }
 
 #[derive(Debug, clap::Args)]
@@ -432,6 +671,8 @@ struct AdminArgs {
     /// FoundationDB cluster file.
     #[arg(long, env = "ARCA_FDB_CLUSTER_FILE")]
     cluster_file: PathBuf,
+    #[command(flatten)]
+    fdb_tls: FdbTlsArgs,
     #[command(subcommand)]
     command: AdminCommand,
 }
@@ -735,6 +976,7 @@ async fn main() -> ExitCode {
     match cli.command {
         Command::Gateway(args) => run_gateway(args).await,
         Command::StorageNode(args) => run_storage_node(args).await,
+        Command::Tls { command } => run_tls(command),
         Command::Controller(args) => run_controller(args).await,
         Command::Admin(args) => run_admin(args).await,
     }
@@ -759,7 +1001,11 @@ fn fail(msg: impl std::fmt::Display) -> ExitCode {
 }
 
 #[cfg(feature = "fdb")]
-fn open_meta(path: &std::path::Path) -> Result<Arc<arca_lake_metadata::fdb::FdbKv>, String> {
+fn open_meta(
+    path: &std::path::Path,
+    tls: &FdbTlsArgs,
+) -> Result<Arc<arca_lake_metadata::fdb::FdbKv>, String> {
+    tls.configure()?;
     let s = path
         .to_str()
         .ok_or_else(|| "cluster file path is not UTF-8".to_string())?;
@@ -769,8 +1015,103 @@ fn open_meta(path: &std::path::Path) -> Result<Arc<arca_lake_metadata::fdb::FdbK
 }
 
 #[cfg(not(feature = "fdb"))]
-fn open_meta(_path: &std::path::Path) -> Result<Arc<arca_lake_metadata::mem::MemKv>, String> {
+fn open_meta(
+    _path: &std::path::Path,
+    tls: &FdbTlsArgs,
+) -> Result<Arc<arca_lake_metadata::mem::MemKv>, String> {
+    tls.configure()?;
     Err("this binary was built without the `fdb` feature; FoundationDB is required for multi-process deployments".into())
+}
+
+fn write_secret(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        o.mode(0o600);
+    }
+    o.open(path)?.write_all(text.as_bytes())
+}
+
+fn run_tls(command: TlsCommand) -> ExitCode {
+    use arca_lake_protocol::pki::Ca;
+    use arca_lake_protocol::tls::Role;
+    let day = |d: u64| Duration::from_secs(d.max(1) * 86_400);
+    let load_ca = |dir: &std::path::Path| -> Result<Ca, String> {
+        let cert =
+            std::fs::read_to_string(dir.join("ca.pem")).map_err(|e| format!("ca.pem: {e}"))?;
+        let key = std::fs::read_to_string(dir.join("ca-key.pem"))
+            .map_err(|e| format!("ca-key.pem: {e}"))?;
+        Ca::from_pem(&cert, &key)
+    };
+    let r: Result<String, String> = (|| match command {
+        TlsCommand::InitCa { dir, name, days } => {
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let ca = Ca::new(&name, day(days))?;
+            std::fs::write(dir.join("ca.pem"), &ca.cert_pem).map_err(|e| e.to_string())?;
+            write_secret(&dir.join("ca-key.pem"), &ca.key_pem()).map_err(|e| e.to_string())?;
+            Ok(format!("CA written to {}", dir.display()))
+        }
+        TlsCommand::Issue {
+            ca_dir,
+            trust_domain,
+            role,
+            name,
+            out,
+            days,
+            serial,
+        } => {
+            let role =
+                Role::parse(&role).ok_or("role must be node, gateway, controller or admin")?;
+            let ca = load_ca(&ca_dir)?;
+            let serial = serial.unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(1, |d| u64::try_from(d.as_micros()).unwrap_or(1))
+            });
+            let issued = ca.issue(&trust_domain, role, &name, serial, day(days))?;
+            std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            std::fs::write(out.join("cert.pem"), &issued.cert_pem).map_err(|e| e.to_string())?;
+            write_secret(&out.join("key.pem"), &issued.key_pem).map_err(|e| e.to_string())?;
+            std::fs::write(out.join("ca.pem"), &ca.cert_pem).map_err(|e| e.to_string())?;
+            Ok(format!(
+                "issued spiffe://{trust_domain}/{}/{name} serial {serial} into {}",
+                role.as_str(),
+                out.display()
+            ))
+        }
+        TlsCommand::Crl {
+            ca_dir,
+            revoke,
+            number,
+            out,
+        } => {
+            let ca = load_ca(&ca_dir)?;
+            std::fs::write(&out, ca.crl(&revoke, number)?).map_err(|e| e.to_string())?;
+            Ok(format!(
+                "CRL {number} revoking {revoke:?} written to {}",
+                out.display()
+            ))
+        }
+        TlsCommand::Show { cert } => {
+            let pem = std::fs::read(&cert).map_err(|e| e.to_string())?;
+            let (ids, not_after) = arca_lake_protocol::tls::pem_certificate_identities(&pem)
+                .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "identities {:?} not_after {not_after}",
+                ids.iter().map(ToString::to_string).collect::<Vec<_>>()
+            ))
+        }
+    })();
+    match r {
+        Ok(msg) => {
+            println!("{msg}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
 }
 
 async fn wait_for_shutdown() {
@@ -851,7 +1192,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
         let Some(path) = args.cluster_file.as_deref() else {
             return fail("--backend cluster needs --cluster-file");
         };
-        let meta = match open_meta(path) {
+        let meta = match open_meta(path, &args.fdb_tls) {
             Ok(m) => m,
             Err(e) => return fail(e),
         };
@@ -866,6 +1207,10 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 shard_frame_bytes: 256 << 10,
                 node_timeout: Duration::from_secs(10),
                 rpc_policy: Some(args.rpc.policy()),
+                tls: match args.rpc.tls.context(arca_lake_protocol::tls::Role::Gateway) {
+                    Ok(t) => t,
+                    Err(e) => return fail(e),
+                },
                 cache,
                 read_parallelism: args.read_parallelism,
                 population_queue_depth: args.cache.cache_population_queue_depth,
@@ -896,6 +1241,10 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 render_put_stats(&mut out, &stats_backend.put_stats());
                 render_queue_and_txn_stats(&mut out, &stats_backend.population_queue_stats());
                 render_integrity_stats(&mut out, &stats_backend.integrity_stats());
+                out += &arca_lake_protocol::tls::render_metrics(
+                    "arca_gateway",
+                    stats_backend.node_clients().tls().map(|t| &*t.stats),
+                );
                 out
             }));
         }
@@ -952,6 +1301,10 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
     if let Some(b) = args.segment_max_bytes {
         cfg.store.segment_max_bytes = b;
     }
+    cfg.tls = match args.tls.context(arca_lake_protocol::tls::Role::Node) {
+        Ok(t) => t,
+        Err(e) => return fail(e),
+    };
     let node = match arca_lake_storage_node::serve(cfg).await {
         Ok(n) => n,
         Err(e) => return fail(format!("cannot start the storage node: {e}")),
@@ -965,7 +1318,12 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
         tracing::info!(%addr, "storage node metrics endpoint");
         let service = Arc::clone(node.service());
         tokio::spawn(serve_gateway_metrics(listener, move || {
-            render_node_stats(&service.stats(), &service.store().timings())
+            let mut out = render_node_stats(&service.stats(), &service.store().timings());
+            out += &arca_lake_protocol::tls::render_metrics(
+                "arca_node",
+                service.tls_stats().as_deref(),
+            );
+            out
         }));
     }
     wait_for_shutdown().await;
@@ -1127,7 +1485,7 @@ fn run_storage_node_command(command: StorageNodeCommand) -> ExitCode {
 }
 
 async fn run_controller(args: ControllerArgs) -> ExitCode {
-    let meta = match open_meta(&args.cluster_file) {
+    let meta = match open_meta(&args.cluster_file, &args.fdb_tls) {
         Ok(m) => m,
         Err(e) => return fail(e),
     };
@@ -1179,6 +1537,14 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.stripe_repair_interval = Duration::from_secs(args.stripe_repair_interval_secs.max(1));
     cfg.node_timeout = Duration::from_secs(args.rpc.node_timeout_secs.max(1));
     cfg.rpc_policy = Some(args.rpc.policy());
+    cfg.tls = match args
+        .rpc
+        .tls
+        .context(arca_lake_protocol::tls::Role::Controller)
+    {
+        Ok(t) => t,
+        Err(e) => return fail(e),
+    };
     let handle = match arca_lake_controller::process::spawn(meta, cfg).await {
         Ok(h) => h,
         Err(e) => return fail(format!("cannot start the controller: {e}")),
@@ -1194,7 +1560,7 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
 
 #[allow(clippy::too_many_lines)]
 async fn run_admin(args: AdminArgs) -> ExitCode {
-    let meta = match open_meta(&args.cluster_file) {
+    let meta = match open_meta(&args.cluster_file, &args.fdb_tls) {
         Ok(m) => m,
         Err(e) => return fail(e),
     };
@@ -1983,7 +2349,12 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
             rpc,
         } => {
             use arca_lake_controller::objects::{ShardState, Verdict, verify_object};
-            let clients = arca_lake_protocol::client::NodeClients::with_policy(rpc.policy());
+            let clients = match rpc.tls.context(arca_lake_protocol::tls::Role::Admin) {
+                Ok(t) => {
+                    arca_lake_protocol::client::NodeClients::with_policy(rpc.policy()).with_tls(t)
+                }
+                Err(e) => return fail(e),
+            };
             match verify_object(
                 meta.as_ref(),
                 &clients,
@@ -2141,7 +2512,12 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
                     Err(e) => fail(e),
                 };
             }
-            let clients = arca_lake_protocol::client::NodeClients::with_policy(rpc.policy());
+            let clients = match rpc.tls.context(arca_lake_protocol::tls::Role::Admin) {
+                Ok(t) => {
+                    arca_lake_protocol::client::NodeClients::with_policy(rpc.policy()).with_tls(t)
+                }
+                Err(e) => return fail(e),
+            };
             let coders = arca_lake_controller::integrity::coders();
             let opts = arca_lake_controller::integrity::ScrubOptions {
                 page,

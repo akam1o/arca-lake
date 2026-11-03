@@ -228,14 +228,24 @@ version = "0.0.0"
 dependencies = [
  "arca-lake-common",
  "bytes",
+ "hyper-util",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "rcgen",
+ "rustls",
+ "tempfile",
+ "thiserror",
+ "time",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tower",
+ "tracing",
+ "x509-parser",
 ]
 
 [[package]]

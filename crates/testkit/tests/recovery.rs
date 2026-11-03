@@ -1090,3 +1090,61 @@ async fn a_node_that_does_not_answer_makes_the_verification_incomplete() {
     assert_eq!(state(&c).await.state, ClusterPhase::ReadOnly);
     c.shutdown().await;
 }
+
+#[tokio::test]
+async fn nodes_refuse_old_incarnation_deletes_from_the_first_recovery_pass() {
+    // A delete RPC of a pre-restore controller that is still in flight (or
+    // delayed) must be refused while the cluster is restoring and
+    // verifying, not only once it is Active again.
+    let c = cluster(3, 2, 1).await;
+    put(&c, "obj", 1).await;
+    let group = group_of(&c, "obj").await;
+    let chunk = c.manifest(BUCKET, "obj").await.chunks[0].1.chunk_id;
+    let old = state(&c).await;
+    let old_clients = NodeClients::new(Duration::from_secs(5));
+    old_clients.set_incarnation(Some(old.incarnation));
+    let addr = c.nodes[member_node(&c, &group, 0)].addr.to_string();
+    // Nodes know the old incarnation (the old controller's health pass).
+    c.clients
+        .health_with(
+            &addr,
+            HealthRequest {
+                format_write: 0,
+                incarnation: Bytes::copy_from_slice(&old.incarnation),
+                incarnation_changed_ms: old.changed_ms,
+            },
+        )
+        .await
+        .unwrap();
+    let marked = compat::mark_restoring(c.meta.as_ref(), None, None, "admin", now_ms())
+        .await
+        .unwrap();
+    let admin = GuardedKv::new(Arc::clone(&c.meta), marked.incarnation, OpClass::Admin);
+    let r = recovery_pass(
+        &admin,
+        &c.clients,
+        &RecoveryOptions::default(),
+        None,
+        "ctl",
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.phase_after, Some(ClusterPhase::VerificationPending));
+    let shard = ShardRef {
+        group_id: group.id,
+        chunk_id: chunk,
+        shard_index: 0,
+    };
+    let e = old_clients
+        .delete_shard(&addr, shard, u64::MAX)
+        .await
+        .unwrap_err();
+    assert!(e.message().starts_with("incarnation rejected"), "{e}");
+    assert!(
+        c.shard_keys(member_node(&c, &group, 0), group.id)
+            .iter()
+            .any(|k| k.chunk_id == chunk)
+    );
+    c.shutdown().await;
+}

@@ -36,6 +36,12 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 
 const BUCKET: &str = "mixed";
+/// The test cluster runs plaintext node RPCs and metadata, explicitly
+/// (ADR-0017).
+const PLAINTEXT: [(&str, &str); 2] = [
+    ("ARCA_INSECURE_PLAINTEXT", "1"),
+    ("ARCA_FDB_INSECURE_PLAINTEXT", "1"),
+];
 const ACCESS_KEY: &str = "AKIAMIXEDVERSION00000";
 const SECRET_KEY: &str = "mixed-version-test-secret-not-a-real-key";
 const CHUNK: u64 = 256 << 10;
@@ -69,6 +75,7 @@ impl Env {
     /// Run an admin command; returns (success, stdout + stderr).
     fn admin(&self, new: bool, args: &[&str]) -> (bool, String) {
         let out = Command::new(self.bin(new))
+            .envs(PLAINTEXT)
             .arg("admin")
             .arg("--cluster-file")
             .arg(&self.cluster_file)
@@ -93,6 +100,7 @@ impl Env {
         let log = self.tmp.path().join(format!("{name}.log"));
         let f = std::fs::File::create(&log).unwrap();
         let child = Command::new(self.bin(new))
+            .envs(PLAINTEXT)
             .args(args)
             .stdout(Stdio::from(f.try_clone().unwrap()))
             .stderr(Stdio::from(f))
@@ -661,6 +669,7 @@ async fn rolling_upgrade_with_two_binaries() {
     // A node: stop node 0 and try the old binary on its device.
     nodes[0].kill();
     let out = Command::new(env.bin(false))
+        .envs(PLAINTEXT)
         .args([
             "storage-node",
             "check-downgrade",

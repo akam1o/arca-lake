@@ -50,7 +50,10 @@ ADDR_C=""; [ -n "$HOST_C" ] && ADDR_C="$(addr_of "$HOST_C")"
 # The gateway host: C in the three-host layout, B otherwise.
 if [ -n "$HOST_C" ]; then sg() { sc "$@"; }; ADDR_G="$ADDR_C"; else sg() { sb "$@"; }; ADDR_G="$ADDR_B"; fi
 HOSTS_FNS="sa sb"; [ -n "$HOST_C" ] && HOSTS_FNS="sa sb sc"
-BIN="$REMOTE_REPO/target/release/arca-lake"
+# Transport of node RPCs and metadata (ADR-0017): explicit plaintext unless
+# ARCA_ENV says otherwise (for example the TLS flags as environment).
+ARCA_ENV="${ARCA_ENV:-ARCA_INSECURE_PLAINTEXT=1 ARCA_FDB_INSECURE_PLAINTEXT=1}"
+BIN="env $ARCA_ENV $REMOTE_REPO/target/release/arca-lake"
 S3LOAD="$REMOTE_REPO/target/release/s3load"
 CLUSTER_FILE="$RUN_DIR/fdb.cluster"
 ADMIN="$BIN admin --cluster-file $CLUSTER_FILE"
