@@ -208,6 +208,9 @@ message HealthResponse {
   repeated GroupEpoch group_epochs = 13;
   // Test-only additive field of the version-bump build (ADR-0016).
   uint64 version_bump = 14;
+  // Client load right now (repair yields to it, RFC-008 §8.5 budgets).
+  uint64 puts_in_flight = 15;
+  uint64 gets_in_flight = 16;
 }
 
 service StorageNode {

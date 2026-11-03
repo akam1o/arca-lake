@@ -83,6 +83,8 @@ pub struct NodeStats {
     pub get_serve: Histogram,
     /// `PutShard` streams currently open.
     pub puts_in_flight: std::sync::atomic::AtomicU64,
+    /// `GetShard` streams currently open.
+    pub gets_in_flight: std::sync::atomic::AtomicU64,
     /// Reads (`GetShard`, `VerifyShards`, `ScrubShards`) that found a
     /// corrupt record (RFC-008 §8.2).
     pub corrupt_reads: std::sync::atomic::AtomicU64,
@@ -408,6 +410,8 @@ impl StorageNode for StorageNodeService {
     ) -> Result<tonic::Response<Self::GetShardStream>, tonic::Status> {
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
+        self.stats.gets_in_flight.fetch_add(1, Ordering::Relaxed);
+        let in_flight = InFlightGuard(&self.stats.gets_in_flight);
         let key = Self::key(req.key)?;
         let store = Arc::clone(&self.store);
         let range = if req.len == 0 {
@@ -452,6 +456,7 @@ impl StorageNode for StorageNodeService {
                 off = end;
             }
         });
+        drop(in_flight);
         Ok(tonic::Response::new(ReceiverStream::new(rx)))
     }
 
@@ -787,6 +792,8 @@ impl StorageNode for StorageNodeService {
             software: arca_lake_common::compat::software_version(),
             group_epochs,
             version_bump: arca_lake_common::compat::BUMP,
+            puts_in_flight: self.stats.puts_in_flight.load(Ordering::Relaxed),
+            gets_in_flight: self.stats.gets_in_flight.load(Ordering::Relaxed),
         }))
     }
 }

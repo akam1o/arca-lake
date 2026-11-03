@@ -75,7 +75,11 @@ impl Backup {
             c.arg(tool);
             c
         };
-        cmd.arg("-C").arg(&self.cluster_file).args(args);
+        // Subcommand first, then options (`fdbbackup start -C <file> ...`).
+        cmd.args(args);
+        if tool == "fdbbackup" && args.first() != Some(&"list") {
+            cmd.arg("-C").arg(&self.cluster_file);
+        }
         let out = cmd.output().expect("run backup tool");
         let text = format!(
             "{}{}",

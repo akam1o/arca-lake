@@ -103,6 +103,7 @@ fn worker() -> RepairWorkerOptions {
         tasks_per_pass: 64,
         max_attempts: 3,
         recheck_ms: 1000,
+        ..RepairWorkerOptions::default()
     }
 }
 
@@ -1008,6 +1009,7 @@ fn fast(id: &str) -> ControllerConfig {
         tasks_per_pass: 64,
         max_attempts: 8,
         recheck_ms: 1000,
+        ..RepairWorkerOptions::default()
     };
     cfg.http_listen = Some("127.0.0.1:0".parse().unwrap());
     cfg
@@ -1024,6 +1026,131 @@ async fn metrics_of(h: &arca_lake_controller::process::ControllerHandle) -> Stri
         .await
         .unwrap();
     out
+}
+
+#[tokio::test]
+async fn parallel_repair_rebuilds_many_stripes_under_budget_and_stops_on_shutdown() {
+    let c = cluster(3, 2, 1).await;
+    let objects = seed_objects(&c, 24, usize::try_from(MIB / 2).unwrap()).await;
+    let group = first_chunk(&c, "obj0").await.0;
+    // Wipe member 2's shard of every object: 24 stripes to rebuild.
+    let victim = member_node(&c, &group, 2);
+    for (key, _) in &objects {
+        let chunk = first_chunk(&c, key).await.1;
+        c.node_store(victim)
+            .delete(shard_key(&group, &chunk, 2))
+            .unwrap();
+    }
+    let r = scrub(&c, group.id).await;
+    assert_eq!(r.enqueued, 24, "{r:?}");
+    // A shutdown signal that fires during the pass: the pass stops between
+    // tasks (and inside pacing sleeps), leaving the rest queued.
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let slow = RepairWorkerOptions {
+        workers: 2,
+        rate_bytes_per_s: 1 << 20,
+        ..worker()
+    };
+    let meta = Arc::clone(&c.meta);
+    let clients = c.clients.clone();
+    let gid = group.id;
+    let handle = tokio::spawn(async move {
+        repair_pass(
+            meta.as_ref(),
+            &clients,
+            &coders(),
+            &slow,
+            None,
+            Some(&rx),
+            now_ms(),
+        )
+        .await
+        .unwrap()
+    });
+    let meta = Arc::clone(&c.meta);
+    wait_until("some repairs", Duration::from_secs(20), async || {
+        itasks::tasks(meta.as_ref(), usize::MAX)
+            .await
+            .unwrap()
+            .len()
+            < 24
+    })
+    .await;
+    let started = std::time::Instant::now();
+    tx.send(true).unwrap();
+    let partial = handle.await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "stopped promptly: {:?}",
+        started.elapsed()
+    );
+    let left = tasks(&c).await.len();
+    assert!(
+        partial.succeeded >= 1 && left >= 1,
+        "{partial:?} left {left}"
+    );
+    assert_eq!(partial.failed, 0);
+    // The rest, with four workers and a budget: every stripe is rebuilt,
+    // and the wall time respects the budget (reads k shards + writes one +
+    // reads one back per stripe).
+    let fast = RepairWorkerOptions {
+        workers: 4,
+        rate_bytes_per_s: 0,
+        ..worker()
+    };
+    let r = repair_pass(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders(),
+        &fast,
+        None,
+        None,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (r.succeeded, r.failed, r.shards_rewritten),
+        (left, 0, left),
+        "{r:?}"
+    );
+    assert_eq!(tasks(&c).await.len(), 0);
+    assert_eq!(scrub(&c, gid).await.findings, [0; 8]);
+    assert_all_readable(&c, &objects).await;
+    // Budget: 4 stripes of 256 KiB shards at 256 KiB/s move (2 reads +
+    // 1 write + 1 read-back) × 256 KiB each: at least 4 × 1 MiB / 256 KiB
+    // = 16 s unpaced would be far less; expect ≥ 8 s with 2 workers.
+    for (key, _) in objects.iter().take(4) {
+        let chunk = first_chunk(&c, key).await.1;
+        c.node_store(victim)
+            .delete(shard_key(&group, &chunk, 2))
+            .unwrap();
+    }
+    assert_eq!(scrub(&c, gid).await.enqueued, 4);
+    let paced = RepairWorkerOptions {
+        workers: 2,
+        rate_bytes_per_s: 512 << 10,
+        ..worker()
+    };
+    let t = std::time::Instant::now();
+    let r = repair_pass(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders(),
+        &paced,
+        None,
+        None,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.succeeded, 4, "{r:?}");
+    assert!(
+        t.elapsed() >= Duration::from_secs(6),
+        "budget held: {:?}",
+        t.elapsed()
+    );
+    c.shutdown().await;
 }
 
 #[tokio::test]

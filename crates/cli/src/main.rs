@@ -413,6 +413,16 @@ struct ControllerArgs {
     /// Attempts before a stripe repair task is marked failed.
     #[arg(long, default_value_t = 8)]
     stripe_repair_max_attempts: u32,
+    /// Stripes repaired concurrently.
+    #[arg(long, default_value_t = 4)]
+    stripe_repair_workers: usize,
+    /// Repair byte budget in MiB per second over reads and writes (0 =
+    /// unpaced); separate from `--scrub-rate-mib`.
+    #[arg(long, default_value_t = 64)]
+    stripe_repair_rate_mib: u64,
+    /// Repair transfers in flight per node (1 on nodes busy with clients).
+    #[arg(long, default_value_t = 2)]
+    stripe_repair_per_node: usize,
     #[command(flatten)]
     rpc: NodeRpcArgs,
 }
@@ -1092,6 +1102,9 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.stripe_repair = arca_lake_controller::integrity::RepairWorkerOptions {
         tasks_per_pass: args.stripe_repair_tasks_per_pass,
         max_attempts: args.stripe_repair_max_attempts,
+        workers: args.stripe_repair_workers,
+        rate_bytes_per_s: args.stripe_repair_rate_mib << 20,
+        per_node_in_flight: args.stripe_repair_per_node,
         ..Default::default()
     };
     cfg.stripe_repair_interval = Duration::from_secs(args.stripe_repair_interval_secs.max(1));

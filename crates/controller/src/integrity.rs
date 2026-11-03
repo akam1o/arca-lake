@@ -88,15 +88,75 @@ pub struct RepairWorkerOptions {
     pub max_attempts: u32,
     /// Milliseconds before an `Unrecoverable` task is re-checked.
     pub recheck_ms: u64,
+    /// Stripes repaired concurrently (Phase 3.3 §4).
+    pub workers: usize,
+    /// Byte budget per second over every shard the worker reads and
+    /// writes (0 = unpaced). Separate from the scrub budget; the operator
+    /// sizes the two so that their sum fits the devices.
+    pub rate_bytes_per_s: u64,
+    /// Repair shard transfers in flight per node at once.
+    pub per_node_in_flight: usize,
+    /// A node with more client PUT or GET streams open than this at the
+    /// start of a pass is "busy": repair uses one transfer at a time on it
+    /// (yielding to clients).
+    pub busy_threshold: u64,
 }
 
 impl Default for RepairWorkerOptions {
     fn default() -> Self {
         Self {
-            tasks_per_pass: 64,
+            tasks_per_pass: 256,
             max_attempts: 8,
             recheck_ms: 3600 * 1000,
+            workers: 4,
+            rate_bytes_per_s: 64 << 20,
+            per_node_in_flight: 2,
+            busy_threshold: 4,
         }
+    }
+}
+
+/// Shared limits of one repair pass: the byte budget and the per-node
+/// transfer slots (narrowed to one on nodes that are busy with clients).
+pub struct RepairBudget {
+    pacer: tokio::sync::Mutex<Pacer>,
+    slots: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
+    busy: std::collections::HashSet<String>,
+    per_node: usize,
+}
+
+impl RepairBudget {
+    fn new(opts: &RepairWorkerOptions, busy: std::collections::HashSet<String>) -> Self {
+        Self {
+            pacer: tokio::sync::Mutex::new(Pacer::new(opts.rate_bytes_per_s)),
+            slots: std::sync::Mutex::new(HashMap::new()),
+            busy,
+            per_node: opts.per_node_in_flight.max(1),
+        }
+    }
+
+    /// A transfer slot on `addr`.
+    async fn slot(&self, addr: &str) -> tokio::sync::OwnedSemaphorePermit {
+        let sem = {
+            let mut m = self
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(m.entry(addr.to_string()).or_insert_with(|| {
+                let n = if self.busy.contains(addr) {
+                    1
+                } else {
+                    self.per_node
+                };
+                Arc::new(tokio::sync::Semaphore::new(n))
+            }))
+        };
+        sem.acquire_owned().await.expect("semaphore open")
+    }
+
+    /// Account transferred bytes against the budget (sleeps when ahead).
+    async fn account(&self, bytes: u64, cancel: Cancel<'_>) {
+        self.pacer.lock().await.account(bytes, cancel).await;
     }
 }
 
@@ -684,20 +744,57 @@ pub async fn repair_pass<S: KvStore>(
         .into_iter()
         .map(|n| (n.id, n))
         .collect();
-    let tasks = integrity::tasks(meta, usize::MAX).await?;
-    for (group_id, chunk_id, task) in tasks.into_iter().take(opts.tasks_per_pass) {
-        if cancelled(cancel) {
-            break;
+    // Nodes busy with clients get one repair transfer at a time.
+    let mut busy = std::collections::HashSet::new();
+    for n in nodes.values() {
+        if let Ok(h) = clients.health(&n.address).await
+            && h.puts_in_flight + h.gets_in_flight > opts.busy_threshold
+        {
+            busy.insert(n.address.clone());
         }
-        if task.next_attempt_ms > now_ms {
-            report.deferred += 1;
-            continue;
+    }
+    let budget = RepairBudget::new(opts, busy);
+    // Due tasks by priority: recoverable damage first, unrecoverable
+    // re-checks last; oldest first within a class.
+    let mut tasks: Vec<(u64, [u8; 16], RepairTask)> = integrity::tasks(meta, usize::MAX)
+        .await?
+        .into_iter()
+        .filter(|(_, _, t)| {
+            if t.next_attempt_ms > now_ms {
+                report.deferred += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    tasks.sort_by_key(|(_, _, t)| {
+        let class = match t.reason {
+            Finding::UnrecoverableStripe => 2,
+            Finding::UnexpectedShard | Finding::StalePlacementEpoch => 1,
+            _ => 0,
+        };
+        (class, t.created_ms)
+    });
+    tasks.truncate(opts.tasks_per_pass);
+    report.examined = tasks.len();
+    use futures::StreamExt as _;
+    let mut stream = futures::stream::iter(tasks.into_iter().map(|(group_id, chunk_id, task)| {
+        let budget = &budget;
+        let nodes = &nodes;
+        async move {
+            if cancelled(cancel) {
+                return Ok(Outcome::Replanned);
+            }
+            repair_one(
+                meta, clients, coders, nodes, group_id, chunk_id, task, opts, budget, cancel,
+                now_ms,
+            )
+            .await
         }
-        report.examined += 1;
-        let outcome = repair_one(
-            meta, clients, coders, &nodes, group_id, chunk_id, task, opts, now_ms,
-        )
-        .await;
+    }))
+    .buffer_unordered(opts.workers.max(1));
+    while let Some(outcome) = stream.next().await {
         match outcome {
             Ok(o) => match o {
                 Outcome::Repaired { shards, bytes } => {
@@ -728,6 +825,7 @@ pub async fn repair_pass<S: KvStore>(
             Err(e) => return Err(e),
         }
     }
+    drop(stream);
     if let Some(m) = metrics {
         let (total, unrecoverable, failed) = integrity::queue_summary(meta).await?;
         m.repair_queue_depth.store(total, Ordering::Relaxed);
@@ -771,6 +869,8 @@ async fn repair_one<S: KvStore>(
     chunk_id: [u8; 16],
     mut task: RepairTask,
     opts: &RepairWorkerOptions,
+    budget: &RepairBudget,
+    cancel: Cancel<'_>,
     now_ms: u64,
 ) -> Result<Outcome, ControlError> {
     let cid = hex(&chunk_id);
@@ -821,10 +921,15 @@ async fn repair_one<S: KvStore>(
             sources.push(Source::Bad("unknown node"));
             continue;
         };
-        match clients
+        let slot = budget.slot(&node.address).await;
+        let got = clients
             .get_shard(&node.address, shard_ref(&group, chunk_id, i), 0, 0)
-            .await
-        {
+            .await;
+        drop(slot);
+        if let Ok(b) = &got {
+            budget.account(b.len() as u64, cancel).await;
+        }
+        match got {
             Ok(b) if b.len() as u64 == shard_len => sources.push(Source::Good(b.to_vec())),
             Ok(_) => sources.push(Source::Bad("length mismatch")),
             Err(s) if s.code() == tonic::Code::NotFound => sources.push(Source::Bad("missing")),
@@ -892,7 +997,8 @@ async fn repair_one<S: KvStore>(
             .await;
         };
         let expected = arca_lake_storage::format::crc32c(&shards[i]);
-        match clients
+        let slot = budget.slot(&node.address).await;
+        let put = clients
             .put_shard(
                 &node.address,
                 shard_ref(&group, chunk_id, i),
@@ -900,8 +1006,10 @@ async fn repair_one<S: KvStore>(
                 shards[i].clone(),
                 256 << 10,
             )
-            .await
-        {
+            .await;
+        drop(slot);
+        budget.account(shards[i].len() as u64, cancel).await;
+        match put {
             Ok(r) if r.crc32c == expected => bytes_written += shards[i].len() as u64,
             Ok(r) => {
                 return fail(
@@ -952,10 +1060,13 @@ async fn repair_one<S: KvStore>(
             )
             .await;
         };
-        match clients
+        let slot = budget.slot(&node.address).await;
+        let back = clients
             .get_shard(&node.address, shard_ref(&group, chunk_id, i), 0, 0)
-            .await
-        {
+            .await;
+        drop(slot);
+        budget.account(shards[i].len() as u64, cancel).await;
+        match back {
             Ok(b) if b.as_ref() == shards[i].as_ref() => {}
             Ok(_) => {
                 return fail(
