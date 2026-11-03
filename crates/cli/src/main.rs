@@ -68,7 +68,8 @@ enum TlsCommand {
         /// Trust domain.
         #[arg(long)]
         trust_domain: String,
-        /// Role: node, gateway, controller or admin.
+        /// Role: node, gateway, controller, admin, or fdb (a FoundationDB
+        /// server certificate).
         #[arg(long)]
         role: String,
         /// Name (the node id for nodes).
@@ -83,6 +84,10 @@ enum TlsCommand {
         /// Serial number (default: from the clock).
         #[arg(long)]
         serial: Option<u64>,
+        /// Start the validity this many days ago (with `--days` smaller,
+        /// an already expired certificate: for tests).
+        #[arg(long, default_value_t = 0)]
+        backdate_days: u64,
     },
     /// Write a CRL revoking `--revoke` serials.
     Crl {
@@ -257,7 +262,7 @@ struct TlsArgs {
     tls_reload_secs: u64,
     /// Run node RPCs in plaintext with no authentication or authorization
     /// (test and lab clusters only). Refused together with TLS flags.
-    #[arg(long, env = "ARCA_INSECURE_PLAINTEXT")]
+    #[arg(long, env = "ARCA_INSECURE_PLAINTEXT", value_parser = clap::builder::BoolishValueParser::new())]
     insecure_plaintext: bool,
 }
 
@@ -333,7 +338,7 @@ struct FdbTlsArgs {
     #[arg(long, env = "ARCA_FDB_TLS_VERIFY_PEERS")]
     fdb_tls_verify_peers: Option<String>,
     /// Connect to FoundationDB in plaintext (test and lab clusters only).
-    #[arg(long, env = "ARCA_FDB_INSECURE_PLAINTEXT")]
+    #[arg(long, env = "ARCA_FDB_INSECURE_PLAINTEXT", value_parser = clap::builder::BoolishValueParser::new())]
     fdb_insecure_plaintext: bool,
 }
 
@@ -1062,23 +1067,31 @@ fn run_tls(command: TlsCommand) -> ExitCode {
             out,
             days,
             serial,
+            backdate_days,
         } => {
-            let role =
-                Role::parse(&role).ok_or("role must be node, gateway, controller or admin")?;
             let ca = load_ca(&ca_dir)?;
             let serial = serial.unwrap_or_else(|| {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(1, |d| u64::try_from(d.as_micros()).unwrap_or(1))
             });
-            let issued = ca.issue(&trust_domain, role, &name, serial, day(days))?;
+            // arca-lake roles, or `fdb` for FoundationDB server
+            // certificates (`spiffe://<td>/fdb/<name>`).
+            let path = match Role::parse(&role) {
+                Some(r) => format!("{}/{name}", r.as_str()),
+                None if role == "fdb" => format!("fdb/{name}"),
+                None => return Err("role must be node, gateway, controller, admin or fdb".into()),
+            };
+            let not_before = std::time::SystemTime::now()
+                - Duration::from_secs(300)
+                - Duration::from_secs(backdate_days * 86_400);
+            let issued = ca.issue_path_at(&trust_domain, &path, serial, not_before, day(days))?;
             std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
             std::fs::write(out.join("cert.pem"), &issued.cert_pem).map_err(|e| e.to_string())?;
             write_secret(&out.join("key.pem"), &issued.key_pem).map_err(|e| e.to_string())?;
             std::fs::write(out.join("ca.pem"), &ca.cert_pem).map_err(|e| e.to_string())?;
             Ok(format!(
-                "issued spiffe://{trust_domain}/{}/{name} serial {serial} into {}",
-                role.as_str(),
+                "issued spiffe://{trust_domain}/{path} serial {serial} into {}",
                 out.display()
             ))
         }

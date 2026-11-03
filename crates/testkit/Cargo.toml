@@ -68,3 +68,7 @@ required-features = ["fdb"]
 [[test]]
 name = "fdb_restore"
 required-features = ["fdb"]
+
+[[test]]
+name = "fdb_tls"
+required-features = ["fdb"]

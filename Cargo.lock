@@ -265,6 +265,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "arca-lake-soakload"
+version = "0.0.0"
+dependencies = [
+ "aws-credential-types",
+ "aws-sdk-s3",
+ "bytes",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "arca-lake-storage"
 version = "0.0.0"
 dependencies = [

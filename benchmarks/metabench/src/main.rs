@@ -98,6 +98,11 @@ struct Report {
     txn_unknown_retries: u64,
     txn_exhausted: u64,
     conflicts_per_op: f64,
+    /// `tls` or `plain` (FoundationDB client transport).
+    transport: String,
+    /// Wall time from opening the database to the first committed read,
+    /// ms (includes connection and TLS handshakes).
+    first_txn_ms: f64,
 }
 
 fn now_ms() -> u64 {
@@ -337,6 +342,8 @@ async fn run<S: KvStore + 'static>(store: Arc<S>, args: &Args) -> Report {
         } else {
             (after.conflicts - before.conflicts) as f64 / ops_n as f64
         },
+        transport: "memory".into(),
+        first_txn_ms: 0.0,
     }
 }
 
@@ -353,9 +360,37 @@ fn main() {
             Backend::Fdb => {
                 #[cfg(feature = "fdb")]
                 {
+                    // Client TLS from the same environment as arca-lake
+                    // processes (ADR-0017).
+                    let env = |k: &str| std::env::var_os(k).map(std::path::PathBuf::from);
+                    let tls = match (
+                        env("ARCA_FDB_TLS_CA"),
+                        env("ARCA_FDB_TLS_CERT"),
+                        env("ARCA_FDB_TLS_KEY"),
+                    ) {
+                        (Some(ca), Some(cert), Some(key)) => {
+                            Some(arca_lake_metadata::fdb::FdbTls {
+                                ca,
+                                cert,
+                                key,
+                                verify_peers: std::env::var("ARCA_FDB_TLS_VERIFY_PEERS").ok(),
+                            })
+                        }
+                        _ => None,
+                    };
+                    let transport = if tls.is_some() { "tls" } else { "plain" };
+                    arca_lake_metadata::fdb::configure_network_tls(tls).expect("FoundationDB TLS");
+                    let t = Instant::now();
                     let store = arca_lake_metadata::fdb::FdbKv::open(args.cluster_file.as_deref())
                         .expect("open FoundationDB");
-                    run(Arc::new(store), &args).await
+                    arca_lake_metadata::ops::compat::cluster_state(&store)
+                        .await
+                        .expect("first transaction");
+                    let first = t.elapsed().as_secs_f64() * 1000.0;
+                    let mut r = run(Arc::new(store), &args).await;
+                    r.transport = transport.into();
+                    r.first_txn_ms = first;
+                    r
                 }
                 #[cfg(not(feature = "fdb"))]
                 {

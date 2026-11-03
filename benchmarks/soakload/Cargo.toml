@@ -1,0 +1,29 @@
+[package]
+name = "arca-lake-soakload"
+description = "Long-running mixed S3 workload with an acknowledged-write ledger and invariant checks for arca-lake soak tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "soakload"
+path = "src/main.rs"
+
+[[bin]]
+name = "faultproxy"
+path = "src/faultproxy.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }
+aws-sdk-s3.workspace = true
+aws-credential-types.workspace = true
+bytes.workspace = true
+clap.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+
+[lints]
+workspace = true

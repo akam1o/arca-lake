@@ -8,6 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Test-only: storage I/O faults driven by a control file (soak tests).
+fault-injection = []
+
 [dependencies]
 tracing.workspace = true
 arca-lake-common.workspace = true

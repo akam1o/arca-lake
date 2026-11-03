@@ -897,6 +897,8 @@ pub async fn serve(
     cfg: NodeConfig,
 ) -> Result<NodeHandle, Box<dyn std::error::Error + Send + Sync>> {
     let service = Arc::new(StorageNodeService::open(&cfg)?);
+    #[cfg(feature = "fault-injection")]
+    crate::fault_control::spawn(cfg.store.dir.clone());
     let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
     let local_addr = listener.local_addr()?;
     let (tx, rx) = oneshot::channel::<()>();

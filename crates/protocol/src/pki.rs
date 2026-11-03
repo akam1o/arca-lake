@@ -111,12 +111,57 @@ impl Ca {
         not_before: SystemTime,
         valid: Duration,
     ) -> Result<Issued, String> {
+        self.issue_path_at(
+            trust_domain,
+            &format!("{}/{name}", role.as_str()),
+            serial,
+            not_before,
+            valid,
+        )
+    }
+
+    /// Issue `spiffe://<trust_domain>/<path>` for a non-arca-lake peer
+    /// (for example a FoundationDB server, `fdb/1`), valid from five
+    /// minutes ago for `valid`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::issue_at`].
+    pub fn issue_path(
+        &self,
+        trust_domain: &str,
+        path: &str,
+        serial: u64,
+        valid: Duration,
+    ) -> Result<Issued, String> {
+        self.issue_path_at(
+            trust_domain,
+            path,
+            serial,
+            SystemTime::now() - Duration::from_secs(300),
+            valid,
+        )
+    }
+
+    /// [`Self::issue_path`] valid from `not_before` (a time in the past
+    /// with a short validity yields an expired certificate, for tests).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::issue_at`].
+    pub fn issue_path_at(
+        &self,
+        trust_domain: &str,
+        path: &str,
+        serial: u64,
+        not_before: SystemTime,
+        valid: Duration,
+    ) -> Result<Issued, String> {
         let key = KeyPair::generate().map_err(err)?;
         let mut p = CertificateParams::new(Vec::<String>::new()).map_err(err)?;
-        let uri = format!("spiffe://{trust_domain}/{}/{name}", role.as_str());
+        let uri = format!("spiffe://{trust_domain}/{path}");
         p.subject_alt_names = vec![SanType::URI(uri.as_str().try_into().map_err(err)?)];
-        p.distinguished_name
-            .push(DnType::CommonName, format!("{}/{name}", role.as_str()));
+        p.distinguished_name.push(DnType::CommonName, path);
         p.is_ca = IsCa::NoCa;
         p.key_usages = vec![
             KeyUsagePurpose::DigitalSignature,
