@@ -559,8 +559,12 @@ async fn classify_shard<S: KvStore>(
     Ok(())
 }
 
+/// A chunk id stamped at or after the restore point is post-T: the same
+/// millisecond is ambiguous, and counting it as a possibly lost write is
+/// the conservative side (a write that started before `T` and committed
+/// after it still reads as pre-T; ids carry the start time).
 fn classify_orphan(prefix: &[u8; 12], restore_point_ms: u64, rep: &mut RestoreReport) {
-    if uuid_v7_unix_ms(prefix) > restore_point_ms {
+    if uuid_v7_unix_ms(prefix) >= restore_point_ms {
         rep.counts.orphan_post_t += 1;
     } else {
         rep.counts.orphan_pre_t += 1;

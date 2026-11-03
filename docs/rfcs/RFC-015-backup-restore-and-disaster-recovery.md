@@ -178,9 +178,12 @@ node), rate limited, in `VerificationPending` or `RecoveryRequired`:
   above) and the report distinguishes "missing" from "corrupt".
 - **Orphan classification**: `ListShards` on every node; a shard is
   `referenced` (a live generation places it, RFC-008 §6.3), `orphan
-  post-T` (generation id UUIDv7 time > `T` and no generation record:
+  post-T` (generation id UUIDv7 time ≥ `T` and no generation record:
   written after `T`, unrecoverable as an object because its header is
-  gone), `orphan pre-T` (older, unreferenced: ordinary garbage), or
+  gone; the same millisecond counts as post-T, the conservative side; an
+  id carries the start time of its write, so a write that started before
+  `T` and committed after it reads as pre-T), `orphan pre-T` (older,
+  unreferenced: ordinary garbage), or
   `former-member`. Nothing is deleted; counts and bytes per node go to
   the report.
 - **Completion criteria**: every group's every referenced chunk has a
