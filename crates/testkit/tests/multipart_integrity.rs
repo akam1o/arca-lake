@@ -440,7 +440,9 @@ async fn the_background_manifest_scrub_pages_through_a_persisted_cursor() {
 
 #[tokio::test]
 async fn object_level_status_names_the_version_part_and_shard_of_a_loss() {
-    use arca_lake_controller::objects::{ShardState, Verdict, affected_objects, verify_object};
+    use arca_lake_controller::objects::{
+        ShardState, Verdict, VerifyMode, affected_objects, verify_object,
+    };
     use arca_lake_metadata::ops::object::{self, ManifestFound};
     let c = cluster().await;
     let mut b = PutBucketVersioningInput::builder();
@@ -505,9 +507,16 @@ async fn object_level_status_names_the_version_part_and_shard_of_a_loss() {
     del(&p1, 1);
     del(&p2, 2);
 
-    let r = verify_object(c.meta.as_ref(), &c.clients, BUCKET, "obj", Some(&v1_id))
-        .await
-        .unwrap();
+    let r = verify_object(
+        c.meta.as_ref(),
+        &c.clients,
+        BUCKET,
+        "obj",
+        Some(&v1_id),
+        VerifyMode::ReadOnly,
+    )
+    .await
+    .unwrap();
     assert!(r.multipart);
     assert_eq!(r.version_id, v1_id);
     assert_eq!(r.verdict, Verdict::Unreadable);
@@ -519,9 +528,16 @@ async fn object_level_status_names_the_version_part_and_shard_of_a_loss() {
     assert_eq!(c2.good(), 2);
     assert_eq!(c2.shards[2].1, ShardState::Missing);
     // The current version is untouched.
-    let cur = verify_object(c.meta.as_ref(), &c.clients, BUCKET, "obj", None)
-        .await
-        .unwrap();
+    let cur = verify_object(
+        c.meta.as_ref(),
+        &c.clients,
+        BUCKET,
+        "obj",
+        None,
+        VerifyMode::ReadOnly,
+    )
+    .await
+    .unwrap();
     assert_eq!((cur.verdict, cur.multipart), (Verdict::Healthy, false));
     assert_ne!(cur.version_id, v1_id);
 
@@ -549,9 +565,16 @@ async fn object_level_status_names_the_version_part_and_shard_of_a_loss() {
     assert!(!a.is_current);
     assert_eq!((a.part_number, a.chunk_index), (Some(1), 0));
     assert_eq!(a.chunk_id, p1.chunk_id);
-    let r = verify_object(c.meta.as_ref(), &c.clients, BUCKET, "obj", Some(&v1_id))
-        .await
-        .unwrap();
+    let r = verify_object(
+        c.meta.as_ref(),
+        &c.clients,
+        BUCKET,
+        "obj",
+        Some(&v1_id),
+        VerifyMode::ReadOnly,
+    )
+    .await
+    .unwrap();
     let c2 = r.chunks.iter().find(|x| x.part_number == Some(2)).unwrap();
     assert_eq!(c2.good(), 3, "part 2 repaired");
     assert_eq!(r.verdict, Verdict::Unreadable, "part 1 is lost");

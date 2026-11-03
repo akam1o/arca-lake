@@ -1214,6 +1214,25 @@ impl NodeClients {
         after: Option<ShardRef>,
         limit: u32,
     ) -> Result<VerifyPage, tonic::Status> {
+        self.verify_shards_page_with(addr, group_id, after, limit, false)
+            .await
+    }
+
+    /// [`Self::verify_shards_page`], read-only when `read_only` (a corrupt
+    /// shard is reported, not quarantined; nodes whose `Health` says
+    /// `verify_read_only`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::verify_shards_page`].
+    pub async fn verify_shards_page_with(
+        &self,
+        addr: &str,
+        group_id: u64,
+        after: Option<ShardRef>,
+        limit: u32,
+        read_only: bool,
+    ) -> Result<VerifyPage, tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::VerifyShards,
@@ -1228,6 +1247,7 @@ impl NodeClients {
                     group_id,
                     after: after.map(|s| s.pb()),
                     limit,
+                    read_only,
                 };
                 let resp = client.verify_shards(req).await?.into_inner();
                 Ok(VerifyPage {

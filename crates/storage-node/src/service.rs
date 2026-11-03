@@ -619,6 +619,7 @@ impl StorageNode for StorageNodeService {
             .then(|| page.last().map(|(k, _)| Self::pb_key(k)))
             .flatten();
         let store = Arc::clone(&self.store);
+        let read_only = req.read_only;
         let _slot = self
             .scrub_slot
             .acquire()
@@ -626,9 +627,16 @@ impl StorageNode for StorageNodeService {
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
         let (verified, corrupt) = tokio::task::spawn_blocking(move || {
             let mut corrupt = 0u64;
+            let read = |key: &ShardKey| {
+                if read_only {
+                    store.get_no_quarantine(key, None)
+                } else {
+                    store.get(key, None)
+                }
+            };
             let out = page
                 .into_iter()
-                .map(|(key, len)| match store.get(&key, None) {
+                .map(|(key, len)| match read(&key) {
                     Ok(data) => pb::ShardVerification {
                         key: Some(Self::pb_key(&key)),
                         payload_len: data.len() as u64,
@@ -889,6 +897,7 @@ impl StorageNode for StorageNodeService {
             gets_in_flight: self.stats.gets_in_flight.load(Ordering::Relaxed),
             device_free_bytes: space.map_or(0, |s| s.0),
             device_total_bytes: space.map_or(0, |s| s.1),
+            verify_read_only: true,
         }))
     }
 }

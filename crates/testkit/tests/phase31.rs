@@ -1536,5 +1536,45 @@ async fn checksums_are_verified_before_publish_and_returned_on_read() {
         .await
         .unwrap_err();
     assert_eq!(*err.code(), S3ErrorCode::InvalidRequest);
+    // End-to-end decode verification (Phase 3.4 §9, `verify-object
+    // --decode`) of every object above: every chunk decodes against its
+    // record, and the recorded ETags and checksums (single-part for every
+    // algorithm; multipart composite and full-object, per part too) are
+    // recomputed from the decoded bytes.
+    let mut verified = 0;
+    for algo in ALGOS {
+        for key in [
+            format!("cs/{}", algo.name()),
+            format!("cs/mp-{}", algo.name()),
+        ] {
+            let Ok(r) = arca_lake_gateway::verify::decode_object(
+                c.meta.as_ref(),
+                &c.clients,
+                BUCKET,
+                &key,
+                None,
+                &arca_lake_gateway::verify::GoodShards::new(),
+            )
+            .await
+            else {
+                continue; // not every algorithm has a multipart object
+            };
+            assert!(r.ok(), "{key}: {r:?}");
+            assert!(
+                r.checks.iter().any(|(w, _)| w.contains("checksum")),
+                "{key}: the recorded checksum was recomputed: {r:?}"
+            );
+            assert!(
+                r.checks.iter().any(|(w, _)| w.contains("ETag")),
+                "{key}: {r:?}"
+            );
+            verified += 1;
+        }
+    }
+    assert_eq!(
+        verified,
+        ALGOS.len() + 3,
+        "every single-part and the three multipart objects"
+    );
     c.shutdown().await;
 }

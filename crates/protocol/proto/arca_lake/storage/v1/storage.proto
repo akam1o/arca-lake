@@ -99,6 +99,10 @@ message VerifyShardsRequest {
   uint64 group_id = 2;
   ShardKey after = 3;
   uint32 limit = 4;
+  // Report corrupt shards without quarantining them (read-only
+  // verification). Honoured by nodes whose Health says
+  // `verify_read_only`; older nodes ignore it and quarantine.
+  bool read_only = 5;
 }
 
 message ShardVerification {
@@ -216,6 +220,8 @@ message HealthResponse {
   // of replacements then cannot check capacity.
   uint64 device_free_bytes = 17;
   uint64 device_total_bytes = 18;
+  // The node honours VerifyShardsRequest.read_only.
+  bool verify_read_only = 19;
 }
 
 service StorageNode {

@@ -892,6 +892,21 @@ impl Store {
     /// shard is then dropped from the index); [`StorageError::InvalidArgument`]
     /// if the range is out of bounds.
     pub fn get(&self, key: &ShardKey, range: Option<Range<u64>>) -> Result<Vec<u8>> {
+        self.read(key, range, true)
+    }
+
+    /// [`Store::get`] for read-only verification: a corrupt record is
+    /// reported (`Corrupt`) but not quarantined; nothing on the device or
+    /// in the index changes (`admin integrity verify-object`, Phase 3.4).
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::get`], without the quarantine.
+    pub fn get_no_quarantine(&self, key: &ShardKey, range: Option<Range<u64>>) -> Result<Vec<u8>> {
+        self.read(key, range, false)
+    }
+
+    fn read(&self, key: &ShardKey, range: Option<Range<u64>>, quarantine: bool) -> Result<Vec<u8>> {
         let loc = self.locate(key).ok_or(StorageError::NotFound)?;
         let total = u64::from(loc.payload_len);
         let range = range.unwrap_or(0..total);
@@ -915,7 +930,7 @@ impl Store {
             // the index now points elsewhere. Retry once.
             drop(readers);
             return match self.locate(key) {
-                Some(l) if l != loc => self.get(key, Some(range)),
+                Some(l) if l != loc => self.read(key, Some(range), quarantine),
                 _ => Err(StorageError::NotFound),
             };
         };
@@ -935,16 +950,16 @@ impl Store {
             if e.kind() == std::io::ErrorKind::UnexpectedEof
                 && file_len(&seg.file) < loc.offset + loc.header_len
             {
-                return Err(self.quarantine(key, loc, "record header truncated"));
+                return Err(self.on_corrupt(quarantine, key, loc, "record header truncated"));
             }
             return Err(e.into());
         }
         let header = match RecordHeader::decode(&hbuf, seg.header.block_size) {
             Ok(h) if h.key == *key && h.sequence == loc.sequence => h,
             Ok(_) => {
-                return Err(self.quarantine(key, loc, "record does not match index"));
+                return Err(self.on_corrupt(quarantine, key, loc, "record does not match index"));
             }
-            Err(reason) => return Err(self.quarantine(key, loc, reason)),
+            Err(reason) => return Err(self.on_corrupt(quarantine, key, loc, reason)),
         };
 
         let mut buf = vec![0u8; to_usize(read_end - read_start)];
@@ -958,7 +973,7 @@ impl Store {
                 && file_len(&seg.file) < loc.payload_offset() + read_end
             {
                 // The record extends past the segment: truncated on disk.
-                return Err(self.quarantine(key, loc, "record truncated"));
+                return Err(self.on_corrupt(quarantine, key, loc, "record truncated"));
             }
             return Err(e.into());
         }
@@ -968,12 +983,31 @@ impl Store {
             &header.block_crcs,
             seg.header.block_size,
         ) {
-            return Err(self.quarantine(key, loc, reason));
+            return Err(self.on_corrupt(quarantine, key, loc, reason));
         }
         let _ = corrupt;
         buf.drain(..to_usize(range.start - read_start));
         buf.truncate(to_usize(range.end - range.start));
         Ok(buf)
+    }
+
+    /// Quarantine (when asked) and return the `Corrupt` error.
+    fn on_corrupt(
+        &self,
+        quarantine: bool,
+        key: &ShardKey,
+        loc: Location,
+        reason: &'static str,
+    ) -> StorageError {
+        if quarantine {
+            self.quarantine(key, loc, reason)
+        } else {
+            StorageError::Corrupt {
+                segment_id: loc.segment_id,
+                offset: loc.offset,
+                reason,
+            }
+        }
     }
 
     /// Quarantine the record at `loc` for `key` durably (RFC-005 §5.6a):

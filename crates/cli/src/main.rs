@@ -999,6 +999,15 @@ enum IntegrityCommand {
         /// Version id (default: the current version).
         #[arg(long)]
         version_id: Option<String>,
+        /// Also decode every chunk from shards that verified good, check
+        /// each against its record, and recompute the object's checksums
+        /// and ETag (reads the whole object; read-only).
+        #[arg(long)]
+        decode: bool,
+        /// Let the nodes quarantine the corrupt shards they find (as a
+        /// scrub would). Without it the check changes nothing anywhere.
+        #[arg(long)]
+        quarantine: bool,
         #[command(flatten)]
         rpc: NodeRpcArgs,
     },
@@ -2583,14 +2592,21 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
             bucket,
             key,
             version_id,
+            decode,
+            quarantine,
             rpc,
         } => {
-            use arca_lake_controller::objects::{ShardState, Verdict, verify_object};
+            use arca_lake_controller::objects::{ShardState, Verdict, VerifyMode, verify_object};
             let clients = match rpc.tls.context(arca_lake_protocol::tls::Role::Admin) {
                 Ok(t) => {
                     arca_lake_protocol::client::NodeClients::with_policy(rpc.policy()).with_tls(t)
                 }
                 Err(e) => return fail(e),
+            };
+            let mode = if quarantine {
+                VerifyMode::Quarantine
+            } else {
+                VerifyMode::ReadOnly
             };
             match verify_object(
                 meta.as_ref(),
@@ -2598,6 +2614,7 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
                 &bucket,
                 &key,
                 version_id.as_deref(),
+                mode,
             )
             .await
             {
@@ -2638,10 +2655,68 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
                             bad.join(", ")
                         );
                     }
+                    println!(
+                        "mode {}",
+                        if quarantine {
+                            "quarantine (corrupt shards were quarantined by their nodes)"
+                        } else {
+                            "read-only (nothing was changed)"
+                        }
+                    );
+                    let mut decoded_ok = true;
+                    if decode {
+                        // Only shards that verified good are read.
+                        let mut good = arca_lake_gateway::verify::GoodShards::new();
+                        for c in &r.chunks {
+                            good.insert(
+                                (c.generation, c.chunk_index),
+                                c.shards
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, (_, st))| *st == ShardState::Ok)
+                                    .map(|(i, _)| i)
+                                    .collect(),
+                            );
+                        }
+                        match arca_lake_gateway::verify::decode_object(
+                            meta.as_ref(),
+                            &clients,
+                            &bucket,
+                            &key,
+                            Some(&r.version_id),
+                            &good,
+                        )
+                        .await
+                        {
+                            Ok(d) => {
+                                println!(
+                                    "decode chunks_ok {} bytes {} {}",
+                                    d.chunks_ok,
+                                    d.bytes,
+                                    if d.ok() { "OK" } else { "MISMATCH" }
+                                );
+                                for (part, index, why) in &d.chunk_errors {
+                                    println!("  chunk part {part:?} index {index}: {why}");
+                                }
+                                for e in &d.layout_errors {
+                                    println!("  layout: {e}");
+                                }
+                                for (what, ok) in &d.checks {
+                                    println!(
+                                        "  {what}: {}",
+                                        if *ok { "match" } else { "MISMATCH" }
+                                    );
+                                }
+                                decoded_ok = d.ok();
+                            }
+                            Err(e) => return fail(e),
+                        }
+                    }
                     match r.verdict {
+                        Verdict::Unreadable => ExitCode::from(2),
+                        _ if !decoded_ok => ExitCode::from(2),
                         Verdict::Healthy => ExitCode::SUCCESS,
                         Verdict::Degraded | Verdict::Incomplete => ExitCode::from(1),
-                        Verdict::Unreadable => ExitCode::from(2),
                     }
                 }
                 Err(e) => fail(e),

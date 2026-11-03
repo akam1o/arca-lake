@@ -11,6 +11,7 @@ pub mod cluster;
 pub mod memory;
 pub mod requests;
 mod server;
+pub mod verify;
 
 pub use server::{AllowAll, GatewayConfig, ServerHandle, serve, serve_with_access};
 

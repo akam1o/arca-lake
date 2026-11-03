@@ -2,11 +2,13 @@
 //! on its members, and resolve repair findings to the objects they hit.
 //!
 //! The check uses the nodes' deep verification (`VerifyShards`: header and
-//! every payload block CRC), so a shard that fails it is quarantined by
-//! the node exactly as a scrub would (non-destructive, RFC-008 §8.2). The
-//! S3 checksums of the object are not recomputed: that would need the
-//! whole object decoded, and the per-shard CRCs plus the chunk records
-//! already decide whether every byte is recoverable.
+//! every payload block CRC). It is read-only by default (Phase 3.4): a
+//! corrupt shard is reported, not quarantined, and a node that cannot
+//! verify without quarantining is reported `Unverified`. With
+//! [`VerifyMode::Quarantine`] a corrupt shard is quarantined by its node
+//! exactly as a scrub would (the behaviour before Phase 3.4). Decoding the
+//! object and recomputing its S3 checksums is the gateway's
+//! `verify::decode_object`.
 
 use std::collections::HashMap;
 
@@ -30,6 +32,19 @@ pub enum ShardState {
     Missing,
     /// The member did not answer.
     Unanswered,
+    /// The member's node cannot verify without quarantining (an older
+    /// node) and the check was read-only: not looked at.
+    Unverified,
+}
+
+/// Whether a verification may change node state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerifyMode {
+    /// Report only; nothing changes on any node.
+    #[default]
+    ReadOnly,
+    /// A corrupt shard is quarantined by its node (as a scrub would).
+    Quarantine,
 }
 
 /// One chunk of an object version.
@@ -72,7 +87,7 @@ impl ChunkCheck {
     pub fn undecided(&self) -> bool {
         self.shards
             .iter()
-            .any(|(_, s)| *s == ShardState::Unanswered)
+            .any(|(_, s)| matches!(s, ShardState::Unanswered | ShardState::Unverified))
     }
 }
 
@@ -131,6 +146,8 @@ async fn check_chunk(
     nodes: &HashMap<u64, NodeRecord>,
     group: &GroupRecord,
     chunk: &ChunkRecord,
+    mode: VerifyMode,
+    capable: &HashMap<u64, bool>,
 ) -> Vec<(u64, ShardState)> {
     let after = chunk_pred(&chunk.chunk_id).map(|c| ShardRef {
         group_id: group.id,
@@ -139,10 +156,14 @@ async fn check_chunk(
     });
     let mut out = Vec::with_capacity(group.members.len());
     for (i, m) in group.members.iter().enumerate() {
+        let read_only = mode == VerifyMode::ReadOnly;
         let state = match nodes.get(&m.node_id) {
             None => ShardState::Unanswered,
+            Some(_) if read_only && !capable.get(&m.node_id).copied().unwrap_or(false) => {
+                ShardState::Unverified
+            }
             Some(n) => match clients
-                .verify_shards_page(&n.address, group.id, after, 8)
+                .verify_shards_page_with(&n.address, group.id, after, 8, read_only)
                 .await
             {
                 Err(_) => ShardState::Unanswered,
@@ -173,6 +194,7 @@ pub async fn verify_object<S: KvStore>(
     bucket: &str,
     key: &str,
     version_id: Option<&str>,
+    mode: VerifyMode,
 ) -> Result<ObjectCheck, ControlError> {
     let manifest = match object::read_manifest_version(meta, bucket, key, version_id, None).await? {
         ManifestFound::Manifest(m) => m,
@@ -192,6 +214,17 @@ pub async fn verify_object<S: KvStore>(
         .into_iter()
         .map(|n| (n.id, n))
         .collect();
+    // Which nodes verify read-only (asked once per node).
+    let mut capable: HashMap<u64, bool> = HashMap::new();
+    if mode == VerifyMode::ReadOnly {
+        for n in nodes.values() {
+            let ok = clients
+                .health(&n.address)
+                .await
+                .is_ok_and(|h| h.verify_read_only);
+            capable.insert(n.id, ok);
+        }
+    }
     let mut groups: HashMap<u64, GroupRecord> = HashMap::new();
     let multipart = matches!(manifest.header.kind, GenKind::MultipartRoot { .. });
     let mut sources: Vec<ChunkSource> = Vec::new();
@@ -216,7 +249,7 @@ pub async fn verify_object<S: KvStore>(
                 e.insert(cluster::get_group(meta, gid).await?);
             }
             let group = &groups[&gid];
-            let shards = check_chunk(clients, &nodes, group, &ch).await;
+            let shards = check_chunk(clients, &nodes, group, &ch, mode, &capable).await;
             chunks.push(ChunkCheck {
                 generation,
                 part_number,
