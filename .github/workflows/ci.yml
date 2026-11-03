@@ -1,9 +1,11 @@
 name: CI
 
+# Push to main only (RFC-012 §5.11): every job runs on self-hosted
+# runners, so pull requests (and above all pull requests from forks) never
+# trigger this workflow; each job also refuses any other event.
 on:
   push:
     branches: [main]
-  pull_request:
 
 permissions:
   contents: read
@@ -27,9 +29,10 @@ jobs:
   check:
     name: fmt, clippy, test (Linux)
     runs-on: [self-hosted, Linux, X64]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: prepare the runner (compiler, pkg-config; idempotent)
         run: |
           set -euo pipefail
@@ -59,7 +62,7 @@ jobs:
             sudo apt-get update -qq
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev
           fi
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99"
           components: rustfmt, clippy
@@ -77,7 +80,7 @@ jobs:
       # The `fdb` feature links libfdb_c; install the client library so that
       # --all-features builds and runs.
       - name: cache downloaded tools and packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/arca-lake
           key: tools-${{ runner.os }}-fdb7.3.77-v1
@@ -121,13 +124,14 @@ jobs:
   fdb:
     name: FoundationDB backend tests
     runs-on: [self-hosted, Linux, X64]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     timeout-minutes: 45
     env:
       FDB_VERSION: 7.3.77
       # Per-run container name: two runners share the host.
       FDB_CONTAINER: fdb-${{ github.run_id }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: prepare the runner (compiler, pkg-config; idempotent)
         run: |
           set -euo pipefail
@@ -157,7 +161,7 @@ jobs:
             sudo apt-get update -qq
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev
           fi
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99"
       # The runner is persistent, but actions/checkout cleans the workspace
@@ -172,7 +176,7 @@ jobs:
           if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - name: cache downloaded tools and packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/arca-lake
           key: tools-${{ runner.os }}-fdb7.3.77-v1
@@ -253,6 +257,7 @@ jobs:
   fdb-failover:
     name: FoundationDB failover (3 processes)
     runs-on: [self-hosted, Linux, X64]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     timeout-minutes: 30
     # The failover test addresses the container as `arca-fdb` by name, so
     # two of these jobs cannot share a host: a later run waits for this one.
@@ -261,7 +266,7 @@ jobs:
     env:
       FDB_VERSION: 7.3.77
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: prepare the runner (compiler, pkg-config; idempotent)
         run: |
           set -euo pipefail
@@ -291,7 +296,7 @@ jobs:
             sudo apt-get update -qq
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev
           fi
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99"
       # The runner is persistent, but actions/checkout cleans the workspace
@@ -306,7 +311,7 @@ jobs:
           if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - name: cache downloaded tools and packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/arca-lake
           key: tools-${{ runner.os }}-fdb7.3.77-v1
@@ -396,19 +401,20 @@ jobs:
   checks:
     name: licenses, secrets, DCO, links
     runs-on: [self-hosted, Linux, X64]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99"
       # cargo-deny refreshes the advisory database on every check, so the
       # cache only spares the initial clone; a key per run re-uploaded it
       # every time (about a minute).
       - name: cache cargo-deny and the advisory database
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cache/arca-lake/cargo-deny
@@ -431,7 +437,7 @@ jobs:
       # (empty "before" SHA), so run the pinned CLI directly and scan the
       # full history plus the working tree.
       - name: cache gitleaks
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/arca-lake/gitleaks
           key: gitleaks-${{ runner.os }}-8.30.1
@@ -485,5 +491,5 @@ jobs:
       - name: check markdown links (lychee, pinned image)
         run: |
           set -euo pipefail
-          sudo docker run --rm -v "$PWD:/input:ro" -w /input lycheeverse/lychee:latest \
+          sudo docker run --rm -v "$PWD:/input:ro" -w /input lycheeverse/lychee@sha256:eaff3e0a13603c9a701accfcc84f44158bb77bf36ecfa4622b626056c3463892 \
             --no-progress --offline './**/*.md'
