@@ -125,7 +125,7 @@ start_gateway() { # name
   launch "$n" $(fdb_env gateway) $(node_env "$n") -- "$BIN" gateway --backend cluster --cluster-file "$CF" \
     --listen "127.0.0.1:${GWPORT[$n]}" --metrics-listen "127.0.0.1:${METRICS[$n]}" --tls-reload-secs 10 \
     --access-key "$AK" --secret-key "$SK" --k 2 --m 1 --chunk-bytes "$CHUNK" --small-threshold "$SMALL" \
-    --failure-domain node $CACHE_ARGS
+    --failure-domain node --multipart-min-part-bytes $((1 << 20)) $CACHE_ARGS
 }
 start_proxy() {
   launch proxy -- "$FAULTPROXY" --listen "127.0.0.1:$PROXY_PORT" --target "127.0.0.1:${LISTEN[$PROXIED]}" --control "$RUN/proxy.ctl"
@@ -265,7 +265,8 @@ cmd_start() {
   date +%s > "$RUN/started"
   launch soakload -- "$SOAKLOAD" --endpoint "http://127.0.0.1:${GWPORT[gw-a]}" --endpoint "http://127.0.0.1:${GWPORT[gw-b]}" \
     --access-key "$AK" --secret-key "$SK" --workers "$WORKERS" --duration-secs "$DURATION_SECS" \
-    --report-secs 60 --verify-every-secs 7200 --pause-ms "${PAUSE_MS:-50}" --timeout-secs 60 --bucket-prefix soak \
+    --report-secs 60 --verify-every-secs 7200 --pause-ms "${PAUSE_MS:-100}" --timeout-secs 60 --bucket-prefix soak \
+    --size-scale-pct "${SIZE_SCALE_PCT:-40}" --part-mib 1 \
     --run-label "$RUN"
   launch sampler -- bash "$0" _sampler "$RUN"
   launch faults -- bash "$0" _faults "$RUN"

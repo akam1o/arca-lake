@@ -87,6 +87,14 @@ struct Args {
     /// Seed of the run (keys and contents derive from it).
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// Scale of the larger object sizes, percent (sizes stay above the
+    /// chunk-crossing threshold of 100 KiB).
+    #[arg(long, default_value_t = 100)]
+    size_scale_pct: u64,
+    /// Multipart part size, MiB (the gateway's minimum part size must
+    /// allow it; S3's is 5).
+    #[arg(long, default_value_t = 5)]
+    part_mib: u64,
     /// Free-form label of the run, repeated in the final report (the soak
     /// orchestrator passes its run directory to recognise the process).
     #[arg(long, default_value = "")]
@@ -108,14 +116,20 @@ fn body(seed: u64, len: u64) -> Vec<u8> {
     out
 }
 
-struct Rng(u64);
+struct Rng {
+    state: u64,
+    scale_pct: u64,
+}
 
 impl Rng {
     fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        self.state
+    }
+    fn scaled(&self, n: u64) -> u64 {
+        (n * self.scale_pct / 100).max(100 << 10)
     }
     fn below(&mut self, n: u64) -> u64 {
         self.next() % n.max(1)
@@ -125,8 +139,11 @@ impl Rng {
         match self.below(10) {
             0..=2 => 1 + self.below(4096),
             3..=5 => 100 << 10,
-            6..=7 => (1 << 20) + self.below(1 << 20),
-            _ => 3 << 20,
+            6..=7 => {
+                let base = self.scaled(1 << 20);
+                base + self.below(base)
+            }
+            _ => self.scaled(3 << 20),
         }
     }
 }
@@ -334,6 +351,7 @@ struct Worker {
     ukeys: Vec<(String, UKey)>,
     vkeys: Vec<(String, VKey)>,
     seeds: u64,
+    part_bytes: u64,
 }
 
 impl Worker {
@@ -636,7 +654,8 @@ impl Worker {
     async fn multipart_u(&mut self, i: usize) {
         let key = self.ukeys[i].0.clone();
         let seed = self.new_seed();
-        let len: u64 = (5 << 20) * 2 + (1 << 20) + self.rng.below(1 << 20);
+        let part = self.part_bytes;
+        let len: u64 = part * 2 + 1 + self.rng.below(part);
         let data = body(seed, len);
         let c = self.ctx.c().clone();
         let b = self.ctx.ubucket.clone();
@@ -651,11 +670,7 @@ impl Worker {
                 .map_err(|e| format!("{e:?}"))?;
             let id = up.upload_id().unwrap_or_default().to_string();
             let mut parts = Vec::new();
-            for (n, range) in [
-                (1, 0..(5 << 20)),
-                (2, (5 << 20)..(10 << 20)),
-                (3, (10 << 20)..len),
-            ] {
+            for (n, range) in [(1, 0..part), (2, part..2 * part), (3, 2 * part..len)] {
                 let chunk = data[usize::try_from(range.start).unwrap_or(0)
                     ..usize::try_from(range.end).unwrap_or(0)]
                     .to_vec();
@@ -1028,11 +1043,16 @@ async fn main() -> std::process::ExitCode {
         let pause = Duration::from_millis(args.pause_ms);
         let verify_every = Duration::from_secs(args.verify_every_secs);
         let seed = args.seed;
+        let size_scale_pct = args.size_scale_pct.max(1);
+        let part_mib = args.part_mib.max(1);
         handles.push(tokio::spawn(async move {
             let mut wk = Worker {
                 id: w,
                 ctx,
-                rng: Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ((w as u64 + 1) << 32) | 1),
+                rng: Rng {
+                    state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ((w as u64 + 1) << 32) | 1,
+                    scale_pct: size_scale_pct,
+                },
                 ukeys: (0..keys)
                     .map(|k| (format!("w{w}/k{k}"), UKey { states: vec![None] }))
                     .collect(),
@@ -1049,6 +1069,7 @@ async fn main() -> std::process::ExitCode {
                     })
                     .collect(),
                 seeds: 0,
+                part_bytes: part_mib << 20,
             };
             let mut last_verify = Instant::now();
             while !stop.load(Ordering::Relaxed) {
