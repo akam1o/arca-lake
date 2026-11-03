@@ -142,3 +142,57 @@ fn unknown_versions_and_flags_are_rejected_explicitly() {
         "unknown record flags"
     );
 }
+
+/// The quarantine log's line format (Phase 3.4 §8): operators and tools
+/// read it, so its lines are fixed in `tests/golden/quarantine-v1.log`
+/// (timestamps normalized). Regenerate with `ARCA_STORAGE_WRITE_GOLDEN=1`.
+#[test]
+fn quarantine_log_lines_keep_their_format() {
+    use std::os::unix::fs::FileExt as _;
+    let golden = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/quarantine-v1.log");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(golden_path(), dir.path().join("seg-0000000000000007.arca")).unwrap();
+    let cfg = StoreConfig {
+        dir: dir.path().to_path_buf(),
+        segment_max_bytes: 1 << 20,
+        record_alignment: ALIGN,
+        block_size: BLOCK,
+        sync: SyncPolicy::Never,
+        format_write: arca_lake_storage::default_format_write(),
+    };
+    let (store, _) = Store::open(cfg).unwrap();
+    // Corrupt key 1's payload on disk, read it (quarantined), then write a
+    // newer record (the quarantine is released as superseded).
+    let loc = store.locate(&key(1)).unwrap();
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.path().join(format!("seg-{:016x}.arca", loc.segment_id)))
+        .unwrap();
+    let mut b = [0u8; 1];
+    f.read_exact_at(&mut b, loc.payload_offset()).unwrap();
+    f.write_all_at(&[b[0] ^ 0x5a], loc.payload_offset())
+        .unwrap();
+    assert!(matches!(
+        store.get(&key(1), None),
+        Err(StorageError::Corrupt { .. })
+    ));
+    store.put(key(1), b"repaired").unwrap();
+    let lines: Vec<String> = store
+        .quarantine_log()
+        .unwrap()
+        .into_iter()
+        .map(|l| match l.rsplit_once(" ms=") {
+            Some((head, _)) => format!("{head} ms=<ms>"),
+            None => l,
+        })
+        .collect();
+    let text = lines.join("\n") + "\n";
+    if std::env::var_os("ARCA_STORAGE_WRITE_GOLDEN").is_some() {
+        std::fs::write(&golden, &text).unwrap();
+    }
+    let want = std::fs::read_to_string(&golden)
+        .unwrap_or_else(|e| panic!("missing golden file {}: {e}", golden.display()));
+    assert_eq!(text, want, "the quarantine log line format changed");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+}

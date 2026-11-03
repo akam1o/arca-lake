@@ -1,0 +1,2 @@
+quarantine group=1 chunk=01010101010101010101010101010101 index=1 segment=7 offset=2048 sequence=3 len=10 reason="payload block crc mismatch" ms=<ms>
+release group=1 chunk=01010101010101010101010101010101 index=1 segment=7 offset=2048 sequence=3 cause=superseded ms=<ms>
