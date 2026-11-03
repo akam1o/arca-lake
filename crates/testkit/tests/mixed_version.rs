@@ -466,6 +466,36 @@ async fn rolling_upgrade_with_two_binaries() {
         assert_eq!(get(&s3_old, &format!("during{i}")).await, d);
         committed.push((format!("during{i}"), d));
     }
+    // 8 (rollback before the cut-off): node 0 goes back to the old binary.
+    // Everything the new binary wrote while format_write was 1 opens; the
+    // node serves reads and writes; then it is upgraded again.
+    nodes[0].kill();
+    nodes[0] = env.spawn(
+        "node0-rollback",
+        false,
+        &Env::node_args(&node_dirs[0], &node_addrs[0]),
+    );
+    wait_tcp(&node_addrs[0], Duration::from_secs(20)).await;
+    let h = clients.health(&node_addrs[0]).await.unwrap();
+    assert_eq!((h.protocol_max, h.format_max, h.version_bump), (1, 1, 0));
+    for (key, data) in &committed {
+        assert_eq!(
+            &get(&s3_new, key).await,
+            data,
+            "{key} after the node rollback"
+        );
+    }
+    let d = body(300 << 10, 39);
+    put(&s3_new, "rolled-back", d.clone()).await;
+    committed.push(("rolled-back".into(), d));
+    nodes[0].kill();
+    nodes[0] = env.spawn(
+        "node0-new2",
+        true,
+        &Env::node_args(&node_dirs[0], &node_addrs[0]),
+    );
+    wait_tcp(&node_addrs[0], Duration::from_secs(20)).await;
+
     // 7: a multipart upload completed while the upgrade is pending.
     let up = s3_new
         .create_multipart_upload()
