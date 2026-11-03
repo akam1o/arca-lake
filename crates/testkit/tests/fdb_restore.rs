@@ -565,19 +565,46 @@ async fn metadata_restore_drill_with_fdbbackup() {
     tx.set(b"zz-probe", b"1");
     assert!(matches!(tx.commit().await, Err(KvError::ClusterState(_))));
 
-    // ---- `admin recovery finalize --yes --force`: accept the loss of pre2.
-    let mut accepted = rep.clone();
-    accepted.accepted = Some(recovery::Acceptance {
-        at_ms: now_ms(),
-        by: "admin".into(),
-        forced: true,
-    });
-    recovery::set_report(restored.as_ref(), &accepted)
+    // ---- `admin recovery finalize`: refused without --force (pre2 is
+    // unreadable), refused with --force but no reason, then accepted; the
+    // finding stays in the report and pre2 gets a data-loss record.
+    let fin = |force: bool, reason: &str| recovery::FinalizeRequest {
+        incarnation: marked.incarnation,
+        operator: "drill".into(),
+        reason: reason.into(),
+        force,
+        now_ms: now_ms(),
+    };
+    let (v, _) = recovery::finalize(restored.as_ref(), &fin(false, ""))
         .await
         .unwrap();
-    compat::set_phase(restored.as_ref(), ClusterPhase::Active, "admin", now_ms())
+    assert!(
+        v.refusal
+            .as_deref()
+            .is_some_and(|w| w.contains("unreadable")),
+        "{v:?}"
+    );
+    let (v, _) = recovery::finalize(restored.as_ref(), &fin(true, ""))
         .await
         .unwrap();
+    assert!(v.refusal.is_some(), "{v:?}");
+    let (v, audit) = recovery::finalize(
+        restored.as_ref(),
+        &fin(true, "restore drill: pre2 written after the backup point"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(v.refusal, None, "{v:?}");
+    assert_eq!(audit.result, "activated-forced");
+    let losses = recovery::data_losses(restored.as_ref()).await.unwrap();
+    assert!(losses.iter().any(|l| l.object.key == "pre2"), "{losses:?}");
+    assert_eq!(
+        recovery::finalize_audits(restored.as_ref())
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
     c.backend
         .cluster()
         .set(compat::cluster_state(restored.as_ref()).await.unwrap());

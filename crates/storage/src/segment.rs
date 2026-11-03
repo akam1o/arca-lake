@@ -50,9 +50,18 @@ impl SegmentWriter {
         let padded = header.padded_len();
         let mut buf = vec![0u8; usize::try_from(padded).expect("alignment fits usize")];
         buf[..SEGMENT_HEADER_LEN].copy_from_slice(&header.encode());
-        faults::write_all_at(&file, &buf, 0, header.segment_id)?;
-        faults::sync_all(&file, "segment")?;
-        faults::sync_all(&File::open(dir)?, "dir")?;
+        let written = faults::write_all_at(&file, &buf, 0, header.segment_id)
+            .and_then(|()| faults::sync_all(&file, "segment"))
+            .and_then(|()| faults::sync_all(&File::open(dir)?, "dir"));
+        if let Err(e) = written {
+            // Do not leave a half-made segment behind: it holds no record,
+            // and a file with this id would block the id. Best effort; the
+            // caller never reuses the id either (and open treats a file
+            // shorter than its header as a crashed creation).
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(e.into());
+        }
         Ok(Self {
             file,
             header,

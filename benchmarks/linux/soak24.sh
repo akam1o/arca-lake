@@ -201,6 +201,8 @@ print(json.dumps({"t":int(time.time()),"healthy":s.get("data",{}).get("state",{}
  "processes":len(s.get("processes",{})),"recovery":s.get("recovery_state",{}).get("name")}))' >> "$RUN/fdb.jsonl"
 }
 cmd__sampler() {
+  # A sample must never end the loop: processes come and go under faults.
+  set +e +o pipefail
   while [ ! -f "$RUN/finished" ]; do sample_once; sleep 60; done
 }
 
@@ -242,6 +244,8 @@ do_fault() { # index
   esac
 }
 cmd__faults() {
+  # One fault failing (e.g. no leader at that moment) is logged, not fatal.
+  set +e +o pipefail
   local k=0
   wait_s "${FAULT_START_SECS:-600}"
   while [ ! -f "$RUN/stop-faults" ]; do

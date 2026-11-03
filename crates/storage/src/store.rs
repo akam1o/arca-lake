@@ -746,7 +746,11 @@ impl Store {
     fn rollover(&self, w: &mut Writer) -> Result<()> {
         w.active.sync()?;
         let old_id = w.active.header().segment_id;
+        // Consume the id first: a creation that fails after the file exists
+        // (a write or fsync error) must not make every later rollover try
+        // the same name again (`EEXIST` forever, found by the soak test).
         let id = w.next_segment_id;
+        w.next_segment_id = id + 1;
         let new = Self::create_segment(&self.cfg, self.device_id, id, self.format_write())?;
         let start = (id, new.end());
         {
@@ -774,7 +778,6 @@ impl Store {
         }
         w.active = new;
         w.active_min_seq = None;
-        w.next_segment_id = id + 1;
         Ok(())
     }
 

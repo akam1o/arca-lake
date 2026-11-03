@@ -419,3 +419,53 @@ fn a_failed_segment_creation_is_an_error_and_the_store_keeps_serving() {
         ],
     );
 }
+
+#[test]
+fn a_segment_creation_failing_after_the_file_exists_does_not_block_later_writes() {
+    // The header write or its fsync fails once the new file exists: the
+    // write is refused, and the next write rolls to a fresh segment instead
+    // of failing forever on the existing name (EEXIST).
+    for fail_on_sync in [false, true] {
+        let _s = faults::serial();
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path(), SyncPolicy::Group);
+        cfg.segment_max_bytes = 8 << 10;
+        let (store, _) = Store::open(cfg.clone()).unwrap();
+        store.put(key(1), &payload(1, 6000)).unwrap();
+        store.put(key(2), &payload(2, 6000)).unwrap(); // the next put rolls
+        let active = store
+            .segment_stats()
+            .unwrap()
+            .iter()
+            .find(|s| s.active)
+            .unwrap()
+            .segment_id;
+        set_io_hook(Some(fail_times(
+            move |op| {
+                if fail_on_sync {
+                    matches!(op, IoOp::SyncAll { .. })
+                } else {
+                    matches!(op, IoOp::Write { segment, .. } if *segment > active)
+                }
+            },
+            ErrorKind::Other,
+            1,
+        )));
+        let e = store.put(key(3), &payload(3, 100)).unwrap_err();
+        assert!(is_io(&e, ErrorKind::Other), "{e}");
+        set_io_hook(None);
+        for i in 3..8 {
+            store
+                .put(key(i), &payload(i, 3000))
+                .unwrap_or_else(|e| panic!("put {i}: {e}"));
+        }
+        drop(store);
+        reopen_and_check(
+            dir.path(),
+            SyncPolicy::Group,
+            &(1..8)
+                .map(|i| (key(i), payload(i, if i < 3 { 6000 } else { 3000 })))
+                .collect::<Vec<_>>(),
+        );
+    }
+}

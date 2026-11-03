@@ -42,11 +42,13 @@ print(json.dumps({"ts":float(sys.argv[1]),"commit_s":lp.get("commit_seconds"),"r
     fi
     ;;
   stop)
-    [ -f "$out/pids" ] && while read -r p; do kill "$p" 2>/dev/null || true; done < "$out/pids"
-    sleep 0.3
-    [ -f "$out/pids" ] && while read -r p; do kill -9 "$p" 2>/dev/null || true; done < "$out/pids"
-    pkill -f "sar -u -d -n DEV -w -r 1" 2>/dev/null || true
-    pkill -f "pidstat -h -u -w -r -C" 2>/dev/null || true
+    # Children first (sar's data collector), then the recorded processes;
+    # only PIDs this sampler started, never a pattern match.
+    if [ -f "$out/pids" ]; then
+      while read -r p; do pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; done < "$out/pids"
+      sleep 0.3
+      while read -r p; do pkill -9 -P "$p" 2>/dev/null || true; kill -9 "$p" 2>/dev/null || true; done < "$out/pids"
+    fi
     ;;
   *) echo "usage: $0 start <out> [url...] | stop <out>" >&2; exit 2 ;;
 esac

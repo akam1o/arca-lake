@@ -356,3 +356,468 @@ pub async fn upgrade_audits<S: KvStore>(store: &S) -> Result<Vec<crate::records:
     })
     .await
 }
+
+// ---- finalize (RFC-015 §5.3, Phase 3.4 §3) --------------------------------
+
+/// An accepted, unrecoverable chunk of one object version
+/// (`("al","meta","loss",generation,chunk_index)`). Written by a forced
+/// finalize for every unreadable object the report lists; never removed
+/// by finalize, GC or repair, so the loss stays visible after the cluster
+/// is Active again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataLossRecord {
+    /// Incarnation whose verification found it.
+    pub incarnation: [u8; 16],
+    /// The object as the report named it.
+    pub object: AffectedObject,
+    /// When the loss was accepted.
+    pub accepted_ms: u64,
+    /// Who accepted it.
+    pub accepted_by: String,
+}
+
+impl Record for DataLossRecord {}
+
+/// One `admin recovery finalize` attempt
+/// (`("al","meta","restore","finalize",incarnation,at_ms)`): accepted or
+/// refused, with the findings as they were.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizeAudit {
+    /// Target incarnation.
+    pub incarnation: [u8; 16],
+    /// When.
+    pub at_ms: u64,
+    /// Operator.
+    pub operator: String,
+    /// Operator's reason (required with `--force`).
+    pub reason: String,
+    /// Whether `--force` was given.
+    pub force: bool,
+    /// Phase before the attempt (`ClusterPhase::name`).
+    pub phase_before: String,
+    /// `activated`, `activated-forced` or `refused: <why>`.
+    pub result: String,
+    /// Unresolved findings that need `--force` (critical).
+    pub critical: Vec<String>,
+    /// Findings reported but not blocking (repair continues once Active).
+    pub warnings: Vec<String>,
+    /// Counts of the report at the time.
+    pub counts: Option<RestoreCounts>,
+    /// Objects the report listed; `affected_total` > this when the list
+    /// was truncated (the integrity task list then holds every chunk).
+    pub affected_listed: u32,
+    /// Unreadable chunks counted by verification.
+    pub affected_total: u64,
+}
+
+impl Record for FinalizeAudit {}
+
+/// What finalize was asked to do.
+#[derive(Debug, Clone)]
+pub struct FinalizeRequest {
+    /// The incarnation the operator looked at; refused if it changed.
+    pub incarnation: [u8; 16],
+    /// Operator name (audit).
+    pub operator: String,
+    /// Reason (audit; required with `force`).
+    pub reason: String,
+    /// Accept critical findings.
+    pub force: bool,
+    /// Now, Unix milliseconds.
+    pub now_ms: u64,
+}
+
+/// Outcome of the evaluation of a finalize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizeVerdict {
+    /// Refusal, if any (`None` = may activate).
+    pub refusal: Option<String>,
+    /// Findings that need `--force`.
+    pub critical: Vec<String>,
+    /// Findings that do not block.
+    pub warnings: Vec<String>,
+    /// Whether the activation depends on `--force`.
+    pub forced: bool,
+}
+
+/// Decide a finalize from the state it would act on. Refused, whatever
+/// `force` says, when there is no report for the current incarnation,
+/// verification has not finished (cursor not `Done`, report not
+/// finished), a node's listing is missing and was not excluded, or the
+/// phase is not `ReadOnly`/`RecoveryRequired`. Critical findings
+/// (unreadable chunks, dangling or broken multipart manifests, placement
+/// epochs ahead of their group) refuse a finalize without `force`; with
+/// `force` they need an operator and a reason, and they stay recorded.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn evaluate_finalize(
+    state: &crate::records::ClusterStateRecord,
+    cursor: Option<&RestoreCursor>,
+    report: Option<&RestoreReport>,
+    req: &FinalizeRequest,
+) -> FinalizeVerdict {
+    use crate::records::ClusterPhase as P;
+    let mut v = FinalizeVerdict {
+        refusal: None,
+        critical: Vec::new(),
+        warnings: Vec::new(),
+        forced: false,
+    };
+    let refuse = |mut v: FinalizeVerdict, why: String| {
+        v.refusal = Some(why);
+        v
+    };
+    if state.incarnation != req.incarnation {
+        return refuse(
+            v,
+            "the cluster incarnation changed since the request".into(),
+        );
+    }
+    if req.operator.trim().is_empty() {
+        return refuse(v, "an operator name is required".into());
+    }
+    if let Some(r) = report {
+        let c = &r.counts;
+        for (n, what) in [
+            (c.unreadable_chunks, "unreadable chunks"),
+            (c.manifest_findings, "multipart manifest findings"),
+            (
+                c.placement_epoch_mismatch,
+                "placement epochs ahead of their group",
+            ),
+        ] {
+            if n > 0 {
+                v.critical.push(format!("{n} {what}"));
+            }
+        }
+        let dangling = r
+            .affected
+            .iter()
+            .filter(|a| a.why == "dangling-part")
+            .count();
+        if dangling > 0 && c.manifest_findings == 0 {
+            v.critical
+                .push(format!("{dangling} dangling multipart parts"));
+        }
+        for (n, what) in [
+            (c.missing, "missing shards (repair queued)"),
+            (c.corrupt, "corrupt shards (repair queued)"),
+            (c.degraded_chunks, "degraded chunks (repair queued)"),
+            (c.cache_mismatch, "cache copy mismatches"),
+            (c.membership_mismatch, "membership mismatches"),
+            (
+                c.orphan_post_t,
+                "post-restore orphans (reclaimed once Active)",
+            ),
+        ] {
+            if n > 0 {
+                v.warnings.push(format!("{n} {what}"));
+            }
+        }
+    }
+    match state.state {
+        P::ReadOnly | P::RecoveryRequired => {}
+        other => {
+            return refuse(
+                v,
+                format!(
+                    "cluster is {}; finalize needs ReadOnly or RecoveryRequired",
+                    other.name()
+                ),
+            );
+        }
+    }
+    let Some(r) = report else {
+        return refuse(
+            v,
+            "no verification report for this incarnation (run `recovery verify`)".into(),
+        );
+    };
+    if r.incarnation != state.incarnation {
+        return refuse(v, "the report belongs to another incarnation".into());
+    }
+    let done = cursor
+        .is_some_and(|c| c.incarnation == state.incarnation && c.phase == RecoveryPhase::Done);
+    if !done || r.finished_ms == 0 {
+        return refuse(
+            v,
+            "verification has not finished (not even --force finalizes an unverified cluster)"
+                .into(),
+        );
+    }
+    if !r.complete || !r.unanswered_nodes.is_empty() {
+        return refuse(
+            v,
+            format!(
+                "verification is incomplete: nodes {:?} did not answer (bring them back, or replace their group memberships, then `recovery verify`)",
+                r.unanswered_nodes
+            ),
+        );
+    }
+    if !v.critical.is_empty() {
+        if !req.force {
+            let why = format!(
+                "unresolved findings: {} (accept the loss with --force --reason)",
+                v.critical.join(", ")
+            );
+            return refuse(v, why);
+        }
+        if req.reason.trim().is_empty() {
+            return refuse(v, "--force needs --reason".into());
+        }
+        v.forced = true;
+    }
+    v
+}
+
+/// Finalize in one transaction: re-read the state, the cursor and the
+/// report, evaluate, and either refuse or record the acceptance, a
+/// [`DataLossRecord`] per unreadable object, and set the cluster
+/// `Active`. Every attempt writes a [`FinalizeAudit`]. A concurrent
+/// metadata change (a resumed verification, another finalize) conflicts
+/// and the evaluation is repeated on the new state.
+///
+/// # Errors
+///
+/// Backend errors; a missing cluster state record.
+///
+/// # Panics
+///
+/// Never: an accepted verdict implies the report was read.
+pub async fn finalize<S: KvStore>(
+    store: &S,
+    req: &FinalizeRequest,
+) -> Result<(FinalizeVerdict, FinalizeAudit)> {
+    // One id per attempt, kept across transaction retries.
+    let attempt = crate::records::new_gen_id();
+    transact(store, (req, attempt), |tx, env| {
+        Box::pin(async move {
+            let (req, attempt) = *env;
+            let mut state: crate::records::ClusterStateRecord =
+                read(tx, &keys::cluster_state()).await?.ok_or_else(|| {
+                    crate::error::MetaError::InvalidArgument("cluster state record missing".into())
+                })?;
+            let cursor: Option<RestoreCursor> = read(tx, &keys::restore_cursor()).await?;
+            let report: Option<RestoreReport> =
+                read(tx, &keys::restore_report(&state.incarnation)).await?;
+            let verdict = evaluate_finalize(&state, cursor.as_ref(), report.as_ref(), req);
+            let audit = FinalizeAudit {
+                incarnation: req.incarnation,
+                at_ms: req.now_ms,
+                operator: req.operator.clone(),
+                reason: req.reason.clone(),
+                force: req.force,
+                phase_before: state.state.name().to_string(),
+                result: match (&verdict.refusal, verdict.forced) {
+                    (Some(w), _) => format!("refused: {w}"),
+                    (None, true) => "activated-forced".into(),
+                    (None, false) => "activated".into(),
+                },
+                critical: verdict.critical.clone(),
+                warnings: verdict.warnings.clone(),
+                counts: report.as_ref().map(|r| r.counts.clone()),
+                affected_listed: report
+                    .as_ref()
+                    .map_or(0, |r| u32::try_from(r.affected.len()).unwrap_or(u32::MAX)),
+                affected_total: report.as_ref().map_or(0, |r| r.counts.unreadable_chunks),
+            };
+            write(
+                tx,
+                &keys::restore_finalize_audit(&req.incarnation, req.now_ms, &attempt),
+                &audit,
+            )?;
+            if verdict.refusal.is_some() {
+                return Ok((verdict, audit));
+            }
+            let mut report = report.expect("evaluated");
+            report.accepted = Some(Acceptance {
+                at_ms: req.now_ms,
+                by: req.operator.clone(),
+                forced: verdict.forced,
+            });
+            for a in &report.affected {
+                let rec = DataLossRecord {
+                    incarnation: state.incarnation,
+                    object: a.clone(),
+                    accepted_ms: req.now_ms,
+                    accepted_by: req.operator.clone(),
+                };
+                write(tx, &keys::data_loss(&a.generation, a.chunk_index), &rec)?;
+            }
+            write(tx, &keys::restore_report(&state.incarnation), &report)?;
+            state.state = crate::records::ClusterPhase::Active;
+            state.changed_ms = req.now_ms;
+            state.changed_by.clone_from(&req.operator);
+            write(tx, &keys::cluster_state(), &state)?;
+            Ok((verdict, audit))
+        })
+    })
+    .await
+}
+
+/// Every finalize audit record, oldest first.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn finalize_audits<S: KvStore>(store: &S) -> Result<Vec<FinalizeAudit>> {
+    transact(store, (), |tx, ()| {
+        Box::pin(async move {
+            let mut out = Vec::new();
+            for (_, v) in tx
+                .get_range(&keys::restore_finalize_audits_range(), usize::MAX, false)
+                .await?
+            {
+                out.push(decode::<FinalizeAudit>(&v)?);
+            }
+            out.sort_by_key(|a| a.at_ms);
+            Ok(out)
+        })
+    })
+    .await
+}
+
+/// Every accepted data loss.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn data_losses<S: KvStore>(store: &S) -> Result<Vec<DataLossRecord>> {
+    transact(store, (), |tx, ()| {
+        Box::pin(async move {
+            let mut out = Vec::new();
+            for (_, v) in tx
+                .get_range(&keys::data_losses_range(), usize::MAX, false)
+                .await?
+            {
+                out.push(decode::<DataLossRecord>(&v)?);
+            }
+            Ok(out)
+        })
+    })
+    .await
+}
+
+/// `ReadOnly` → `Active` for an operator's read-only switch
+/// (`admin cluster activate`). Refused while the current incarnation has
+/// a restore report that was not accepted: leaving a restore goes through
+/// [`finalize`] (and its audit), never around it. Returns the phase after
+/// and whether it changed (`Ok(Err(why))` = refused).
+///
+/// # Errors
+///
+/// Backend errors; a missing cluster state record.
+pub async fn activate_read_only<S: KvStore>(
+    store: &S,
+    who: &str,
+    now_ms: u64,
+) -> Result<std::result::Result<crate::records::ClusterPhase, String>> {
+    transact(store, (who.to_string(), now_ms), |tx, env| {
+        Box::pin(async move {
+            let (who, now_ms) = env;
+            let mut state: crate::records::ClusterStateRecord = read(tx, &keys::cluster_state())
+                .await?
+                .ok_or_else(|| crate::error::MetaError::InvalidArgument("cluster state record missing".into()))?;
+            if state.state != crate::records::ClusterPhase::ReadOnly {
+                return Ok(Err(format!("cluster is {}, not ReadOnly", state.state.name())));
+            }
+            let report: Option<RestoreReport> = read(tx, &keys::restore_report(&state.incarnation)).await?;
+            if report.is_some_and(|r| r.accepted.is_none()) {
+                return Ok(Err(
+                    "this incarnation has a restore report that was not accepted; use `admin recovery finalize`".into(),
+                ));
+            }
+            state.state = crate::records::ClusterPhase::Active;
+            state.changed_ms = *now_ms;
+            state.changed_by.clone_from(who);
+            write(tx, &keys::cluster_state(), &state)?;
+            Ok(Ok(state.state))
+        })
+    })
+    .await
+}
+
+/// `recovery verify` (`from_start`: ReadOnly or RecoveryRequired, fresh
+/// cursor and report) or `recovery resume` (RecoveryRequired, cursor
+/// kept) → `VerificationPending`, in one transaction conditional on the
+/// incarnation and the phase: a finalize that committed meanwhile is never
+/// undone (its accepted report overwritten, an Active cluster sent back to
+/// verification). `Ok(Err(why))` = refused.
+///
+/// # Errors
+///
+/// Backend errors; a missing cluster state record.
+pub async fn restart_verification<S: KvStore>(
+    store: &S,
+    incarnation: [u8; 16],
+    from_start: bool,
+    who: &str,
+    now_ms: u64,
+) -> Result<std::result::Result<(), String>> {
+    use crate::records::ClusterPhase as P;
+    transact(store, (who.to_string(), now_ms), |tx, env| {
+        Box::pin(async move {
+            let (who, now_ms) = env;
+            let mut state: crate::records::ClusterStateRecord =
+                read(tx, &keys::cluster_state()).await?.ok_or_else(|| {
+                    crate::error::MetaError::InvalidArgument("cluster state record missing".into())
+                })?;
+            if state.incarnation != incarnation {
+                return Ok(Err(
+                    "the cluster incarnation changed since the request".into()
+                ));
+            }
+            let allowed = if from_start {
+                matches!(state.state, P::ReadOnly | P::RecoveryRequired)
+            } else {
+                state.state == P::RecoveryRequired
+            };
+            if !allowed {
+                return Ok(Err(format!(
+                    "cluster is {}; {} needs {}",
+                    state.state.name(),
+                    if from_start { "verify" } else { "resume" },
+                    if from_start {
+                        "ReadOnly or RecoveryRequired"
+                    } else {
+                        "RecoveryRequired"
+                    }
+                )));
+            }
+            if from_start {
+                let point = state.restore_point_ms().unwrap_or(*now_ms);
+                let c = RestoreCursor {
+                    incarnation,
+                    phase: RecoveryPhase::Shards {
+                        group: 0,
+                        member: 0,
+                        after: None,
+                    },
+                    restore_point_ms: point,
+                    started_ms: *now_ms,
+                    updated_ms: *now_ms,
+                    unanswered_nodes: Vec::new(),
+                    excluded_nodes: Vec::new(),
+                };
+                let r = RestoreReport {
+                    incarnation,
+                    restore_point_ms: point,
+                    counts: RestoreCounts::default(),
+                    affected: Vec::new(),
+                    complete: false,
+                    unanswered_nodes: Vec::new(),
+                    finished_ms: 0,
+                    accepted: None,
+                };
+                write(tx, &keys::restore_cursor(), &c)?;
+                write(tx, &keys::restore_report(&incarnation), &r)?;
+            }
+            state.state = P::VerificationPending;
+            state.changed_ms = *now_ms;
+            state.changed_by.clone_from(who);
+            write(tx, &keys::cluster_state(), &state)?;
+            Ok(Ok(()))
+        })
+    })
+    .await
+}

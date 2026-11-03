@@ -103,6 +103,47 @@ pub fn restore_reports_range() -> KeyRange {
     KeyRange::prefix(&pack(&(ROOT, "meta", "restore", "report")))
 }
 
+/// Audit record of one `admin recovery finalize` attempt (accepted or
+/// refused) for an incarnation; `id` is unique per attempt (attempts in
+/// the same millisecond must not overwrite each other).
+#[must_use]
+pub fn restore_finalize_audit(incarnation: &[u8; 16], at_ms: u64, id: &[u8; 16]) -> Key {
+    pack(&(
+        ROOT,
+        "meta",
+        "restore",
+        "finalize",
+        Bytes::from(&incarnation[..]),
+        at_ms,
+        Bytes::from(&id[..]),
+    ))
+}
+
+/// Every finalize audit record.
+#[must_use]
+pub fn restore_finalize_audits_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "meta", "restore", "finalize")))
+}
+
+/// A data loss accepted by a forced finalize: one chunk of one object
+/// version that could not be recovered (kept until the operator clears it).
+#[must_use]
+pub fn data_loss(generation: &GenId, chunk_index: u32) -> Key {
+    pack(&(
+        ROOT,
+        "meta",
+        "loss",
+        Bytes::from(&generation[..]),
+        chunk_index,
+    ))
+}
+
+/// Every data-loss record.
+#[must_use]
+pub fn data_losses_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "meta", "loss")))
+}
+
 /// Heartbeat of a gateway or controller process (RFC-014 §5.5).
 #[must_use]
 pub fn proc(id: &str) -> Key {

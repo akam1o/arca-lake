@@ -902,16 +902,28 @@ enum RecoveryCommand {
     /// `VerificationPending`, cursor kept).
     Resume,
     /// Accept the report and activate (`restore accept` + `cluster
-    /// activate`): `ReadOnly` → `Active`; `RecoveryRequired` → `Active`
-    /// only with `--force` (audited in the report).
+    /// activate`) in one transaction. Refused, even with `--force`, while
+    /// verification has not finished or a node's listing is missing.
+    /// Unresolved critical findings (unreadable chunks, broken multipart
+    /// manifests, placement epochs ahead of their group) need `--force`
+    /// and `--reason`; they stay in the report, every listed object gets a
+    /// data-loss record, and every attempt is audited.
     Finalize {
         /// Confirm.
         #[arg(long)]
         yes: bool,
-        /// Accept an incomplete or unreadable report.
+        /// Accept unresolved critical findings (data loss).
         #[arg(long)]
         force: bool,
+        /// Who finalizes (audit).
+        #[arg(long, env = "ARCA_OPERATOR")]
+        operator: String,
+        /// Why (audit; required with --force).
+        #[arg(long, default_value = "")]
+        reason: String,
     },
+    /// Accepted data losses and the finalize audit trail.
+    Losses,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2211,140 +2223,123 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
             if !yes {
                 return fail("verify leaves ReadOnly for VerificationPending; re-run with --yes");
             }
-            if !matches!(
-                state.state,
-                ClusterPhase::ReadOnly | ClusterPhase::RecoveryRequired
-            ) {
-                return fail(format!(
-                    "cluster is {}; verify needs ReadOnly or RecoveryRequired",
-                    state.state.name()
-                ));
-            }
-            // A fresh cursor at the verification start; the report of this
-            // incarnation is rewritten by the pass.
-            let c = recovery::RestoreCursor {
-                incarnation: state.incarnation,
-                phase: recovery::RecoveryPhase::Shards {
-                    group: 0,
-                    member: 0,
-                    after: None,
-                },
-                restore_point_ms: state.restore_point_ms().unwrap_or(now),
-                started_ms: now,
-                updated_ms: now,
-                unanswered_nodes: Vec::new(),
-                excluded_nodes: Vec::new(),
-            };
-            if let Err(e) = recovery::set_cursor(meta.as_ref(), &c).await {
-                return fail(e);
-            }
-            let mut r = recovery::RestoreReport {
-                incarnation: state.incarnation,
-                restore_point_ms: c.restore_point_ms,
-                counts: recovery::RestoreCounts::default(),
-                affected: Vec::new(),
-                complete: false,
-                unanswered_nodes: Vec::new(),
-                finished_ms: 0,
-                accepted: None,
-            };
-            r.counts.epochs_raised = 0;
-            if let Err(e) = recovery::set_report(meta.as_ref(), &r).await {
-                return fail(e);
-            }
-            match compat::set_phase(
+            match recovery::restart_verification(
                 meta.as_ref(),
-                ClusterPhase::VerificationPending,
+                state.incarnation,
+                true,
                 "admin",
                 now,
             )
             .await
             {
-                Ok(_) => {
+                Ok(Ok(())) => {
                     println!("VerificationPending: the controller leader verifies from the start");
                     ExitCode::SUCCESS
                 }
+                Ok(Err(why)) => fail(why),
                 Err(e) => fail(e),
             }
         }
         RecoveryCommand::Resume => {
-            if state.state != ClusterPhase::RecoveryRequired {
-                return fail(format!(
-                    "cluster is {}; resume needs RecoveryRequired",
-                    state.state.name()
-                ));
-            }
-            match compat::set_phase(
+            match recovery::restart_verification(
                 meta.as_ref(),
-                ClusterPhase::VerificationPending,
+                state.incarnation,
+                false,
                 "admin",
                 now,
             )
             .await
             {
-                Ok(_) => {
+                Ok(Ok(())) => {
                     println!(
                         "VerificationPending: the controller leader continues from the cursor"
                     );
                     ExitCode::SUCCESS
                 }
+                Ok(Err(why)) => fail(why),
                 Err(e) => fail(e),
             }
         }
-        RecoveryCommand::Finalize { yes, force } => {
+        RecoveryCommand::Finalize {
+            yes,
+            force,
+            operator,
+            reason,
+        } => {
             if !yes {
                 return fail("finalize activates the cluster; re-run with --yes");
             }
-            let report = match recovery::report(meta.as_ref(), &state.incarnation).await {
-                Ok(r) => r,
+            let req = recovery::FinalizeRequest {
+                incarnation: state.incarnation,
+                operator,
+                reason,
+                force,
+                now_ms: now,
+            };
+            let (verdict, _) = match recovery::finalize(meta.as_ref(), &req).await {
+                Ok(v) => v,
                 Err(e) => return fail(e),
             };
-            match state.state {
-                ClusterPhase::ReadOnly => {}
-                ClusterPhase::RecoveryRequired if force => {}
-                ClusterPhase::RecoveryRequired => {
-                    return fail(
-                        "cluster is RecoveryRequired (unreadable data or an incomplete pass); fix the cause, `recovery resume`, or accept with --force",
-                    );
-                }
-                other => {
-                    return fail(format!(
-                        "cluster is {}; finalize needs ReadOnly",
-                        other.name()
-                    ));
-                }
+            for c in &verdict.critical {
+                println!("unresolved: {c}");
             }
-            if let Some(mut r) = report {
-                if r.finished_ms == 0 && !force {
-                    return fail("verification has not finished; wait or use --force");
+            for w in &verdict.warnings {
+                println!("note: {w}");
+            }
+            if let Some(why) = verdict.refusal {
+                return fail(format!("finalize refused (audited): {why}"));
+            }
+            println!(
+                "cluster Active{}",
+                if verdict.forced {
+                    " (forced: the findings above stay in the report and in `recovery losses`)"
+                } else {
+                    ""
                 }
-                r.accepted = Some(recovery::Acceptance {
-                    at_ms: now,
-                    by: "admin".into(),
-                    forced: force,
-                });
-                if let Err(e) = recovery::set_report(meta.as_ref(), &r).await {
-                    return fail(e);
-                }
-            } else if !force {
-                return fail(
-                    "no verification report for this incarnation; run `recovery verify --yes` or use --force",
+            );
+            ExitCode::SUCCESS
+        }
+        RecoveryCommand::Losses => {
+            let (losses, audits) = match (
+                recovery::data_losses(meta.as_ref()).await,
+                recovery::finalize_audits(meta.as_ref()).await,
+            ) {
+                (Ok(l), Ok(a)) => (l, a),
+                (Err(e), _) | (_, Err(e)) => return fail(e),
+            };
+            for l in &losses {
+                println!(
+                    "loss bucket {} key {} generation {} chunk {} group {} have {}/{} why {} accepted_ms {} by {} incarnation {}",
+                    l.object.bucket,
+                    l.object.key,
+                    compat::hex(&l.object.generation),
+                    l.object.chunk_index,
+                    l.object.group,
+                    l.object.have,
+                    l.object.need,
+                    l.object.why,
+                    l.accepted_ms,
+                    l.accepted_by,
+                    compat::hex(&l.incarnation)
                 );
             }
-            match compat::set_phase(meta.as_ref(), ClusterPhase::Active, "admin", now).await {
-                Ok(_) => {
-                    println!(
-                        "cluster Active{}",
-                        if force {
-                            " (forced; recorded in the report)"
-                        } else {
-                            ""
-                        }
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(e) => fail(e),
+            for a in &audits {
+                println!(
+                    "finalize at_ms {} incarnation {} operator {} force {} phase_before {} result {:?} reason {:?} critical {:?} warnings {:?} affected {}/{}",
+                    a.at_ms,
+                    compat::hex(&a.incarnation),
+                    a.operator,
+                    a.force,
+                    a.phase_before,
+                    a.result,
+                    a.reason,
+                    a.critical,
+                    a.warnings,
+                    a.affected_listed,
+                    a.affected_total
+                );
             }
+            ExitCode::SUCCESS
         }
     }
 }
@@ -2358,7 +2353,23 @@ async fn run_admin_cluster<S: arca_lake_metadata::KvStore + 'static>(
     use arca_lake_metadata::records::ClusterPhase;
     let (from, to) = match command {
         ClusterCommand::SetReadOnly => (ClusterPhase::Active, ClusterPhase::ReadOnly),
-        ClusterCommand::Activate => (ClusterPhase::ReadOnly, ClusterPhase::Active),
+        ClusterCommand::Activate => {
+            // Not around a restore's finalize (and its audit).
+            return match arca_lake_metadata::ops::recovery::activate_read_only(
+                meta.as_ref(),
+                "admin",
+                now,
+            )
+            .await
+            {
+                Ok(Ok(p)) => {
+                    println!("cluster {}", p.name());
+                    ExitCode::SUCCESS
+                }
+                Ok(Err(why)) => fail(why),
+                Err(e) => fail(e),
+            };
+        }
     };
     match compat::transition(meta.as_ref(), from, to, "admin", now).await {
         Ok((rec, true)) => {
