@@ -4,7 +4,7 @@
 //! simulated restore, cursor resume, and leader failover during
 //! verification.
 
-#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_lines, clippy::many_single_char_names)]
 
 use std::sync::Arc;
 use std::time::Duration;

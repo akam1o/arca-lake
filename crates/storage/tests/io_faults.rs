@@ -5,7 +5,7 @@
 //! that silently drops writes is outside what these tests show (RFC-005
 //! §8).
 
-#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
 
 use std::io::ErrorKind;
 use std::path::Path;
@@ -235,7 +235,7 @@ fn read_errors_and_short_reads_are_io_errors_not_corruption() {
     assert!(store.quarantine_entry(&key(1)).is_none());
     set_io_hook(None);
     assert_eq!(store.get(&key(1), None).unwrap(), payload(1, 3000));
-    assert!(store.quarantine_log().unwrap().is_empty());
+    assert_eq!(store.quarantine_log().unwrap().len(), 0);
     // A real truncation (the file is cut) is still corruption.
     let loc = store.locate(&key(1)).unwrap();
     let path = dir.path().join(format!("seg-{:016x}.arca", loc.segment_id));
@@ -271,7 +271,7 @@ fn a_quarantine_log_failure_still_quarantines_in_memory_and_recovery_rederives_i
         f.write_all_at(&[0xFF], loc.payload_offset() + 10).unwrap();
     }
     set_io_hook(Some(Arc::new(|op| match op {
-        IoOp::QuarantineLog => FaultOutcome::Error(std::io::Error::new(ErrorKind::Other, "EIO")),
+        IoOp::QuarantineLog => FaultOutcome::Error(std::io::Error::other("EIO")),
         _ => FaultOutcome::None,
     })));
     assert!(matches!(
