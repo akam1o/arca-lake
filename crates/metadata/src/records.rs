@@ -146,6 +146,15 @@ pub enum ClusterPhase {
     RecoveryRequired,
 }
 
+impl ClusterStateRecord {
+    /// The time separating pre- and post-restore-point orphans: the
+    /// backup point when known, else the mark time.
+    #[must_use]
+    pub fn restore_point_ms(&self) -> Option<u64> {
+        self.backup_point_ms.or(self.restored_at_ms)
+    }
+}
+
 impl ClusterPhase {
     /// Which operation classes this phase admits (RFC-015 §5.3 table).
     #[must_use]
@@ -196,6 +205,11 @@ pub struct ClusterStateRecord {
     pub restored_at_ms: Option<u64>,
     /// Backup the metadata was restored from (operator-supplied label).
     pub restored_from: Option<String>,
+    /// Consistent point of that backup, Unix milliseconds (operator
+    /// supplied): shards whose chunk id is newer were written after it
+    /// (post-T orphans, RFC-015 §5.3.2). `None` = unknown, and the mark
+    /// time is used instead (every orphan then counts as pre-T).
+    pub backup_point_ms: Option<u64>,
     /// Last change, Unix milliseconds.
     pub changed_ms: u64,
     /// Who changed it (controller id or `admin`).

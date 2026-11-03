@@ -66,6 +66,9 @@ pub struct ScrubOptions {
     pub interval_ms: u64,
     /// Groups scrubbed per pass invocation.
     pub concurrency: usize,
+    /// Multipart roots examined per pass by the manifest scrub (R-55); 0
+    /// disables the background manifest scrub.
+    pub manifest_roots_per_pass: usize,
 }
 
 impl Default for ScrubOptions {
@@ -76,6 +79,7 @@ impl Default for ScrubOptions {
             rate_bytes_per_s: 32 << 20,
             interval_ms: 24 * 3600 * 1000,
             concurrency: 1,
+            manifest_roots_per_pass: 256,
         }
     }
 }
@@ -250,6 +254,70 @@ fn is_deferrable(e: &MetaError) -> bool {
 
 // ---- scrub ----------------------------------------------------------------
 
+/// One page of the background manifest scrub from its persisted cursor:
+/// a new pass starts when the interval since the last one passed (R-55).
+async fn manifest_scrub_step<S: KvStore>(
+    meta: &S,
+    opts: &ScrubOptions,
+    metrics: Option<&Metrics>,
+    report: &mut ScrubReport,
+    now_ms: u64,
+) -> Result<(), ControlError> {
+    // Manifest scrub (RFC-008 §8.6, R-55): one page of multipart roots per
+    // pass from a persisted cursor, a new pass when the interval passed.
+    let mut cur = match integrity::manifest_cursor(meta).await? {
+        Some(c) if !c.done => c,
+        Some(c) if now_ms.saturating_sub(c.finished_ms) >= opts.interval_ms => {
+            integrity::ManifestCursor {
+                pass: c.pass + 1,
+                after: None,
+                done: false,
+                started_ms: now_ms,
+                finished_ms: c.finished_ms,
+                roots: 0,
+                findings: 0,
+            }
+        }
+        Some(c) => c,
+        None => integrity::ManifestCursor {
+            pass: 1,
+            after: None,
+            done: false,
+            started_ms: now_ms,
+            finished_ms: 0,
+            roots: 0,
+            findings: 0,
+        },
+    };
+    if !cur.done {
+        let r = integrity::verify_manifests(meta, cur.after, opts.manifest_roots_per_pass).await?;
+        cur.roots += r.roots;
+        cur.findings += r.findings.len() as u64;
+        report.manifest_roots = r.roots;
+        for (root, f) in &r.findings {
+            warn!(root = %hex(root), finding = ?f, "multipart manifest finding (RFC-008 §8.6)");
+        }
+        if let Some(m) = metrics {
+            m.manifest_roots_verified_total
+                .fetch_add(r.roots, Ordering::Relaxed);
+            m.manifest_findings_total
+                .fetch_add(r.findings.len() as u64, Ordering::Relaxed);
+        }
+        report.manifest_findings = r.findings;
+        if let Some(n) = r.next {
+            cur.after = Some(n);
+        } else {
+            cur.done = true;
+            cur.finished_ms = now_ms;
+            if let Some(m) = metrics {
+                m.manifest_findings.store(cur.findings, Ordering::Relaxed);
+            }
+        }
+        integrity::set_manifest_cursor(meta, &cur).await?;
+    }
+    Ok(())
+}
+
 /// One scrub pass: scrub up to `opts.concurrency` due groups (resuming
 /// cursors), paced by the byte budget.
 ///
@@ -340,20 +408,9 @@ pub async fn scrub_pass<S: KvStore>(
             Err(e) => return Err(e),
         }
     }
-    // Manifest scrub (RFC-008 §8.6): whenever a group pass completed, every
-    // committed multipart root is checked against its part generations.
-    if report.groups_completed > 0 {
-        let (roots, findings) = verify_manifests(meta).await?;
-        report.manifest_roots = roots;
-        if let Some(m) = metrics {
-            m.manifest_roots_verified_total
-                .fetch_add(roots, Ordering::Relaxed);
-            m.manifest_findings_total
-                .fetch_add(findings.len() as u64, Ordering::Relaxed);
-            m.manifest_findings
-                .store(findings.len() as u64, Ordering::Relaxed);
-        }
-        report.manifest_findings = findings;
+    // Manifest scrub (RFC-008 §8.6, R-55).
+    if opts.manifest_roots_per_pass > 0 && !cancelled(cancel) {
+        manifest_scrub_step(meta, opts, metrics, &mut report, now_ms).await?;
     }
     if let Some(m) = metrics {
         m.scrub_passes_total.fetch_add(1, Ordering::Relaxed);
@@ -829,6 +886,9 @@ pub async fn repair_pass<S: KvStore>(
     }
     drop(stream);
     if let Some(m) = metrics {
+        for (i, n) in integrity::open_by_class(meta).await?.iter().enumerate() {
+            m.integrity_findings_open[i].store(*n, Ordering::Relaxed);
+        }
         let (total, unrecoverable, failed) = integrity::queue_summary(meta).await?;
         m.repair_queue_depth.store(total, Ordering::Relaxed);
         m.repair_tasks_unrecoverable

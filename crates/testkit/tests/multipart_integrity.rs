@@ -127,6 +127,7 @@ async fn scrub(c: &TestCluster) -> arca_lake_controller::integrity::ScrubReport 
             rate_bytes_per_s: 0,
             interval_ms: 1,
             concurrency: 1,
+            manifest_roots_per_pass: 256,
         },
         now_ms(),
     )
@@ -342,5 +343,97 @@ async fn dangling_and_mismatched_part_references_are_findings_and_never_partial_
     );
     let err = s3::get(&c.backend, BUCKET, "obj").await.unwrap_err();
     assert!(err.to_string().contains("integrity"), "{err}");
+    c.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_background_manifest_scrub_pages_through_a_persisted_cursor() {
+    use arca_lake_controller::integrity::scrub_pass;
+    use arca_lake_metadata::ops::integrity as itasks;
+    let c = cluster().await;
+    for i in 0..5u64 {
+        multipart_put(&c, &format!("m{i}"), 2, 40 + i).await;
+    }
+    let opts = ScrubOptions {
+        page: 8,
+        page_bytes: 0,
+        rate_bytes_per_s: 0,
+        interval_ms: 3_600_000,
+        concurrency: 1,
+        manifest_roots_per_pass: 2,
+    };
+    let pass = |now: u64| {
+        let meta = std::sync::Arc::clone(&c.meta);
+        let clients = c.clients.clone();
+        let opts = opts.clone();
+        async move {
+            scrub_pass(meta.as_ref(), &clients, &coders(), &opts, None, None, now)
+                .await
+                .unwrap()
+        }
+    };
+    let t0 = now_ms();
+    // Each pass examines one page of two roots and persists the cursor; a
+    // controller that takes over simply calls the next pass (the cursor is
+    // in metadata, nothing is in memory).
+    let r = pass(t0).await;
+    assert_eq!(r.manifest_roots, 2);
+    let cur = itasks::manifest_cursor(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((cur.pass, cur.roots, cur.done), (1, 2, false));
+    assert!(cur.after.is_some());
+    // A reference ahead of the cursor goes bad before the scrub reaches it.
+    let last = c.manifest(BUCKET, "m4").await;
+    let mut bad = last.parts[0].clone();
+    bad.size += 1;
+    transact(
+        c.meta.as_ref(),
+        (last.pointer.generation, bad),
+        |tx, env| {
+            Box::pin(async move {
+                let (root, bad) = env;
+                tx.set(
+                    &keys::part_ref(root, bad.part_number),
+                    &records::encode(bad)?,
+                );
+                Ok(())
+            })
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(pass(t0 + 1).await.manifest_roots, 2);
+    let r = pass(t0 + 2).await;
+    assert_eq!(r.manifest_roots, 1);
+    assert!(
+        r.manifest_findings
+            .iter()
+            .any(|(g, _)| *g == last.pointer.generation),
+        "{:?}",
+        r.manifest_findings
+    );
+    let cur = itasks::manifest_cursor(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((cur.pass, cur.roots, cur.done), (1, 5, true));
+    assert!(cur.findings >= 1);
+    // Finite load: a finished pass waits for the interval.
+    assert_eq!(pass(t0 + 3).await.manifest_roots, 0);
+    let cur2 = itasks::manifest_cursor(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cur2, cur);
+    // After the interval a new pass starts from the beginning.
+    let r = pass(t0 + 3_600_000 + 10).await;
+    assert_eq!(r.manifest_roots, 2);
+    let cur = itasks::manifest_cursor(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((cur.pass, cur.roots, cur.done), (2, 2, false));
     c.shutdown().await;
 }

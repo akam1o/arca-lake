@@ -170,6 +170,12 @@ pub fn scrub_group_from(key: &[u8]) -> Option<u64> {
     unpack::<(String, String, u64)>(key).ok().map(|t| t.2)
 }
 
+/// Cursor of the multipart manifest scrub (RFC-008 §8.6, R-55).
+#[must_use]
+pub fn manifest_cursor() -> Key {
+    pack(&(ROOT, "mscrub"))
+}
+
 /// Stripe repair task of `(group, chunk)` (RFC-008 §8.5).
 #[must_use]
 pub fn repair_task(group_id: u64, chunk_id: &[u8; 16]) -> Key {

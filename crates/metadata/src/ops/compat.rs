@@ -220,6 +220,7 @@ pub async fn init<S: KvStore>(
                     state: ClusterPhase::Active,
                     restored_at_ms: None,
                     restored_from: None,
+                    backup_point_ms: None,
                     changed_ms: *now_ms,
                     changed_by: who.clone(),
                 };
@@ -342,22 +343,30 @@ pub async fn transition<S: KvStore>(
 pub async fn mark_restoring<S: KvStore>(
     store: &S,
     restored_from: Option<String>,
+    backup_point_ms: Option<u64>,
     who: &str,
     now_ms: u64,
 ) -> Result<ClusterStateRecord> {
     let incarnation = *uuid::Uuid::now_v7().as_bytes();
     transact(
         store,
-        (incarnation, restored_from, who.to_string(), now_ms),
+        (
+            incarnation,
+            restored_from,
+            backup_point_ms,
+            who.to_string(),
+            now_ms,
+        ),
         |tx, env| {
             Box::pin(async move {
-                let (incarnation, from, who, now_ms) = env;
+                let (incarnation, from, backup_point_ms, who, now_ms) = env;
                 let prev: Option<ClusterStateRecord> = read(tx, &keys::cluster_state()).await?;
                 let rec = ClusterStateRecord {
                     incarnation: *incarnation,
                     state: ClusterPhase::Restoring,
                     restored_at_ms: Some(*now_ms),
                     restored_from: from.clone(),
+                    backup_point_ms: *backup_point_ms,
                     changed_ms: *now_ms,
                     changed_by: who.clone(),
                 };

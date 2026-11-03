@@ -394,6 +394,68 @@ pub async fn tasks_of_group<S: KvStore>(
     .await
 }
 
+/// Progress of the background manifest scrub (`("al","mscrub")`): one
+/// page of roots per scrub pass, resumed across leaders (R-55). The DR
+/// verification pass walks every root in one go instead (RFC-015 §5.3.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestCursor {
+    /// Pass number.
+    pub pass: u64,
+    /// Last root examined in the current pass (`None` = at the start).
+    pub after: Option<GenId>,
+    /// Whether the current pass is complete.
+    pub done: bool,
+    /// When the current pass started.
+    pub started_ms: u64,
+    /// When the last pass finished (0 = never).
+    pub finished_ms: u64,
+    /// Roots examined in the current pass.
+    pub roots: u64,
+    /// Findings in the current pass.
+    pub findings: u64,
+}
+
+impl Record for ManifestCursor {}
+
+/// The manifest cursor, if any.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn manifest_cursor<S: KvStore>(store: &S) -> Result<Option<ManifestCursor>> {
+    transact(store, (), |tx, ()| {
+        Box::pin(async move { read(tx, &keys::manifest_cursor()).await })
+    })
+    .await
+}
+
+/// Replace the manifest cursor.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn set_manifest_cursor<S: KvStore>(store: &S, c: &ManifestCursor) -> Result<()> {
+    transact(store, c, |tx, c| {
+        Box::pin(async move { write(tx, &keys::manifest_cursor(), *c) })
+    })
+    .await
+}
+
+/// Open tasks by finding class ([`Finding::ALL`] order): the per-stripe
+/// view of what is unresolved now (R-56), as opposed to the cumulative
+/// detection counters.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn open_by_class<S: KvStore>(store: &S) -> Result<[u64; 8]> {
+    let mut out = [0u64; 8];
+    for (_, _, t) in tasks(store, usize::MAX).await? {
+        out[t.reason.index()] += 1;
+    }
+    Ok(out)
+}
+
 /// Queue summary for metrics: `(total, unrecoverable, failed)`.
 ///
 /// # Errors

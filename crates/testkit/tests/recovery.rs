@@ -263,9 +263,15 @@ async fn a_stale_incarnation_is_fenced_in_metadata_and_on_the_nodes() {
     stale_clients.set_incarnation(Some(old.incarnation));
 
     // The restore mark: a fresh incarnation, Restoring.
-    let fresh = compat::mark_restoring(c.meta.as_ref(), Some("drill".into()), "admin", now_ms())
-        .await
-        .unwrap();
+    let fresh = compat::mark_restoring(
+        c.meta.as_ref(),
+        Some("drill".into()),
+        None,
+        "admin",
+        now_ms(),
+    )
+    .await
+    .unwrap();
     assert_ne!(fresh.incarnation, old.incarnation);
     assert_eq!(fresh.state, ClusterPhase::Restoring);
     // Even after the cluster is Active again, every stale wrapper is fenced
@@ -403,6 +409,14 @@ async fn recovery_catches_up_epochs_and_classifies_every_restore_finding() {
     c.node_store(member_node(&c, &group, 1))
         .delete(key(&ch1, 1))
         .unwrap();
+    // obj4: every shard gone (what GC after the backup point leaves): no
+    // node lists it, only the metadata walk can find it.
+    let ch4 = chunk(4).await.chunks[0].1.clone();
+    for i in 0..3u16 {
+        c.node_store(member_node(&c, &group, usize::from(i)))
+            .delete(key(&ch4, i))
+            .unwrap();
+    }
     // obj2: a corrupt shard (quarantined by the deep verification).
     assert_eq!(
         c.corrupt_chunk_on_node(member_node(&c, &group, 1), group.id, ch2.chunk_id),
@@ -458,6 +472,7 @@ async fn recovery_catches_up_epochs_and_classifies_every_restore_finding() {
     let marked = compat::mark_restoring(
         c.meta.as_ref(),
         Some("drill".into()),
+        None,
         "admin",
         restore_point,
     )
@@ -513,8 +528,8 @@ async fn recovery_catches_up_epochs_and_classifies_every_restore_finding() {
     // by the deep verification, so the presence walk no longer sees it)
     // are degraded; obj1 is unreadable. Counts are per shard.
     assert_eq!(k.degraded_chunks, 2, "{k:?}");
-    assert_eq!(k.unreadable_chunks, 1, "{k:?}");
-    assert_eq!(k.missing, 4, "{k:?}");
+    assert_eq!(k.unreadable_chunks, 2, "obj1 and obj4: {k:?}");
+    assert_eq!(k.missing, 7, "{k:?}");
     assert_eq!(k.corrupt, 1, "{k:?}");
     assert_eq!(
         k.placement_epoch_mismatch, 3,
@@ -526,13 +541,12 @@ async fn recovery_catches_up_epochs_and_classifies_every_restore_finding() {
     assert_eq!(k.membership_mismatch, 1, "{k:?}");
     assert_eq!(k.epochs_raised, 1);
     assert_eq!(k.manifest_findings, 0);
-    assert_eq!(rep.affected.len(), 1, "{:?}", rep.affected);
-    let a = &rep.affected[0];
-    assert_eq!(
-        (a.bucket.as_str(), a.key.as_str(), a.why.as_str()),
-        (BUCKET, "obj1", "unreadable")
-    );
+    assert_eq!(rep.affected.len(), 2, "{:?}", rep.affected);
+    let a = rep.affected.iter().find(|a| a.key == "obj1").unwrap();
+    assert_eq!((a.bucket.as_str(), a.why.as_str()), (BUCKET, "unreadable"));
     assert_eq!((a.have, a.need), (1, 2));
+    let a = rep.affected.iter().find(|a| a.key == "obj4").unwrap();
+    assert_eq!((a.have, a.need), (0, 2));
     // Nothing was deleted (I6): the orphans, the former-member copy and the
     // corrupt (quarantined, bytes kept) shard are all still there.
     assert_eq!(
@@ -542,7 +556,7 @@ async fn recovery_catches_up_epochs_and_classifies_every_restore_finding() {
     );
     // Repair tasks queued for the degraded and the unreadable stripe.
     let tasks = itasks::tasks(c.meta.as_ref(), usize::MAX).await.unwrap();
-    assert_eq!(tasks.len(), 3, "{tasks:?}");
+    assert_eq!(tasks.len(), 4, "{tasks:?}");
     // The gateway that started before the restore is fenced out entirely
     // (its incarnation is stale); a restarted one serves: the unreadable
     // error for obj1, bytes for the rest.
@@ -556,7 +570,7 @@ async fn recovery_catches_up_epochs_and_classifies_every_restore_finding() {
     assert_eq!(c.backend.cluster().incarnation, marked.incarnation);
     let e = s3::get(&c.backend, BUCKET, "obj1").await.unwrap_err();
     assert!(e.to_string().contains("unreadable"), "{e}");
-    for (key, data) in objects.iter().filter(|(k, _)| k != "obj1") {
+    for (key, data) in objects.iter().filter(|(k, _)| k != "obj1" && k != "obj4") {
         assert_eq!(
             &s3::get(&c.backend, BUCKET, key).await.unwrap().0,
             data,
@@ -577,7 +591,7 @@ async fn recovery_catches_up_epochs_and_classifies_every_restore_finding() {
     )
     .await
     .unwrap();
-    assert_eq!((r.succeeded, r.unrecoverable, r.failed), (2, 1, 0), "{r:?}");
+    assert_eq!((r.succeeded, r.unrecoverable, r.failed), (2, 2, 0), "{r:?}");
     // Object-level resolution of the unrecoverable chunk (R-54).
     let resolved = crecovery::resolve_chunk(c.meta.as_ref(), &ch1.chunk_id)
         .await
@@ -609,7 +623,7 @@ async fn verification_resumes_from_its_cursor_and_survives_a_leader_failover() {
             shard_index: 2,
         })
         .unwrap();
-    let marked = compat::mark_restoring(c.meta.as_ref(), None, "admin", now_ms())
+    let marked = compat::mark_restoring(c.meta.as_ref(), None, None, "admin", now_ms())
         .await
         .unwrap();
     c.backend.cluster().set(Some(marked.clone()));
@@ -665,7 +679,7 @@ async fn verification_resumes_from_its_cursor_and_survives_a_leader_failover() {
             member: 0,
             after: None,
         },
-        restore_point_ms: marked.restored_at_ms.unwrap(),
+        restore_point_ms: marked.restore_point_ms().unwrap(),
         started_ms: now_ms(),
         updated_ms: now_ms(),
         unanswered_nodes: Vec::new(),

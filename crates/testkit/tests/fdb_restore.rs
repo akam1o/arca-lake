@@ -91,6 +91,12 @@ impl Backup {
     }
 
     /// Take a full backup and wait for it; returns the backup's own URL.
+    /// The mutation log runs on for a while past the snapshot, so the
+    /// restore names its target version explicitly: the backup's minimum
+    /// restorable version (the end of the snapshot, before any write the
+    /// test makes after this returns). Without `-v`, `fdbrestore` would
+    /// bring back everything up to the last log and there would be no RPO
+    /// to drill.
     fn backup(&self) -> String {
         let (ok, text) = self.run("fdbbackup", &["start", "-d", &self.url, "-w"]);
         assert!(ok, "fdbbackup start: {text}");
@@ -103,8 +109,24 @@ impl Backup {
             .expect("a backup url")
     }
 
-    /// Restore `backup_url` into the (emptied) cluster and wait.
-    fn restore(&self, backup_url: &str) {
+    /// The snapshot end of a backup (`MinRestorableVersion`).
+    fn min_restorable_version(&self, backup_url: &str) -> u64 {
+        let (ok, text) = self.run("fdbbackup", &["describe", "-d", backup_url]);
+        assert!(ok, "fdbbackup describe: {text}");
+        text.lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("MinRestorableVersion:")
+                    .and_then(|v| v.split_whitespace().next())
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or_else(|| panic!("no MinRestorableVersion in {text}"))
+    }
+
+    /// Restore `backup_url` as of `version` into the (emptied) cluster and
+    /// wait.
+    fn restore(&self, backup_url: &str, version: u64) {
+        let v = version.to_string();
         let (ok, text) = self.run(
             "fdbrestore",
             &[
@@ -113,6 +135,8 @@ impl Backup {
                 &self.cluster_file,
                 "-r",
                 backup_url,
+                "-v",
+                &v,
                 "-w",
             ],
         );
@@ -209,12 +233,37 @@ async fn metadata_restore_drill_with_fdbbackup() {
     kv.clear_range_blocking(&arca_lake_metadata::keys::all_range())
         .await
         .unwrap();
+    // fdbrestore needs an empty destination: refuse (never clear) keys
+    // outside arca-lake's subspace, which may belong to someone else.
+    {
+        let mut tx = kv.begin().await.unwrap();
+        let foreign = tx
+            .get_range(
+                &arca_lake_metadata::kv::KeyRange::new(Vec::new(), vec![0xff]),
+                5,
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = tx.commit().await;
+        assert!(
+            foreign.is_empty(),
+            "the drill needs a dedicated, otherwise empty FoundationDB cluster; found keys {:?}",
+            foreign
+                .iter()
+                .map(|(k, _)| String::from_utf8_lossy(k).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
     let meta = Arc::new(kv);
     let mut c = TestCluster::start_with(
         Arc::clone(&meta),
         ClusterOptions {
             groups: 1,
-            heartbeat: Some(Duration::from_millis(500)),
+            // No gateway heartbeat: fdbrestore needs an empty database, and
+            // in the real procedure every process is stopped before the
+            // restore; the backend is kept only to prove it is fenced.
+            heartbeat: None,
             ..ClusterOptions::rs(3, 2, 1, MIB, 0)
         },
     )
@@ -252,8 +301,10 @@ async fn metadata_restore_drill_with_fdbbackup() {
     pre.push(("mp".into(), mp));
     let shards_at_t = shards_total(&c).await;
     let backup_url = backup.backup();
+    // The restore point: the end of the snapshot.
+    let restore_version = backup.min_restorable_version(&backup_url);
     let restore_point = now_ms();
-    eprintln!("backup at {restore_point}: {backup_url}");
+    eprintln!("backup at {restore_point} (version {restore_version}): {backup_url}");
 
     // ---- After the backup point: new objects, an overwrite (a new version
     // of pre1), a delete whose shards GC collects (pre2), a multipart
@@ -301,10 +352,22 @@ async fn metadata_restore_drill_with_fdbbackup() {
                 .unwrap();
         }
     }
+    // pre0: one shard lost after T (a failed disk): degraded, recoverable.
+    {
+        let ch = &c.manifest(BUCKET, "pre0").await.chunks[0].1;
+        let n = c.node_index(&group.members[2]).unwrap();
+        c.node_store(n)
+            .delete(arca_lake_storage_node::ShardKey {
+                group_id: group.id,
+                chunk_id: ch.chunk_id,
+                shard_index: 2,
+            })
+            .unwrap();
+    }
     s3::delete(&c.backend, BUCKET, "pre3").await.unwrap();
     let shards_now = shards_total(&c).await;
     assert!(shards_now > shards_at_t, "post-T shards exist on the nodes");
-    let pre_shard_loss: u64 = 2 * 3; // pre2: two chunks of three shards, collected
+    let pre_shard_loss: u64 = 3; // pre2: one 512 KiB chunk of three shards, gone
 
     // ---- The restore: every arca-lake process would be stopped now; the
     // in-process gateway backend and the clients stay around to prove they
@@ -312,7 +375,7 @@ async fn metadata_restore_drill_with_fdbbackup() {
     meta.clear_range_blocking(&arca_lake_metadata::keys::all_range())
         .await
         .unwrap();
-    backup.restore(&backup_url);
+    backup.restore(&backup_url, restore_version);
     // Freshly opened handle on the restored metadata.
     let restored = Arc::new(FdbKv::open_with_timeout(path.as_deref(), 10_000).unwrap());
     let g = compat::gate(restored.as_ref()).await.unwrap();
@@ -326,6 +389,7 @@ async fn metadata_restore_drill_with_fdbbackup() {
     let marked = compat::mark_restoring(
         restored.as_ref(),
         Some(backup_url.clone()),
+        Some(restore_point),
         "admin",
         now_ms(),
     )
@@ -409,16 +473,17 @@ async fn metadata_restore_drill_with_fdbbackup() {
     eprintln!("report: {k:?} affected {:?}", rep.affected);
     assert!(rep.complete, "{rep:?}");
     assert_eq!(k.epochs_raised, 1);
-    assert_eq!(k.unreadable_chunks, 2, "both chunks of pre2: {k:?}");
-    assert_eq!(k.missing, pre_shard_loss, "{k:?}");
-    // Post-T shards: post0..2 (2 chunks each), pre1 v2 (2), mp2 (2 parts × 2 chunks): 2+2+2+2+4 = 12 chunks × 3.
-    assert_eq!(k.orphan_post_t, 12 * 3, "{k:?}");
+    assert_eq!(k.unreadable_chunks, 1, "pre2: {k:?}");
+    assert_eq!(k.missing, pre_shard_loss + 1, "pre2 and one of pre0: {k:?}");
+    // Post-T shards: post0..2 (one chunk each), pre1 v2 (one), mp2 (two
+    // parts of one chunk): 6 chunks of 3 shards.
+    assert_eq!(k.orphan_post_t, 6 * 3, "{k:?}");
     assert_eq!(k.orphan_pre_t, 0, "{k:?}");
     assert_eq!(k.corrupt, 0);
-    assert_eq!(k.degraded_chunks, 0);
+    assert_eq!(k.degraded_chunks, 1, "pre0: {k:?}");
     assert_eq!(k.manifest_findings, 0, "the pre-T multipart root verifies");
-    assert_eq!(k.matched, shards_at_t - pre_shard_loss);
-    assert_eq!(rep.affected.len(), 2);
+    assert_eq!(k.matched, shards_at_t - pre_shard_loss - 1);
+    assert_eq!(rep.affected.len(), 1, "{:?}", rep.affected);
     assert!(
         rep.affected
             .iter()
@@ -426,8 +491,24 @@ async fn metadata_restore_drill_with_fdbbackup() {
     );
     // Nothing was deleted while the cluster was not Active: every post-T
     // shard is still on the nodes, and the controller's GC/reconcile
-    // passes were skipped by state.
-    assert_eq!(shards_total(&c).await, shards_now);
+    // passes were skipped by state. Repair is admitted in
+    // RecoveryRequired: the controller rebuilds pre0's lost shard; pre2
+    // stays an unrecoverable task (recorded, never written).
+    assert!(shards_total(&c).await >= shards_now);
+    let r = Arc::clone(&restored);
+    wait_until("repair of pre0", Duration::from_secs(60), async || {
+        let t = arca_lake_metadata::ops::integrity::tasks(r.as_ref(), usize::MAX)
+            .await
+            .unwrap();
+        t.len() == 1
+            && t[0].2.reason == arca_lake_metadata::ops::integrity::Finding::UnrecoverableStripe
+    })
+    .await;
+    assert_eq!(
+        shards_total(&c).await,
+        shards_now + 1,
+        "one shard rebuilt, none deleted"
+    );
     let m = {
         let addr = ctl.http_addr;
         let _ = addr;

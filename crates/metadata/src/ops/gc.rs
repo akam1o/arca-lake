@@ -382,3 +382,60 @@ pub async fn live_generation_with_prefix<S: KvStore>(
     })
     .await
 }
+
+/// One page of live generations with their chunk records, in key order
+/// after `after` (the metadata side of restore verification, RFC-015
+/// §5.3.2: a chunk whose shards are gone from every node never appears in
+/// a node listing). Returns the page and the last generation when more
+/// may follow.
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn live_chunks_page<S: KvStore>(
+    store: &S,
+    after: Option<GenId>,
+    limit: usize,
+) -> Result<(Vec<(GenId, Vec<ChunkRecord>)>, Option<GenId>)> {
+    transact(store, (after, limit), |tx, env| {
+        Box::pin(async move {
+            let (after, limit) = *env;
+            let all = keys::all_generations_range();
+            let mut begin = after.map_or_else(|| all.begin.clone(), |g| keys::gen_range(&g).end);
+            let mut out = Vec::new();
+            let mut last = None;
+            let mut seen = 0usize;
+            while begin < all.end && seen < limit {
+                let first = tx
+                    .get_range(&KeyRange::new(begin.clone(), all.end.clone()), 1, false)
+                    .await?;
+                let Some((k, _)) = first.into_iter().next() else {
+                    break;
+                };
+                let Some(generation) = keys::gen_from_gen_key(&k) else {
+                    break;
+                };
+                seen += 1;
+                last = Some(generation);
+                begin = keys::gen_range(&generation).end;
+                let header = match tx.get(&keys::gen_header(&generation)).await? {
+                    Some(h) => Some(decode::<GenerationHeader>(&h)?),
+                    None => None,
+                };
+                if !is_live(header.as_ref()) {
+                    continue;
+                }
+                let mut chunks = Vec::new();
+                for (_, v) in tx
+                    .get_range(&keys::gen_chunks_range(&generation), usize::MAX, false)
+                    .await?
+                {
+                    chunks.push(decode::<ChunkRecord>(&v)?);
+                }
+                out.push((generation, chunks));
+            }
+            Ok((out, if seen >= limit { last } else { None }))
+        })
+    })
+    .await
+}

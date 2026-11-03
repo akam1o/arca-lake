@@ -104,7 +104,7 @@ pub async fn recovery_pass<S: KvStore>(
             let c = RestoreCursor {
                 incarnation: state.incarnation,
                 phase,
-                restore_point_ms: state.restored_at_ms.unwrap_or(now_ms),
+                restore_point_ms: state.restore_point_ms().unwrap_or(now_ms),
                 started_ms: now_ms,
                 updated_ms: now_ms,
                 unanswered_nodes: Vec::new(),
@@ -288,7 +288,7 @@ pub async fn recovery_pass<S: KvStore>(
             }
             RecoveryPhase::Presence { group, after } => {
                 let Some(g) = groups.iter().find(|g| g.id >= group) else {
-                    cursor.phase = RecoveryPhase::Manifests { after: None };
+                    cursor.phase = RecoveryPhase::Records { after: None };
                     continue;
                 };
                 pages += 1;
@@ -308,6 +308,33 @@ pub async fn recovery_pass<S: KvStore>(
                         group: g.id + 1,
                         after: None,
                     }
+                };
+            }
+            RecoveryPhase::Records { after } => {
+                pages += 1;
+                let (page, next) =
+                    gc::live_chunks_page(meta, after, opts.page.max(1) as usize).await?;
+                for (generation, chunks) in &page {
+                    for ch in chunks {
+                        let Some(g) = durable.iter().find(|g| g.id == ch.placement.group_id) else {
+                            continue;
+                        };
+                        absent_chunk(
+                            meta,
+                            clients,
+                            &nodes,
+                            g,
+                            *generation,
+                            ch,
+                            &mut cursor,
+                            &mut rep,
+                        )
+                        .await?;
+                    }
+                }
+                cursor.phase = match next {
+                    Some(n) => RecoveryPhase::Records { after: Some(n) },
+                    None => RecoveryPhase::Manifests { after: None },
                 };
             }
             RecoveryPhase::Manifests { after } => {
@@ -596,6 +623,96 @@ async fn presence_page<S: KvStore>(
         }
     }
     Ok(if seen >= opts.page { last } else { None })
+}
+
+/// The predecessor of a chunk id (big-endian), for an exclusive `after`.
+fn chunk_pred(id: &[u8; 16]) -> Option<[u8; 16]> {
+    let mut out = *id;
+    for b in out.iter_mut().rev() {
+        if *b > 0 {
+            *b -= 1;
+            return Some(out);
+        }
+        *b = 0xff;
+    }
+    None
+}
+
+/// A live chunk record that no member lists as a good shard: unreadable,
+/// every absent shard missing (quarantined ones were counted as corrupt by
+/// the shard phase). Chunks with at least one good holder are the
+/// presence walk's; an unanswered member leaves the chunk undecided.
+#[allow(clippy::too_many_arguments)]
+async fn absent_chunk<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+    group: &GroupRecord,
+    generation: GenId,
+    chunk: &arca_lake_metadata::records::ChunkRecord,
+    cursor: &mut RestoreCursor,
+    rep: &mut RestoreReport,
+) -> Result<(), ControlError> {
+    let after = chunk_pred(&chunk.chunk_id).map(|c| ShardRef {
+        group_id: group.id,
+        chunk_id: c,
+        shard_index: u16::MAX,
+    });
+    let mut good = 0usize;
+    let mut absent: Vec<u16> = Vec::new();
+    for (i, m) in group.members.iter().enumerate() {
+        let Some(node) = nodes.get(&m.node_id) else {
+            note_unanswered(cursor, m.node_id);
+            return Ok(());
+        };
+        let Ok(p) = clients
+            .list_shards_page_with(&node.address, group.id, after, 8, true)
+            .await
+        else {
+            note_unanswered(cursor, m.node_id);
+            return Ok(());
+        };
+        let live = p.entries.iter().any(|(e, _)| e.chunk_id == chunk.chunk_id);
+        let quarantined = p
+            .quarantined
+            .iter()
+            .any(|(q, _)| q.chunk_id == chunk.chunk_id);
+        if live {
+            good += 1;
+        } else if !quarantined {
+            absent.push(u16::try_from(i).unwrap_or(u16::MAX));
+        }
+    }
+    if good > 0 {
+        return Ok(());
+    }
+    rep.counts.missing += absent.len() as u64;
+    rep.counts.unreadable_chunks += 1;
+    let (_, index) = split_chunk_id(&chunk.chunk_id);
+    let (bucket, key) = resolve_object(meta, &generation).await;
+    push_affected(
+        rep,
+        AffectedObject {
+            bucket,
+            key,
+            generation,
+            chunk_index: index,
+            group: group.id,
+            have: 0,
+            need: group.data_shards,
+            why: "unreadable".into(),
+        },
+    );
+    integrity::enqueue(
+        meta,
+        group.id,
+        chunk.chunk_id,
+        Finding::UnrecoverableStripe,
+        &absent,
+        cursor.updated_ms,
+    )
+    .await?;
+    Ok(())
 }
 
 /// Count shards of `group` on nodes that are not its members.

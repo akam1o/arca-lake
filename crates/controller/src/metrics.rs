@@ -65,8 +65,12 @@ pub struct Metrics {
     pub scrub_errors_total: AtomicU64,
     /// Groups past their scrub interval at the last pass.
     pub scrub_groups_overdue: AtomicU64,
-    /// Integrity findings by class (`Finding::ALL` order; 8 classes).
+    /// Integrity findings by class (`Finding::ALL` order; 8 classes):
+    /// cumulative detections (a shard found on every pass until repaired
+    /// counts each time).
     pub integrity_findings_total: [AtomicU64; 8],
+    /// Open repair tasks by class: distinct stripes unresolved now (R-56).
+    pub integrity_findings_open: [AtomicU64; 8],
     /// Stripe repair tasks in metadata.
     pub repair_queue_depth: AtomicU64,
     /// Tasks in `Unrecoverable`.
@@ -250,6 +254,14 @@ impl Metrics {
             ),
         ] {
             out += &c(name, v.load(Ordering::Relaxed));
+        }
+        out += "# TYPE arca_controller_integrity_findings_open gauge\n";
+        for (label, v) in FINDING_LABELS.iter().zip(&self.integrity_findings_open) {
+            let _ = writeln!(
+                out,
+                "arca_controller_integrity_findings_open{{class=\"{label}\"}} {}",
+                v.load(Ordering::Relaxed)
+            );
         }
         out += "# TYPE arca_controller_integrity_findings_total counter\n";
         for (label, v) in FINDING_LABELS.iter().zip(&self.integrity_findings_total) {

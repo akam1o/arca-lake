@@ -245,9 +245,10 @@ mod tests {
             compat::set_phase(base.as_ref(), ClusterPhase::Active, "test", 3_000)
                 .await
                 .unwrap();
-            let fresh = compat::mark_restoring(base.as_ref(), Some("backup".into()), "test", 4_000)
-                .await
-                .unwrap();
+            let fresh =
+                compat::mark_restoring(base.as_ref(), Some("backup".into()), None, "test", 4_000)
+                    .await
+                    .unwrap();
             assert_ne!(fresh.incarnation, st.incarnation);
             compat::set_phase(base.as_ref(), ClusterPhase::Active, "test", 5_000)
                 .await

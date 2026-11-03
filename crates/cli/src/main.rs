@@ -578,6 +578,12 @@ enum RecoveryCommand {
         /// Label of the backup the metadata was restored from.
         #[arg(long)]
         from: Option<String>,
+        /// Consistent point of that backup, Unix milliseconds (from
+        /// `fdbbackup describe`): separates shards written after it
+        /// (post-restore-point orphans) from older garbage in the report.
+        /// Without it every orphan is reported as older.
+        #[arg(long)]
+        backup_point_ms: Option<u64>,
         /// Confirm.
         #[arg(long)]
         yes: bool,
@@ -1097,6 +1103,7 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
         rate_bytes_per_s: args.scrub_rate_mib << 20,
         interval_ms: args.scrub_interval_secs * 1000,
         concurrency: args.scrub_concurrency,
+        manifest_roots_per_pass: 256,
     };
     cfg.scrub_tick = Duration::from_secs(args.scrub_tick_secs.max(1));
     cfg.stripe_repair = arca_lake_controller::integrity::RepairWorkerOptions {
@@ -1534,13 +1541,14 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
     match command {
         RecoveryCommand::Status => {
             println!(
-                "cluster {} incarnation {} changed_ms {} by {} restored_at_ms {:?} restored_from {:?}",
+                "cluster {} incarnation {} changed_ms {} by {} restored_at_ms {:?} restored_from {:?} backup_point_ms {:?}",
                 state.state.name(),
                 compat::hex(&state.incarnation),
                 state.changed_ms,
                 state.changed_by,
                 state.restored_at_ms,
-                state.restored_from
+                state.restored_from,
+                state.backup_point_ms
             );
             if let Ok(Some(c)) = recovery::cursor(meta.as_ref()).await {
                 println!(
@@ -1574,7 +1582,12 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
             }
             ExitCode::SUCCESS
         }
-        RecoveryCommand::Begin { from, yes, force } => {
+        RecoveryCommand::Begin {
+            from,
+            backup_point_ms,
+            yes,
+            force,
+        } => {
             if !yes {
                 return fail(
                     "recovery begin fences out every running process and starts a restore; re-run with --yes",
@@ -1586,7 +1599,12 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
                     state.state.name()
                 ));
             }
-            match compat::mark_restoring(meta.as_ref(), from, "admin", now).await {
+            if backup_point_ms.is_none() {
+                eprintln!(
+                    "warning: no --backup-point-ms; orphans cannot be split into pre- and post-backup in the report"
+                );
+            }
+            match compat::mark_restoring(meta.as_ref(), from, backup_point_ms, "admin", now).await {
                 Ok(s) => {
                     println!(
                         "cluster Restoring, incarnation {} (restore point {}): start the controllers; writes after the backup point are lost (RPO) and objects whose shards are gone are reported, not recovered",
@@ -1620,7 +1638,7 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
                     member: 0,
                     after: None,
                 },
-                restore_point_ms: state.restored_at_ms.unwrap_or(now),
+                restore_point_ms: state.restore_point_ms().unwrap_or(now),
                 started_ms: now,
                 updated_ms: now,
                 unanswered_nodes: Vec::new(),
@@ -1880,6 +1898,7 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
                 rate_bytes_per_s: rate_mib << 20,
                 interval_ms: 1,
                 concurrency: 1,
+                manifest_roots_per_pass: 256,
             };
             match arca_lake_controller::integrity::scrub_group_now(
                 meta.as_ref(),

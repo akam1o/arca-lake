@@ -98,6 +98,13 @@ pub enum RecoveryPhase {
     },
     /// Everything was examined; the report is final.
     Done,
+    /// Metadata-side walk of live chunk records after generation `after`:
+    /// chunks no member lists at all (the node-driven presence walk never
+    /// sees them). Declared last to keep the encoding of the others.
+    Records {
+        /// Last generation examined.
+        after: Option<GenId>,
+    },
 }
 
 /// `("al","meta","restore","cursor")`.

@@ -95,6 +95,7 @@ fn unpaced() -> ScrubOptions {
         rate_bytes_per_s: 0,
         interval_ms: 1,
         concurrency: 1,
+        manifest_roots_per_pass: 256,
     }
 }
 
@@ -605,6 +606,7 @@ async fn scrub_cursor_resumes_after_an_interrupted_pass_and_a_node_restart() {
             rate_bytes_per_s: 1,
             interval_ms: 1,
             concurrency: 1,
+            manifest_roots_per_pass: 256,
         };
         scrub_group_now(meta.as_ref(), &clients, &coders(), gid, &opts, now_ms()).await
     });
@@ -679,6 +681,7 @@ async fn byte_bounded_scrub_pages_cover_every_shard_exactly_once() {
             rate_bytes_per_s: 0,
             interval_ms: 1,
             concurrency: 1,
+            manifest_roots_per_pass: 256,
         },
         now_ms(),
     )
@@ -724,6 +727,7 @@ async fn scrub_pages_larger_than_the_key_bound_cover_every_shard() {
                 rate_bytes_per_s: 0,
                 interval_ms: 1,
                 concurrency: 1,
+                manifest_roots_per_pass: 256,
             },
             now_ms(),
         )
@@ -1002,6 +1006,7 @@ fn fast(id: &str) -> ControllerConfig {
         rate_bytes_per_s: 0,
         interval_ms: 1,
         concurrency: 4,
+        manifest_roots_per_pass: 256,
     };
     cfg.scrub_tick = Duration::from_millis(200);
     cfg.stripe_repair_interval = Duration::from_millis(200);
@@ -1167,6 +1172,7 @@ async fn shutdown_interrupts_a_paced_scrub_pass_promptly() {
         rate_bytes_per_s: 1,
         interval_ms: 1,
         concurrency: 1,
+        manifest_roots_per_pass: 256,
     };
     let h = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
     let meta = Arc::clone(&c.meta);
