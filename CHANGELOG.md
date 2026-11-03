@@ -8,6 +8,71 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ### Added
 
+- Phase 3.4 (security hardening and production readiness; ADR-0017,
+  ADR-0018): mutual TLS for every node RPC with SPIFFE identities
+  (`spiffe://<trust-domain>/<role>/<name>`), per-RPC role authorization
+  on the storage node, certificate/trust bundle/CRL hot reload that
+  closes connections whose trust was withdrawn, `--insecure-plaintext`
+  required for plaintext; FoundationDB client TLS (`--fdb-tls-*`) with a
+  fail-closed cluster-file check and `--fdb-insecure-plaintext`;
+  `arca-lake tls init-ca|issue|crl|show` (development PKI); TLS metrics.
+- Hardened `admin recovery finalize` (one transaction; refused while
+  verification is unfinished or incomplete even with `--force`; critical
+  findings need `--force --reason --operator`; persistent data-loss
+  records and an audit of every attempt; `admin recovery losses`).
+- `admin replace-member|decommission-node --dry-run`; capacity-aware
+  member moves (nodes report device free/total bytes, `--capacity-bytes`;
+  a move without room pauses and resumes by itself); the leaving member
+  as a validated source and an opt-in direct copy
+  (`--repair-source direct`).
+- Background segment compaction on storage nodes
+  (`--compaction-interval-secs`, `--compaction-min-dead-fraction`,
+  `--compaction-max-segments`, `--compaction-max-copy-mib`).
+- Adaptive scrub budget (`--scrub-adaptive`, ADR-0018): nodes report
+  window load in `Health`; AIMD with a floor, a ceiling, hysteresis,
+  repair priority, and the fixed rate without signals.
+- Continuous metadata backup verification: `admin backup
+  verify-restored|key-range`, `deploy/backup/verify-backup.sh`, text-file
+  metrics.
+- `admin integrity verify-object --decode` (end-to-end decode and
+  checksum/ETag/layout verification) and `--quarantine`.
+- Metric registry (`crates/common/src/metrics-registry.tsv`) checked in
+  CI against every process; HELP lines from it; Prometheus alert rules
+  (`deploy/prometheus/arca-lake-alerts.yml`); S3 request, auth refusal,
+  device space, groups-repairing, compaction and adaptive-scrub series.
+- Golden files for every metadata record and the quarantine log format.
+- Soak tooling: `soakload` (mixed S3 workload with an acknowledged-write
+  ledger), `faultproxy` (userspace network faults), test-only storage EIO
+  control (feature `fault-injection`), `benchmarks/linux/soak24.sh`.
+
+### Changed (Phase 3.4)
+
+- Node RPCs and metadata connections refuse to start without TLS
+  configuration or the explicit plaintext flags.
+- `admin integrity verify-object` is read-only by default.
+- `admin cluster activate` refuses while a restore report is unaccepted;
+  `admin recovery verify|resume` are conditional transactions.
+- `arca_controller_nodes_total` is renamed `arca_controller_nodes_registered`
+  (a gauge); histogram maxima are separate `…_max_seconds` gauge families.
+- CI runs only on pushes to `main` (no pull-request trigger) with actions
+  pinned to commit SHAs.
+
+### Fixed (Phase 3.4)
+
+- A segment creation that failed after the file existed made every later
+  write of the node fail with `EEXIST`.
+- A failed completeness check left a group `Repairing` without a cursor,
+  waiting for an operator forever; shards missing on other members are
+  now handed to stripe repair (a stale unrecoverable verdict is
+  re-checked), and a member move can read the leaving member's shard.
+- Deleted space was never reclaimed by a running node; GC fell behind a
+  sustained write rate (now batches until drained, concurrently).
+- Audit records of finalize attempts in the same millisecond overwrote
+  each other (found before release).
+- The recovery pass now pushes the new incarnation to every node at its
+  start (a delayed pre-restore delete was accepted until `Active`).
+- A chunk stamped in the restore point's millisecond is a post-T orphan.
+
 - Phase 3.3 (operational safety, rolling upgrade, disaster recovery;
   ADR-0016): independent wire-protocol / metadata-schema / storage-format
   versions with startup gates, protocol window negotiation, `schema_write`

@@ -60,8 +60,8 @@ external identity provider.
 | S2 | More than one access key, each mapped to a principal; keys addable, disableable and rotatable at runtime | Open (design §5.2) |
 | S3 | Bucket ownership recorded at creation; only the owner (or a policy) grants access | Open (§5.3) |
 | S4 | Bucket policy: a JSON subset of the AWS grammar, evaluated per request, denies win | Open (§5.3) |
-| S5 | mTLS on gRPC with role- and node-scoped authorization of RPCs | Open (§5.5) |
-| S6 | FoundationDB connections use TLS with client certificates in production | Assumption (FoundationDB supports it; deployment guide) |
+| S5 | mTLS on gRPC with role- and node-scoped authorization of RPCs | Implemented, Verified (Phase 3.4, §5.5, S-A11) |
+| S6 | FoundationDB connections use TLS with client certificates in production | Implemented, Verified on a three-process TLS cluster (Phase 3.4, `fdb_tls.rs`) |
 | S7 | Audit record per S3 request: time, request id, principal (key id), source, action, bucket/key, result code, bytes, duration | Open (§5.7) |
 | S8 | Rate limits per principal and per source; request and body size limits; in-flight caps; timeouts on every socket read | Partly verified (ADR-0011 stream timeouts; RFC-006 queue bounds); rest Open (§5.8–§5.9) |
 | S9 | No credential or key in the metadata store or in logs | Open (verified by test and by the sanitizer policy for artifacts) |
@@ -255,44 +255,60 @@ available for the lab and is logged at startup as insecure.
 
 ### 5.5 C-9 internal mTLS and service identity
 
-- Every gRPC listener (storage node) and client (gateway, controller)
-  uses `tonic` with `rustls`: server certificate, client certificate
-  required, one private CA per cluster (or the platform's), optional
-  second root for rotation. Certificates are files; reload on `SIGHUP`.
-- **Identity**: the certificate's SAN carries a URI
-  `arca://<cluster-id>/<role>/<name>`: roles `node`, `gateway`,
-  `controller`, `admin`; `name` is the node id for nodes. The server
-  extracts it with a tonic interceptor and attaches `Peer { role, name }`
-  to the request.
-- **Authorization of RPCs** on the node:
+Implemented in Phase 3.4; decisions and rejected alternatives in
+[ADR-0017](../adr/0017-service-mtls-rpc-authorization-and-metadata-tls.md),
+which amends this section where noted.
 
-  | RPC | gateway | controller | node | admin |
+- Every storage-node listener and every node client (gateway,
+  controller, admin tools) uses mutual TLS with `rustls`: server and
+  client certificates required, chain and validity checked against a
+  trust bundle of one or more roots (two during a CA rotation), optional
+  CRLs. Certificates, keys, bundles and CRLs are files, re-read when they
+  change (polled, `--tls-reload-secs`, default 30 s); a reload whose
+  material does not validate keeps the previous one and is counted. When
+  the bundle or the CRLs change, connections authenticated under the old
+  trust are closed, so a withdrawn identity cannot keep a connection.
+- **Identity** (amended): a URI SAN in SPIFFE form
+  `spiffe://<trust-domain>/<role>/<name>`, roles `node`, `gateway`,
+  `controller`, `admin`; a node's name is its node id. SPIRE or any
+  SPIFFE-aware CA can issue these certificates; `arca-lake tls` is a
+  development CA for labs and tests.
+- **Authorization of RPCs** on the node (amended: nodes do not call
+  nodes, so the node role has no data-path rights; `Health` carrying
+  cluster facts changes node state and is control-plane only):
+
+  | RPC | gateway | controller | admin | node |
   | --- | --- | --- | --- | --- |
-  | `PutShard`, `GetShard`, `ListShards`, `VerifyShards` | yes | yes | yes (repair reads) | yes |
-  | `DeleteShard` | yes (own placements; epoch-checked as today) | yes | no | yes |
-  | `UpdateGroupEpoch` | no | yes | no | yes |
-  | `Health`, `Scrub` (Phase 3.2) | yes | yes | yes | yes |
+  | `PutShard`, `GetShard`, `ListShards`, `DeleteShard` | yes | yes | yes | no |
+  | `VerifyShards`, `ScrubShards`, `UpdateGroupEpoch` | no | yes | yes | no |
+  | `Health` without cluster facts | yes | yes | yes | yes |
+  | `Health` carrying `format_write` or an incarnation | no | yes | yes | no |
 
-  A gateway's identity cannot fence or re-member a group (the controller
-  does that with its own identity), which bounds a compromised gateway
-  to the data path.
-- **Client-side verification**: when a gateway or controller connects to
-  node `n` at the address in `NodeRecord`, it requires the server SAN
-  `arca://<cluster-id>/node/<n>`; an address serving another identity is
-  refused (spoof resistance without trusting the network).
-- **FoundationDB**: the deployment enables FoundationDB's TLS with client
-  certificates and a verify-peers string; the cluster file is a secret
-  (RFC-013 §5). arca-lake passes the TLS options through the environment
-  FoundationDB already honours.
-- **Lab mode**: `--insecure-plaintext` keeps today's behaviour for the
-  namespace and two-host harnesses and is refused when a certificate flag
-  is also given; it is logged at startup.
-- Alternatives: SPIFFE/SPIRE (compatible: the SAN format follows SPIFFE's
-  shape so an SPIRE deployment can issue these certificates; not
-  required); IPsec/WireGuard at the platform (compatible, but gives no
-  per-RPC role; kept as defence in depth, not as the control); token-based
-  RPC auth (rejected: needs a secret distribution channel that mTLS
-  already provides).
+  Checked in each handler before any argument is read; a refusal is
+  `PermissionDenied`, logged with the identity (never key material) and
+  counted. Fencing is independent and unchanged: the group epoch on every
+  write and delete, the incarnation on deletes, the leader token on every
+  controller metadata commit refuse an authenticated but stale process.
+- **Client-side verification**: a client requires role `node` in its
+  trust domain and, when it knows which node serves the address (the
+  gateway's map, the controller's node records), exactly that node id;
+  host names and IP SANs are not used.
+- **FoundationDB**: FoundationDB's own client TLS (`--fdb-tls-ca`,
+  `--fdb-tls-cert`, `--fdb-tls-key`, `--fdb-tls-verify-peers`), set before
+  the client network starts; a cluster file must list only `:tls`
+  coordinators when TLS is configured and none otherwise (fail closed on a
+  mismatch); FoundationDB refreshes its certificate files itself.
+  FoundationDB has no per-key authorization: a metadata certificate
+  grants the whole keyspace (R-19 narrowed to holders of a valid
+  certificate, not closed).
+- **Lab mode**: `--insecure-plaintext` / `--fdb-insecure-plaintext` (or
+  `ARCA_INSECURE_PLAINTEXT=1` / `ARCA_FDB_INSECURE_PLAINTEXT=1`) keep a
+  plaintext transport, refused together with TLS flags, logged at startup
+  and exported (`*_tls_enabled 0`). Without either TLS or the explicit
+  flag a process refuses to start.
+- Alternatives: see ADR-0017 (tonic's built-in TLS, DNS SAN checks,
+  restart-only rotation, environment-only FoundationDB TLS, IPsec/
+  WireGuard as the control).
 
 ### 5.6 Admin and metrics endpoints
 
@@ -461,7 +477,7 @@ Implemented / Not Verified); Designed never implies Implemented.
 | S-A8 | Anonymous mode: without a policy allowing `*`, anonymous requests are refused | Implemented, Verified (HTTP: 403 before, 200 after a `Principal: "*"` statement, 403 outside it) |
 | S-A9 | Audit: one record per request with principal, key id, action, bucket, decision, status; no secret material | Implemented, Verified (`security.rs::audit_log_has_one_record_per_request_and_no_secret_material`: captures the `arca.audit` stream over a mixed sequence incl. a refused key and an anonymous request, asserts one record per request with unique ids and the designed fields and decisions, and scans every record for every secret key, SigV4 signature material and authorization headers). Since Phase 3.2 the record carries the claimed access key id even when the key is refused, and `anonymous` for unsigned requests |
 | S-A10 | Gateway/node boundary: nodes never read bucket records or policies | Verified by construction (nodes hold no metadata client; code review) |
-| S-A11 | mTLS and role-scoped RPC authorization | Designed (Phase 3.3) |
+| S-A11 | mTLS and role-scoped RPC authorization | Implemented, Verified (Phase 3.4): `storage-node/tests/mtls.rs` (every RPC by role; wrong CA, expired, revoked, impersonating and plaintext peers refused at the handshake; leaf renewal, CA rotation with two roots, root withdrawal closing connections, CRL revocation, invalid reload kept out, all under traffic with every acknowledged PUT read back), `testkit/tests/tls_cluster.rs` (controllers over mTLS, leader failover, an authenticated stale incarnation refused, a gateway identity cannot move epochs, rotation under S3 traffic), the end-to-end suite over mTLS (`e2e_tls.rs`, 18 tests), the 24 h soak over mTLS and FoundationDB TLS |
 | S-A12 | Rate limits and in-flight budgets with `503 SlowDown` | Designed (Phase 3.3) |
-| S-A13 | TLS performance regression | Designed (Phase 3.3) |
+| S-A13 | TLS performance regression | Measured for metadata (Phase 3.4): FoundationDB TLS costs 6–8 % of metadata transaction throughput at 8 concurrent tasks and 12–14 % at 64, p50 +0.1–0.9 ms, first transaction 4 → 8 ms (`benchmarks/linux/results/phase34-20261103/fdb-tls`); node-RPC mTLS data-path cost not measured separately (RFC-009 §6.11 measured +0.5–0.7 CPU-s/GiB for TLS on the transfer path) |
 | S-A14 | CopyObject and UploadPartCopy are authorized on the source bucket (`s3:GetObject[Version]`) as well as the destination | Implemented, Verified (found by the HTTP test during Phase 3.1) |

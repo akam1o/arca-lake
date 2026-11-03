@@ -484,10 +484,13 @@ would violate I-MP1, so this finding is also a `gc_skipped_referenced`
 investigation. Versioned objects and delete markers add no case: a root
 is a generation like any other, and a marker references none.
 
-Full-object checksum verification (`admin verify-object`) reads every
-byte through the gateway's read path and compares with the stored
-checksum (composite or full-object); it is an operator tool, not part of
-scheduled scrubbing.
+Full-object checksum verification (`admin integrity verify-object
+--decode`, Phase 3.4) decodes every byte through the same coded-read path
+as the gateway, from shards a read-only verification found good, and
+compares the recomputed ETag, object checksum (composite or full-object)
+and part checksums with the stored ones; it is an operator tool, not part
+of scheduled scrubbing, and changes nothing (`--quarantine` is the
+explicit opt-in to quarantine what it finds).
 
 ### 8.7 Gateway degraded-read reports
 

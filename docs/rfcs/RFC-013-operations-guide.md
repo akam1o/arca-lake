@@ -100,8 +100,19 @@ written to the metadata store.
 
 ### 5.4 Node removal (decommission)
 
-Phase 3.3 (implemented as below; the planned `--dry-run` and
-`remove-node` are not implemented).
+Phase 3.3, extended in Phase 3.4 (dry run, capacity, the draining node
+as a source; `remove-node` is not implemented).
+
+0. `admin decommission-node --node N --dry-run [--failure-domain L]
+   [--rate-mib R]`: changes nothing (no metadata write, no shard touched;
+   only `Health` and `ListShards` reads) and prints, per group N is in
+   (durable first): the member index, the target the controller would
+   choose under the same rules, the chunks and bytes to write, the bytes to
+   read (k per chunk for EC reconstruction), the sources that answer, the
+   target's free space, and every condition that would block or pause the
+   move (cluster not `Active`, group not `Active`, too few sources, no
+   target in a free failure domain, insufficient capacity), plus a time
+   estimate. Exit 2 when something would block it.
 
 1. `admin decommission-node --node N --yes`: records `Draining` for N
    (`("al","nstate",N)`). The controller leader replaces N in every group
@@ -112,8 +123,16 @@ Phase 3.3 (implemented as below; the planned `--dry-run` and
    decommissioned node. It proceeds only while the cluster is `Active`.
 2. Progress: `admin status` prints `node N lifecycle Draining … blocked
    …`; a reason appears when no healthy replacement fits ("no healthy
-   replacement with free failure domain") or the cluster is not `Active`;
-   nothing is changed while blocked.
+   replacement with free failure domain"), when no candidate has room for
+   the member's bytes plus 10 % and 256 MiB ("insufficient capacity …;
+   paused until a node has room": nodes report their free space in
+   `Health`, capped by `--capacity-bytes`), or the cluster is not
+   `Active`; nothing is changed while blocked, and the move resumes by
+   itself once the condition clears. While N still answers, its own shard
+   of a chunk is a source when fewer than k current members have a good
+   one (validated against the chunk checksum); `--repair-source direct` on
+   the controller copies N's shards instead of reconstructing (1 read per
+   shard instead of k).
 3. Done: the leader records `Decommissioned` only when no durable or
    cache group lists N and no group is still `Repairing`; then stop the
    process. A controller crash or failover at any point resumes from the
@@ -129,8 +148,10 @@ controller replaces it in every group after `--unhealthy-after-secs`
 member deliberately (a device that is failing but still readable):
 `admin replace-member --group G --index I [--node M] --yes`; the leader
 carries the request out (only while `Active`), `admin status` shows it
-with its last error, and it disappears once the group is `Active` with a
-different node at the index. To reuse
+with its last error (including a capacity pause), and it disappears once
+the group is `Active` with a different node at the index.
+`admin replace-member … --dry-run` shows the plan without changing
+anything (as §5.4 step 0). To reuse
 the host: stop the process, replace the device, start the node with an
 empty directory **under a new node id** (`register-node` again); the old
 id is removed once its groups are re-membered (§5.4 step 3). Re-using
@@ -212,12 +233,40 @@ Restore runbook (exercised by `fdb_restore.rs`, real
    affected object. The pass ends in `ReadOnly` (clean and complete) or
    `RecoveryRequired` (unreadable data, dangling parts, unanswered nodes);
    repair runs in both.
-5. `admin recovery finalize --yes` (`--force` to accept a
-   `RecoveryRequired` report; the acceptance is recorded) makes the
-   cluster `Active`; reconciliation then reclaims post-restore orphans.
-   Start gateways (they adopt the new incarnation at start).
-   `admin recovery verify --yes` re-runs the pass from the start;
-   `admin recovery resume` continues it.
+5. `admin recovery finalize --yes --operator NAME` makes the cluster
+   `Active` in one transaction (Phase 3.4): it is refused, even with
+   `--force`, while verification has not finished, while a node's
+   listing is missing, or outside `ReadOnly`/`RecoveryRequired`. Critical
+   findings (unreadable chunks, multipart manifest findings, placement
+   epochs ahead of their group) refuse it without `--force`; with
+   `--force` a `--reason` is required. Findings stay in the report;
+   every listed object becomes a data-loss record (`admin recovery
+   losses`), unrecoverable stripes stay repair tasks, and every attempt,
+   refused ones included, is audited with operator, reason and result.
+   `admin cluster activate` cannot leave a restore around finalize.
+   Reconciliation then reclaims post-restore orphans. Start gateways
+   (they adopt the new incarnation at start). `admin recovery verify
+   --yes` re-runs the pass from the start and `admin recovery resume`
+   continues it; both are conditional transactions that never undo a
+   finalize that committed meanwhile.
+
+Continuous verification (RFC-015 B-A5, Phase 3.4): a backup is trusted
+only after a restore. `deploy/backup/verify-backup.sh run` restores the
+newest backup at `--backup-url` (optionally creating one, on its own
+backup tag) into a dedicated verification cluster and runs
+`admin backup verify-restored` on it: schema, cluster state and epochs,
+every committed generation against its chunk records and groups,
+multipart references, versioning (one latest version per key, every
+version resolving). It refuses without an explicit
+`--restore-cluster-file`, when that is the source or shares a coordinator
+with it, when it is not marked (`init-target`, which refuses a non-empty
+cluster) and when it already holds arca-lake metadata (unless
+`--clear-target`); it clears the restored range afterwards. Schedule it
+daily; it writes text-file metrics (`arca_backup_*`: last success, backup
+age, restore and verification durations, bytes and versions verified,
+unresolved findings) and the alerts `ArcaBackupVerificationFailed` and
+`ArcaBackupVerificationStale` fire on them. It verifies metadata only: a
+metadata backup holds no shard data.
 
 ## 6. Capacity and quotas
 
@@ -375,7 +424,15 @@ unrecoverable or failed task to bucket, key, version id (and whether it
 is the current version), part number and chunk; `admin integrity
 verify-object --bucket B --key K [--version-id V]` checks every shard of
 one version (every part of a multipart object) on its members and exits
-0 healthy, 1 degraded or incomplete, 2 unreadable.
+0 healthy, 1 degraded or incomplete, 2 unreadable. Since Phase 3.4 it is
+read-only: a corrupt shard is reported, not quarantined (a node that
+predates read-only verification is reported `Unverified`); `--quarantine`
+lets the nodes quarantine what they find, as a scrub would. `--decode`
+also decodes every chunk from the shards that verified good, checks it
+against its record, and recomputes the object's ETag and checksums
+(single-part; multipart composite and full-object, and per part) and the
+part layout from the decoded bytes, one chunk in memory at a time; any
+mismatch exits 2.
 
 ### 10.6a Repair task stuck in `Failed` (Phase 3.2)
 
@@ -415,8 +472,36 @@ a restore → RFC-015 §5.4 epoch catch-up.
 
 ### 10.8 Certificate problems
 
-`tls_handshake_failures_total` rising after a rotation → a peer still
-has the old root; §RFC-012 5.5.
+Node RPCs (ADR-0017):
+
+- A process refuses to start: the message names the file and the
+  problem (unreadable, no `spiffe://<trust-domain>/<role>/<name>` SAN in
+  the trust domain, wrong role for the process, the certificate does not
+  validate against the bundle, expired). Key contents are never printed.
+- `*_tls_handshake_failures_total` rising: a peer presents a certificate
+  of another CA, an expired or revoked one, or the wrong identity for the
+  address (a node must present its own node id). After a rotation: some
+  peer still lacks the new root in its bundle.
+- `*_tls_rpcs_denied_total` rising: an authenticated identity called an
+  RPC its role may not (a gateway certificate used by a controller, a
+  node certificate used by a tool); the node logs the identity and RPC.
+- `*_tls_reload_failures_total`: new files did not validate; the process
+  keeps the previous material (fix the files; they are re-read every
+  `--tls-reload-secs`).
+- Rotation: renew leaves under the same CA at any time (new connections
+  use them; open ones continue). CA rotation: put both roots in every
+  bundle, move every leaf to the new CA, then remove the old root (open
+  connections authenticated by it are closed). Revocation: a CRL listing
+  the serial closes the peer's connections and refuses it.
+- Expiry: alert `ArcaCertificateExpiring` (`*_tls_cert_not_after_seconds`
+  within 14 days).
+
+FoundationDB: the cluster file and the TLS flags must agree (all
+coordinators `:tls` with `--fdb-tls-*`, none without); a mismatch is
+refused at start. A peer verification failure appears as an
+unavailable database: check `--fdb-tls-verify-peers` against the server
+certificates' SANs and the client certificate against the servers'
+trust.
 
 ## 11. Alternatives considered
 
