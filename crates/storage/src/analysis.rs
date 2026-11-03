@@ -8,9 +8,9 @@
 //! - dead data: superseded by a newer record of its key;
 //! - tombstones: *needed* while an older data record of the key exists in
 //!   another segment (dropping it could resurrect that record at the next
-//!   open), otherwise *droppable*; and whether compaction's conservative
-//!   rule (keep while any other segment has a lower minimum sequence) keeps
-//!   it now;
+//!   open), otherwise *droppable*; and whether compaction's rule keeps it
+//!   now (a non-live data record of the key, of any sequence, exists in
+//!   another segment);
 //! - damaged records, and the rest of each file (segment header, record
 //!   headers and alignment padding: slack).
 
@@ -40,8 +40,8 @@ pub struct SegmentBreakdown {
     pub tombstones_needed: u64,
     /// Tombstones no longer needed.
     pub tombstones_droppable: u64,
-    /// Tombstones compaction's rule keeps today (lower minimum sequence in
-    /// another segment).
+    /// Tombstones compaction's rule keeps today (a non-live data record of
+    /// the key exists in another segment).
     pub tombstones_kept_by_rule: u64,
     /// Bytes of tombstone records (their headers).
     pub tombstone_bytes: u64,
@@ -142,12 +142,6 @@ pub fn analyze_dir(dir: &Path) -> Result<DirBreakdown> {
             data.entry(*k).or_default().push((r.sequence, r.segment));
         }
     }
-    let mins: Vec<(u64, u64)> = out
-        .segments
-        .iter()
-        .filter_map(|s| s.min_seq.map(|m| (m, s.segment_id)))
-        .collect();
-    let other_min = |id: u64| mins.iter().filter(|(_, s)| *s != id).map(|(m, _)| *m).min();
     let pos: HashMap<u64, usize> = out
         .segments
         .iter()
@@ -167,7 +161,11 @@ pub fn analyze_dir(dir: &Path) -> Result<DirBreakdown> {
             } else {
                 b.tombstones_droppable += 1;
             }
-            if other_min(r.segment).is_some_and(|m| m < r.sequence) {
+            let dead_elsewhere = data.get(k).is_some_and(|v| {
+                v.iter()
+                    .any(|(seq, seg)| *seg != r.segment && newest.get(k) != Some(seq))
+            });
+            if dead_elsewhere {
                 b.tombstones_kept_by_rule += 1;
             }
         } else if newest.get(k) == Some(&r.sequence) {

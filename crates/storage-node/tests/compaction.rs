@@ -85,6 +85,11 @@ async fn deleted_space_is_reclaimed_while_serving_and_survivors_read_back() {
         settled,
         "compaction churns while idle"
     );
+    assert_eq!(
+        stats.backlog_segments.load(Ordering::Relaxed),
+        0,
+        "compaction backlog left"
+    );
     for i in 0..120 {
         let r = c.get_shard(&addr, shard(i), 0, 0).await;
         if i % 5 == 0 {

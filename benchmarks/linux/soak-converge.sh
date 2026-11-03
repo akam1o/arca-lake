@@ -174,6 +174,11 @@ scrape_all "$OUT/final-metrics"
 grep -h "reconcile pass" "$RUN"/logs/ctl-*.log > "$OUT/reconcile-passes.log" 2>/dev/null
 
 # ---- 8. offline breakdown ---------------------------------------------------------
+# The segment each node appends to (never compacted) and its compaction
+# gauges, before the nodes stop.
+for n in $NODES; do
+  echo "$n $(metric arca_node_active_segment_id "$n") $(metric arca_node_compaction_backlog_segments "$n") $(metric arca_node_compaction_blocked_segments "$n") $(metric arca_node_dead_records "$n")"
+done > "$OUT/active-segments.txt"
 touch "$RUN/finished"   # the sampler and the monitor stop
 for n in $NODES; do
   pid="$(cat "$RUN/pids/$n" 2>/dev/null)"
@@ -186,6 +191,39 @@ for n in $NODES; do
   "$TOOLS/arca-lake" storage-node segment-report --dir "$RUN/$n" > "$OUT/segments-$n.jsonl" 2>&1
   log "breakdown $n: $(tail -n 1 "$OUT/segments-$n.jsonl")"
 done
+
+# Verdict: every sealed segment is under the compaction threshold, or
+# holds nothing reclaimable but tombstones that are still needed.
+python3 -I - "$OUT" "${MIN_DEAD_FRACTION:-0.5}" > "$OUT/space-verdict.json" <<'PY'
+import json, sys, os
+out, thr = sys.argv[1], float(sys.argv[2])
+active = {}
+for l in open(os.path.join(out, "active-segments.txt")):
+    p = l.split()
+    if len(p) >= 2 and p[1].isdigit():
+        active[p[0]] = int(p[1])
+res, ok = {}, True
+for f in sorted(os.listdir(out)):
+    if not (f.startswith("segments-") and f.endswith(".jsonl")):
+        continue
+    n = f[len("segments-"):-len(".jsonl")]
+    rows = [json.loads(l) for l in open(os.path.join(out, f)) if l.startswith("{")]
+    segs = [r for r in rows if r["what"] == "segment"]
+    tot = next((r for r in rows if r["what"] == "total"), {})
+    bad = []
+    for s in segs:
+        if s["segment"] == active.get(n):
+            continue
+        nonlive = (s["file_bytes"] - s["live_bytes"]) / max(s["file_bytes"], 1)
+        if nonlive >= thr and (s["dead_records"] > 0 or s["tombstones_droppable"] > 0):
+            bad.append({"segment": s["segment"], "nonlive_fraction": round(nonlive, 3),
+                        "dead_records": s["dead_records"], "tombstones_droppable": s["tombstones_droppable"]})
+    act = next((s for s in segs if s["segment"] == active.get(n)), None)
+    res[n] = {"total": tot, "active_segment": act, "unreclaimed_over_threshold": bad}
+    ok = ok and not bad
+print(json.dumps({"ok": ok, "threshold": thr, "nodes": res}, indent=1))
+PY
+log "space verdict: $(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["ok"])' "$OUT/space-verdict.json")"
 
 # ---- 9. summary, teardown -----------------------------------------------------------
 python3 -I "$REPO/benchmarks/linux/soak-summary.py" "$RUN" > "$OUT/summary.json" 2>/dev/null

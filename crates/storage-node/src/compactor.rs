@@ -55,6 +55,17 @@ pub struct CompactionStats {
     pub segment_bytes: AtomicU64,
     /// Bytes referenced by live records at the last pass.
     pub live_bytes: AtomicU64,
+    /// Sealed segments at or over the dead-fraction threshold still waiting
+    /// for compaction after the last pass, and their dead bytes.
+    pub backlog_segments: AtomicU64,
+    /// See `backlog_segments`.
+    pub backlog_bytes: AtomicU64,
+    /// Segments whose tombstones are all still needed (skipped).
+    pub blocked_segments: AtomicU64,
+    /// Non-live data records still on disk (what keeps tombstones needed).
+    pub dead_records: AtomicU64,
+    /// The segment being appended to (never compacted).
+    pub active_segment: AtomicU64,
 }
 
 /// One pass: refresh the gauges, compact the most dead candidates.
@@ -122,6 +133,35 @@ pub(crate) fn pass(store: &Store, policy: &CompactionPolicy, stats: &CompactionS
             }
         }
     }
+    // The state after the pass: what is still waiting, and why.
+    if let Ok(segs) = store.segment_stats() {
+        let waiting: Vec<_> = segs
+            .iter()
+            .filter(|s| {
+                !s.active && !s.blocked && s.file_bytes > 0 && dead(s) >= policy.min_dead_fraction
+            })
+            .collect();
+        stats
+            .backlog_segments
+            .store(waiting.len() as u64, Ordering::Relaxed);
+        stats.backlog_bytes.store(
+            waiting
+                .iter()
+                .map(|s| s.file_bytes.saturating_sub(s.live_bytes))
+                .sum(),
+            Ordering::Relaxed,
+        );
+        stats.blocked_segments.store(
+            segs.iter().filter(|s| s.blocked).count() as u64,
+            Ordering::Relaxed,
+        );
+        if let Some(a) = segs.iter().find(|s| s.active) {
+            stats.active_segment.store(a.segment_id, Ordering::Relaxed);
+        }
+    }
+    stats
+        .dead_records
+        .store(store.dead_records(), Ordering::Relaxed);
 }
 
 /// Run passes until `stop` fires; returns after the pass in progress.

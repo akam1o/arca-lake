@@ -7,7 +7,7 @@
 //! interrupted compaction) and records copied forward into newer segments
 //! cannot change the outcome.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
 
 use crate::format::ShardKey;
@@ -93,6 +93,16 @@ pub struct MemIndex {
     tombstones: BTreeMap<ShardKey, u64>,
     live_bytes: u64,
     segment_live: BTreeMap<u64, SegmentLive>,
+    /// Data records still physically present that are not live (superseded,
+    /// quarantined, or the source copy of a record compaction relocated),
+    /// per segment and key. A tombstone of a key is needed exactly while
+    /// such a record of the key exists outside its own segment: it could
+    /// otherwise reappear when the store is opened (Phase 3.4: the previous
+    /// rule, "while any other segment has a lower sequence", kept every
+    /// tombstone behind one long-lived record forever).
+    dead_by_segment: HashMap<u64, HashMap<ShardKey, u32>>,
+    /// Per key, the sum over segments of `dead_by_segment`.
+    dead_total: HashMap<ShardKey, u32>,
 }
 
 impl MemIndex {
@@ -102,17 +112,20 @@ impl MemIndex {
         if let Some(existing) = self.map.get(&key)
             && existing.sequence >= loc.sequence
         {
+            self.dead_add(key, loc.segment_id);
             return None;
         }
         if let Some(&t) = self.tombstones.get(&key)
             && t >= loc.sequence
         {
+            self.dead_add(key, loc.segment_id);
             return None;
         }
         if let Some(q) = self.quarantined.get(&key) {
             if q.location.sequence >= loc.sequence {
                 // An older record cannot resurrect a key whose newest record
                 // is quarantined.
+                self.dead_add(key, loc.segment_id);
                 return None;
             }
             let q = self.quarantined.remove(&key).expect("present");
@@ -122,6 +135,7 @@ impl MemIndex {
         let old = self.map.insert(key, loc);
         if let Some(old) = &old {
             self.account_remove(old);
+            self.dead_add(key, old.segment_id);
         }
         old
     }
@@ -141,6 +155,7 @@ impl MemIndex {
             Some(existing) if existing.sequence < sequence => {
                 let old = self.map.remove(&key)?;
                 self.account_remove(&old);
+                self.dead_add(key, old.segment_id);
                 Some(old)
             }
             _ => None,
@@ -156,6 +171,8 @@ impl MemIndex {
                 *cur = to;
                 self.account_remove(&old);
                 self.account_add(&to);
+                // The source copy stays on disk until its segment is gone.
+                self.dead_add(*key, old.segment_id);
                 true
             }
             _ => false,
@@ -180,9 +197,61 @@ impl MemIndex {
         }
         if let Some(old) = self.map.remove(&key) {
             self.account_remove(&old);
+            if old != entry.location {
+                self.dead_add(key, old.segment_id);
+            }
         }
+        // Quarantined bytes stay on disk until their segment is gone.
+        self.dead_add(key, entry.location.segment_id);
         self.quarantined.insert(key, entry);
         true
+    }
+
+    pub(crate) fn dead_add(&mut self, key: ShardKey, segment_id: u64) {
+        *self
+            .dead_by_segment
+            .entry(segment_id)
+            .or_default()
+            .entry(key)
+            .or_default() += 1;
+        *self.dead_total.entry(key).or_default() += 1;
+    }
+
+    /// A segment file is gone (compacted and unlinked): its non-live
+    /// records no longer exist anywhere.
+    pub fn segment_removed(&mut self, segment_id: u64) {
+        let Some(keys) = self.dead_by_segment.remove(&segment_id) else {
+            return;
+        };
+        for (k, n) in keys {
+            if let Some(t) = self.dead_total.get_mut(&k) {
+                *t = t.saturating_sub(n);
+                if *t == 0 {
+                    self.dead_total.remove(&k);
+                }
+            }
+        }
+    }
+
+    /// Whether a non-live data record of `key` exists in a segment other
+    /// than `segment_id` (a tombstone of the key in `segment_id` is then
+    /// still needed).
+    #[must_use]
+    pub fn dead_elsewhere(&self, key: &ShardKey, segment_id: u64) -> bool {
+        let total = self.dead_total.get(key).copied().unwrap_or(0);
+        let here = self
+            .dead_by_segment
+            .get(&segment_id)
+            .and_then(|m| m.get(key))
+            .copied()
+            .unwrap_or(0);
+        total > here
+    }
+
+    /// Non-live data records tracked (for statistics).
+    #[must_use]
+    pub fn dead_records(&self) -> u64 {
+        self.dead_total.values().map(|&n| u64::from(n)).sum()
     }
 
     /// The quarantine entry of `key`, if any.

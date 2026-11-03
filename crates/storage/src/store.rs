@@ -361,11 +361,11 @@ pub struct Store {
     index: RwLock<MemIndex>,
     readers: RwLock<BTreeMap<u64, SegmentInfo>>,
     /// Segments whose last compaction made no progress:
-    /// `segment → (lowest tombstone sequence it had to keep, live records
-    /// then)`. Retried once an older segment's records are gone (the other
-    /// segments' minimum sequence passed the tombstone) or its live records
-    /// changed.
-    compaction_blocked: Mutex<HashMap<u64, (u64, usize)>>,
+    /// `segment → (keys of the tombstones it had to keep, live records
+    /// then)`. Retried once one of those tombstones can go (no other
+    /// segment holds a non-live record of its key any more) or its live
+    /// records changed.
+    compaction_blocked: Mutex<HashMap<u64, (Vec<ShardKey>, usize)>>,
     durability: Durability,
     timings: StoreTimings,
     quarantine_log: QuarantineLog,
@@ -1205,10 +1205,13 @@ impl Store {
     ///
     /// Fails on I/O errors while reading segment sizes.
     pub fn segment_stats(&self) -> Result<Vec<SegmentStats>> {
-        let (active, active_min_seq) = {
-            let w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-            (w.active.header().segment_id, w.active_min_seq)
-        };
+        let active = self
+            .writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .active
+            .header()
+            .segment_id;
         let idx = self.index.read().unwrap_or_else(PoisonError::into_inner);
         let readers = self.readers.read().unwrap_or_else(PoisonError::into_inner);
         let blocked = self
@@ -1216,26 +1219,11 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        // The two lowest minimum sequences, to get every segment's "lowest
-        // sequence elsewhere" (what decides whether its tombstones can go).
-        let mut mins: Vec<(u64, u64)> = readers
-            .iter()
-            .filter_map(|(&id, i)| {
-                if id == active {
-                    active_min_seq
-                } else {
-                    i.min_seq
-                }
-                .map(|m| (m, id))
-            })
-            .collect();
-        mins.sort_unstable();
-        let other_min = |id: u64| mins.iter().find(|(_, s)| *s != id).map(|(m, _)| *m);
         let mut out = Vec::with_capacity(readers.len());
         for (&id, info) in readers.iter() {
             let live = idx.segment_live(id);
-            let blocked = blocked.get(&id).is_some_and(|&(floor, records)| {
-                records == live.records && other_min(id).is_none_or(|m| m < floor)
+            let blocked = blocked.get(&id).is_some_and(|(keys, records)| {
+                *records == live.records && keys.iter().all(|k| idx.dead_elsewhere(k, id))
             });
             out.push(SegmentStats {
                 segment_id: id,
@@ -1247,6 +1235,16 @@ impl Store {
             });
         }
         Ok(out)
+    }
+
+    /// Non-live data records still on disk (superseded, quarantined, or
+    /// source copies of relocated records): what keeps tombstones needed.
+    #[must_use]
+    pub fn dead_records(&self) -> u64 {
+        self.index
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .dead_records()
     }
 
     /// Sealed segments whose dead fraction (bytes not referenced by live
@@ -1299,8 +1297,8 @@ impl Store {
         segment_id: u64,
         hooks: &mut dyn FnMut(CompactionStep) -> Result<()>,
     ) -> Result<CompactionReport> {
-        // Reserve an output ID and learn the active segment's state.
-        let (output_id, active_id, active_min_seq) = {
+        // Reserve an output ID.
+        let output_id = {
             let mut w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
             if w.active.header().segment_id == segment_id {
                 return Err(StorageError::InvalidArgument(
@@ -1309,28 +1307,28 @@ impl Store {
             }
             let id = w.next_segment_id;
             w.next_segment_id += 1;
-            (id, w.active.header().segment_id, w.active_min_seq)
+            id
         };
 
-        let (source, other_min_seq) = {
+        let source = {
             let readers = self.readers.read().unwrap_or_else(PoisonError::into_inner);
             let Some(info) = readers.get(&segment_id) else {
                 return Err(StorageError::InvalidArgument(format!(
                     "unknown segment {segment_id}"
                 )));
             };
-            let other_min = readers
-                .iter()
-                .filter(|&(&id, _)| id != segment_id)
-                .filter_map(|(&id, i)| {
-                    if id == active_id {
-                        active_min_seq
-                    } else {
-                        i.min_seq
-                    }
-                })
-                .min();
-            (info.file.try_clone()?, other_min)
+            info.file.try_clone()?
+        };
+        // A tombstone is needed exactly while a non-live data record of its
+        // key exists in another segment (it could reappear at the next open
+        // otherwise). The tracked set only shrinks when a segment is gone,
+        // and new records have higher sequences, so a decision to drop is
+        // never invalidated by what happens meanwhile.
+        let needed = |key: &ShardKey| {
+            self.index
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .dead_elsewhere(key, segment_id)
         };
 
         let path = segment_path(&self.cfg.dir, segment_id);
@@ -1343,14 +1341,14 @@ impl Store {
         // tombstones that are all still needed would only be rewritten
         // into an identical new segment, every pass (soak test): leave it,
         // and let `segment_stats` mark it blocked until that changes.
-        let mut floor = u64::MAX;
+        let mut kept_keys = Vec::new();
         let progress = !scan.damaged.is_empty()
             || scan.records.iter().any(|r| {
                 let p = r.header.prefix();
                 if p.is_tombstone() {
-                    let keep = other_min_seq.is_some_and(|m| m < p.sequence);
+                    let keep = needed(&p.key);
                     if keep {
-                        floor = floor.min(p.sequence);
+                        kept_keys.push(p.key);
                     }
                     !keep
                 } else {
@@ -1374,7 +1372,7 @@ impl Store {
             self.compaction_blocked
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(segment_id, (floor, records));
+                .insert(segment_id, (kept_keys, records));
             report.no_progress = true;
             return Ok(report);
         }
@@ -1389,9 +1387,7 @@ impl Store {
         for r in &scan.records {
             let p = r.header.prefix();
             let (copy, payload) = if p.is_tombstone() {
-                // Needed as long as an older record for the key may exist in
-                // another segment.
-                let keep = other_min_seq.is_some_and(|m| m < p.sequence);
+                let keep = needed(&p.key);
                 if keep {
                     report.tombstones_kept += 1;
                 } else {
@@ -1503,23 +1499,34 @@ impl Store {
         {
             let mut idx = self.index.write().unwrap_or_else(PoisonError::into_inner);
             for (key, old, new) in &moved {
-                idx.relocate(key, old, *new);
+                if !idx.relocate(key, old, *new) {
+                    // The key changed meanwhile: the copy is not live.
+                    idx.dead_add(*key, new.segment_id);
+                }
             }
         }
         hooks(CompactionStep::IndexSwapped)?;
 
-        // Readers that already hold the file keep reading it (POSIX unlink
+        // Unlink first: if it fails the segment stays known (its records
+        // still exist and stay counted) and the next pass retries it. Readers
+        // that already hold the file keep reading it (POSIX unlink
         // semantics); new reads go through the index, which no longer points
         // here.
-        self.readers
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&segment_id);
         faults::guard(&faults::IoOp::Remove {
             segment: segment_id,
         })?;
         std::fs::remove_file(&path)?;
         faults::sync_all(&File::open(&self.cfg.dir)?, "dir")?;
+        self.readers
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&segment_id);
+        // Only now, with the file durably gone, do its records stop
+        // counting (a crash before this point reopens with the file).
+        self.index
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .segment_removed(segment_id);
         hooks(CompactionStep::Unlinked)?;
         Ok(report)
     }

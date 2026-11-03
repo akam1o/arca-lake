@@ -3459,6 +3459,20 @@ fn render_compaction_stats(
             "bytes of live records at the last compaction pass",
             &c.live_bytes,
         ),
+        // HELP lines are replaced from the metric registry.
+        (
+            "arca_node_compaction_backlog_segments",
+            "",
+            &c.backlog_segments,
+        ),
+        ("arca_node_compaction_backlog_bytes", "", &c.backlog_bytes),
+        (
+            "arca_node_compaction_blocked_segments",
+            "",
+            &c.blocked_segments,
+        ),
+        ("arca_node_dead_records", "", &c.dead_records),
+        ("arca_node_active_segment_id", "", &c.active_segment),
     ] {
         let _ = writeln!(
             out,

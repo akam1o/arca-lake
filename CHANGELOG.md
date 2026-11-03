@@ -79,6 +79,16 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   mostly dead large segments were never compacted (a soak node grew 4 GB
   an hour). Such a segment is now left alone (`no_progress`, `blocked` in
   `segment_stats`) until older records are gone.
+- Compaction kept a tombstone while any other segment had a lower
+  sequence, which a single long-lived record satisfies forever: every
+  deleted or garbage-collected shard left a 4 KiB tombstone record that
+  was never reclaimed (found by the Phase 3.4 convergence test). A
+  tombstone is now kept exactly while a non-live record of its key is
+  still on disk in another segment (tracked in the index, rebuilt on open,
+  released only after the segment's unlink is durable); a failed unlink
+  no longer leaves an untracked segment file behind. New node gauges for
+  compaction backlog, blocked segments, dead records and the active
+  segment.
 - `admin integrity scrub --wait --adaptive` ignored the adaptive policy
   and ran at the fixed rate (found by the Phase 3.4 measurement).
 

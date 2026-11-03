@@ -129,11 +129,16 @@ arca_gateway_tls_reload_failures_total	counter	gateway	reloads	-	TLS reloads ref
 arca_gateway_tls_reloads_total	counter	gateway	reloads	-	TLS material reloads that changed it
 arca_gateway_tls_rpcs_denied_total	counter	gateway	rpcs	-	RPCs refused by the role authorization table
 arca_gateway_unreadable_reads_total	counter	gateway	reads	-	GETs that failed with an integrity error
+arca_node_active_segment_id	gauge	node	id	-	segment being appended to (never compacted)
+arca_node_compaction_backlog_bytes	gauge	node	bytes	-	non-live bytes of the segments still waiting for compaction after the last pass
+arca_node_compaction_backlog_segments	gauge	node	segments	-	sealed segments over the dead-fraction threshold still waiting for compaction after the last pass
+arca_node_compaction_blocked_segments	gauge	node	segments	-	segments skipped because every tombstone in them is still needed
 arca_node_compaction_copied_bytes_total	counter	node	bytes	-	live payload bytes copied by compaction
 arca_node_compaction_errors_total	counter	node	errors	-	compactions that failed and were left for the next pass
 arca_node_compaction_reclaimed_bytes_total	counter	node	bytes	-	segment bytes released by compaction
 arca_node_compactions_total	counter	node	segments	-	sealed segments compacted
 arca_node_corrupt_reads_total	counter	node	reads	-	reads that found a corrupt record
+arca_node_dead_records	gauge	node	records	-	non-live data records still on the device (what keeps tombstones needed)
 arca_node_device_free_bytes	gauge	node	bytes	-	bytes free for placement on the device (capped by --capacity-bytes)
 arca_node_device_total_bytes	gauge	node	bytes	-	size of the device for placement (capped by --capacity-bytes)
 arca_node_live_bytes	gauge	node	bytes	-	bytes of live records at the last compaction pass

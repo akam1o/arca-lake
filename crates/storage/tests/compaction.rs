@@ -405,3 +405,172 @@ fn offline_breakdown_matches_the_index_and_classifies_tombstones() {
     }
     check(&store, &model, "after full compaction");
 }
+
+fn seal(store: &Store, next: &mut u64) {
+    let active = |store: &Store| {
+        store
+            .segment_stats()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.active)
+            .unwrap()
+            .segment_id
+    };
+    let a = active(store);
+    while active(store) == a {
+        store.put(key(*next), &payload(*next)).unwrap();
+        *next += 1;
+    }
+}
+
+/// A tombstone goes once the old records of its key are gone, even with
+/// long-lived data older than it elsewhere (the previous rule, "keep while
+/// any other segment has a lower sequence", kept every such tombstone
+/// forever: 4 KiB per deleted shard, found by the Phase 3.4 convergence
+/// test). An interrupted compaction never lets it go early.
+#[test]
+fn tombstones_go_when_their_old_records_go_not_when_old_data_exists() {
+    for interrupt in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = Store::open(config(dir.path())).unwrap();
+        let mut n = 50_000;
+        // Long-lived data in the oldest segment.
+        store.put(key(1), &payload(1)).unwrap();
+        // Key 2 in its own segment, then deleted (tombstone elsewhere).
+        seal(&store, &mut n);
+        store.put(key(2), &payload(2)).unwrap();
+        let old_seg = store.locate(&key(2)).unwrap().segment_id;
+        seal(&store, &mut n);
+        store.delete(key(2)).unwrap();
+        let tomb_seg = store
+            .segment_stats()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.active)
+            .unwrap()
+            .segment_id;
+        seal(&store, &mut n);
+        // While key 2's old record exists, its tombstone is needed.
+        let r = store.compact(tomb_seg).unwrap();
+        assert!(r.no_progress || r.tombstones_kept == 1, "{r:?}");
+        let tomb_seg = r.output_segment_id.unwrap_or(tomb_seg);
+        if interrupt {
+            // Compaction of the old record's segment stops before the
+            // unlink: the record still exists, the tombstone stays needed.
+            let e = store.compact_with_hooks(old_seg, &mut |step| {
+                if step == arca_lake_storage::CompactionStep::IndexSwapped {
+                    Err(StorageError::InvalidArgument("injected crash".into()))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(e.is_err());
+            assert!(dir.path().join(format!("seg-{old_seg:016x}.arca")).exists());
+            let r = store.compact(tomb_seg).unwrap();
+            assert!(r.no_progress, "kept while the old record is on disk: {r:?}");
+            // Reopen in that state: nothing resurrected.
+            drop(store);
+            let (store, _) = Store::open(config(dir.path())).unwrap();
+            assert!(matches!(
+                store.get(&key(2), None),
+                Err(StorageError::NotFound)
+            ));
+            assert_eq!(store.get(&key(1), None).unwrap(), payload(1));
+            continue;
+        }
+        store.compact(old_seg).unwrap();
+        assert!(!dir.path().join(format!("seg-{old_seg:016x}.arca")).exists());
+        // Key 1 (sequence below the tombstone) is still in the oldest
+        // segment; the tombstone goes all the same.
+        let r = store.compact(tomb_seg).unwrap();
+        assert!(!r.no_progress && r.tombstones_dropped >= 1, "{r:?}");
+        drop(store);
+        let (store, _) = Store::open(config(dir.path())).unwrap();
+        assert!(
+            matches!(store.get(&key(2), None), Err(StorageError::NotFound)),
+            "resurrected"
+        );
+        assert_eq!(store.get(&key(1), None).unwrap(), payload(1));
+    }
+}
+
+/// Random puts, overwrites, deletes, compactions (some interrupted at a
+/// random step) and reopens against a model: nothing deleted ever comes
+/// back, nothing acknowledged is lost, and once everything is compacted no
+/// sealed segment keeps dead data or a tombstone that could go.
+#[test]
+fn random_workload_with_compaction_and_reopen_matches_the_model() {
+    use arca_lake_storage::CompactionStep;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(config(dir.path())).unwrap().0;
+    let mut model = Model::new();
+    let mut rng = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    for round in 0..40u64 {
+        for _ in 0..60 {
+            let k = next() % 120;
+            if next() % 10 < 6 {
+                let p = payload(k + round * 7);
+                store.put(key(k), &p).unwrap();
+                model.insert(k, Some(p));
+            } else {
+                store.delete(key(k)).unwrap();
+                model.insert(k, None);
+            }
+        }
+        for s in store.compaction_candidates(0.3).unwrap() {
+            if next() % 5 == 0 {
+                let stop = match next() % 3 {
+                    0 => CompactionStep::Synced,
+                    1 => CompactionStep::IndexSwapped,
+                    _ => CompactionStep::Unlinked,
+                };
+                let _ = store.compact_with_hooks(s, &mut |step| {
+                    if step == stop {
+                        Err(StorageError::InvalidArgument("injected".into()))
+                    } else {
+                        Ok(())
+                    }
+                });
+            } else {
+                store.compact(s).unwrap();
+            }
+        }
+        check(&store, &model, &format!("round {round}"));
+        if next() % 3 == 0 {
+            drop(store);
+            store = Store::open(config(dir.path())).unwrap().0;
+            check(&store, &model, &format!("round {round} after reopen"));
+        }
+    }
+    // Everything compacted until nothing moves.
+    for _ in 0..6 {
+        for s in store.compaction_candidates(0.0).unwrap() {
+            store.compact(s).unwrap();
+        }
+    }
+    let active = store
+        .segment_stats()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.active)
+        .unwrap()
+        .segment_id;
+    let report = arca_lake_storage::analysis::analyze_dir(dir.path()).unwrap();
+    for s in report.segments.iter().filter(|s| s.segment_id != active) {
+        assert_eq!(s.dead_records, 0, "{s:?}");
+        assert_eq!(
+            s.tombstones_droppable, 0,
+            "a tombstone that could go stays: {s:?}"
+        );
+    }
+    check(&store, &model, "final");
+    drop(store);
+    let store = Store::open(config(dir.path())).unwrap().0;
+    check(&store, &model, "final reopen");
+}
