@@ -11,6 +11,7 @@
 //! RFC-005 fixes the production format.
 
 mod error;
+pub mod faults;
 pub mod format;
 mod index;
 mod segment;

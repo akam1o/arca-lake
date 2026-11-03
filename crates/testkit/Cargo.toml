@@ -64,3 +64,7 @@ workspace = true
 [[test]]
 name = "mixed_version"
 required-features = ["fdb"]
+
+[[test]]
+name = "fdb_restore"
+required-features = ["fdb"]

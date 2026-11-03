@@ -1,11 +1,11 @@
 //! Segment files: creation, appending, and recovery scanning.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::FileExt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Result, StorageError};
+use crate::faults;
 use crate::format::{
     RECORD_FIXED_LEN, RecordHeader, RecordPrefix, SEGMENT_HEADER_LEN, SegmentHeader, round_up,
 };
@@ -39,7 +39,10 @@ impl SegmentWriter {
     /// Create a new segment file, write and sync its header, and sync the directory.
     pub fn create(dir: &Path, header: SegmentHeader) -> Result<Self> {
         let path = segment_path(dir, header.segment_id);
-        let mut file = OpenOptions::new()
+        faults::guard(&faults::IoOp::Create {
+            segment: header.segment_id,
+        })?;
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
@@ -47,9 +50,9 @@ impl SegmentWriter {
         let padded = header.padded_len();
         let mut buf = vec![0u8; usize::try_from(padded).expect("alignment fits usize")];
         buf[..SEGMENT_HEADER_LEN].copy_from_slice(&header.encode());
-        file.write_all(&buf)?;
-        file.sync_all()?;
-        File::open(dir)?.sync_all()?;
+        faults::write_all_at(&file, &buf, 0, header.segment_id)?;
+        faults::sync_all(&file, "segment")?;
+        faults::sync_all(&File::open(dir)?, "dir")?;
         Ok(Self {
             file,
             header,
@@ -60,8 +63,7 @@ impl SegmentWriter {
     /// Reopen an existing segment for appending at `end` (after a recovery scan).
     pub fn reopen(dir: &Path, header: SegmentHeader, end: u64) -> Result<Self> {
         let path = segment_path(dir, header.segment_id);
-        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        file.seek(SeekFrom::Start(end))?;
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
         Ok(Self { file, header, end })
     }
 
@@ -89,14 +91,17 @@ impl SegmentWriter {
         buf.extend_from_slice(&encoded);
         buf.extend_from_slice(payload);
         buf.resize(buf.len() + pad, 0);
-        self.file.write_all(&buf)?;
+        // Positional: a failed or partial write leaves `end` where it was,
+        // and the next append overwrites the torn bytes (or the store
+        // rolls to a new segment first).
+        faults::write_all_at(&self.file, &buf, offset, self.header.segment_id)?;
         self.end += padded;
         Ok(offset)
     }
 
     /// Make appended records durable.
     pub fn sync(&self) -> Result<()> {
-        self.file.sync_data()?;
+        faults::sync_data(&self.file, self.header.segment_id)?;
         Ok(())
     }
 
@@ -294,7 +299,7 @@ fn read_record_at(
     if offset + RECORD_FIXED_LEN as u64 > file_len {
         return Err(ScanFailure::Truncated("record header truncated"));
     }
-    file.read_exact_at(prefix_buf, offset)
+    faults::read_exact_at(file, prefix_buf, offset, seg.segment_id)
         .map_err(|_| ScanFailure::Header("read error"))?;
     let prefix =
         RecordHeader::decode_prefix(prefix_buf, seg.block_size).map_err(ScanFailure::Header)?;
@@ -302,12 +307,17 @@ fn read_record_at(
         return Err(ScanFailure::Truncated("record truncated"));
     }
     let mut hbuf = vec![0u8; prefix.header_len()];
-    file.read_exact_at(&mut hbuf, offset)
+    faults::read_exact_at(file, &mut hbuf, offset, seg.segment_id)
         .map_err(|_| ScanFailure::Header("read error"))?;
     let header = RecordHeader::decode(&hbuf, seg.block_size).map_err(ScanFailure::Header)?;
     let mut payload = vec![0u8; prefix.payload_len as usize];
-    file.read_exact_at(&mut payload, offset + prefix.header_len() as u64)
-        .map_err(|_| ScanFailure::Header("read error"))?;
+    faults::read_exact_at(
+        file,
+        &mut payload,
+        offset + prefix.header_len() as u64,
+        seg.segment_id,
+    )
+    .map_err(|_| ScanFailure::Header("read error"))?;
     if let Err(reason) = verify_blocks(&payload, 0, &header.block_crcs, seg.block_size) {
         return Err(ScanFailure::Payload { header, reason });
     }
@@ -354,10 +364,13 @@ fn next_valid_record(file: &File, seg: &SegmentHeader, from: u64, file_len: u64)
 }
 
 /// Truncate a segment to `len` and sync it.
-pub fn truncate(path: &Path, len: u64) -> Result<()> {
+pub fn truncate(path: &Path, len: u64, segment_id: u64) -> Result<()> {
     let file = OpenOptions::new().write(true).open(path)?;
+    faults::guard(&faults::IoOp::SetLen {
+        segment: segment_id,
+    })?;
     file.set_len(len)?;
-    file.sync_all()?;
+    faults::sync_all(&file, "segment")?;
     Ok(())
 }
 

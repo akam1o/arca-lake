@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::ops::Range;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -12,6 +11,7 @@ use std::sync::{Condvar, Mutex, PoisonError, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Result, StorageError};
+use crate::faults;
 use crate::format::{
     FLAG_TOMBSTONE, RecordHeader, SEGMENT_FORMAT_VERSION, SEGMENT_FORMAT_VERSION_MIN,
     SegmentHeader, ShardKey, padded_header_len, validate_geometry,
@@ -142,10 +142,11 @@ impl QuarantineLog {
     }
 
     fn write(&self, line: &str) -> Result<()> {
-        use std::io::Write as _;
         let mut f = self.file.lock().unwrap_or_else(PoisonError::into_inner);
-        f.write_all(line.as_bytes())?;
-        f.write_all(b"\n")?;
+        let mut buf = line.as_bytes().to_vec();
+        buf.push(b'\n');
+        faults::write_all(&mut f, &buf, &faults::IoOp::QuarantineLog)?;
+        faults::guard(&faults::IoOp::QuarantineLog)?;
         f.sync_data()?;
         Ok(())
     }
@@ -269,6 +270,10 @@ pub struct CompactionReport {
 #[derive(Debug)]
 struct Writer {
     active: SegmentWriter,
+    /// Set after a write or sync of the active segment failed: the next
+    /// append rolls to a new segment first, so that no later ACK depends on
+    /// dirty pages whose fate a failed fsync left unknown (R-53).
+    poisoned: bool,
     /// Lowest sequence number appended to the active segment.
     active_min_seq: Option<u64>,
     next_sequence: u64,
@@ -333,6 +338,11 @@ pub fn clamp_format_write(v: u64) -> u16 {
         u64::from(SEGMENT_FORMAT_VERSION),
     ))
     .unwrap_or(SEGMENT_FORMAT_VERSION_MIN)
+}
+
+/// Current length of a file (0 when unknown).
+fn file_len(f: &File) -> u64 {
+    f.metadata().map_or(0, |m| m.len())
 }
 
 /// A single-device store.
@@ -460,6 +470,7 @@ impl Store {
             device_id,
             writer: Mutex::new(Writer {
                 active,
+                poisoned: false,
                 active_min_seq,
                 next_sequence: rec.max_sequence + 1,
                 next_segment_id,
@@ -493,11 +504,14 @@ impl Store {
         let path = segment_path(&cfg.dir, id);
         let file_len = std::fs::metadata(&path)?.len();
 
-        // A last segment shorter than its own header is a crash during
-        // segment creation: it cannot contain records. Discard it.
-        if is_last && file_len < padded_header_len(cfg.record_alignment) {
+        // A segment shorter than its own header is a crash (or a failed
+        // write) during segment creation, wherever it sorts: it cannot
+        // contain records. Discard it.
+        if file_len < padded_header_len(cfg.record_alignment) {
+            let _ = is_last;
+            faults::guard(&faults::IoOp::Remove { segment: id })?;
             std::fs::remove_file(&path)?;
-            File::open(&cfg.dir)?.sync_all()?;
+            faults::sync_all(&File::open(&cfg.dir)?, "dir")?;
             rec.report.truncated_bytes += file_len;
             return Ok(());
         }
@@ -570,7 +584,7 @@ impl Store {
             ScanEnd::Clean => {}
             ScanEnd::TornTail { valid_len, .. } if is_last => {
                 rec.report.truncated_bytes += scan.file_len - valid_len;
-                segment::truncate(&path, valid_len)?;
+                segment::truncate(&path, valid_len, id)?;
             }
             ScanEnd::TornTail { valid_len, reason } | ScanEnd::Corrupt { valid_len, reason } => {
                 rec.report.corrupt_segments.push((id, valid_len, reason));
@@ -658,14 +672,23 @@ impl Store {
     fn append(&self, key: ShardKey, flags: u8, payload: &[u8]) -> Result<()> {
         let mut w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
         let append_started = Instant::now();
-        if w.active.end() >= self.cfg.segment_max_bytes {
+        if w.active.end() >= self.cfg.segment_max_bytes || w.poisoned {
             let t = Instant::now();
+            // A poisoned segment is sealed without syncing it again: its
+            // last acknowledged position was synced before the failure.
             self.rollover(&mut w)?;
+            w.poisoned = false;
             self.timings.rollover.observe(t.elapsed());
         }
         let sequence = w.next_sequence;
         let header = RecordHeader::for_payload(key, flags, sequence, payload, self.cfg.block_size)?;
-        let offset = w.active.append(&header, payload)?;
+        let offset = match w.active.append(&header, payload) {
+            Ok(o) => o,
+            Err(e) => {
+                w.poisoned = true;
+                return Err(e);
+            }
+        };
         let segment_id = w.active.header().segment_id;
         let end = w.active.end();
         w.next_sequence += 1;
@@ -678,7 +701,10 @@ impl Store {
                 .unwrap_or_else(PoisonError::into_inner);
             st.appended = (segment_id, end);
             if self.cfg.sync == SyncPolicy::Always {
-                w.active.sync()?;
+                if let Err(e) = w.active.sync() {
+                    w.poisoned = true;
+                    return Err(e);
+                }
                 st.durable = st.durable.max((segment_id, end));
             }
         }
@@ -687,7 +713,13 @@ impl Store {
 
         if self.cfg.sync == SyncPolicy::Group {
             let t = Instant::now();
-            self.wait_durable((segment_id, end))?;
+            if let Err(e) = self.wait_durable((segment_id, end)) {
+                self.writer
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .poisoned = true;
+                return Err(e);
+            }
             self.timings.sync_wait.observe(t.elapsed());
         }
 
@@ -780,7 +812,7 @@ impl Store {
                         .try_clone()?
                 };
                 let t = Instant::now();
-                file.sync_data()?;
+                faults::sync_data(&file, target.0)?;
                 self.timings.fsync.observe(t.elapsed());
                 Ok(())
             })();
@@ -893,8 +925,13 @@ impl Store {
         // Re-read and validate the header so that a stale index entry can
         // never return bytes from the wrong record.
         let mut hbuf = vec![0u8; to_usize(loc.header_len)];
-        if let Err(e) = seg.file.read_exact_at(&mut hbuf, loc.offset) {
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+        if let Err(e) = faults::read_exact_at(&seg.file, &mut hbuf, loc.offset, loc.segment_id) {
+            // A short read is corruption only if the file really ends
+            // there; otherwise it is a transient I/O error, never quarantine
+            // (RFC-008 §8.2).
+            if e.kind() == std::io::ErrorKind::UnexpectedEof
+                && file_len(&seg.file) < loc.offset + loc.header_len
+            {
                 return Err(self.quarantine(key, loc, "record header truncated"));
             }
             return Err(e.into());
@@ -908,11 +945,15 @@ impl Store {
         };
 
         let mut buf = vec![0u8; to_usize(read_end - read_start)];
-        if let Err(e) = seg
-            .file
-            .read_exact_at(&mut buf, loc.payload_offset() + read_start)
-        {
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+        if let Err(e) = faults::read_exact_at(
+            &seg.file,
+            &mut buf,
+            loc.payload_offset() + read_start,
+            loc.segment_id,
+        ) {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof
+                && file_len(&seg.file) < loc.payload_offset() + read_end
+            {
                 // The record extends past the segment: truncated on disk.
                 return Err(self.quarantine(key, loc, "record truncated"));
             }
@@ -1261,7 +1302,7 @@ impl Store {
                 }
                 if live {
                     let mut payload = vec![0u8; to_usize(u64::from(p.payload_len))];
-                    source.read_exact_at(&mut payload, old.payload_offset())?;
+                    faults::read_exact_at(&source, &mut payload, old.payload_offset(), segment_id)?;
                     if let Err(reason) =
                         verify_blocks(&payload, 0, &r.header.block_crcs, scan.header.block_size)
                     {
@@ -1328,7 +1369,7 @@ impl Store {
         }
         if let Some(out) = &output {
             out.sync()?;
-            File::open(&self.cfg.dir)?.sync_all()?;
+            faults::sync_all(&File::open(&self.cfg.dir)?, "dir")?;
             report.output_segment_id = Some(output_id);
             self.readers
                 .write()
@@ -1359,8 +1400,11 @@ impl Store {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&segment_id);
+        faults::guard(&faults::IoOp::Remove {
+            segment: segment_id,
+        })?;
         std::fs::remove_file(&path)?;
-        File::open(&self.cfg.dir)?.sync_all()?;
+        faults::sync_all(&File::open(&self.cfg.dir)?, "dir")?;
         hooks(CompactionStep::Unlinked)?;
         Ok(report)
     }

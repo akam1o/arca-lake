@@ -50,9 +50,7 @@ struct Env {
 
 impl Env {
     fn from_env() -> Option<Self> {
-        if std::env::var_os("ARCA_FDB_TESTS").is_none() {
-            return None;
-        }
+        std::env::var_os("ARCA_FDB_TESTS")?;
         let old = PathBuf::from(std::env::var_os("ARCA_BIN_OLD")?);
         let new = PathBuf::from(std::env::var_os("ARCA_BIN_NEW")?);
         let cluster_file = PathBuf::from(std::env::var_os("ARCA_FDB_CLUSTER_FILE")?);
@@ -107,7 +105,7 @@ impl Env {
         }
     }
 
-    fn node_args(&self, dir: &Path, addr: &str) -> Vec<String> {
+    fn node_args(dir: &Path, addr: &str) -> Vec<String> {
         vec![
             "storage-node".into(),
             "--listen".into(),
@@ -299,7 +297,7 @@ async fn rolling_upgrade_with_two_binaries() {
         .iter()
         .zip(&node_addrs)
         .enumerate()
-        .map(|(i, (d, a))| env.spawn(&format!("node{i}-old"), false, &env.node_args(d, a)))
+        .map(|(i, (d, a))| env.spawn(&format!("node{i}-old"), false, &Env::node_args(d, a)))
         .collect();
     for a in &node_addrs {
         wait_tcp(a, Duration::from_secs(20)).await;
@@ -385,12 +383,15 @@ async fn rolling_upgrade_with_two_binaries() {
     // The new controller recorded the old nodes' capabilities (protocol 1,
     // format 1) and left format_write at 1.
     assert!(status.contains("format_write Some(1)"), "{status}");
-    assert_eq!(status.matches("node ").filter(|_| true).count() >= 3, true);
+    let cap_lines: Vec<&str> = status
+        .lines()
+        .filter(|l| l.starts_with("node ") && l.contains("software"))
+        .collect();
+    assert_eq!(cap_lines.len(), 3, "{status}");
     assert!(
-        status
-            .lines()
-            .filter(|l| l.starts_with("node "))
-            .all(|l| l.contains("protocol [1, 1] format [1, 1]")),
+        cap_lines
+            .iter()
+            .all(|l| l.contains("protocol [1, 1] format [1, 1] format_write 1")),
         "{status}"
     );
     for a in &node_addrs {
@@ -457,7 +458,7 @@ async fn rolling_upgrade_with_two_binaries() {
     // process reaches the target (4: leader change in the middle).
     for (i, (d, a)) in node_dirs.iter().zip(&node_addrs).enumerate() {
         nodes[i].kill();
-        nodes[i] = env.spawn(&format!("node{i}-new"), true, &env.node_args(d, a));
+        nodes[i] = env.spawn(&format!("node{i}-new"), true, &Env::node_args(d, a));
         wait_tcp(a, Duration::from_secs(20)).await;
         // 6: traffic between node upgrades, through both gateways.
         let d = body(300 << 10, 30 + i as u64);
@@ -477,7 +478,7 @@ async fn rolling_upgrade_with_two_binaries() {
     let mut parts = Vec::new();
     let mut whole = Vec::new();
     for n in 1..=2 {
-        let d = body(5 << 20, 40 + n as u64);
+        let d = body(5 << 20, 40 + u64::try_from(n).unwrap());
         whole.extend_from_slice(&d);
         let out = s3_new
             .upload_part()
@@ -524,15 +525,22 @@ async fn rolling_upgrade_with_two_binaries() {
     // The old gateway's heartbeat was removed at its shutdown; if the kill
     // beat the removal it goes stale after PROC_STALE_MS — ignore it by id
     // to keep the test bounded.
+    // Old processes that were SIGKILLed (no clean shutdown) leave heartbeats
+    // that block the precondition until they age out (90 s); the operator
+    // names them explicitly, which is what `--ignore-absent` is for.
     let st = env.admin_ok(true, &["status", "--versions"]);
-    let old_gw_id = st
+    let stale_ids: Vec<String> = st
         .lines()
-        .find(|l| l.starts_with("proc Gateway") && l.contains("schema [1, 2]"))
-        .and_then(|l| l.split_whitespace().nth(2).map(str::to_string));
-    if let Some(id) = &old_gw_id {
-        env.admin_ok(true, &["upgrade", "cancel"]);
-        env.admin_ok(true, &["upgrade", "finalize", "--ignore-absent", id]);
+        .filter(|l| l.starts_with("proc ") && l.contains("schema [1, 2]"))
+        .filter_map(|l| l.split_whitespace().nth(2).map(str::to_string))
+        .collect();
+    env.admin_ok(true, &["upgrade", "cancel"]);
+    let mut args: Vec<&str> = vec!["upgrade", "finalize"];
+    for id in &stale_ids {
+        args.push("--ignore-absent");
+        args.push(id);
     }
+    env.admin_ok(true, &args);
     ctl_new_a.kill();
     wait_until("ctl-new-b to lead", Duration::from_secs(20), async || {
         env.admin(true, &["status"]).1.contains("leader ctl-new-b")
@@ -643,7 +651,7 @@ async fn rolling_upgrade_with_two_binaries() {
     let mut node_stale = env.spawn(
         "node0-old-after",
         false,
-        &env.node_args(&node_dirs[0], &node_addrs[0]),
+        &Env::node_args(&node_dirs[0], &node_addrs[0]),
     );
     assert!(
         node_stale.exited_within(Duration::from_secs(15)).is_some(),
@@ -658,7 +666,7 @@ async fn rolling_upgrade_with_two_binaries() {
     nodes[0] = env.spawn(
         "node0-new-again",
         true,
-        &env.node_args(&node_dirs[0], &node_addrs[0]),
+        &Env::node_args(&node_dirs[0], &node_addrs[0]),
     );
     wait_tcp(&node_addrs[0], Duration::from_secs(20)).await;
 

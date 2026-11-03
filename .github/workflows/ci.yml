@@ -232,6 +232,20 @@ jobs:
           ARCA_BIN_OLD="$CARGO_TARGET_DIR/debug/arca-lake" \
           ARCA_BIN_NEW="$CARGO_TARGET_DIR/bump/debug/arca-lake" \
             cargo test -p arca-lake-testkit --features fdb --test mixed_version -- --nocapture --test-threads=1
+      - name: metadata restore drill (fdbbackup/fdbrestore, RFC-015 §5.3.1)
+        env:
+          ARCA_FDB_TESTS: "1"
+          ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
+          ARCA_FDB_BACKUP_URL: file:///var/fdb/backup
+          ARCA_FDB_BACKUP_CLUSTER_FILE: /var/fdb/fdb.cluster
+        run: |
+          set -euo pipefail
+          # The backup agent and the backup tools live in the server
+          # container; the test drives them through `docker exec`.
+          sudo docker exec "$FDB_CONTAINER" mkdir -p /var/fdb/backup
+          sudo docker exec -d "$FDB_CONTAINER" backup_agent -C /var/fdb/fdb.cluster
+          ARCA_FDB_BACKUP_CMD="sudo docker exec $FDB_CONTAINER" \
+            cargo test -p arca-lake-testkit --features fdb --test fdb_restore -- --nocapture --test-threads=1
       - name: stop FoundationDB server
         if: always()
         run: sudo docker rm -f "$FDB_CONTAINER" >/dev/null 2>&1 || true
