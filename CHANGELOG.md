@@ -72,6 +72,8 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 - The recovery pass now pushes the new incarnation to every node at its
   start (a delayed pre-restore delete was accepted until `Active`).
 - A chunk stamped in the restore point's millisecond is a post-T orphan.
+- `arca_node_phase_seconds{phase="get_serve"}` was never observed (the
+  series stayed empty, and adaptive scrubbing had no GET signal).
 
 - Phase 3.3 (operational safety, rolling upgrade, disaster recovery;
   ADR-0016): independent wire-protocol / metadata-schema / storage-format
