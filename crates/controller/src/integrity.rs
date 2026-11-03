@@ -28,6 +28,7 @@ use arca_lake_metadata::{KvStore, MetaError};
 use arca_lake_protocol::client::{NodeClients, ShardRef, ShardStatus};
 use arca_lake_tiering::durable::{Coders, encode_chunk};
 use bytes::Bytes;
+use futures::StreamExt as _;
 use tracing::{info, warn};
 
 use crate::ControlError;
@@ -724,11 +725,13 @@ async fn scrub_group<S: KvStore>(
 
 // ---- stripe repair ----------------------------------------------------------
 
-/// One repair worker pass over due tasks (RFC-008 §8.5).
+/// One repair worker pass over due tasks (RFC-008 §8.5): up to
+/// `opts.workers` stripes at once under the byte budget.
 ///
 /// # Errors
 ///
 /// Metadata errors that are not deferrable.
+#[allow(clippy::too_many_lines)]
 pub async fn repair_pass<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -778,7 +781,6 @@ pub async fn repair_pass<S: KvStore>(
     });
     tasks.truncate(opts.tasks_per_pass);
     report.examined = tasks.len();
-    use futures::StreamExt as _;
     let mut stream = futures::stream::iter(tasks.into_iter().map(|(group_id, chunk_id, task)| {
         let budget = &budget;
         let nodes = &nodes;

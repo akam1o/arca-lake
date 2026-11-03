@@ -284,20 +284,23 @@ async fn metadata_restore_drill_with_fdbbackup() {
     .unwrap();
     let mp2 = multipart_put(&c, "mp2", 2, 8).await;
     post.push(("mp2".into(), mp2));
-    // pre2: delete the version itself (not a marker) so that GC retires it.
-    let pre2_gen = c.manifest(BUCKET, "pre2").await.pointer.generation;
-    let hex = |g: &[u8; 16]| compat::hex(g);
-    c.backend
-        .delete_object(request(s3s::dto::DeleteObjectInput {
-            bucket: BUCKET.into(),
-            key: "pre2".into(),
-            version_id: Some(hex(&pre2_gen)),
-            ..Default::default()
-        }))
-        .await
-        .unwrap();
-    let gc = c.gc(now_ms() + 3_600_000, 0).await;
-    assert!(gc.collected >= 1, "{gc:?}");
+    // pre2: its shards are gone from every node after T (what a delete
+    // followed by GC leaves behind); the restored metadata still
+    // references them.
+    let pre2 = c.manifest(BUCKET, "pre2").await;
+    let group = c.groups().await.remove(0);
+    for (_, ch) in &pre2.chunks {
+        for (i, m) in group.members.iter().enumerate() {
+            let n = c.node_index(m).unwrap();
+            c.node_store(n)
+                .delete(arca_lake_storage_node::ShardKey {
+                    group_id: group.id,
+                    chunk_id: ch.chunk_id,
+                    shard_index: u16::try_from(i).unwrap(),
+                })
+                .unwrap();
+        }
+    }
     s3::delete(&c.backend, BUCKET, "pre3").await.unwrap();
     let shards_now = shards_total(&c).await;
     assert!(shards_now > shards_at_t, "post-T shards exist on the nodes");
