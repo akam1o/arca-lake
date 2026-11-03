@@ -88,7 +88,17 @@ launch() { # name env... -- command...
   while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
   mkdir -p "$RUN/logs" "$RUN/pids"
   nohup env "${envs[@]}" "$@" >> "$RUN/logs/$name.log" 2>&1 < /dev/null &
-  echo $! > "$RUN/pids/$name"
+  local pid=$!
+  echo "$pid" > "$RUN/pids/$name"
+  # The PID is nohup's, then env's, until the command execs: wait for that,
+  # or an immediate liveness check would see a foreign executable and
+  # start a second copy.
+  local want; want="$(basename "$1")"
+  for _ in $(seq 1 50); do
+    case "$(readlink "/proc/$pid/exe" 2>/dev/null)" in */"$want") break ;; esac
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
 }
 stop() { # name [signal]
   local sig="${2:-TERM}"
@@ -300,9 +310,23 @@ cmd_finish() {
 
 cmd_teardown() {
   touch "$RUN/stop-faults" "$RUN/finished"
-  for n in faults sampler soakload gw-a gw-b ctl-a ctl-b $NODES proxy; do stop "$n" TERM; done
+  # The fault loop first, so that it cannot start anything again.
+  stop faults TERM
+  for n in sampler soakload gw-a gw-b ctl-a ctl-b $NODES proxy; do stop "$n" TERM; done
   bash "$FDBSH" stop "$F" || true
   rm -f "$RUN"/pids/fdb-*
+  # Anything left (a process started while stopping): ours by owner, by
+  # this run's directory on its command line, and by executable.
+  local me; me="$(id -u)"
+  for d in /proc/[0-9]*; do
+    [ "$(stat -c %u "$d" 2>/dev/null)" = "$me" ] || continue
+    tr '\0' ' ' < "$d/cmdline" 2>/dev/null | grep -q -- "$RUN/" || continue
+    case "$(readlink "$d/exe" 2>/dev/null)" in
+      "$BIN"|"$SOAKLOAD"|"$FAULTPROXY"|"${FDBSERVER:-/usr/sbin/fdbserver}")
+        log "teardown: stopping leftover pid ${d#/proc/}"
+        kill -9 "${d#/proc/}" 2>/dev/null || true ;;
+    esac
+  done
   log "teardown: done"
 }
 
