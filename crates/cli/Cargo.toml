@@ -16,6 +16,9 @@ path = "src/main.rs"
 default = []
 # FoundationDB metadata backend for multi-process deployments.
 fdb = ["arca-lake-metadata/fdb"]
+# Test-only build reporting (P + 1, M + 1, F + 1) for the mixed-version
+# tests (RFC-014 §5.7, ADR-0016). Never ship a binary built with this.
+version-bump = ["arca-lake-common/version-bump"]
 
 [dependencies]
 arca-lake-common.workspace = true

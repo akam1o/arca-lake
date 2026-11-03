@@ -79,6 +79,7 @@ pub struct TestCluster<S: KvStore + 'static = MemKv> {
     pub page_size: u32,
     /// Repair options used by [`TestCluster::repair`].
     pub repair_options: repair::RepairOptions,
+    cluster_cfg: ClusterConfig,
     tmp: tempfile::TempDir,
 }
 
@@ -317,28 +318,26 @@ impl<S: KvStore + 'static> TestCluster<S> {
             None
         };
 
-        let backend = ClusterBackend::new(
-            Arc::clone(&meta),
-            ClusterConfig {
-                profile: opts.profile.clone(),
-                tier: "default".into(),
-                lease: opts.lease,
-                chunk_batch: 16,
-                shard_frame_bytes: 256 << 10,
-                node_timeout: Duration::from_secs(5),
-                rpc_policy: None,
-                cache,
-                read_parallelism: opts.read_parallelism,
-                population_queue_depth: opts.population_queue_depth,
-                populations_per_node: opts.populations_per_node,
-                write_pipeline: opts.write_pipeline,
-                multipart_min_part_bytes: opts.multipart_min_part_bytes,
-                process_id: format!("gateway-test-{}", uuid::Uuid::new_v4().simple()),
-                heartbeat: opts.heartbeat,
-            },
-        )
-        .await
-        .unwrap();
+        let cluster_cfg = ClusterConfig {
+            profile: opts.profile.clone(),
+            tier: "default".into(),
+            lease: opts.lease,
+            chunk_batch: 16,
+            shard_frame_bytes: 256 << 10,
+            node_timeout: Duration::from_secs(5),
+            rpc_policy: None,
+            cache,
+            read_parallelism: opts.read_parallelism,
+            population_queue_depth: opts.population_queue_depth,
+            populations_per_node: opts.populations_per_node,
+            write_pipeline: opts.write_pipeline,
+            multipart_min_part_bytes: opts.multipart_min_part_bytes,
+            process_id: format!("gateway-test-{}", uuid::Uuid::new_v4().simple()),
+            heartbeat: opts.heartbeat,
+        };
+        let backend = ClusterBackend::new(Arc::clone(&meta), cluster_cfg.clone())
+            .await
+            .unwrap();
         let credentials = (
             format!("ARCATEST{}", uuid::Uuid::new_v4().simple()),
             uuid::Uuid::new_v4().simple().to_string(),
@@ -387,8 +386,22 @@ impl<S: KvStore + 'static> TestCluster<S> {
             durable_nodes: opts.nodes,
             page_size: 0,
             repair_options: repair::RepairOptions::default(),
+            cluster_cfg,
             tmp,
         }
+    }
+
+    /// Replace `backend` with a freshly constructed one (a gateway restarted
+    /// after a metadata restore picks up the new incarnation, RFC-015
+    /// §5.3). The HTTP gateway keeps serving the old backend.
+    ///
+    /// # Errors
+    ///
+    /// The startup gate's refusal.
+    pub async fn restart_backend(&mut self) -> Result<(), arca_lake_metadata::MetaError> {
+        self.backend =
+            ClusterBackend::new(Arc::clone(&self.meta), self.cluster_cfg.clone()).await?;
+        Ok(())
     }
 
     /// Stop node `i` (its process is gone until [`TestCluster::start_node`]).

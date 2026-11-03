@@ -30,8 +30,9 @@ pub fn capabilities() -> arca_lake_common::compat::Capabilities {
         protocol_max: PROTOCOL_VERSION,
         schema_min: SCHEMA_VERSION_MIN,
         schema_max: SCHEMA_VERSION,
-        // Gateways hold no segments; they read nothing of the format.
-        format_min: 1,
-        format_max: u64::MAX,
+        // Gateways hold no segments; the format axis is the storage crate
+        // this binary was built with (what `admin init` stamps).
+        format_min: u64::from(arca_lake_storage::format::SEGMENT_FORMAT_VERSION_MIN),
+        format_max: u64::from(arca_lake_storage::format::SEGMENT_FORMAT_VERSION),
     }
 }

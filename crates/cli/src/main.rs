@@ -263,6 +263,10 @@ struct StorageNodeArgs {
     /// (`GET /metrics`).
     #[arg(long)]
     metrics_listen: Option<SocketAddr>,
+    /// Roll to a new segment at this size (bytes); the default is the
+    /// storage engine's 1 GiB. Small values are for tests.
+    #[arg(long)]
+    segment_max_bytes: Option<u64>,
     #[command(subcommand)]
     command: Option<StorageNodeCommand>,
 }
@@ -866,7 +870,10 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return fail(format!("cannot create {}: {e}", dir.display()));
     }
-    let cfg = arca_lake_storage_node::NodeConfig::new(args.listen, &dir);
+    let mut cfg = arca_lake_storage_node::NodeConfig::new(args.listen, &dir);
+    if let Some(b) = args.segment_max_bytes {
+        cfg.store.segment_max_bytes = b;
+    }
     let node = match arca_lake_storage_node::serve(cfg).await {
         Ok(n) => n,
         Err(e) => return fail(format!("cannot start the storage node: {e}")),

@@ -60,3 +60,7 @@ required-features = ["fdb"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "mixed_version"
+required-features = ["fdb"]

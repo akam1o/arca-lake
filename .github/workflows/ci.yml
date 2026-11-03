@@ -219,6 +219,19 @@ jobs:
           set -euo pipefail
           cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
           cargo test -p arca-lake-testkit --features fdb --test e2e_fdb --test faults_fdb --test cache_fdb --test cache_ec_fdb -- --nocapture --test-threads=1
+      - name: mixed-version rolling upgrade (two binaries, RFC-014 §5.7)
+        env:
+          ARCA_FDB_TESTS: "1"
+          ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
+        run: |
+          set -euo pipefail
+          # The "old" build is this tree; the "new" one the same tree with the
+          # test-only version bump (a different binary, ADR-0016).
+          cargo build -p arca-lake --features fdb
+          cargo build -p arca-lake --features fdb,version-bump --target-dir "$CARGO_TARGET_DIR/bump"
+          ARCA_BIN_OLD="$CARGO_TARGET_DIR/debug/arca-lake" \
+          ARCA_BIN_NEW="$CARGO_TARGET_DIR/bump/debug/arca-lake" \
+            cargo test -p arca-lake-testkit --features fdb --test mixed_version -- --nocapture --test-threads=1
       - name: stop FoundationDB server
         if: always()
         run: sudo docker rm -f "$FDB_CONTAINER" >/dev/null 2>&1 || true
