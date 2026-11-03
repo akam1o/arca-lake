@@ -100,7 +100,8 @@ where
     A: S3Access,
 {
     let service = {
-        let mut b = S3ServiceBuilder::new(backend);
+        // Client-visible error messages never carry internal addresses.
+        let mut b = S3ServiceBuilder::new(crate::redact::Redacted(backend));
         let store = cfg.store.clone().or_else(|| {
             cfg.credentials
                 .as_ref()

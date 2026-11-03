@@ -19,6 +19,7 @@ pub mod auth;
 pub mod checksum;
 /// Bucket policy subset (RFC-012 §5.3.3).
 pub mod policy;
+pub mod redact;
 
 /// What this gateway build reads and writes on every axis (RFC-014 §5.1).
 #[must_use]
