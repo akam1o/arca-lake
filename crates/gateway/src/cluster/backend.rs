@@ -141,6 +141,8 @@ pub struct ClusterWatch {
     state: RwLock<Option<ClusterStateRecord>>,
     /// Admission refusals by phase.
     pub refused: std::sync::atomic::AtomicU64,
+    /// Refreshes that failed (the last state was kept).
+    pub refresh_failures: std::sync::atomic::AtomicU64,
 }
 
 /// Interval of the cluster-state refresh.
@@ -656,6 +658,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             incarnation: state.incarnation,
             state: RwLock::new(Some(state.clone())),
             refused: std::sync::atomic::AtomicU64::new(0),
+            refresh_failures: std::sync::atomic::AtomicU64::new(0),
         });
         let base = Arc::clone(&meta);
         let meta_repair = Arc::new(GuardedKv::new(
@@ -764,9 +767,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         w.set(g.cluster);
                     }
                     Err(e) => {
-                        // Fail closed: an unreadable state admits nothing.
-                        tracing::warn!(error = %e, "cluster state refresh failed");
-                        w.set(None);
+                        // A metadata outage keeps the last known state: the
+                        // commit-time guard is the authoritative fence for
+                        // writes, and reads must not be refused because the
+                        // store was briefly unreachable (RFC-011 §6).
+                        w.refresh_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!(error = %e, "cluster state refresh failed; keeping the last state");
                     }
                 }
             }
