@@ -27,6 +27,19 @@ Enabled with `--scrub-adaptive` on the controller (`--adaptive` on
 `admin integrity scrub --wait`). The default stays the fixed budget until
 the measurements in the Phase 3.4 performance report justify changing it.
 
+## Measurements (Phase 3.4)
+
+Disk-bound working set (24 GiB over 7.8 GiB RAM, shared virtual storage,
+three repetitions; `docs/verification/performance-regression.md`): the
+client load alone keeps the device queue above the target, so the
+adaptive budget sits at its floor (1.5 MiB/s, never zero); its client cost
+is about half that of the fixed 32 MiB/s (GET throughput −3 % against −6
+to −9 %), within the between-run variance, at a pass time of 4.5 h
+instead of 0.21 h. The default stays the fixed budget. With adaptation on,
+size the floor to the data: `--scrub-min-rate-mib` ≥ shard bytes per
+device / scrub interval, or the pass will not finish within the interval
+on a device that is always busy.
+
 ## Consequences
 
 - `Health` carries load fields 20–26 (additive; older nodes leave

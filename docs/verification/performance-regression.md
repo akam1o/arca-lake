@@ -286,3 +286,55 @@ read-only transactions pay nothing). The hit ratio is below the
 tolerance for both binaries; it is the population queue dropping work
 behind slow reads, as recorded in Phase 3.1. No regression attributable
 to Phase 3.3 code is visible within the noise of these hosts.
+
+## Phase 3.4 run (2026-11-03): adaptive scrub, FoundationDB TLS, member moves
+
+### Disk-bound scrub: off / fixed 32 MiB/s / adaptive (R-59, ADR-0018)
+
+`scrub-diskbound.sh` with `REPS=3 MODES="none 32 adaptive"`: 1024 × 16 MiB
+objects (24 GiB of shards, three times the RAM of the host with two
+nodes), random 1 MiB range GETs and PUTs from the other host, 120 s
+windows, mode order rotated per repetition. Raw data and per-window tables:
+`benchmarks/linux/results/phase34-20261103/scrub-diskbound/` (run 1: fixed
+32 only, its "adaptive" windows ran at the fixed rate because of a bug
+fixed in 9ca323b; run 2: all three modes).
+
+- Variance: every mode's third repetition ran about 40 % slower than its
+  first two (shared virtual storage). Medians over windows mean little;
+  modes are compared with the no-scrub window of the same repetition.
+- Fixed 32 MiB/s (runs 1 and 2, six windows): GET throughput −6 to −11 %,
+  p50 +5 to +13 %, p99 +2 to +8 %; PUT within its window-to-window noise
+  (±30 %). Full pass 0.21 h. Compared with Phase 3.3 (p95 +72 % on 16 GiB),
+  the p95 cost here is +2 to +8 %: the larger working set saturates the
+  device with client reads alone (queue depth 7–10 without scrubbing).
+- Adaptive: the client load alone keeps the queue depth above the target
+  (4), so the budget sat at its floor (1.5 MiB/s measured, never 0). Cost
+  in the two clean repetitions: GET throughput −3.3 %, p50 +0.1 to +2.8 %,
+  p99 −0.2 to +5.7 %; full pass about 4.5 h. About half the fixed budget's
+  cost, at a twentieth of its scrub rate; the difference is within the
+  between-repetition variance.
+- Default unchanged (fixed 32 MiB/s); adaptive is opt-in. On a busy device
+  the floor sets the pass time: `--scrub-min-rate-mib` ≥ shard bytes per
+  device / scrub interval.
+- Not measured: stripe repair throughput while scrubbing a disk-bound
+  device (the soak exports repair counters under its faults; no
+  controlled measurement). Not verified on physical disks.
+
+### FoundationDB TLS versus plaintext
+
+`benchmarks/linux/results/phase34-20261103/fdb-tls/` (metabench, two
+identical three-process clusters on one host, 3 alternating repetitions):
+metadata transaction throughput −6 to −8 % at 8 concurrent tasks and
+−12 to −14 % at 64, p50 +0.1 to +0.9 ms, first transaction after open
+3.8 ms → 7–8.6 ms. No error.
+
+### Member moves: reconstruction versus direct copy
+
+In-process (`membership_faults.rs::measure_member_move`, release build,
+4+2 group, 96 × 1 MiB chunks, 3 repetitions): reconstruction reads 384
+shards (k = 4 per chunk) in 0.75–0.76 s; a direct copy from the leaving
+member reads 96 in 0.62–0.63 s, and every object reads back unchanged in
+both. The default stays reconstruction (each chunk is checked against
+its recorded checksum before the shard is written); `--repair-source
+direct` is the opt-in when the leaving member is healthy and network or
+device reads are the bottleneck. Not measured on the hosts.
