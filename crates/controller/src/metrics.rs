@@ -111,6 +111,10 @@ pub struct Metrics {
     pub tls: std::sync::OnceLock<std::sync::Arc<arca_lake_protocol::tls::TlsStats>>,
     /// Groups in `Repairing` at the last repair pass.
     pub groups_repairing: AtomicU64,
+    /// Current byte budget of an adaptive scrub (ADR-0018).
+    pub scrub_rate_bytes_per_second: AtomicU64,
+    /// Times an adaptive scrub halved its budget under load.
+    pub scrub_throttles_total: AtomicU64,
 }
 
 /// Metric label of each finding class, in `Finding::ALL` order.
@@ -188,6 +192,14 @@ impl Metrics {
         out += &g(
             "arca_controller_groups_repairing",
             self.groups_repairing.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_scrub_rate_bytes_per_second",
+            self.scrub_rate_bytes_per_second.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_scrub_throttles_total",
+            self.scrub_throttles_total.load(Ordering::Relaxed),
         );
         out += &c(
             "arca_controller_cache_evicted_total",

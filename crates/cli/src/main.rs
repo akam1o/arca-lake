@@ -237,6 +237,41 @@ struct NodeRpcArgs {
     tls: TlsArgs,
 }
 
+/// Adaptive scrub budget of the controller (ADR-0018).
+#[derive(Debug, clap::Args)]
+struct AdaptiveScrubArgs {
+    /// Adapt the scrub budget to the scrubbed node's load (device
+    /// utilisation and queue depth, client GET/PUT p99); without load
+    /// signals the fixed `--scrub-rate-mib` applies.
+    #[arg(long = "scrub-adaptive")]
+    on: bool,
+    /// Floor of the adaptive budget, MiB/s (scrubbing never stops).
+    #[arg(long = "scrub-min-rate-mib", default_value_t = 1)]
+    min_mib: u64,
+    /// Ceiling, MiB/s (0 = four times `--scrub-rate-mib`).
+    #[arg(long = "scrub-max-rate-mib", default_value_t = 0)]
+    max_mib: u64,
+    /// Client GET p99 above which the budget is halved, ms.
+    #[arg(long = "scrub-target-get-p99-ms", default_value_t = 50)]
+    get_p99_ms: u64,
+}
+
+fn adaptive_policy(
+    base_mib: u64,
+    min_mib: u64,
+    max_mib: u64,
+    get_p99_ms: u64,
+) -> arca_lake_controller::adaptive::AdaptivePolicy {
+    let base = (base_mib.max(1)) << 20;
+    let mut p = arca_lake_controller::adaptive::AdaptivePolicy::around(base);
+    p.min = (min_mib.max(1) << 20).min(base);
+    if max_mib > 0 {
+        p.max = (max_mib << 20).max(base);
+    }
+    p.get_p99_us = get_p99_ms.max(1) * 1000;
+    p
+}
+
 /// Dry runs of member moves: node access and the controller's settings.
 #[derive(Debug, clap::Args)]
 struct PlanArgs {
@@ -683,9 +718,12 @@ struct ControllerArgs {
     /// device between two pacing sleeps (0 = unbounded).
     #[arg(long, default_value_t = 8)]
     scrub_page_mib: u64,
-    /// Scrub read budget in MiB per second across groups (0 = unpaced).
+    /// Scrub read budget in MiB per second across groups (0 = unpaced);
+    /// with `--scrub-adaptive`, the starting and fallback rate.
     #[arg(long, default_value_t = 32)]
     scrub_rate_mib: u64,
+    #[command(flatten)]
+    scrub_adaptive: AdaptiveScrubArgs,
     /// Groups scrubbed per tick.
     #[arg(long, default_value_t = 1)]
     scrub_concurrency: usize,
@@ -1058,9 +1096,22 @@ enum IntegrityCommand {
         /// Payload MiB per request when `--wait` (0 = unbounded).
         #[arg(long, default_value_t = 8)]
         page_mib: u64,
-        /// Read budget in MiB per second when `--wait` (0 = unpaced).
+        /// Read budget in MiB per second when `--wait` (0 = unpaced); with
+        /// `--adaptive`, the starting and fallback rate.
         #[arg(long, default_value_t = 0)]
         rate_mib: u64,
+        /// Adapt the budget to the nodes' load (ADR-0018).
+        #[arg(long)]
+        adaptive: bool,
+        /// Floor of the adaptive budget, MiB/s.
+        #[arg(long, default_value_t = 1)]
+        adaptive_min_mib: u64,
+        /// Ceiling of the adaptive budget, MiB/s (0 = four times the rate).
+        #[arg(long, default_value_t = 0)]
+        adaptive_max_mib: u64,
+        /// Client GET p99 target of the adaptive budget, ms.
+        #[arg(long, default_value_t = 50)]
+        adaptive_get_p99_ms: u64,
         #[command(flatten)]
         rpc: NodeRpcArgs,
     },
@@ -1686,6 +1737,14 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
         interval_ms: args.scrub_interval_secs * 1000,
         concurrency: args.scrub_concurrency,
         manifest_roots_per_pass: 256,
+        adaptive: args.scrub_adaptive.on.then(|| {
+            adaptive_policy(
+                args.scrub_rate_mib,
+                args.scrub_adaptive.min_mib,
+                args.scrub_adaptive.max_mib,
+                args.scrub_adaptive.get_p99_ms,
+            )
+        }),
     };
     cfg.scrub_tick = Duration::from_secs(args.scrub_tick_secs.max(1));
     cfg.stripe_repair = arca_lake_controller::integrity::RepairWorkerOptions {
@@ -2950,6 +3009,10 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
             page,
             page_mib,
             rate_mib,
+            adaptive,
+            adaptive_min_mib,
+            adaptive_max_mib,
+            adaptive_get_p99_ms,
             rpc,
         } => {
             if !wait {
@@ -2981,6 +3044,14 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
                 interval_ms: 1,
                 concurrency: 1,
                 manifest_roots_per_pass: 256,
+                adaptive: adaptive.then(|| {
+                    adaptive_policy(
+                        rate_mib.max(32),
+                        adaptive_min_mib,
+                        adaptive_max_mib,
+                        adaptive_get_p99_ms,
+                    )
+                }),
             };
             match arca_lake_controller::integrity::scrub_group_now(
                 meta.as_ref(),

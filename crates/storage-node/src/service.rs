@@ -76,6 +76,8 @@ pub struct StorageNodeService {
     compaction: Arc<crate::compactor::CompactionStats>,
     /// Advertised capacity cap.
     capacity_bytes: Option<u64>,
+    /// Load signals for adaptive background work (ADR-0018).
+    load: crate::load::LoadSampler,
 }
 
 /// Decrements a gauge when dropped (`PutShard` streams in flight).
@@ -185,6 +187,7 @@ impl StorageNodeService {
             tls: cfg.tls.clone(),
             compaction: Arc::default(),
             capacity_bytes: cfg.capacity_bytes,
+            load: crate::load::LoadSampler::new(&cfg.store.dir),
         })
     }
 
@@ -878,6 +881,10 @@ impl StorageNode for StorageNodeService {
             )
         };
         let space = self.device_space_with(stats.segment_bytes);
+        let load = self.load.sample(
+            self.stats.get_serve.snapshot(),
+            self.stats.put_store.snapshot(),
+        );
         Ok(tonic::Response::new(pb::HealthResponse {
             live_shards: stats.live_shards as u64,
             live_bytes: stats.live_bytes,
@@ -898,6 +905,13 @@ impl StorageNode for StorageNodeService {
             device_free_bytes: space.map_or(0, |s| s.0),
             device_total_bytes: space.map_or(0, |s| s.1),
             verify_read_only: true,
+            load_get_p99_us: load.get_p99_us,
+            load_put_p99_us: load.put_p99_us,
+            load_device: load.device.is_some(),
+            load_device_util_permille: load.device.map_or(0, |d| d.util_permille),
+            load_device_queue_depth_milli: load.device.map_or(0, |d| d.queue_depth_milli),
+            load_device_read_await_us: load.device.map_or(0, |d| d.read_await_us),
+            load_reported: true,
         }))
     }
 }

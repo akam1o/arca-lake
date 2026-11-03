@@ -127,6 +127,7 @@ async fn scrub(c: &TestCluster) -> arca_lake_controller::integrity::ScrubReport 
             rate_bytes_per_s: 0,
             interval_ms: 1,
             concurrency: 1,
+            adaptive: None,
             manifest_roots_per_pass: 256,
         },
         now_ms(),
@@ -360,6 +361,7 @@ async fn the_background_manifest_scrub_pages_through_a_persisted_cursor() {
         rate_bytes_per_s: 0,
         interval_ms: 3_600_000,
         concurrency: 1,
+        adaptive: None,
         manifest_roots_per_pass: 2,
     };
     let pass = |now: u64| {

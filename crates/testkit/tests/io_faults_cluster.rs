@@ -36,6 +36,7 @@ fn scrub_opts() -> ScrubOptions {
         rate_bytes_per_s: 0,
         interval_ms: 1,
         concurrency: 1,
+        adaptive: None,
         manifest_roots_per_pass: 0,
     }
 }

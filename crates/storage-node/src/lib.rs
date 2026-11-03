@@ -11,6 +11,7 @@ pub mod compactor;
 mod epochs;
 #[cfg(feature = "fault-injection")]
 mod fault_control;
+pub mod load;
 mod service;
 
 pub use arca_lake_storage::{ShardKey, Store, StoreTimingsSnapshot};

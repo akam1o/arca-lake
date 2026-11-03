@@ -222,6 +222,18 @@ message HealthResponse {
   uint64 device_total_bytes = 18;
   // The node honours VerifyShardsRequest.read_only.
   bool verify_read_only = 19;
+  // Load of the recent window (ADR-0018, adaptive background work):
+  // p99 of GetShard serve and PutShard store time, µs (0 = no request).
+  uint64 load_get_p99_us = 20;
+  uint64 load_put_p99_us = 21;
+  // Device statistics of the window, when the platform has them.
+  bool load_device = 22;
+  uint32 load_device_util_permille = 23;
+  uint32 load_device_queue_depth_milli = 24;
+  uint32 load_device_read_await_us = 25;
+  // The node reports the load fields above (older nodes: false, and their
+  // zeros mean "unknown", not "idle").
+  bool load_reported = 26;
 }
 
 service StorageNode {

@@ -69,6 +69,9 @@ pub struct ScrubOptions {
     /// Multipart roots examined per pass by the manifest scrub (R-55); 0
     /// disables the background manifest scrub.
     pub manifest_roots_per_pass: usize,
+    /// Adapt the byte budget to the scrubbed node's load (ADR-0018);
+    /// `None` = the fixed `rate_bytes_per_s`.
+    pub adaptive: Option<crate::adaptive::AdaptivePolicy>,
 }
 
 impl Default for ScrubOptions {
@@ -80,6 +83,7 @@ impl Default for ScrubOptions {
             interval_ms: 24 * 3600 * 1000,
             concurrency: 1,
             manifest_roots_per_pass: 256,
+            adaptive: None,
         }
     }
 }
@@ -362,7 +366,7 @@ pub async fn scrub_pass<S: KvStore>(
         m.scrub_groups_overdue
             .store(due.len() as u64, Ordering::Relaxed);
     }
-    let mut budget = Pacer::new(opts.rate_bytes_per_s);
+    let mut budget = Pacer::new(opts.rate_bytes_per_s).with_adaptive(opts.adaptive);
     for (_, group) in due.into_iter().take(opts.concurrency.max(1)) {
         if cancelled(cancel) {
             break;
@@ -451,11 +455,22 @@ pub async fn verify_manifests<S: KvStore>(
 }
 
 /// Byte budget per second: sleeps so that bytes verified so far fit it.
+/// Adaptive (ADR-0018): the rate follows the scrubbed node's load.
 struct Pacer {
     rate: u64,
     started: std::time::Instant,
     bytes: u64,
+    adaptive: Option<Adapt>,
 }
+
+struct Adapt {
+    aimd: crate::adaptive::Aimd,
+    last_sample: std::time::Instant,
+    repair_bytes: u64,
+}
+
+/// Shortest time between two load samples of an adaptive scrub.
+const ADAPT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl Pacer {
     fn new(rate: u64) -> Self {
@@ -463,7 +478,71 @@ impl Pacer {
             rate,
             started: std::time::Instant::now(),
             bytes: 0,
+            adaptive: None,
         }
+    }
+
+    fn with_adaptive(mut self, policy: Option<crate::adaptive::AdaptivePolicy>) -> Self {
+        if let Some(p) = policy {
+            self.rate = p.base;
+            self.adaptive = Some(Adapt {
+                aimd: crate::adaptive::Aimd::new(p),
+                last_sample: std::time::Instant::now(),
+                repair_bytes: 0,
+            });
+        }
+        self
+    }
+
+    /// A new rate takes effect from now (no burst to catch up, no debt).
+    fn set_rate(&mut self, rate: u64) {
+        if rate != self.rate {
+            self.rate = rate;
+            self.started = std::time::Instant::now();
+            self.bytes = 0;
+        }
+    }
+
+    /// Adaptive scrubbing: sample the node at `addr` (at most once per
+    /// `ADAPT_EVERY`) and apply the new rate.
+    async fn adapt<S: KvStore>(
+        &mut self,
+        meta: &S,
+        clients: &NodeClients,
+        addr: &str,
+        metrics: Option<&Metrics>,
+    ) {
+        let Some(a) = self.adaptive.as_mut() else {
+            return;
+        };
+        if a.last_sample.elapsed() < ADAPT_EVERY {
+            return;
+        }
+        a.last_sample = std::time::Instant::now();
+        let signals = clients
+            .health(addr)
+            .await
+            .ok()
+            .and_then(|h| crate::adaptive::Signals::from_health(&h));
+        // Repair is active when it moved bytes since the last sample (this
+        // process's repair worker) or has work queued (any process's).
+        let repair_bytes = metrics.map_or(0, |m| m.repair_bytes_total.load(Ordering::Relaxed));
+        let queued = integrity::tasks(meta, 256).await.is_ok_and(|t| {
+            t.iter().any(|(_, _, t)| {
+                matches!(t.state, RepairState::Detected | RepairState::Planned { .. })
+            })
+        });
+        let repair_active = repair_bytes > a.repair_bytes || queued;
+        a.repair_bytes = repair_bytes;
+        let before = a.aimd.throttles;
+        let rate = a.aimd.observe(signals, repair_active);
+        let throttled = a.aimd.throttles - before;
+        if let Some(m) = metrics {
+            m.scrub_rate_bytes_per_second.store(rate, Ordering::Relaxed);
+            m.scrub_throttles_total
+                .fetch_add(throttled, Ordering::Relaxed);
+        }
+        self.set_rate(rate);
     }
 
     async fn account(&mut self, bytes: u64, cancel: Cancel<'_>) {
@@ -699,6 +778,7 @@ async fn scrub_group<S: KvStore>(
                     },
                 };
                 integrity::set_scrub_cursor(meta, group.id, &cursor).await?;
+                pacer.adapt(meta, clients, &node.address, metrics).await;
                 pacer.account(page.bytes_read, cancel).await;
                 if cancelled(cancel) {
                     return Ok((false, report));

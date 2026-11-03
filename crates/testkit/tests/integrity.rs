@@ -95,6 +95,7 @@ fn unpaced() -> ScrubOptions {
         rate_bytes_per_s: 0,
         interval_ms: 1,
         concurrency: 1,
+        adaptive: None,
         manifest_roots_per_pass: 256,
     }
 }
@@ -606,6 +607,7 @@ async fn scrub_cursor_resumes_after_an_interrupted_pass_and_a_node_restart() {
             rate_bytes_per_s: 1,
             interval_ms: 1,
             concurrency: 1,
+            adaptive: None,
             manifest_roots_per_pass: 256,
         };
         scrub_group_now(meta.as_ref(), &clients, &coders(), gid, &opts, now_ms()).await
@@ -681,6 +683,7 @@ async fn byte_bounded_scrub_pages_cover_every_shard_exactly_once() {
             rate_bytes_per_s: 0,
             interval_ms: 1,
             concurrency: 1,
+            adaptive: None,
             manifest_roots_per_pass: 256,
         },
         now_ms(),
@@ -727,6 +730,7 @@ async fn scrub_pages_larger_than_the_key_bound_cover_every_shard() {
                 rate_bytes_per_s: 0,
                 interval_ms: 1,
                 concurrency: 1,
+                adaptive: None,
                 manifest_roots_per_pass: 256,
             },
             now_ms(),
@@ -1006,6 +1010,7 @@ fn fast(id: &str) -> ControllerConfig {
         rate_bytes_per_s: 0,
         interval_ms: 1,
         concurrency: 4,
+        adaptive: None,
         manifest_roots_per_pass: 256,
     };
     cfg.scrub_tick = Duration::from_millis(200);
@@ -1172,6 +1177,7 @@ async fn shutdown_interrupts_a_paced_scrub_pass_promptly() {
         rate_bytes_per_s: 1,
         interval_ms: 1,
         concurrency: 1,
+        adaptive: None,
         manifest_roots_per_pass: 256,
     };
     let h = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
@@ -1293,5 +1299,56 @@ async fn controller_processes_scrub_and_repair_and_a_leader_failover_resumes_the
     assert_all_readable(&c, &objects).await;
     assert_eq!(scrub(&c, group.id).await.findings, [0; 8]);
     new.shutdown().await;
+    c.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_adaptive_scrub_reads_the_node_load_and_completes_its_pass() {
+    // Nodes report load (ADR-0018); the pass completes with every shard
+    // verified, at an adapted rate the controller exports.
+    use arca_lake_controller::adaptive::{AdaptivePolicy, Signals};
+    use arca_lake_controller::integrity::scrub_pass;
+    use arca_lake_controller::metrics::Metrics;
+    let c = cluster(3, 2, 1).await;
+    seed_objects(&c, 6, 300 << 10).await;
+    let nodes = arca_lake_metadata::ops::cluster::list_nodes(c.meta.as_ref())
+        .await
+        .unwrap();
+    // Two samples half a second apart: the second covers a window.
+    let addr = &nodes[0].address;
+    c.clients.health(addr).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let h = c.clients.health(addr).await.unwrap();
+    assert!(
+        Signals::from_health(&h).is_some(),
+        "the node reports its load"
+    );
+    let opts = ScrubOptions {
+        page: 2,
+        page_bytes: 64 << 10,
+        rate_bytes_per_s: 1 << 20,
+        adaptive: Some(AdaptivePolicy::around(1 << 20)),
+        ..unpaced()
+    };
+    let m = Metrics::default();
+    let r = scrub_pass(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders(),
+        &opts,
+        Some(&m),
+        None,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.groups_completed, 1, "{r:?}");
+    assert_eq!(r.verified, 18, "6 objects x 3 shards: {r:?}");
+    assert!(
+        m.scrub_rate_bytes_per_second
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0,
+        "the adapted rate is exported"
+    );
     c.shutdown().await;
 }

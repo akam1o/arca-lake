@@ -12,6 +12,16 @@ pub const BUCKET_BOUNDS_US: [u64; 12] = [
 
 const BUCKETS: usize = BUCKET_BOUNDS_US.len() + 1;
 
+/// Upper bound of bucket `i` in microseconds (the open last bucket
+/// reports twice the largest bound).
+#[must_use]
+pub fn bucket_upper_us(i: usize) -> u64 {
+    BUCKET_BOUNDS_US
+        .get(i)
+        .copied()
+        .unwrap_or(BUCKET_BOUNDS_US[BUCKET_BOUNDS_US.len() - 1] * 2)
+}
+
 /// A histogram of durations: cumulative bucket counts plus sum, count and
 /// the largest value seen.
 #[derive(Debug, Default)]
