@@ -79,7 +79,11 @@ pub(crate) fn pass(store: &Store, policy: &CompactionPolicy, stats: &CompactionS
     };
     let mut candidates: Vec<_> = segs
         .iter()
-        .filter(|s| !s.active && s.file_bytes > 0 && dead(s) >= policy.min_dead_fraction)
+        // A blocked segment would only be rewritten as it is (its
+        // tombstones are still needed): never spend the pass on it.
+        .filter(|s| {
+            !s.active && !s.blocked && s.file_bytes > 0 && dead(s) >= policy.min_dead_fraction
+        })
         .collect();
     candidates.sort_by(|a, b| dead(b).total_cmp(&dead(a)));
     let mut budget = policy.max_copy_bytes;
@@ -89,6 +93,12 @@ pub(crate) fn pass(store: &Store, policy: &CompactionPolicy, stats: &CompactionS
         }
         budget = budget.saturating_sub(s.live_bytes);
         match store.compact(s.segment_id) {
+            Ok(r) if r.no_progress => {
+                tracing::debug!(
+                    segment = s.segment_id,
+                    "nothing to reclaim yet; skipped until that changes"
+                );
+            }
             Ok(r) => {
                 stats.compactions.fetch_add(1, Ordering::Relaxed);
                 stats

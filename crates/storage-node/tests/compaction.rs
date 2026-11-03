@@ -75,6 +75,16 @@ async fn deleted_space_is_reclaimed_while_serving_and_survivors_read_back() {
     assert_eq!(stats.errors.load(Ordering::Relaxed), 0);
     assert!(stats.compactions.load(Ordering::Relaxed) > 0);
     assert!(stats.reclaimed_bytes.load(Ordering::Relaxed) > 0);
+    // Settled: idle passes do not keep rewriting segments whose tombstones
+    // are still needed (the churn found by the soak test).
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let settled = stats.compactions.load(Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        stats.compactions.load(Ordering::Relaxed),
+        settled,
+        "compaction churns while idle"
+    );
     for i in 0..120 {
         let r = c.get_shard(&addr, shard(i), 0, 0).await;
         if i % 5 == 0 {

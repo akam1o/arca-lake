@@ -250,8 +250,18 @@ fn tombstones_are_kept_while_older_data_may_exist() {
         .map(|s| s.segment_id)
         .max()
         .expect("a sealed segment holding only the tombstone");
+    // Nothing in it can go: the segment (and its tombstone) is left as it
+    // is rather than rewritten.
     let r = store.compact(tomb_seg).unwrap();
-    assert_eq!(r.tombstones_kept, 1, "{r:?}");
+    assert!(r.no_progress, "{r:?}");
+    assert!(
+        store
+            .segment_stats()
+            .unwrap()
+            .iter()
+            .any(|s| s.segment_id == tomb_seg && s.blocked),
+        "{r:?}"
+    );
     drop(store);
     let (store, _) = Store::open(cfg).unwrap();
     assert!(
@@ -259,4 +269,90 @@ fn tombstones_are_kept_while_older_data_may_exist() {
         "key 1 resurrected"
     );
     assert_eq!(store.get(&key(2), None).unwrap(), b"filler");
+}
+
+/// A segment holding only tombstones that must be kept (an older segment
+/// still has records below them) is not rewritten into another such
+/// segment pass after pass; it is skipped until the older records are
+/// gone, then its tombstones are dropped (found by the Phase 3.4 soak:
+/// endless tombstone-segment churn starved real compaction).
+#[test]
+fn kept_tombstones_are_not_rewritten_until_they_can_be_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    let active = |store: &Store| {
+        store
+            .segment_stats()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.active)
+            .unwrap()
+            .segment_id
+    };
+    for i in 0..200 {
+        store.put(key(i), &payload(i)).unwrap();
+    }
+    let last_data = store.locate(&key(199)).unwrap().segment_id;
+    // 200 tombstones of one 512-byte record each: several segments of
+    // nothing but tombstones after the last data segment.
+    for i in 0..200 {
+        store.delete(key(i)).unwrap();
+    }
+    // Seal them.
+    let mut n = 10_000;
+    let first_active = active(&store);
+    while active(&store) == first_active {
+        store.put(key(n), &payload(n)).unwrap();
+        n += 1;
+    }
+    let tomb = last_data + 1;
+    assert!(
+        tomb < first_active,
+        "a sealed tombstone-only segment exists"
+    );
+    // Its tombstones are needed (the data segments below are still
+    // there): compacting it makes no progress and writes nothing ...
+    let r = store.compact(tomb).unwrap();
+    assert!(r.no_progress, "{r:?}");
+    assert_eq!(r.output_segment_id, None);
+    assert_eq!(r.tombstones_kept, 0, "nothing was rewritten: {r:?}");
+    // ... and it is not offered again while that holds.
+    let files = || std::fs::read_dir(dir.path()).unwrap().count();
+    let before = files();
+    for _ in 0..3 {
+        assert!(!store.compaction_candidates(0.0).unwrap().contains(&tomb));
+    }
+    assert_eq!(files(), before);
+    // The old data segments are compacted away (all their records are
+    // dead): the tombstones can go now, the segment is offered again and
+    // compacting it drops them.
+    for s in 0..=last_data {
+        if store
+            .segment_stats()
+            .unwrap()
+            .iter()
+            .any(|x| x.segment_id == s)
+        {
+            store.compact(s).unwrap();
+        }
+    }
+    assert!(store.compaction_candidates(0.0).unwrap().contains(&tomb));
+    let r = store.compact(tomb).unwrap();
+    assert!(!r.no_progress && r.tombstones_dropped > 0, "{r:?}");
+    assert_eq!(r.output_segment_id, None, "every tombstone dropped: {r:?}");
+    for i in 0..200 {
+        assert!(matches!(
+            store.get(&key(i), None),
+            Err(StorageError::NotFound)
+        ));
+    }
+    drop(store);
+    // A reopen agrees: nothing deleted comes back.
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    for i in 0..200 {
+        assert!(
+            matches!(store.get(&key(i), None), Err(StorageError::NotFound)),
+            "{i} came back"
+        );
+    }
 }

@@ -25,8 +25,8 @@ OBJECTS="${OBJECTS:-1024}"
 SIZE="${SIZE:-$((16 << 20))}"
 WINDOW="${WINDOW:-120}"
 TH=benchmarks/linux/two-host.sh
-sa() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_A" "$@"; }
-sb() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_B" "$@"; }
+sa() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 "$HOST_A" "$@"; }
+sb() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 "$HOST_B" "$@"; }
 addr_of() { ssh -o BatchMode=yes "$1" "hostname -I | awk '{print \$1}'"; }
 ADDR_B="$(addr_of "$HOST_B")"
 # Transport of node RPCs and metadata (ADR-0017): explicit plaintext unless

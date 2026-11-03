@@ -1,6 +1,6 @@
 //! The per-device store: open/recover, put, get, delete, compaction, scrub.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -233,6 +233,10 @@ pub struct SegmentStats {
     pub live_records: usize,
     /// Whether this is the active (append) segment.
     pub active: bool,
+    /// A compaction found nothing to reclaim (its tombstones are still
+    /// needed) and nothing changed since: compacting it again would only
+    /// rewrite the same records. Compaction schedulers skip it.
+    pub blocked: bool,
 }
 
 /// Points at which compaction can be interrupted by a fault-injection hook.
@@ -265,6 +269,9 @@ pub struct CompactionReport {
     pub tombstones_kept: usize,
     /// Tombstones dropped.
     pub tombstones_dropped: usize,
+    /// Nothing could be reclaimed (no dead record, every tombstone still
+    /// needed): the segment was left as it was, nothing was written.
+    pub no_progress: bool,
 }
 
 #[derive(Debug)]
@@ -353,6 +360,12 @@ pub struct Store {
     writer: Mutex<Writer>,
     index: RwLock<MemIndex>,
     readers: RwLock<BTreeMap<u64, SegmentInfo>>,
+    /// Segments whose last compaction made no progress:
+    /// `segment → (lowest tombstone sequence it had to keep, live records
+    /// then)`. Retried once an older segment's records are gone (the other
+    /// segments' minimum sequence passed the tombstone) or its live records
+    /// changed.
+    compaction_blocked: Mutex<HashMap<u64, (u64, usize)>>,
     durability: Durability,
     timings: StoreTimings,
     quarantine_log: QuarantineLog,
@@ -477,6 +490,7 @@ impl Store {
             }),
             index: RwLock::new(rec.index),
             readers: RwLock::new(rec.readers),
+            compaction_blocked: Mutex::new(HashMap::new()),
             durability: Durability {
                 state: Mutex::new(DurState {
                     durable: start,
@@ -1191,24 +1205,45 @@ impl Store {
     ///
     /// Fails on I/O errors while reading segment sizes.
     pub fn segment_stats(&self) -> Result<Vec<SegmentStats>> {
-        let active = self
-            .writer
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .active
-            .header()
-            .segment_id;
+        let (active, active_min_seq) = {
+            let w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+            (w.active.header().segment_id, w.active_min_seq)
+        };
         let idx = self.index.read().unwrap_or_else(PoisonError::into_inner);
         let readers = self.readers.read().unwrap_or_else(PoisonError::into_inner);
+        let blocked = self
+            .compaction_blocked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        // The two lowest minimum sequences, to get every segment's "lowest
+        // sequence elsewhere" (what decides whether its tombstones can go).
+        let mut mins: Vec<(u64, u64)> = readers
+            .iter()
+            .filter_map(|(&id, i)| {
+                if id == active {
+                    active_min_seq
+                } else {
+                    i.min_seq
+                }
+                .map(|m| (m, id))
+            })
+            .collect();
+        mins.sort_unstable();
+        let other_min = |id: u64| mins.iter().find(|(_, s)| *s != id).map(|(m, _)| *m);
         let mut out = Vec::with_capacity(readers.len());
         for (&id, info) in readers.iter() {
             let live = idx.segment_live(id);
+            let blocked = blocked.get(&id).is_some_and(|&(floor, records)| {
+                records == live.records && other_min(id).is_none_or(|m| m < floor)
+            });
             out.push(SegmentStats {
                 segment_id: id,
                 file_bytes: info.file.metadata()?.len(),
                 live_bytes: live.bytes,
                 live_records: live.records,
                 active: id == active,
+                blocked,
             });
         }
         Ok(out)
@@ -1225,7 +1260,7 @@ impl Store {
         Ok(self
             .segment_stats()?
             .into_iter()
-            .filter(|s| !s.active && s.file_bytes > 0)
+            .filter(|s| !s.active && !s.blocked && s.file_bytes > 0)
             .filter(|s| {
                 let dead = s.file_bytes.saturating_sub(s.live_bytes) as f64 / s.file_bytes as f64;
                 dead >= min_dead_fraction
@@ -1304,6 +1339,49 @@ impl Store {
             segment_id,
             ..Default::default()
         };
+        // Would this reclaim anything? A segment of live records and
+        // tombstones that are all still needed would only be rewritten
+        // into an identical new segment, every pass (soak test): leave it,
+        // and let `segment_stats` mark it blocked until that changes.
+        let mut floor = u64::MAX;
+        let progress = !scan.damaged.is_empty()
+            || scan.records.iter().any(|r| {
+                let p = r.header.prefix();
+                if p.is_tombstone() {
+                    let keep = other_min_seq.is_some_and(|m| m < p.sequence);
+                    if keep {
+                        floor = floor.min(p.sequence);
+                    }
+                    !keep
+                } else {
+                    self.locate(&r.header.key)
+                        != Some(Location {
+                            segment_id,
+                            offset: r.offset,
+                            header_len: p.header_len() as u64,
+                            payload_len: p.payload_len,
+                            sequence: p.sequence,
+                        })
+                }
+            });
+        if !progress {
+            let records = self
+                .index
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .segment_live(segment_id)
+                .records;
+            self.compaction_blocked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(segment_id, (floor, records));
+            report.no_progress = true;
+            return Ok(report);
+        }
+        self.compaction_blocked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&segment_id);
         let mut output: Option<SegmentWriter> = None;
         let mut moved: Vec<(ShardKey, Location, Location)> = Vec::new();
         let mut out_min_seq: Option<u64> = None;

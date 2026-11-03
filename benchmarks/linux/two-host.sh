@@ -39,9 +39,9 @@ CACHE_CAPACITY="${CACHE_CAPACITY:-0}"
 OUT="${OUT:-benchmarks/linux/results}"
 
 HOST_C="${HOST_C:-}"
-sa() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_A" "$@"; }
-sb() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_B" "$@"; }
-sc() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_C" "$@"; }
+sa() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 "$HOST_A" "$@"; }
+sb() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 "$HOST_B" "$@"; }
+sc() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 "$HOST_C" "$@"; }
 addr_of() { ssh -o BatchMode=yes "$1" "hostname -I | awk '{print \$1}'"; }
 
 ADDR_A="$(addr_of "$HOST_A")"
