@@ -1,6 +1,6 @@
 # RFC-015: Backup, Restore and Disaster Recovery
 
-- Status: draft, conditionally approved (Phase 3.0 review reflected; cluster-state record in Phase 3.1, remainder and drills Phase 3.3)
+- Status (Phase 3.3: implemented as amended by ADR-0016; `admin recovery begin|status|verify|resume|finalize` and `admin cluster set-read-only|activate` are the command names): draft, conditionally approved (Phase 3.0 review reflected; cluster-state record in Phase 3.1, remainder and drills Phase 3.3)
 - Authors: arca-lake maintainers
 - Created: 2026-11-02
 - Depends on: RFC-003, RFC-004, RFC-006, RFC-008, RFC-011, RFC-014

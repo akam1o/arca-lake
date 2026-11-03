@@ -1,6 +1,6 @@
 # RFC-014: Rolling Upgrade and Compatibility
 
-- Status: draft, conditionally approved (Phase 3.0 review reflected; prerequisites in Phase 3.1, remainder Phase 3.3)
+- Status: draft, conditionally approved; Phase 3.3 implements it as amended by ADR-0016 (Phase 3.0 review reflected; prerequisites in Phase 3.1, remainder Phase 3.3)
 - Authors: arca-lake maintainers
 - Created: 2026-11-02
 - Depends on: RFC-003, RFC-005, RFC-008, RFC-011
