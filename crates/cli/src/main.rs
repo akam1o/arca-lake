@@ -604,6 +604,19 @@ enum StorageNodeCommand {
         #[arg(long)]
         scan: bool,
     },
+    /// Offline space breakdown of a device directory (Phase 3.4): per
+    /// segment and in total, live and dead data, tombstones still needed or
+    /// droppable (and those compaction keeps today), damaged records and
+    /// slack, one JSON object per line. Reads the segment files only; run
+    /// it on a directory no node is serving.
+    SegmentReport {
+        /// Device directory.
+        #[arg(long)]
+        dir: PathBuf,
+        /// Print only the total.
+        #[arg(long)]
+        total_only: bool,
+    },
     /// Test-only: flip bytes of a stored shard on a stopped node so that
     /// scrubbing and repair can be exercised (RFC-008 §8.9).
     #[command(hide = true)]
@@ -1547,6 +1560,38 @@ fn run_storage_node_command(command: StorageNodeCommand) -> ExitCode {
                 },
                 Err(e) => fail(format!("cannot open the store: {e}")),
             }
+        }
+        StorageNodeCommand::SegmentReport { dir, total_only } => {
+            let r = match arca_lake_storage::analysis::analyze_dir(&dir) {
+                Ok(r) => r,
+                Err(e) => return fail(format!("cannot analyse {}: {e}", dir.display())),
+            };
+            let line = |what: &str, s: &arca_lake_storage::analysis::SegmentBreakdown| {
+                format!(
+                    "{{\"what\":\"{what}\",\"segment\":{},\"file_bytes\":{},\"live_bytes\":{},\"live_records\":{},\"dead_bytes\":{},\"dead_records\":{},\"tombstones_needed\":{},\"tombstones_droppable\":{},\"tombstones_kept_by_rule\":{},\"tombstone_bytes\":{},\"damaged_records\":{},\"slack_bytes\":{},\"min_seq\":{}}}",
+                    s.segment_id,
+                    s.file_bytes,
+                    s.live_bytes,
+                    s.live_records,
+                    s.dead_bytes,
+                    s.dead_records,
+                    s.tombstones_needed,
+                    s.tombstones_droppable,
+                    s.tombstones_kept_by_rule,
+                    s.tombstone_bytes,
+                    s.damaged_records,
+                    s.slack_bytes,
+                    s.min_seq
+                        .map_or_else(|| "null".to_string(), |m| m.to_string())
+                )
+            };
+            if !total_only {
+                for s in &r.segments {
+                    println!("{}", line("segment", s));
+                }
+            }
+            println!("{}", line("total", &r.total()));
+            ExitCode::SUCCESS
         }
         StorageNodeCommand::QuarantineList { dir, scan } => {
             match std::fs::read_to_string(dir.join("quarantine.log")) {
@@ -3599,5 +3644,69 @@ mod metrics_registry {
             );
         }
         assert!(n >= 10, "the rules reference {n} metrics");
+    }
+}
+
+#[cfg(test)]
+mod tls_args {
+    //! Node RPCs never fall back to plaintext by accident (ADR-0017).
+    use super::*;
+
+    fn none() -> TlsArgs {
+        TlsArgs {
+            tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_crl: None,
+            trust_domain: None,
+            tls_reload_secs: 30,
+            insecure_plaintext: false,
+        }
+    }
+
+    #[test]
+    fn plaintext_only_when_asked_and_never_with_tls_flags() {
+        use arca_lake_protocol::tls::Role;
+        let e = none().context(Role::Node).unwrap_err();
+        assert!(e.contains("no TLS configuration"), "{e}");
+        let partial = TlsArgs {
+            tls_ca: Some("/ca.pem".into()),
+            ..none()
+        };
+        assert!(
+            partial
+                .context(Role::Gateway)
+                .unwrap_err()
+                .contains("TLS needs")
+        );
+        let mixed = TlsArgs {
+            trust_domain: Some("td".into()),
+            insecure_plaintext: true,
+            ..none()
+        };
+        assert!(
+            mixed
+                .context(Role::Controller)
+                .unwrap_err()
+                .contains("cannot be combined")
+        );
+        let plain = TlsArgs {
+            insecure_plaintext: true,
+            ..none()
+        };
+        assert!(plain.context(Role::Node).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_plaintext_switch_parses_as_a_flag() {
+        #[derive(clap::Parser)]
+        struct T {
+            #[command(flatten)]
+            tls: TlsArgs,
+        }
+        let t = <T as clap::Parser>::try_parse_from(["x", "--insecure-plaintext"]).unwrap();
+        assert!(t.tls.insecure_plaintext);
+        let t = <T as clap::Parser>::try_parse_from(["x"]).unwrap();
+        assert!(!t.tls.insecure_plaintext || std::env::var_os("ARCA_INSECURE_PLAINTEXT").is_some());
     }
 }

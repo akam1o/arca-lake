@@ -272,6 +272,7 @@ dependencies = [
  "aws-sdk-s3",
  "bytes",
  "clap",
+ "md-5",
  "serde",
  "serde_json",
  "tokio",

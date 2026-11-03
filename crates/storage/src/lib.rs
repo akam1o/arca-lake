@@ -10,6 +10,7 @@
 //! exists to measure the I/O path and to prove crash consistency before
 //! RFC-005 fixes the production format.
 
+pub mod analysis;
 mod error;
 pub mod faults;
 pub mod format;

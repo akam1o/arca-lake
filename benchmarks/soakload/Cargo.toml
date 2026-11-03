@@ -13,6 +13,10 @@ name = "soakload"
 path = "src/main.rs"
 
 [[bin]]
+name = "soakcheck"
+path = "src/soakcheck.rs"
+
+[[bin]]
 name = "faultproxy"
 path = "src/faultproxy.rs"
 
@@ -22,8 +26,9 @@ aws-sdk-s3.workspace = true
 aws-credential-types.workspace = true
 bytes.workspace = true
 clap.workspace = true
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+md-5.workspace = true
 
 [lints]
 workspace = true

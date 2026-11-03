@@ -356,3 +356,52 @@ fn kept_tombstones_are_not_rewritten_until_they_can_be_dropped() {
         );
     }
 }
+
+/// The offline breakdown agrees with the store's index (live bytes and
+/// records, file bytes) and classifies tombstones by whether an older
+/// record still exists elsewhere.
+#[test]
+fn offline_breakdown_matches_the_index_and_classifies_tombstones() {
+    use arca_lake_storage::analysis::analyze_dir;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    let model = populate(&store);
+    let stats = store.segment_stats().unwrap();
+    let live_bytes: u64 = stats.iter().map(|s| s.live_bytes).sum();
+    let live_records: usize = stats.iter().map(|s| s.live_records).sum();
+    let file_bytes: u64 = stats.iter().map(|s| s.file_bytes).sum();
+    let t = analyze_dir(dir.path()).unwrap().total();
+    assert_eq!(t.live_bytes, live_bytes);
+    assert_eq!(usize::try_from(t.live_records).unwrap(), live_records);
+    assert_eq!(t.file_bytes, file_bytes);
+    assert_eq!(
+        usize::try_from(t.live_records).unwrap(),
+        model.values().filter(|v| v.is_some()).count()
+    );
+    assert!(t.dead_records > 0 && t.tombstones_needed + t.tombstones_droppable > 0);
+    // Everything compacted until nothing moves: no needed tombstone can
+    // remain without an older record, and no dead data remains.
+    for _ in 0..4 {
+        for s in store.compaction_candidates(0.0).unwrap() {
+            store.compact(s).unwrap();
+        }
+    }
+    // (The active segment is never compacted.)
+    let active = store
+        .segment_stats()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.active)
+        .unwrap()
+        .segment_id;
+    for s in analyze_dir(dir.path())
+        .unwrap()
+        .segments
+        .iter()
+        .filter(|s| s.segment_id != active)
+    {
+        assert_eq!(s.dead_records, 0, "{s:?}");
+        assert_eq!(s.tombstones_needed, 0, "{s:?}");
+    }
+    check(&store, &model, "after full compaction");
+}
