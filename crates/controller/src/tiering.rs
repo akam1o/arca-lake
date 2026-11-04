@@ -117,11 +117,12 @@ pub async fn run_once<S: KvStore>(
             let Some((target_index, promote)) = target else {
                 continue;
             };
-            let Some(target_group) = groups.values().find(|g| {
-                g.tier == policy.tiers[target_index]
-                    && g.state == GroupState::Active
-                    && !g.is_cache()
-            }) else {
+            let Some(target_group) = target_group(
+                &groups,
+                &policy.tiers[target_index],
+                current_group,
+                generation,
+            ) else {
                 continue;
             };
             for (index, record) in &manifest {
@@ -163,4 +164,38 @@ pub async fn run_once<S: KvStore>(
         }
     }
     Ok(report)
+}
+
+/// The group of `tier` a generation moves to: the Active durable groups of
+/// the tier with the source group's scheme and shape (any of the tier when
+/// none has it), in id order, chosen by the generation id. Taking the
+/// first group of a hash map sent every move of a controller process to
+/// one group, and the next leader to another (Phase 3.4 soak).
+fn target_group<'a>(
+    groups: &'a HashMap<u64, GroupRecord>,
+    tier: &str,
+    source: &GroupRecord,
+    generation: &[u8; 16],
+) -> Option<&'a GroupRecord> {
+    let mut of_tier: Vec<&GroupRecord> = groups
+        .values()
+        .filter(|g| g.tier == tier && g.state == GroupState::Active && !g.is_cache())
+        .collect();
+    of_tier.sort_by_key(|g| g.id);
+    let same: Vec<&GroupRecord> = of_tier
+        .iter()
+        .copied()
+        .filter(|g| {
+            g.scheme == source.scheme
+                && g.data_shards == source.data_shards
+                && g.parity_shards == source.parity_shards
+        })
+        .collect();
+    let pool = if same.is_empty() { of_tier } else { same };
+    if pool.is_empty() {
+        return None;
+    }
+    let salt = u64::from_le_bytes(generation[8..].try_into().unwrap_or_default());
+    let i = usize::try_from(salt % pool.len() as u64).unwrap_or(0);
+    Some(pool[i])
 }

@@ -408,3 +408,69 @@ async fn controller_policy_promotes_hot_and_demotes_cold_generations() {
     };
     c.shutdown().await;
 }
+
+/// Moves spread over every group of the target tier (Phase 3.4 soak
+/// finding: the first group of a hash map took every move of a controller
+/// process, and a leader change moved all later ones to another group).
+#[tokio::test]
+async fn tier_moves_spread_over_the_groups_of_the_target_tier() {
+    let (c, first) = cluster().await;
+    let second =
+        groups::create_groups_for_class(c.meta.as_ref(), &c.profile, "fast-durable", "ssd", 1)
+            .await
+            .unwrap()
+            .remove(0);
+    c.backend.refresh_map().await.unwrap();
+    let n = 40u64;
+    for i in 0..n {
+        let k = format!("hot{i}");
+        s3::put(
+            &c.backend,
+            BUCKET,
+            &k,
+            payload(64 << 10, 900 + i),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+        let g = c.manifest(BUCKET, &k).await.pointer.generation;
+        object::record_access(c.meta.as_ref(), &g, now_ms(), 10)
+            .await
+            .unwrap();
+    }
+    let policy = arca_lake_controller::tiering::TieringPolicy {
+        tiers: vec!["default".into(), "fast-durable".into()],
+        promote_reads: 5,
+        promote_window: Duration::from_mins(10),
+        demote_after: Duration::from_mins(30),
+    };
+    let r = arca_lake_controller::tiering::run_once(c.meta.as_ref(), &c.clients, &policy, now_ms())
+        .await
+        .unwrap();
+    assert_eq!(r.promoted_chunks, usize::try_from(n).unwrap(), "{r:?}");
+    let mut by: HashMap<u64, u64> = HashMap::new();
+    for i in 0..n {
+        let g = c.manifest(BUCKET, &format!("hot{i}")).await.chunks[0]
+            .1
+            .placement
+            .group_id;
+        *by.entry(g).or_default() += 1;
+    }
+    for id in [first.id, second.id] {
+        assert!(
+            by.get(&id).copied().unwrap_or(0) >= n / 4,
+            "group {id}: {by:?}"
+        );
+    }
+    c.backend.refresh_map().await.unwrap();
+    for i in 0..n {
+        assert_eq!(
+            s3::get(&c.backend, BUCKET, &format!("hot{i}"))
+                .await
+                .unwrap()
+                .0,
+            payload(64 << 10, 900 + i)
+        );
+    }
+    c.shutdown().await;
+}

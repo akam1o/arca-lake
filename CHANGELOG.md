@@ -96,6 +96,10 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   (present since Phase 1; found by the Phase 3.4 soak as one node draining
   to 0.2 GB while another doubled). Chunks are now spread by their id over
   the eligible groups in group-id order.
+- Automatic tiering moved every generation of a controller process into
+  the first group of the target tier in hash-map order (a leader change
+  switched all later moves to another group). Targets are now spread by
+  generation id over the tier's Active groups of the source's scheme.
 - `admin integrity scrub --wait --adaptive` ignored the adaptive policy
   and ran at the fixed rate (found by the Phase 3.4 measurement).
 
