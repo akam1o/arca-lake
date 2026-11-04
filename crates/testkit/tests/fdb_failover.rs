@@ -324,6 +324,19 @@ async fn scenario() {
     }
     let report = c.gc(now_ms() + 3_600_000, 0).await;
     assert_eq!(report.skipped_referenced, 0);
+    // What failed requests above left (a pending generation expired by the
+    // pass above and collected by the next; shards without a generation,
+    // reclaimed by reconciliation) goes before the baseline is taken: the
+    // multipart step's count below covers multipart shards only.
+    c.gc(now_ms() + 3_600_000, 0).await;
+    c.reconcile(now_ms() + 3_600_000, 0).await;
+    for (key, data) in &committed {
+        assert_eq!(
+            &s3::get(&c.backend, BUCKET, key).await.unwrap().0,
+            data,
+            "{key}"
+        );
+    }
 
     // 4b. Multipart during process and coordinator loss (RFC-007 A10).
     //     Every outcome is explicit; a completed object is never partially
@@ -497,7 +510,75 @@ async fn scenario() {
         .filter(|(k, _)| k.starts_with("mp-"))
         .map(|(_, d)| d.len().div_ceil(300 << 10))
         .sum();
-    assert_eq!(c.total_shards().await, shards_before_multipart + chunks * 3);
+    let total = c.total_shards().await;
+    if total != shards_before_multipart + chunks * 3 {
+        // Name what is left: every shard whose generation no committed
+        // object references.
+        let mut live = std::collections::HashSet::new();
+        for (key, _) in &committed {
+            let m = c.manifest(BUCKET, key).await;
+            for (_, ch) in &m.chunks {
+                live.insert(ch.chunk_id);
+            }
+            for p in &m.parts {
+                if let Some((chunks, _)) = arca_lake_metadata::ops::object::read_part_manifest(
+                    c.meta.as_ref(),
+                    &p.generation,
+                )
+                .await
+                .unwrap()
+                {
+                    for (_, ch) in chunks {
+                        live.insert(ch.chunk_id);
+                    }
+                }
+            }
+        }
+        for g in c.groups().await.iter().filter(|g| !g.is_cache()) {
+            for i in 0..c.nodes.len() {
+                if !c.node_running(i) {
+                    continue;
+                }
+                for k in c.shard_keys(i, g.id) {
+                    if live.contains(&k.chunk_id) {
+                        continue;
+                    }
+                    let (prefix, index) = arca_lake_common::split_chunk_id(&k.chunk_id);
+                    let a = arca_lake_metadata::ops::gc::attribute_shard(
+                        c.meta.as_ref(),
+                        &prefix,
+                        index,
+                        g.id,
+                    )
+                    .await
+                    .unwrap();
+                    eprintln!(
+                        "leftover node {i} group {} chunk {:02x?} index {} shard {}: {a:?}",
+                        g.id, k.chunk_id, index, k.shard_index
+                    );
+                }
+            }
+        }
+        let gc_queue = arca_lake_metadata::transact(c.meta.as_ref(), (), |tx, ()| {
+            Box::pin(async move {
+                Ok(tx
+                    .get_range(
+                        &arca_lake_metadata::keys::retired_until_range(u64::MAX),
+                        1000,
+                        false,
+                    )
+                    .await?
+                    .len())
+            })
+        })
+        .await
+        .unwrap();
+        eprintln!(
+            "retired queue entries: {gc_queue}; open uploads: {:?}",
+            open_uploads(&c.backend).await
+        );
+    }
+    assert_eq!(total, shards_before_multipart + chunks * 3);
     for (key, data) in committed.iter().filter(|(k, _)| k.starts_with("mp-")) {
         assert_eq!(
             &s3::get(&c.backend, BUCKET, key).await.unwrap().0,
@@ -515,6 +596,10 @@ async fn scenario() {
     cfg.gc_grace = Duration::ZERO;
     let mut cfg2 = cfg.clone();
     cfg2.id = "f2".into();
+    // FoundationDB was just restarting processes: start from a store that
+    // commits again, and allow a failover the time of a slow recovery
+    // (leases are renewed through it).
+    wait_for_store(&c).await;
     let ctl_a = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
     let ctl_b = spawn(Arc::clone(&c.meta), cfg2).await.unwrap();
     wait_until("leader", Duration::from_secs(20), async || {
@@ -527,7 +612,7 @@ async fn scenario() {
         (ctl_b, ctl_a)
     };
     leader.abort();
-    wait_until("failover", Duration::from_secs(20), async || {
+    wait_until("failover", Duration::from_secs(60), async || {
         follower.is_leader()
     })
     .await;
@@ -554,7 +639,28 @@ async fn scenario() {
     }
     chaos.run("start 2").await;
     wait_for_store(&c).await;
-    let done = c.repair(group.id, 0, new_node).await;
+    // The re-run completes. FoundationDB may still answer a commit with an
+    // unknown outcome while it finishes recovering: like the controller's
+    // next pass, retry then (the repair resumes from its cursor); any other
+    // error fails the test.
+    let mut done = None;
+    for attempt in 0..5 {
+        match c.repair_with(group.id, 0, new_node, async |_| Ok(())).await {
+            Ok(r) => {
+                done = Some(r);
+                break;
+            }
+            Err(ControlError::Meta(arca_lake_metadata::MetaError::Kv(
+                arca_lake_metadata::KvError::CommitUnknown(_)
+                | arca_lake_metadata::KvError::Backend(_),
+            ))) => {
+                eprintln!("repair re-run {attempt}: transient metadata error, retrying");
+                wait_for_store(&c).await;
+            }
+            Err(e) => panic!("repair re-run failed: {e}"),
+        }
+    }
+    let done = done.expect("repair re-run completes within five attempts");
     assert!(done.complete, "{done:?}");
     assert_eq!(c.groups().await[0].state, GroupState::Active);
 
