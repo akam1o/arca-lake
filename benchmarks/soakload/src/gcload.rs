@@ -215,7 +215,7 @@ async fn main() {
         .split(',')
         .filter_map(|r| r.trim().parse().ok())
         .collect();
-    for rate in rates {
+    for (step, rate) in rates.into_iter().enumerate() {
         let started = Instant::now();
         let deadline = started + Duration::from_secs(a.step_secs);
         let issued = Arc::new(AtomicU64::new(0));
@@ -234,7 +234,10 @@ async fn main() {
                 Arc::clone(&last_error),
             );
             tasks.push(tokio::spawn(async move {
-                let mut x = 0x9E37_79B9_7F4A_7C15_u64 ^ ((w as u64) << 32) | 1;
+                // Distinct per worker and per step: `put-only` must never
+                // write a key twice.
+                let mut x =
+                    0x9E37_79B9_7F4A_7C15_u64 ^ ((w as u64) << 32) ^ ((step as u64) << 52) | 1;
                 loop {
                     // Pace: operation n is due at n / rate seconds.
                     let n = issued.fetch_add(1, Ordering::Relaxed);
