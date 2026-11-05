@@ -166,6 +166,23 @@ log "integrity snapshot 2"
 "$TOOLS/soakcheck" compare "$OUT/snapshot-1.jsonl" "$OUT/snapshot-2.jsonl" > "$OUT/compare.txt" 2>&1
 cmpr=$?; log "compare: $(head -n 1 "$OUT/compare.txt") (exit $cmpr)"
 
+# Snapshot 2 read every version through the gateway: that populates the
+# cache tier and the next eviction pass deletes the copies again. Let that
+# settle too before anything is measured (soak 6: the breakdown was taken
+# 12 s after those writes and counted them, with a 30 s old active-segment
+# gauge).
+log "settling after snapshot 2"
+q0="$(date +%s)"; last_fp=""; still_since="$q0"
+while :; do
+  fp="$(sample | moving)"; now="$(date +%s)"
+  if [ "$fp" != "$last_fp" ]; then last_fp="$fp"; still_since="$now"; fi
+  if [ $((now - still_since)) -ge "${POST_SNAPSHOT_SETTLE_SECS:-180}" ]; then
+    log "settled after snapshot 2 in $((now - q0)) s"; break
+  fi
+  if [ $((now - q0)) -ge 3600 ]; then log "NOT settled after snapshot 2 within 3600 s"; break; fi
+  sleep 30
+done
+
 # ---- 7. manifests, integrity ----------------------------------------------------
 admin integrity verify-manifests > "$OUT/manifests.txt" 2>&1; log "verify-manifests exit $?"
 admin integrity status > "$OUT/integrity-final.txt" 2>&1
