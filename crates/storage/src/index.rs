@@ -79,6 +79,21 @@ impl ReleaseCause {
     }
 }
 
+/// Entry counts of the in-memory index.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexSizes {
+    /// Live keys.
+    pub live: u64,
+    /// Tombstone history entries (only while rebuilding).
+    pub tombstone_history: u64,
+    /// Keys with non-live records still on disk.
+    pub dead_tracked: u64,
+    /// Quarantined keys.
+    pub quarantined: u64,
+    /// Segments with per-segment bookkeeping.
+    pub segments_tracked: u64,
+}
+
 /// Ordered in-memory index.
 #[derive(Debug, Default)]
 pub struct MemIndex {
@@ -103,6 +118,12 @@ pub struct MemIndex {
     dead_by_segment: HashMap<u64, HashMap<ShardKey, u32>>,
     /// Per key, the sum over segments of `dead_by_segment`.
     dead_total: HashMap<ShardKey, u32>,
+    /// The rebuild from the segments is over ([`Self::finish_rebuild`]):
+    /// from then on new records carry strictly increasing sequences and the
+    /// tombstone history is neither needed nor kept (Phase 3.5, R-70: every
+    /// runtime delete added an entry that lived until the next restart,
+    /// about 5 MiB/h of growth under the soak's delete rate).
+    rebuilt: bool,
 }
 
 impl MemIndex {
@@ -143,8 +164,10 @@ impl MemIndex {
     /// Apply a tombstone with sequence `sequence`: removes the key if its
     /// current record is older. Returns the removed location, if any.
     pub fn tombstone(&mut self, key: ShardKey, sequence: u64) -> Option<Location> {
-        let t = self.tombstones.entry(key).or_insert(0);
-        *t = (*t).max(sequence);
+        if !self.rebuilt {
+            let t = self.tombstones.entry(key).or_insert(0);
+            *t = (*t).max(sequence);
+        }
         if let Some(q) = self.quarantined.get(&key)
             && q.location.sequence < sequence
         {
@@ -321,6 +344,31 @@ impl MemIndex {
     /// records and new (strictly increasing) sequences matter.
     pub fn finish_rebuild(&mut self) {
         self.tombstones.clear();
+        self.rebuilt = true;
+    }
+
+    /// Quarantine a record read through the live index (runtime): only if
+    /// the key still has exactly that live location. A key deleted, replaced
+    /// or quarantined since the read is left alone; this is what the
+    /// tombstone history protected against before it stopped being kept
+    /// after the rebuild.
+    pub fn quarantine_live(&mut self, key: ShardKey, entry: QuarantineEntry) -> bool {
+        if self.map.get(&key) != Some(&entry.location) {
+            return false;
+        }
+        self.quarantine(key, entry)
+    }
+
+    /// Sizes of the in-memory structures (diagnostics and metrics).
+    #[must_use]
+    pub fn sizes(&self) -> IndexSizes {
+        IndexSizes {
+            live: self.map.len() as u64,
+            tombstone_history: self.tombstones.len() as u64,
+            dead_tracked: self.dead_total.len() as u64,
+            quarantined: self.quarantined.len() as u64,
+            segments_tracked: self.dead_by_segment.len().max(self.segment_live.len()) as u64,
+        }
     }
 
     /// Look up `key`.
@@ -430,6 +478,35 @@ mod tests {
             chunk_id: [i; 16],
             shard_index: 0,
         }
+    }
+
+    /// After the rebuild a runtime quarantine applies only to the location
+    /// still live: a key deleted or replaced since the read is left alone,
+    /// without any tombstone history (R-70).
+    #[test]
+    fn runtime_quarantine_needs_the_location_still_live() {
+        let mut idx = MemIndex::default();
+        idx.finish_rebuild();
+        let q = |l: Location| QuarantineEntry {
+            location: l,
+            reason: "test",
+            since_unix_ms: 0,
+        };
+        idx.insert(key(1), loc(1, 5, 100));
+        idx.tombstone(key(1), 6);
+        assert!(
+            !idx.quarantine_live(key(1), q(loc(1, 5, 100))),
+            "deleted since the read"
+        );
+        idx.insert(key(2), loc(1, 7, 100));
+        idx.insert(key(2), loc(1, 8, 100));
+        assert!(
+            !idx.quarantine_live(key(2), q(loc(1, 7, 100))),
+            "replaced since the read"
+        );
+        assert!(idx.quarantine_live(key(2), q(loc(1, 8, 100))));
+        assert_eq!(idx.sizes().tombstone_history, 0);
+        assert_eq!(idx.sizes().quarantined, 1);
     }
 
     #[test]

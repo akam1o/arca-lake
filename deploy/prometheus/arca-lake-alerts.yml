@@ -164,3 +164,19 @@ groups:
         annotations:
           summary: "Requests with unknown, inactive or expired access keys"
           runbook: "audit log (target arca.audit)"
+      - alert: ArcaNodeHeapGrowing
+        # Bytes the storage node program holds (not allocator retention)
+        # rising steadily for six hours (R-70).
+        expr: deriv(arca_node_process_memory_bytes{kind="heap_in_use"}[6h]) * 3600 > 8 * 1024 * 1024
+        for: 6h
+        labels: { severity: ticket }
+        annotations:
+          summary: "Storage-node heap in use grows more than 8 MiB/h for 6 h"
+          runbook: "RFC-013 §10 (memory); compare arca_node_index_entries, restart the node in its maintenance window"
+      - alert: ArcaNodeMemoryHigh
+        expr: arca_node_process_memory_bytes{kind="anon"} > 2 * 1024 * 1024 * 1024
+        for: 30m
+        labels: { severity: page }
+        annotations:
+          summary: "A storage node holds more than 2 GiB of anonymous memory"
+          runbook: "RFC-013 §10 (memory)"

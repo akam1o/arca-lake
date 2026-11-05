@@ -27,6 +27,7 @@ arca_controller_data_integrity_status	gauge	controller	enum	-	0 clean, 1 repairs
 arca_controller_gc_collected_total	counter	controller	generations	-	retired generations whose shards GC deleted
 arca_controller_gc_passes_total	counter	controller	passes	-	GC batches run
 arca_controller_gc_skipped_referenced_total	counter	controller	generations	-	retired-queue entries naming a referenced generation (invariant violation when > 0)
+arca_controller_groups_reduced_redundancy	gauge	controller	groups	-	durable groups rebuilding a member while the node it left does not answer: one shard of redundancy short until the rebuild completes (a healthy member's move keeps the leaving node as a reader)
 arca_controller_groups_repairing	gauge	controller	groups	-	groups in Repairing at the last repair pass
 arca_controller_guard_refusals_total	counter	controller	transactions	-	metadata writes refused by the cluster-state guard at commit
 arca_controller_integrity_findings_open	gauge	controller	tasks	class=missing_shard|checksum_mismatch|truncated_shard|invalid_header|unexpected_shard|stale_placement_epoch|metadata_data_mismatch|unrecoverable_stripe	open stripe repair tasks by finding class
@@ -141,9 +142,11 @@ arca_node_corrupt_reads_total	counter	node	reads	-	reads that found a corrupt re
 arca_node_dead_records	gauge	node	records	-	non-live data records still on the device (what keeps tombstones needed)
 arca_node_device_free_bytes	gauge	node	bytes	-	bytes free for placement on the device (capped by --capacity-bytes)
 arca_node_device_total_bytes	gauge	node	bytes	-	size of the device for placement (capped by --capacity-bytes)
+arca_node_index_entries	gauge	node	entries	kind=live|tombstone_history|dead_tracked|quarantined	in-memory index entries after the last compaction pass (tombstone history is kept only while the index is rebuilt at open)
 arca_node_live_bytes	gauge	node	bytes	-	bytes of live records at the last compaction pass
 arca_node_phase_max_seconds	gauge	node	seconds	phase=put_recv|put_queue|put_store|get_serve|store_append|store_rollover|store_sync_wait|store_fsync	longest node phase observed
 arca_node_phase_seconds	histogram	node	seconds	phase=put_recv|put_queue|put_store|get_serve|store_append|store_rollover|store_sync_wait|store_fsync	node RPC and storage time per phase
+arca_node_process_memory_bytes	gauge	node	bytes	kind=resident|anon|heap_in_use|heap_free|heap_mmap	process memory at scrape time: resident and anonymous set, and on glibc the allocator bytes in use, free but retained, and mmapped
 arca_node_put_in_flight	gauge	node	streams	-	PutShard streams open now
 arca_node_quarantined_bytes	gauge	node	bytes	-	payload bytes of quarantined shards
 arca_node_quarantined_shards	gauge	node	shards	-	quarantined shards on the device

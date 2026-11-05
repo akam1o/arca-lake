@@ -4,6 +4,7 @@
 pub mod compat;
 pub mod ec_profile;
 pub mod metrics;
+pub mod process;
 pub mod timing;
 
 pub use ec_profile::{EcProfile, ProfileError, SmallObjectPolicy};

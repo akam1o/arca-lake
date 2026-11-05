@@ -574,3 +574,38 @@ fn random_workload_with_compaction_and_reopen_matches_the_model() {
     let store = Store::open(config(dir.path())).unwrap().0;
     check(&store, &model, "final reopen");
 }
+
+/// The tombstone history is kept only while the index is rebuilt at open:
+/// runtime deletes of distinct keys do not grow it (Phase 3.5, R-70: one
+/// entry per delete lived until the next restart). A record read before a
+/// concurrent delete is not quarantined afterwards, and nothing deleted
+/// comes back at the next open.
+#[test]
+fn runtime_deletes_keep_no_tombstone_history_and_deleted_keys_stay_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    for i in 0..2_000u64 {
+        store.put(key(100_000 + i), &payload(i)).unwrap();
+        store.delete(key(100_000 + i)).unwrap();
+    }
+    let sizes = store.index_sizes();
+    assert_eq!(sizes.tombstone_history, 0, "{sizes:?}");
+    assert_eq!(sizes.live, 0, "{sizes:?}");
+    // Compaction leaves no bookkeeping behind either.
+    for _ in 0..4 {
+        for s in store.compaction_candidates(0.0).unwrap() {
+            store.compact(s).unwrap();
+        }
+    }
+    let sizes = store.index_sizes();
+    assert!(sizes.dead_tracked < 2_000, "{sizes:?}");
+    drop(store);
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    for i in 0..2_000u64 {
+        assert!(matches!(
+            store.get(&key(100_000 + i), None),
+            Err(StorageError::NotFound)
+        ));
+    }
+    assert_eq!(store.index_sizes().tombstone_history, 0);
+}

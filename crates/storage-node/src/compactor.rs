@@ -66,6 +66,16 @@ pub struct CompactionStats {
     pub dead_records: AtomicU64,
     /// The segment being appended to (never compacted).
     pub active_segment: AtomicU64,
+    /// In-memory index entries after the last pass: live keys, tombstone
+    /// history (only while rebuilding), keys with non-live records on disk,
+    /// quarantined keys (R-70).
+    pub index_live: AtomicU64,
+    /// See `index_live`.
+    pub index_tombstone_history: AtomicU64,
+    /// See `index_live`.
+    pub index_dead_tracked: AtomicU64,
+    /// See `index_live`.
+    pub index_quarantined: AtomicU64,
 }
 
 /// One pass: refresh the gauges, compact the most dead candidates.
@@ -162,6 +172,17 @@ pub(crate) fn pass(store: &Store, policy: &CompactionPolicy, stats: &CompactionS
     stats
         .dead_records
         .store(store.dead_records(), Ordering::Relaxed);
+    let sizes = store.index_sizes();
+    stats.index_live.store(sizes.live, Ordering::Relaxed);
+    stats
+        .index_tombstone_history
+        .store(sizes.tombstone_history, Ordering::Relaxed);
+    stats
+        .index_dead_tracked
+        .store(sizes.dead_tracked, Ordering::Relaxed);
+    stats
+        .index_quarantined
+        .store(sizes.quarantined, Ordering::Relaxed);
 }
 
 /// Run passes until `stop` fires; returns after the pass in progress.

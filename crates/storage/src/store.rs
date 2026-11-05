@@ -1035,11 +1035,21 @@ impl Store {
         };
         // A log write failure must not hide the corruption from the caller
         // nor keep serving the bytes: the index change still happens.
-        let _ = self.quarantine_log.quarantine(key, &entry);
-        self.index
-            .write()
+        let current = self
+            .index
+            .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .quarantine(*key, entry);
+            .get(key);
+        if current == Some(loc) {
+            // Logged outside the index lock (it fsyncs). If the key changes
+            // before the index takes the entry, the log holds one entry the
+            // next open overrides with the newer record or tombstone.
+            let _ = self.quarantine_log.quarantine(key, &entry);
+            self.index
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .quarantine_live(*key, entry);
+        }
         StorageError::Corrupt {
             segment_id: loc.segment_id,
             offset: loc.offset,
@@ -1235,6 +1245,15 @@ impl Store {
             });
         }
         Ok(out)
+    }
+
+    /// Entry counts of the in-memory index (R-70 diagnostics).
+    #[must_use]
+    pub fn index_sizes(&self) -> crate::IndexSizes {
+        self.index
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sizes()
     }
 
     /// Non-live data records still on disk (superseded, quarantined, or

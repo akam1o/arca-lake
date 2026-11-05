@@ -3506,6 +3506,30 @@ fn render_compaction_stats(
             v.load(Relaxed)
         );
     }
+    let _ = writeln!(out, "# TYPE arca_node_index_entries gauge");
+    for (kind, v) in [
+        ("live", &c.index_live),
+        ("tombstone_history", &c.index_tombstone_history),
+        ("dead_tracked", &c.index_dead_tracked),
+        ("quarantined", &c.index_quarantined),
+    ] {
+        let _ = writeln!(
+            out,
+            "arca_node_index_entries{{kind=\"{kind}\"}} {}",
+            v.load(Relaxed)
+        );
+    }
+    let m = arca_lake_common::process::memory();
+    let _ = writeln!(out, "# TYPE arca_node_process_memory_bytes gauge");
+    for (kind, v) in [
+        ("resident", m.resident),
+        ("anon", m.anon),
+        ("heap_in_use", m.heap_in_use),
+        ("heap_free", m.heap_free),
+        ("heap_mmap", m.heap_mmap),
+    ] {
+        let _ = writeln!(out, "arca_node_process_memory_bytes{{kind=\"{kind}\"}} {v}");
+    }
 }
 
 fn render_node_stats(

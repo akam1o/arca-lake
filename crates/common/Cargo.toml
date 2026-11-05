@@ -18,6 +18,9 @@ version-bump = []
 serde.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 uuid.workspace = true
 
