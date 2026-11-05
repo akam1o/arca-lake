@@ -371,6 +371,10 @@ pub struct Store {
     /// after the index took the record, so that [`Self::delete_if`] sees
     /// every record appended before it.
     appending: Mutex<HashMap<ShardKey, u64>>,
+    /// Sequences appended and not yet applied to the index (any record):
+    /// the index's runtime tombstone history below the lowest is dropped
+    /// (CON-9, R-70).
+    inflight: Mutex<std::collections::BTreeSet<u64>>,
     durability: Durability,
     timings: StoreTimings,
     quarantine_log: QuarantineLog,
@@ -486,6 +490,11 @@ impl Store {
         // were checked against it (Phase 3.5 audit OPS-4: an older damaged
         // record of a deleted key was quarantined).
         rec.index.finish_rebuild();
+        // Never hand out a sequence again: compaction can drop the records
+        // that carried the highest ones (Phase 3.5 audit CON-10: a delete
+        // conditional on an old sequence matched a new record after reopen).
+        let next_sequence = (rec.max_sequence + 1).max(read_sequence_bound(&cfg.dir)?);
+        write_sequence_bound(&cfg.dir, next_sequence + sequences_per_segment(&cfg))?;
         let store = Self {
             cfg,
             device_id,
@@ -493,13 +502,14 @@ impl Store {
                 active,
                 poisoned: false,
                 active_min_seq,
-                next_sequence: rec.max_sequence + 1,
+                next_sequence,
                 next_segment_id,
             }),
             index: RwLock::new(rec.index),
             readers: RwLock::new(rec.readers),
             compaction_blocked: Mutex::new(HashMap::new()),
             appending: Mutex::new(HashMap::new()),
+            inflight: Mutex::new(std::collections::BTreeSet::new()),
             durability: Durability {
                 state: Mutex::new(DurState {
                     durable: start,
@@ -778,6 +788,10 @@ impl Store {
         w.next_sequence += 1;
         w.active_min_seq.get_or_insert(sequence);
         let data = flags & FLAG_TOMBSTONE == 0;
+        self.inflight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(sequence);
         {
             let mut a = self
                 .appending
@@ -799,6 +813,14 @@ impl Store {
                 a.remove(&key);
             }
         };
+        let not_inflight = |store: &Self| -> u64 {
+            let mut f = store
+                .inflight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            f.remove(&sequence);
+            f.first().copied().unwrap_or(u64::MAX)
+        };
         {
             let mut st = self
                 .durability
@@ -811,6 +833,7 @@ impl Store {
                     w.poisoned = true;
                     drop(st);
                     done(self);
+                    not_inflight(self);
                     return Err(e);
                 }
                 st.durable = st.durable.max((segment_id, end));
@@ -827,6 +850,7 @@ impl Store {
                     .unwrap_or_else(PoisonError::into_inner)
                     .poisoned = true;
                 done(self);
+                not_inflight(self);
                 return Err(e);
             }
             self.timings.sync_wait.observe(t.elapsed());
@@ -848,6 +872,9 @@ impl Store {
             idx.tombstone(key, sequence);
         }
         self.log_released(&mut idx);
+        // Applied: history below every record still on its way can go.
+        let lowest = not_inflight(self);
+        idx.prune_history(lowest);
         drop(idx);
         if data {
             done(self);
@@ -865,6 +892,11 @@ impl Store {
         let id = w.next_segment_id;
         w.next_segment_id = id + 1;
         let new = Self::create_segment(&self.cfg, self.device_id, id, self.format_write())?;
+        // Every sequence the new segment can take stays below the bound.
+        write_sequence_bound(
+            &self.cfg.dir,
+            w.next_sequence + sequences_per_segment(&self.cfg),
+        )?;
         let start = (id, new.end());
         {
             let mut readers = self.readers.write().unwrap_or_else(PoisonError::into_inner);
@@ -1670,4 +1702,34 @@ impl Store {
 /// they always fit in `usize` on supported (64-bit) platforms.
 fn to_usize(n: u64) -> usize {
     usize::try_from(n).unwrap_or(usize::MAX)
+}
+
+/// File holding a bound above every record sequence handed out so far.
+const SEQUENCE_BOUND_FILE: &str = "sequence.bound";
+
+/// Records one segment can take at most (each has at least a 64-byte
+/// header), plus one for the record that crosses the size limit.
+fn sequences_per_segment(cfg: &StoreConfig) -> u64 {
+    cfg.segment_max_bytes / 64 + 2
+}
+
+fn read_sequence_bound(dir: &Path) -> Result<u64> {
+    match std::fs::read_to_string(dir.join(SEQUENCE_BOUND_FILE)) {
+        Ok(text) => Ok(text.trim().parse().unwrap_or(0)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Replace the bound durably (write, sync, rename, sync the directory).
+fn write_sequence_bound(dir: &Path, bound: u64) -> Result<()> {
+    let tmp = dir.join(format!("{SEQUENCE_BOUND_FILE}.tmp"));
+    {
+        let f = File::create(&tmp)?;
+        std::io::Write::write_all(&mut &f, format!("{bound}\n").as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, dir.join(SEQUENCE_BOUND_FILE))?;
+    File::open(dir)?.sync_all()?;
+    Ok(())
 }

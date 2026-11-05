@@ -280,6 +280,36 @@ impl VersionIdentity {
     }
 }
 
+/// The identity of the current version: its version record's (every
+/// publication writes one at its ordinal; a pointer restored from an older
+/// version keeps the newer `next_ordinal`, Phase 3.5 audit CON-11), else
+/// derived from the pointer (unversioned buckets keep no records).
+fn pointer_identity_in(c: &CurrentPointer, versions: &[(u64, VersionRecord)]) -> VersionIdentity {
+    versions
+        .iter()
+        .find(|(_, v)| {
+            v.version_id == c.version_id
+                && v.generation == c.generation
+                && v.committed_ms == c.last_modified_ms
+        })
+        .map_or_else(
+            || VersionIdentity::of_pointer(c),
+            |(o, v)| VersionIdentity::of_record(*o, v),
+        )
+}
+
+async fn pointer_identity<X: Txn>(
+    tx: &mut X,
+    bucket_id: u64,
+    key: &str,
+    c: &CurrentPointer,
+) -> Result<VersionIdentity> {
+    Ok(pointer_identity_in(
+        c,
+        &version_records(tx, bucket_id, key).await?,
+    ))
+}
+
 impl Precondition {
     /// No client condition (`If-Match`, `If-None-Match`).
     #[must_use]
@@ -319,9 +349,10 @@ pub async fn current_identity<S: KvStore>(
         Box::pin(async move {
             let (bucket, key) = *env;
             let b = bucket_by_name(tx, bucket).await?;
-            Ok(current_pointer(tx, b.id, key)
-                .await?
-                .map(|c| VersionIdentity::of_pointer(&c)))
+            match current_pointer(tx, b.id, key).await? {
+                Some(c) => Ok(Some(pointer_identity(tx, b.id, key, &c).await?)),
+                None => Ok(None),
+            }
         })
     })
     .await
@@ -394,7 +425,7 @@ pub async fn commit_put<S: KvStore>(
                 let bucket = bucket_by_id(tx, header.bucket_id).await?;
                 let current = current_pointer(tx, bucket.id, &header.key).await?;
 
-                check_preconditions(tx, pre, current.as_ref()).await?;
+                check_preconditions(tx, bucket.id, &header.key, pre, current.as_ref()).await?;
 
                 let version_id = if bucket.versioning == Versioning::Enabled {
                     fresh_version_id.to_string()
@@ -860,7 +891,7 @@ pub async fn delete_object_as<S: KvStore>(
                 let (bucket, key, pre, now_ms, fresh_version_id) = *env;
                 let b = bucket_by_name(tx, bucket).await?;
                 let current = current_pointer(tx, b.id, key).await?;
-                check_preconditions(tx, pre, current.as_ref()).await?;
+                check_preconditions(tx, b.id, key, pre, current.as_ref()).await?;
                 match b.versioning {
                     Versioning::Disabled => {
                         let retired = retire_displaced(tx, current.as_ref(), now_ms).await?;
@@ -944,7 +975,8 @@ pub async fn delete_version<S: KvStore>(
             let b = bucket_by_name(tx, bucket).await?;
             let current = current_pointer(tx, b.id, key).await?;
             if let Some(c) = current.filter(|c| c.version_id == version_id) {
-                return Ok(Some((VersionIdentity::of_pointer(&c), c.delete_marker)));
+                let id = pointer_identity(tx, b.id, key, &c).await?;
+                return Ok(Some((id, c.delete_marker)));
             }
             Ok(version_records(tx, b.id, key)
                 .await?
@@ -985,7 +1017,7 @@ pub async fn delete_version<S: KvStore>(
                 }
                 let (identity, generation, was_delete_marker) = match (&current, &target) {
                     (Some(c), _) if is_current => (
-                        VersionIdentity::of_pointer(c),
+                        pointer_identity_in(c, &versions),
                         c.generation,
                         c.delete_marker,
                     ),
@@ -1095,13 +1127,19 @@ pub(crate) async fn require_pending<X: Txn>(
 
 pub(crate) async fn check_preconditions<X: Txn>(
     tx: &mut X,
+    bucket_id: u64,
+    key: &str,
     pre: &Precondition,
     current: Option<&CurrentPointer>,
 ) -> Result<()> {
-    if let Some(expected) = &pre.if_current
-        && current.map(VersionIdentity::of_pointer) != *expected
-    {
-        return Err(MetaError::PreconditionFailed);
+    if let Some(expected) = &pre.if_current {
+        let now = match current {
+            Some(c) => Some(pointer_identity(tx, bucket_id, key, c).await?),
+            None => None,
+        };
+        if now != *expected {
+            return Err(MetaError::PreconditionFailed);
+        }
     }
     let live = current.filter(|c| !c.delete_marker);
     if pre.if_none_match_any && live.is_some() {

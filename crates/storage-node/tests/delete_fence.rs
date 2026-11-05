@@ -142,3 +142,56 @@ async fn a_delete_decided_on_an_old_record_does_not_remove_a_newer_one() {
     assert!(c.get_shard(&addr, shard(5), 0, 0).await.is_err());
     n.shutdown().await;
 }
+
+/// Quarantined shards are listed page by page like live ones: with fewer
+/// live keys than the page limit and more quarantined keys than it, a walk
+/// still reaches every key (Phase 3.5 audit OPS-5: the cursor followed the
+/// live keys only, so quarantined keys beyond the first page were never
+/// listed and never reconciled).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quarantined_shards_beyond_one_page_are_listed() {
+    use arca_lake_storage::{ShardKey, Store, StoreConfig};
+    use std::os::unix::fs::FileExt as _;
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let key = |i: u8| ShardKey {
+        group_id: 1,
+        chunk_id: [i; 16],
+        shard_index: 0,
+    };
+    {
+        let (store, _) = Store::open(StoreConfig::new(dir.path())).unwrap();
+        for i in 1..=6u8 {
+            store.put(key(i), &vec![i; 8192]).unwrap();
+        }
+        // Damage keys 2..=6 on disk: the next open quarantines them.
+        for i in 2..=6u8 {
+            let loc = store.locate(&key(i)).unwrap();
+            let path = dir.path().join(format!("seg-{:016x}.arca", loc.segment_id));
+            let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            f.write_all_at(&[!i], loc.payload_offset() + 10).unwrap();
+        }
+    }
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let addr = n.local_addr.to_string();
+    let c = NodeClients::new(Duration::from_secs(5));
+    let (mut live, mut quarantined, mut after) = (Vec::new(), Vec::new(), None);
+    for _ in 0..10 {
+        let page = c
+            .list_shards_page_with(&addr, 1, after, 2, true)
+            .await
+            .unwrap();
+        assert!(page.entries.len() + page.quarantined.len() <= 2);
+        live.extend(page.entries.iter().map(|(s, _)| s.chunk_id[0]));
+        quarantined.extend(page.quarantined.iter().map(|(s, _)| s.chunk_id[0]));
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert_eq!(live, vec![1]);
+    assert_eq!(quarantined, vec![2, 3, 4, 5, 6]);
+    n.shutdown().await;
+}

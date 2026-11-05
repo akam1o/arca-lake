@@ -609,3 +609,27 @@ fn runtime_deletes_keep_no_tombstone_history_and_deleted_keys_stay_deleted() {
     }
     assert_eq!(store.index_sizes().tombstone_history, 0);
 }
+
+/// Sequences are never handed out twice, even when the records that
+/// carried the highest ones are gone (compaction can drop them; simulated
+/// here by removing the segment files): a delete conditional on an old
+/// sequence cannot match a new record after a reopen (Phase 3.5 audit
+/// CON-10).
+#[test]
+fn sequences_are_not_reused_after_their_records_are_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    let old = store.put_sequenced(key(7), &payload(7)).unwrap();
+    drop(store);
+    for e in std::fs::read_dir(dir.path()).unwrap() {
+        let e = e.unwrap();
+        if e.file_name().to_string_lossy().starts_with("seg-") {
+            std::fs::remove_file(e.path()).unwrap();
+        }
+    }
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    let new = store.put_sequenced(key(7), &payload(8)).unwrap();
+    assert!(new > old, "sequence {new} handed out again (was {old})");
+    assert!(!store.delete_if(key(7), old).unwrap());
+    assert_eq!(store.get(&key(7), None).unwrap(), payload(8));
+}

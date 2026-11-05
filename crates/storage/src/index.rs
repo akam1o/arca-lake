@@ -124,6 +124,13 @@ pub struct MemIndex {
     /// runtime delete added an entry that lived until the next restart,
     /// about 5 MiB/h of growth under the soak's delete rate).
     rebuilt: bool,
+    /// After the rebuild, the tombstones of the history by sequence, so
+    /// that they can be dropped once no older record can still reach the
+    /// index ([`Self::prune_history`]). Records are appended in sequence
+    /// order but reach the index after group commit in any order: an older
+    /// put applied after a newer delete must stay ignored (Phase 3.5 audit
+    /// CON-9).
+    history_by_seq: BTreeMap<u64, ShardKey>,
 }
 
 impl MemIndex {
@@ -164,9 +171,10 @@ impl MemIndex {
     /// Apply a tombstone with sequence `sequence`: removes the key if its
     /// current record is older. Returns the removed location, if any.
     pub fn tombstone(&mut self, key: ShardKey, sequence: u64) -> Option<Location> {
-        if !self.rebuilt {
-            let t = self.tombstones.entry(key).or_insert(0);
-            *t = (*t).max(sequence);
+        let t = self.tombstones.entry(key).or_insert(0);
+        *t = (*t).max(sequence);
+        if self.rebuilt {
+            self.history_by_seq.insert(sequence, key);
         }
         if let Some(q) = self.quarantined.get(&key)
             && q.location.sequence < sequence
@@ -344,7 +352,22 @@ impl MemIndex {
     /// records and new (strictly increasing) sequences matter.
     pub fn finish_rebuild(&mut self) {
         self.tombstones.clear();
+        self.history_by_seq.clear();
         self.rebuilt = true;
+    }
+
+    /// Drop the runtime tombstone history below `sequence`: every record
+    /// with a lower sequence has reached the index.
+    pub fn prune_history(&mut self, sequence: u64) {
+        while let Some((&seq, &key)) = self.history_by_seq.first_key_value() {
+            if seq >= sequence {
+                break;
+            }
+            self.history_by_seq.remove(&seq);
+            if self.tombstones.get(&key) == Some(&seq) {
+                self.tombstones.remove(&key);
+            }
+        }
     }
 
     /// Quarantine a record read through the live index (runtime): only if
@@ -505,8 +528,27 @@ mod tests {
             "replaced since the read"
         );
         assert!(idx.quarantine_live(key(2), q(loc(1, 8, 100))));
+        idx.prune_history(u64::MAX);
         assert_eq!(idx.sizes().tombstone_history, 0);
         assert_eq!(idx.sizes().quarantined, 1);
+    }
+
+    /// Records reach the index after group commit in any order: a put
+    /// applied after a newer delete of its key stays deleted (Phase 3.5
+    /// audit CON-9), and the history goes once nothing older is in flight.
+    #[test]
+    fn an_older_put_applied_after_a_newer_delete_stays_deleted() {
+        let mut idx = MemIndex::default();
+        idx.finish_rebuild();
+        idx.insert(key(1), loc(1, 1, 100));
+        // Put 2 appended, delete 3 appended; the delete reaches the index
+        // first.
+        idx.tombstone(key(1), 3);
+        assert!(idx.insert(key(1), loc(1, 2, 100)).is_none());
+        assert!(idx.get(&key(1)).is_none(), "resurrected by an older put");
+        assert_eq!(idx.sizes().tombstone_history, 1);
+        idx.prune_history(4);
+        assert_eq!(idx.sizes().tombstone_history, 0);
     }
 
     #[test]

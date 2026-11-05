@@ -639,7 +639,7 @@ pub async fn complete<S: KvStore>(
                     .collect();
 
                 let current = current_pointer(tx, b.id, key).await?;
-                check_preconditions(tx, req.pre, current.as_ref()).await?;
+                check_preconditions(tx, b.id, key, req.pre, current.as_ref()).await?;
                 let version_id = if b.versioning == Versioning::Enabled {
                     fresh_version_id.to_string()
                 } else {

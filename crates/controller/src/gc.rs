@@ -63,6 +63,10 @@ pub struct ReconcileReport {
     /// Shards whose delete the node refused because the record changed
     /// since the listing (written again under the same key: kept).
     pub kept_changed: usize,
+    /// Shards left because their node reports no record sequence (an older
+    /// node: a delete there could not be made conditional; reclaimed once
+    /// the node is upgraded, Phase 3.5 audit CON-12).
+    pub kept_no_sequence: usize,
 }
 
 impl ReconcileReport {
@@ -558,8 +562,13 @@ async fn reconcile_shard<S: KvStore>(
 ) -> Result<(), ControlError> {
     // Every delete below names the record the listing showed: one written
     // since under the same key (a migration or repair) is not touched
-    // (Phase 3.5 audit CON-5/CON-6). 0 (an older node) is unconditional.
+    // (Phase 3.5 audit CON-5/CON-6). An older node reports no sequence and
+    // would delete unconditionally: nothing is deleted there (CON-12).
     let mut delete = async |epoch: u64| -> Result<bool, ControlError> {
+        if sequence == 0 {
+            report.kept_no_sequence += 1;
+            return Ok(false);
+        }
         match delete_one(clients, node_addr, shard, epoch, sequence).await {
             Ok(()) => Ok(true),
             Err(ControlError::Node { status, .. }) if NodeClients::is_changed(&status) => {

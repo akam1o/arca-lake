@@ -271,8 +271,12 @@ async fn write_and_verify(
 /// key is left alone, Phase 3.5 audit CON-6).
 async fn cleanup(clients: &NodeClients, written: &[(String, ShardRef, u64)], epoch: u64) {
     for (addr, shard, sequence) in written {
-        let _ = clients
-            .delete_shard_if(addr, *shard, epoch, *sequence)
-            .await;
+        // 0: an older node, where the delete would be unconditional
+        // (CON-12): left to reconciliation after the node's upgrade.
+        if *sequence != 0 {
+            let _ = clients
+                .delete_shard_if(addr, *shard, epoch, *sequence)
+                .await;
+        }
     }
 }

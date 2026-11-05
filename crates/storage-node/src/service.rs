@@ -603,21 +603,25 @@ impl StorageNode for StorageNodeService {
             .into_iter()
             .map(|(k, len, seq)| (k, len, false, seq))
             .collect();
-        let more = page.len() == limit;
+        let mut more = page.len() == limit;
         if req.include_quarantined {
-            // Quarantined keys of the same window, merged in key order; the
-            // cursor stays the last live key so that paging is unchanged.
-            let bound = page.last().map(|(k, _, _, _)| *k);
-            for (k, e) in self
+            // Quarantined keys merged with the live ones into one ordered,
+            // bounded page whose cursor is the last key of the merge (Phase
+            // 3.5 audit OPS-5: the cursor followed the live keys only, and
+            // quarantined keys beyond one page were never listed).
+            let quarantined: Vec<_> = self
                 .store
                 .quarantined_in_group_after(req.group_id, after, limit)
-            {
-                if more && bound.is_some_and(|b| k > b) {
-                    break;
-                }
-                page.push((k, e.location.payload_len, true, e.location.sequence));
-            }
+                .into_iter()
+                .map(|(k, e)| (k, e.location.payload_len, true, e.location.sequence))
+                .collect();
+            more |= quarantined.len() == limit;
+            page.extend(quarantined);
             page.sort_by_key(|a| a.0);
+            if page.len() > limit {
+                page.truncate(limit);
+                more = true;
+            }
         }
         let next = more
             .then(|| page.last().map(|(k, _, _, _)| Self::pb_key(k)))

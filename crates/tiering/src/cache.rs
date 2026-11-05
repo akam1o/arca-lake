@@ -450,6 +450,12 @@ pub async fn reconcile_node<S: KvStore>(
             // Only the record listed: a copy populated since under the same
             // key is not touched (Phase 3.5 audit INT-1).
             let seq = page.sequences.get(shard).copied().unwrap_or(0);
+            if seq == 0 {
+                // An older node: a delete there would be unconditional
+                // (CON-12); left until the node is upgraded.
+                report.kept += 1;
+                continue;
+            }
             match clients
                 .delete_shard_if(node_addr, *shard, group.epoch, seq)
                 .await

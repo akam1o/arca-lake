@@ -474,3 +474,38 @@ fn stale_migration_intents_beyond_a_page_of_young_ones_expire() {
         );
     });
 }
+
+/// A pointer restored to an older marker is not the newer marker it
+/// replaced, even within one millisecond (Phase 3.5 audit CON-11: the
+/// restored pointer keeps the newer `next_ordinal`).
+#[test]
+fn a_restored_marker_is_not_the_marker_deleted() {
+    run(async {
+        use arca_lake_metadata::ops::object;
+        let kv = MemKv::default();
+        bucket::create_bucket(&kv, "b", Versioning::Enabled, 1)
+            .await
+            .unwrap();
+        object::delete_object(&kv, "b", "k", 10).await.unwrap();
+        let newer = object::delete_object(&kv, "b", "k", 10).await.unwrap();
+        let pinned_newer = object::current_identity(&kv, "b", "k").await.unwrap();
+        object::delete_version(
+            &kv,
+            "b",
+            "k",
+            newer.delete_marker_version.as_deref().unwrap(),
+            10,
+        )
+        .await
+        .unwrap();
+        let pinned = Precondition {
+            if_current: Some(pinned_newer),
+            ..Precondition::default()
+        };
+        let r = object::delete_object_as(&kv, "b", "k", &pinned, "x", 10).await;
+        assert!(
+            matches!(r, Err(MetaError::PreconditionFailed)),
+            "the restored older marker was taken for the newer: {r:?}"
+        );
+    });
+}
