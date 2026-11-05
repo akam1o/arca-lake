@@ -1432,6 +1432,10 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             }));
         }
         let pre = precondition(input.if_match.as_ref(), None)?;
+        // The state this delete is decided on, for a re-run (CON-1).
+        let before = object::current_generation(self.meta.as_ref(), &input.bucket, &input.key)
+            .await
+            .map_err(meta_err)?;
         let mut result = object::delete_object_if(
             self.meta.as_ref(),
             &input.bucket,
@@ -1446,19 +1450,32 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                 Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(_)))
             )
         {
-            // Unversioned: idempotent. Versioned: a second marker may be
-            // created, which is harmless for visibility (RFC-007 §5.4).
-            // Not with a precondition: after an applied delete the retry
-            // would answer 412 or 404 for a delete that succeeded; the
-            // unknown outcome is reported instead (503, R-72).
-            result = object::delete_object_if(
+            // Re-run only against the state the delete was decided on: if
+            // the pointer moved, the first attempt was applied (or another
+            // write replaced the key) and the re-run must not delete what is
+            // there now (a newer object, or a second delete marker). Not
+            // with a client precondition: after an applied delete the
+            // re-run would answer 412 or 404 for a delete that succeeded;
+            // the unknown outcome is reported instead (503, R-72).
+            let pinned = object::Precondition {
+                if_current: Some(before),
+                ..object::Precondition::default()
+            };
+            result = match object::delete_object_if(
                 self.meta.as_ref(),
                 &input.bucket,
                 &input.key,
-                &pre,
+                &pinned,
                 now_ms(),
             )
-            .await;
+            .await
+            {
+                Err(MetaError::PreconditionFailed) => Ok(object::Deleted {
+                    delete_marker_version: None,
+                    retired: None,
+                }),
+                other => other,
+            };
         }
         let d = result.map_err(meta_err)?;
         Ok(S3Response::new(DeleteObjectOutput {

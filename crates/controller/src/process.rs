@@ -771,6 +771,8 @@ fn is_state_refusal(e: &ControlError) -> bool {
 
 /// Generations collected per GC batch.
 const GC_BATCH: usize = 1000;
+/// Retired-queue entries counted for the backlog gauge at most.
+const GC_BACKLOG_CAP: usize = 200_000;
 /// Longest a GC pass keeps running batches.
 const GC_PASS_BUDGET: Duration = Duration::from_secs(30);
 
@@ -807,6 +809,14 @@ async fn gc_pass<S: KvStore>(
         if !full || started.elapsed() >= GC_PASS_BUDGET {
             break;
         }
+    }
+    // What is left for the next pass (counted up to GC_BACKLOG_CAP).
+    if let Ok((n, oldest)) = arca_lake_metadata::ops::gc::backlog(meta, GC_BACKLOG_CAP).await {
+        metrics.gc_backlog.store(n as u64, Ordering::Relaxed);
+        metrics.gc_backlog_oldest_age_seconds.store(
+            oldest.map_or(0, |t| now_ms().saturating_sub(t) / 1000),
+            Ordering::Relaxed,
+        );
     }
     let expire_before = (!cfg.multipart_expiry.is_zero())
         .then(|| now_ms().saturating_sub(ms(cfg.multipart_expiry)));

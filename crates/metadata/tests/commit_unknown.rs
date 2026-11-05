@@ -298,3 +298,75 @@ fn conditional_create_with_lost_reply_still_has_one_winner() {
         );
     });
 }
+
+/// A delete by version whose commit is applied but answered as unknown is
+/// re-run; a version written meanwhile under the same id (`null`) is not
+/// deleted by the re-run (Phase 3.5 audit CON-1), and the answer reports
+/// what was deleted.
+#[test]
+fn delete_version_rerun_never_deletes_a_version_written_since() {
+    run(async {
+        let mem = MemKv::default();
+        let kv = FaultKv::new(mem.clone());
+        bucket::create_bucket(&kv, "b", Versioning::Disabled, 1)
+            .await
+            .unwrap();
+        let put = async |s: &MemKv, etag: &str, now: u64| {
+            let p = begin_put(s, "b", "k", now, 60_000).await.unwrap();
+            commit_put(
+                s,
+                &p.generation,
+                &CommitInfo {
+                    size: 1,
+                    etag: etag.into(),
+                    ..Default::default()
+                },
+                &Precondition::default(),
+                now,
+            )
+            .await
+            .unwrap()
+        };
+        let a = put(&mem, "a", 10).await;
+        assert_eq!(a.version_id, "null");
+        kv.inject_on_key(
+            keys::object_current(bucket::get_bucket(&kv, "b").await.unwrap().id, "k"),
+            CommitFault::TimeoutAfterApply,
+            1,
+        );
+        // Between the applied delete and its re-run, B is written as "null".
+        let writer = mem.clone();
+        kv.interleave_next(move || {
+            // Another writer (its own thread: the caller's executor is busy).
+            std::thread::spawn(move || {
+                futures::executor::block_on(async {
+                    let p = begin_put(&writer, "b", "k", 20, 60_000).await.unwrap();
+                    commit_put(
+                        &writer,
+                        &p.generation,
+                        &CommitInfo {
+                            size: 1,
+                            etag: "b".into(),
+                            ..Default::default()
+                        },
+                        &Precondition::default(),
+                        20,
+                    )
+                    .await
+                    .unwrap();
+                });
+            })
+            .join()
+            .unwrap();
+        });
+        let d = arca_lake_metadata::ops::object::delete_version(&kv, "b", "k", "null", 15)
+            .await
+            .unwrap();
+        assert!(d.existed && !d.was_delete_marker, "{d:?}");
+        let h = arca_lake_metadata::ops::object::head_object(&kv, "b", "k")
+            .await
+            .unwrap()
+            .expect("B survives the re-run");
+        assert_eq!(h.pointer.etag, "b");
+    });
+}

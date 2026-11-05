@@ -240,14 +240,41 @@ pub struct Precondition {
     pub if_match: Option<String>,
     /// `If-None-Match: *`: no current (non-delete-marker) version may exist.
     pub if_none_match_any: bool,
+    /// Internal (no S3 header): the key's current pointer must name this
+    /// generation (`Some(None)`: the key has no pointer). Used to re-run a
+    /// write whose commit outcome is unknown against the state it was
+    /// decided on, so that the re-run cannot act on a version written
+    /// since (Phase 3.5 audit CON-1).
+    pub if_current: Option<Option<GenId>>,
 }
 
 impl Precondition {
-    /// No condition at all.
+    /// No client condition (`If-Match`, `If-None-Match`).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.if_match.is_none() && !self.if_none_match_any
     }
+}
+
+/// The generation the key's current pointer names (a delete marker's too),
+/// if any.
+///
+/// # Errors
+///
+/// [`MetaError::NoSuchBucket`].
+pub async fn current_generation<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+) -> Result<Option<GenId>> {
+    transact(store, (bucket, key), |tx, env| {
+        Box::pin(async move {
+            let (bucket, key) = *env;
+            let b = bucket_by_name(tx, bucket).await?;
+            Ok(current_pointer(tx, b.id, key).await?.map(|c| c.generation))
+        })
+    })
+    .await
 }
 
 /// Result of a successful commit.
@@ -799,6 +826,7 @@ pub struct DeletedVersion {
 /// # Errors
 ///
 /// [`MetaError::NoSuchBucket`].
+#[allow(clippy::too_many_lines)]
 pub async fn delete_version<S: KvStore>(
     store: &S,
     bucket: &str,
@@ -806,77 +834,116 @@ pub async fn delete_version<S: KvStore>(
     version_id: &str,
     now_ms: u64,
 ) -> Result<DeletedVersion> {
-    // Re-run after an unknown commit outcome (R-72): a version that is gone
-    // answers `existed: false`, so a re-run after an applied commit neither
-    // fails nor retires anything twice.
-    transact_idempotent(store, (bucket, key, version_id, now_ms), |tx, env| {
+    // The version is pinned to the generation it names now; the deletion
+    // then removes the version only while it still names that generation,
+    // so that a re-run after an unknown commit outcome (R-72) cannot remove
+    // a version written since under a reused id ("null"; Phase 3.5 audit
+    // CON-1). A re-run that finds it gone answers as the deletion did.
+    let pinned = transact(store, (bucket, key, version_id), |tx, env| {
         Box::pin(async move {
-            let (bucket, key, version_id, now_ms) = *env;
+            let (bucket, key, version_id) = *env;
             let b = bucket_by_name(tx, bucket).await?;
             let current = current_pointer(tx, b.id, key).await?;
-            let versions = version_records(tx, b.id, key).await?;
-            let target = versions
-                .iter()
+            if let Some(c) = current.filter(|c| c.version_id == version_id) {
+                return Ok(Some((c.generation, c.delete_marker)));
+            }
+            Ok(version_records(tx, b.id, key)
+                .await?
+                .into_iter()
                 .find(|(_, v)| v.version_id == version_id)
-                .cloned();
-            let is_current = current.as_ref().is_some_and(|c| c.version_id == version_id);
-            if !is_current && target.is_none() {
-                return Ok(DeletedVersion {
-                    was_delete_marker: false,
-                    retired: None,
-                    existed: false,
-                });
-            }
-            let (generation, was_delete_marker) = match (&current, &target) {
-                (Some(c), _) if is_current => (c.generation, c.delete_marker),
-                (_, Some((_, v))) => (v.generation, v.delete_marker),
-                _ => {
-                    return Ok(DeletedVersion {
-                        was_delete_marker: false,
-                        retired: None,
-                        existed: false,
-                    });
-                }
-            };
-            if let Some((ordinal, _)) = &target {
-                tx.clear(&keys::version(b.id, key, *ordinal));
-            }
-            let retired = if was_delete_marker {
-                None
-            } else {
-                let header = generation_header(tx, &generation).await?;
-                retire(tx, &generation, &header, now_ms)?;
-                Some(generation)
-            };
-            if let Some(c) = current.as_ref().filter(|_| is_current) {
-                // Newest remaining version becomes current.
-                let next = versions
-                    .iter()
-                    .find(|(_, v)| v.version_id != version_id)
-                    .map(|(_, v)| v.clone());
-                match next {
-                    Some(v) => {
-                        let pointer = CurrentPointer {
-                            generation: v.generation,
-                            version_id: v.version_id,
-                            delete_marker: v.delete_marker,
-                            next_ordinal: c.next_ordinal,
-                            size: v.size,
-                            etag: v.etag,
-                            last_modified_ms: v.committed_ms,
-                        };
-                        write(tx, &keys::object_current(b.id, key), &pointer)?;
-                    }
-                    None => tx.clear(&keys::object_current(b.id, key)),
-                }
-            }
-            Ok(DeletedVersion {
-                was_delete_marker,
-                retired,
-                existed: true,
-            })
+                .map(|(_, v)| (v.generation, v.delete_marker)))
         })
     })
+    .await?;
+    let Some(pinned) = pinned else {
+        return Ok(DeletedVersion {
+            was_delete_marker: false,
+            retired: None,
+            existed: false,
+        });
+    };
+    transact_idempotent(
+        store,
+        (bucket, key, version_id, now_ms, pinned),
+        |tx, env| {
+            Box::pin(async move {
+                let (bucket, key, version_id, now_ms, pinned) = *env;
+                let b = bucket_by_name(tx, bucket).await?;
+                let current = current_pointer(tx, b.id, key).await?;
+                let versions = version_records(tx, b.id, key).await?;
+                let target = versions
+                    .iter()
+                    .find(|(_, v)| v.version_id == version_id)
+                    .cloned();
+                let is_current = current.as_ref().is_some_and(|c| c.version_id == version_id);
+                if !is_current && target.is_none() {
+                    // Gone since it was pinned: deleted (by an earlier attempt).
+                    return Ok(DeletedVersion {
+                        was_delete_marker: pinned.1,
+                        retired: None,
+                        existed: true,
+                    });
+                }
+                let (generation, was_delete_marker) = match (&current, &target) {
+                    (Some(c), _) if is_current => (c.generation, c.delete_marker),
+                    (_, Some((_, v))) => (v.generation, v.delete_marker),
+                    _ => {
+                        return Ok(DeletedVersion {
+                            was_delete_marker: false,
+                            retired: None,
+                            existed: false,
+                        });
+                    }
+                };
+                if generation != pinned.0 {
+                    // The id now names another version: the pinned one is gone
+                    // (this deletion's earlier attempt, or an overwrite).
+                    return Ok(DeletedVersion {
+                        was_delete_marker: pinned.1,
+                        retired: None,
+                        existed: true,
+                    });
+                }
+                if let Some((ordinal, _)) = &target {
+                    tx.clear(&keys::version(b.id, key, *ordinal));
+                }
+                let retired = if was_delete_marker {
+                    None
+                } else {
+                    let header = generation_header(tx, &generation).await?;
+                    retire(tx, &generation, &header, now_ms)?;
+                    Some(generation)
+                };
+                if let Some(c) = current.as_ref().filter(|_| is_current) {
+                    // Newest remaining version becomes current.
+                    let next = versions
+                        .iter()
+                        .find(|(_, v)| v.version_id != version_id)
+                        .map(|(_, v)| v.clone());
+                    match next {
+                        Some(v) => {
+                            let pointer = CurrentPointer {
+                                generation: v.generation,
+                                version_id: v.version_id,
+                                delete_marker: v.delete_marker,
+                                next_ordinal: c.next_ordinal,
+                                size: v.size,
+                                etag: v.etag,
+                                last_modified_ms: v.committed_ms,
+                            };
+                            write(tx, &keys::object_current(b.id, key), &pointer)?;
+                        }
+                        None => tx.clear(&keys::object_current(b.id, key)),
+                    }
+                }
+                Ok(DeletedVersion {
+                    was_delete_marker,
+                    retired,
+                    existed: true,
+                })
+            })
+        },
+    )
     .await
 }
 
@@ -924,6 +991,11 @@ pub(crate) async fn check_preconditions<X: Txn>(
     pre: &Precondition,
     current: Option<&CurrentPointer>,
 ) -> Result<()> {
+    if let Some(expected) = &pre.if_current
+        && current.map(|c| c.generation) != *expected
+    {
+        return Err(MetaError::PreconditionFailed);
+    }
     let live = current.filter(|c| !c.delete_marker);
     if pre.if_none_match_any && live.is_some() {
         return Err(MetaError::PreconditionFailed);

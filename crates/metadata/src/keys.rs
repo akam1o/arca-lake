@@ -569,6 +569,14 @@ pub fn retired(since_ms: u64, generation: &GenId) -> Key {
     pack(&(ROOT, "gc", since_ms, Bytes::from(&generation[..])))
 }
 
+/// The retirement time of a retired-queue entry.
+#[must_use]
+pub fn retired_since_from(key: &[u8]) -> Option<u64> {
+    unpack::<(String, String, u64, Bytes<'_>)>(key)
+        .ok()
+        .map(|t| t.2)
+}
+
 /// Retired-generation entries retired at or before `cutoff_ms`.
 #[must_use]
 pub fn retired_until_range(cutoff_ms: u64) -> KeyRange {

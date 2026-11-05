@@ -166,7 +166,11 @@ impl CredentialStore {
             }
         }
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut files = vec![path.to_path_buf()];
+        // The stamp describes exactly the bytes parsed (OPS-2: a stamp
+        // re-read afterwards could describe a file rotated in between, and
+        // that rotation would never be loaded).
+        let mut read: Vec<(std::path::PathBuf, Vec<u8>)> =
+            vec![(path.to_path_buf(), text.as_bytes().to_vec())];
         let file: CredentialsFile =
             toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut set = KeySet::default();
@@ -183,11 +187,10 @@ impl CredentialStore {
                         } else {
                             path.parent().unwrap_or(Path::new(".")).join(f)
                         };
-                        let secret = std::fs::read_to_string(&f)
-                            .map_err(|e| format!("{}: {e}", f.display()))?
-                            .trim()
-                            .to_string();
-                        files.push(f);
+                        let bytes =
+                            std::fs::read(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+                        let secret = String::from_utf8_lossy(&bytes).trim().to_string();
+                        read.push((f, bytes));
                         secret
                     }
                     _ => {
@@ -228,7 +231,8 @@ impl CredentialStore {
                 }
             }
         }
-        let digest = Stamp::digest_of(&files);
+        let digest = Stamp::digest_bytes(&read);
+        let files = read.into_iter().map(|(p, _)| p).collect();
         Ok((set, Stamp { files, digest }))
     }
 
@@ -959,15 +963,27 @@ struct Stamp {
 }
 
 impl Stamp {
+    /// Digest of what the files hold now (an unreadable file differs from
+    /// any content).
     fn digest_of(files: &[std::path::PathBuf]) -> u64 {
+        let now: Vec<(std::path::PathBuf, Vec<u8>)> = files
+            .iter()
+            .map(|f| {
+                (
+                    f.clone(),
+                    std::fs::read(f).unwrap_or_else(|_| b"\0unreadable".to_vec()),
+                )
+            })
+            .collect();
+        Self::digest_bytes(&now)
+    }
+
+    fn digest_bytes(files: &[(std::path::PathBuf, Vec<u8>)]) -> u64 {
         use std::hash::{Hash as _, Hasher as _};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        for f in files {
+        for (f, bytes) in files {
             f.hash(&mut h);
-            match std::fs::read(f) {
-                Ok(bytes) => bytes.hash(&mut h),
-                Err(e) => e.kind().hash(&mut h),
-            }
+            bytes.hash(&mut h);
         }
         h.finish()
     }

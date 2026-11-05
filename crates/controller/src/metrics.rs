@@ -74,6 +74,11 @@ pub struct Metrics {
     /// Durable groups rebuilding a member whose former node does not
     /// answer: one shard of redundancy short until the rebuild ends (R-65).
     pub groups_reduced_redundancy: AtomicU64,
+    /// Retired generations waiting for GC after the last pass (counted up
+    /// to a cap) and the age of the oldest (R-64).
+    pub gc_backlog: AtomicU64,
+    /// See `gc_backlog`.
+    pub gc_backlog_oldest_age_seconds: AtomicU64,
     /// Stripe repair tasks in metadata.
     pub repair_queue_depth: AtomicU64,
     /// Tasks in `Unrecoverable`.
@@ -306,6 +311,11 @@ impl Metrics {
             (
                 "arca_controller_groups_reduced_redundancy",
                 &self.groups_reduced_redundancy,
+            ),
+            ("arca_controller_gc_backlog", &self.gc_backlog),
+            (
+                "arca_controller_gc_backlog_oldest_age_seconds",
+                &self.gc_backlog_oldest_age_seconds,
             ),
             (
                 "arca_controller_repair_tasks_unrecoverable",

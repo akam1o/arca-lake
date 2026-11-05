@@ -918,34 +918,58 @@ pub async fn sweep_candidates<S: KvStore>(
     expire_before_ms: Option<u64>,
     limit: usize,
 ) -> Result<Vec<MultipartRecord>> {
-    transact(store, (expire_before_ms, limit), |tx, env| {
-        Box::pin(async move {
-            let (expire_before_ms, limit) = *env;
-            let range = crate::kv::KeyRange::prefix(&foundationdb_tuple::pack(&("al", "mpu")));
-            let mut out = Vec::new();
-            for (_, v) in tx.get_range(&range, usize::MAX, false).await? {
-                let r: MultipartRecord = decode(&v)?;
-                let wanted = match r.state {
-                    MultipartState::Open => expire_before_ms.is_some_and(|t| r.initiated_ms < t),
-                    MultipartState::Aborting => true,
-                    MultipartState::Completed { .. } => {
-                        // Work only if part records remain.
-                        !tx.get_range(&keys::parts_range(&r.upload_id), 1, false)
-                            .await?
-                            .is_empty()
-                    }
-                };
-                if wanted {
-                    out.push(r);
-                    if out.len() >= limit {
-                        break;
-                    }
+    // One bounded page per transaction (Phase 3.5 audit OPS-1: the whole
+    // upload space was read in one transaction, which outgrows the store's
+    // transaction limits and the controller's memory with many uploads).
+    const PAGE: usize = 1000;
+    let full = crate::kv::KeyRange::prefix(&foundationdb_tuple::pack(&("al", "mpu")));
+    let mut begin = full.begin.clone();
+    let mut out = Vec::new();
+    loop {
+        let range = crate::kv::KeyRange::new(begin.clone(), full.end.clone());
+        let (page, more) = transact(store, (range, expire_before_ms), |tx, env| {
+            Box::pin(async move {
+                let (range, expire_before_ms) = env;
+                let entries = tx.get_range(range, PAGE, false).await?;
+                let more = entries.len() == PAGE;
+                let mut page = Vec::new();
+                for (k, v) in entries {
+                    let r: MultipartRecord = decode(&v)?;
+                    let wanted = match r.state {
+                        MultipartState::Open => {
+                            expire_before_ms.is_some_and(|t| r.initiated_ms < t)
+                        }
+                        MultipartState::Aborting => true,
+                        MultipartState::Completed { .. } => {
+                            // Work only if part records remain.
+                            !tx.get_range(&keys::parts_range(&r.upload_id), 1, false)
+                                .await?
+                                .is_empty()
+                        }
+                    };
+                    page.push((k, wanted.then_some(r)));
+                }
+                Ok((page, more))
+            })
+        })
+        .await?;
+        let last = page.last().map(|(k, _)| k.clone());
+        for (_, r) in page {
+            if let Some(r) = r {
+                out.push(r);
+                if out.len() >= limit {
+                    return Ok(out);
                 }
             }
-            Ok(out)
-        })
-    })
-    .await
+        }
+        match last {
+            Some(k) if more => {
+                begin = k;
+                begin.push(0);
+            }
+            _ => return Ok(out),
+        }
+    }
 }
 
 /// One step of finishing a retiring multipart root (GC; I-MP2): retire up to

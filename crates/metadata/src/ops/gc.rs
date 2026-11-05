@@ -103,6 +103,27 @@ pub async fn collectable<S: KvStore>(
         .collect())
 }
 
+/// The retired queue: entries (counted up to `cap`) and the time the
+/// oldest was retired (R-64: the backlog GC works through).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn backlog<S: KvStore>(store: &S, cap: usize) -> Result<(usize, Option<u64>)> {
+    transact(store, cap, |tx, cap| {
+        Box::pin(async move {
+            let entries = tx
+                .get_range(&keys::retired_until_range(u64::MAX), *cap, false)
+                .await?;
+            let oldest = entries
+                .first()
+                .and_then(|(k, _)| keys::retired_since_from(k));
+            Ok((entries.len(), oldest))
+        })
+    })
+    .await
+}
+
 /// Remove all metadata of a retired generation. Call only after its shards
 /// have been deleted from every storage node.
 ///

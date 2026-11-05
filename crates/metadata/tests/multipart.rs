@@ -1068,3 +1068,41 @@ fn complete_evaluates_conditional_headers_and_checksums() {
         assert_eq!(m.pointer.generation, root);
     });
 }
+
+/// The sweep's candidates are found page by page beyond the first page of
+/// the upload space, and at most `limit` are returned (Phase 3.5 audit
+/// OPS-1: the whole space used to be read in one transaction).
+#[test]
+fn sweep_candidates_page_through_many_uploads() {
+    run(async {
+        let kv = MemKv::default();
+        bucket::create_bucket(&kv, "b", Versioning::Disabled, 1)
+            .await
+            .unwrap();
+        // 2500 open uploads (not yet expired), keys sorting first; then
+        // three aborting ones at the end of the space.
+        for i in 0..2500 {
+            multipart::create_upload(&kv, "b", &format!("a/{i:05}"), &UploadInfo::default(), 10)
+                .await
+                .unwrap();
+        }
+        for i in 0..3 {
+            let up =
+                multipart::create_upload(&kv, "b", &format!("z/{i}"), &UploadInfo::default(), 10)
+                    .await
+                    .unwrap();
+            multipart::abort(&kv, "b", &format!("z/{i}"), &up.upload_id)
+                .await
+                .unwrap();
+        }
+        let c = multipart::sweep_candidates(&kv, Some(5), 100)
+            .await
+            .unwrap();
+        assert_eq!(c.len(), 3);
+        assert!(c.iter().all(|r| r.state == MultipartState::Aborting));
+        let c = multipart::sweep_candidates(&kv, Some(11), 1000)
+            .await
+            .unwrap();
+        assert_eq!(c.len(), 1000, "expired open uploads, at most the limit");
+    });
+}

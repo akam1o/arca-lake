@@ -43,6 +43,7 @@ fn timeout_error() -> KvError {
 }
 
 type Parked = Arc<Mutex<Vec<Box<dyn std::any::Any + Send>>>>;
+type Interleave = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 
 type Matcher = dyn Fn(&[Key]) -> bool + Send + Sync;
 
@@ -60,6 +61,7 @@ pub struct FaultKv<S> {
     rules: Arc<Mutex<Vec<FaultRule>>>,
     fired: Arc<Mutex<Vec<CommitFault>>>,
     parked: Parked,
+    interleave: Interleave,
 }
 
 impl<S: std::fmt::Debug> std::fmt::Debug for FaultKv<S> {
@@ -78,6 +80,7 @@ impl<S> FaultKv<S> {
             rules: Arc::default(),
             fired: Arc::default(),
             parked: Arc::default(),
+            interleave: Arc::default(),
         }
     }
 
@@ -107,6 +110,17 @@ impl<S> FaultKv<S> {
     /// Inject `fault` into the next `times` commits that write `key`.
     pub fn inject_on_key(&self, key: Key, fault: CommitFault, times: usize) {
         self.inject(move |written| written.contains(&key), fault, times);
+    }
+
+    /// Run `f` once, when the next fault fires: after the faulted commit was
+    /// applied (or dropped or held) and before its error reaches the
+    /// caller, the moment a concurrent writer could slip in between a lost
+    /// reply and the caller's resolution or retry.
+    pub fn interleave_next(&self, f: impl FnOnce() + Send + 'static) {
+        *self
+            .interleave
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(f));
     }
 
     /// Faults fired so far, in order.
@@ -170,6 +184,7 @@ where
             rules: Arc::clone(&self.rules),
             fired: Arc::clone(&self.fired),
             parked: Arc::clone(&self.parked),
+            interleave: Arc::clone(&self.interleave),
         })
     }
 
@@ -185,6 +200,7 @@ pub struct FaultTx<T> {
     rules: Arc<Mutex<Vec<FaultRule>>>,
     fired: Arc<Mutex<Vec<CommitFault>>>,
     parked: Parked,
+    interleave: Interleave,
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for FaultTx<T> {
@@ -252,7 +268,8 @@ impl<T: Txn + 'static> Txn for FaultTx<T> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(fault);
-        match fault {
+        let interleave = Arc::clone(&self.interleave);
+        let result = match fault {
             CommitFault::UnknownAfterApply => {
                 self.inner.commit().await?;
                 Err(KvError::CommitUnknown(
@@ -275,7 +292,15 @@ impl<T: Txn + 'static> Txn for FaultTx<T> {
                     .push(Box::new(self.inner));
                 Err(timeout_error())
             }
+        };
+        let f = interleave
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(f) = f {
+            f();
         }
+        result
     }
 }
 
