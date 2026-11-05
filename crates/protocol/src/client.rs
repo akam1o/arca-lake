@@ -601,11 +601,16 @@ impl NodeClients {
             })
             .await?;
         let caps = NodeCaps::from_health(&resp);
-        self.negotiated
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(addr.to_string(), caps.clone());
         let v = caps.compatible();
+        // Only a compatible window is kept: an incompatible one is asked
+        // again on the next call, so a node replaced by a compatible binary
+        // is used again without a restart (Phase 3.5 audit OPS-12).
+        if v.is_ok() {
+            self.negotiated
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(addr.to_string(), caps.clone());
+        }
         if v.is_err() {
             self.stats
                 .incompatible
