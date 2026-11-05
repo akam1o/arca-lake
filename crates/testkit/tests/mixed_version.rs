@@ -30,6 +30,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use arca_lake_protocol::client::NodeClients;
+use arca_lake_protocol::storage::v1::{
+    PROTOCOL_VERSION as P_OLD, PROTOCOL_VERSION_MIN as P_OLD_MIN,
+};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::primitives::ByteStream;
@@ -388,8 +391,8 @@ async fn rolling_upgrade_with_two_binaries() {
         .unwrap();
     committed.retain(|(k, _)| k != "base0");
     let status = env.admin_ok(true, &["status", "--versions"]);
-    // The new controller recorded the old nodes' capabilities (protocol 1,
-    // format 1) and left format_write at 1.
+    // The new controller recorded the old nodes' capabilities (protocol
+    // P_OLD, format 1) and left format_write at 1.
     assert!(status.contains("format_write Some(1)"), "{status}");
     let cap_lines: Vec<&str> = status
         .lines()
@@ -397,14 +400,17 @@ async fn rolling_upgrade_with_two_binaries() {
         .collect();
     assert_eq!(cap_lines.len(), 3, "{status}");
     assert!(
-        cap_lines
-            .iter()
-            .all(|l| l.contains("protocol [1, 1] format [1, 1] format_write 1")),
+        cap_lines.iter().all(|l| l.contains(&format!(
+            "protocol [{P_OLD_MIN}, {P_OLD}] format [1, 1] format_write 1"
+        ))),
         "{status}"
     );
     for a in &node_addrs {
         let h = clients.health(a).await.unwrap();
-        assert_eq!((h.protocol_max, h.format_max, h.format_write), (1, 1, 1));
+        assert_eq!(
+            (h.protocol_max, h.format_max, h.format_write),
+            (P_OLD, 1, 1)
+        );
     }
 
     // ---- 8. Cancel before finalize: request, cancel, the old gateway
@@ -457,7 +463,10 @@ async fn rolling_upgrade_with_two_binaries() {
     .await;
     let st = env.admin_ok(true, &["upgrade", "status"]);
     assert!(st.contains("step Requested"), "{st}");
-    assert!(st.contains("speaks protocol 1 format 1"), "{st}");
+    assert!(
+        st.contains(&format!("speaks protocol {P_OLD} format 1")),
+        "{st}"
+    );
     // Old gateway heartbeats block too (it reads schema up to 2).
     assert!(st.contains("old") || st.contains("Gateway"), "{st}");
 
@@ -485,7 +494,10 @@ async fn rolling_upgrade_with_two_binaries() {
     );
     wait_tcp(&node_addrs[0], Duration::from_secs(20)).await;
     let h = clients.health(&node_addrs[0]).await.unwrap();
-    assert_eq!((h.protocol_max, h.format_max, h.version_bump), (1, 1, 0));
+    assert_eq!(
+        (h.protocol_max, h.format_max, h.version_bump),
+        (P_OLD, 1, 0)
+    );
     for (key, data) in &committed {
         assert_eq!(
             &get(&s3_new, key).await,
@@ -623,7 +635,7 @@ async fn rolling_upgrade_with_two_binaries() {
         let h = clients.health(a).await.unwrap();
         assert_eq!(
             (h.protocol_max, h.format_max, h.format_write, h.version_bump),
-            (2, 2, 2, 1),
+            (P_OLD + 1, 2, 2, 1),
             "{a}"
         );
     }

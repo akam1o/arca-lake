@@ -698,6 +698,31 @@ impl NodeClients {
     where
         Fut: Future<Output = Result<T, tonic::Status>>,
     {
+        let addr = ctx.addr;
+        let r = self.with_faults_inner(ctx, call).await;
+        // A node that refuses the negotiated protocol version runs another
+        // binary than when it was asked: negotiate again on the next call
+        // (Phase 3.5 audit OPS-11).
+        if let Err(status) = &r
+            && status.code() == tonic::Code::FailedPrecondition
+            && status.message().starts_with("protocol version")
+        {
+            self.negotiated
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(addr);
+        }
+        r
+    }
+
+    async fn with_faults_inner<T, Fut>(
+        &self,
+        ctx: RpcContext<'_>,
+        call: impl Fn(StreamFault) -> Fut,
+    ) -> Result<T, tonic::Status>
+    where
+        Fut: Future<Output = Result<T, tonic::Status>>,
+    {
         match self.action(&ctx) {
             FaultAction::None => call(StreamFault::None).await,
             FaultAction::StallStream => call(StreamFault::Stall).await,
