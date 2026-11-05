@@ -137,6 +137,10 @@ loss, coordinator loss, leader failover, repair under process loss).
   are not conditional on record sequences (INT-1/INT-2, Medium): a newer
   copy under the same key can be lost, which costs a cache miss (reads
   verify against the chunk record and fall back to the durable tier).
+- Delete tokens are (store epoch, sequence) with a new random 64-bit
+  epoch at every store open: two epochs collide with probability 2^-64
+  (CON-20); a token from before a node restart is refused, and the delete
+  is redone after the next listing.
 - Storage nodes without record sequences (before Phase 3.5) get no
   reconciliation or migration-cleanup deletes; their orphans wait for the
   upgrade (CON-12).

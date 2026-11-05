@@ -94,6 +94,10 @@ pub struct OpenReport {
     /// Regions skipped because their header did not validate, as
     /// `(segment, offset, end, reason)`.
     pub holes: Vec<(u64, u64, u64, &'static str)>,
+    /// The sequence bound file was damaged and ignored (safe: every open
+    /// takes a new store epoch; sequences restart above the surviving
+    /// records).
+    pub sequence_bound_damaged: bool,
 }
 
 /// Scrub result.
@@ -359,6 +363,8 @@ pub struct Store {
     device_id: [u8; 16],
     /// Store epoch: half of every delete token ([`Store::store_epoch`]).
     epoch: u64,
+    /// Exclusive lock on the directory, held while the store is open.
+    _lock: File,
     writer: Mutex<Writer>,
     index: RwLock<MemIndex>,
     readers: RwLock<BTreeMap<u64, SegmentInfo>>,
@@ -423,6 +429,21 @@ impl Store {
         validate_geometry(cfg.record_alignment, cfg.block_size)?;
         let cfg_format_write = cfg.format_write;
         std::fs::create_dir_all(&cfg.dir)?;
+        // One store per directory, for the store's whole life (Phase 3.5
+        // audit CON-19: two stores on one directory would write segments
+        // and hand out sequences independently).
+        let lock = File::create(cfg.dir.join(LOCK_FILE))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("{} is in use by another store", cfg.dir.display()),
+                )
+                .into());
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
 
         let mut ids: Vec<u64> = std::fs::read_dir(&cfg.dir)?
             .filter_map(std::result::Result::ok)
@@ -493,17 +514,17 @@ impl Store {
         // were checked against it (Phase 3.5 audit OPS-4: an older damaged
         // record of a deleted key was quarantined).
         rec.index.finish_rebuild();
-        // Never hand out a sequence again: compaction can drop the records
-        // that carried the highest ones (Phase 3.5 audit CON-10: a delete
-        // conditional on an old sequence matched a new record after reopen).
-        // Without a bound (a new store, one that predates it, or a bound
-        // lost or removed) nothing proves which sequences were handed out:
-        // a new store epoch makes every earlier delete token stale instead
-        // (Phase 3.5 audit CON-16; a token is the epoch and the sequence).
-        let (next_sequence, store_epoch) = match read_sequence_bound(&cfg.dir)? {
-            Some((bound, epoch)) => ((rec.max_sequence + 1).max(bound), epoch),
-            None => (rec.max_sequence + 1, new_store_epoch()),
-        };
+        // A delete token is (store epoch, sequence), and every open takes a
+        // new epoch: no token handed out before can match a record written
+        // after, whatever the directory went through in between (compaction
+        // dropping the highest sequences, a lost bound, a restored older
+        // copy; Phase 3.5 audit CON-10, CON-16, CON-18). A token from
+        // before a restart is refused and the caller lists again. The bound
+        // only keeps sequences increasing across opens (diagnostics).
+        let store_epoch = new_store_epoch();
+        let (bound, damaged) = read_sequence_bound(&cfg.dir);
+        rec.report.sequence_bound_damaged = damaged;
+        let next_sequence = reserve(rec.max_sequence, 1)?.max(bound);
         write_sequence_bound(
             &cfg.dir,
             reserve(next_sequence, sequences_per_segment(&cfg))?,
@@ -513,6 +534,7 @@ impl Store {
             cfg,
             device_id,
             epoch: store_epoch,
+            _lock: lock,
             writer: Mutex::new(Writer {
                 active,
                 poisoned: false,
@@ -1427,10 +1449,8 @@ impl Store {
         Ok(out)
     }
 
-    /// The store epoch: changes when the store cannot prove which record
-    /// sequences it handed out (its bound was missing at open). A delete
-    /// token is `(store epoch, sequence)`; the node refuses one of another
-    /// epoch.
+    /// The store epoch, new at every open. A delete token is `(store
+    /// epoch, sequence)`; the node refuses one of another epoch.
     #[must_use]
     pub fn store_epoch(&self) -> u64 {
         self.epoch
@@ -1755,59 +1775,45 @@ fn sequences_per_segment(cfg: &StoreConfig) -> u64 {
     cfg.segment_max_bytes / 64 + 2
 }
 
-/// A random, non-zero store epoch.
+/// File locked while a store has the directory open.
+const LOCK_FILE: &str = "store.lock";
+
+/// A random, non-zero store epoch: 64 random bits (the two halves of a
+/// v4 UUID combined, so that its fixed version and variant bits are not
+/// part of it; Phase 3.5 audit CON-20). Two opens collide with
+/// probability 2^-64.
 fn new_store_epoch() -> u64 {
     let b = *uuid::Uuid::new_v4().as_bytes();
-    u64::from_le_bytes(b[..8].try_into().unwrap_or_default()).max(1)
+    let (lo, hi) = b.split_at(8);
+    let x = u64::from_le_bytes(lo.try_into().unwrap_or_default())
+        ^ u64::from_le_bytes(hi.try_into().unwrap_or_default()).rotate_left(29);
+    x.max(1)
 }
 
-/// `next + n`, refusing to wrap (Phase 3.5 audit CON-17).
+/// `next + n`, refusing to wrap (Phase 3.5 audit CON-17, CON-21).
 fn reserve(next: u64, n: u64) -> Result<u64> {
     next.checked_add(n)
         .ok_or_else(|| std::io::Error::other("record sequences exhausted").into())
 }
 
-/// The persisted bound and store epoch; `None` when there is no bound
-/// file, or one of the earlier single-value format (no epoch). A bound that
-/// does not match its checksum refuses the open (CON-14). The operator's
-/// recovery is to remove the file: the store then takes a new epoch, and
-/// delete tokens handed out before can no longer match (CON-16).
-fn read_sequence_bound(dir: &Path) -> Result<Option<(u64, u64)>> {
-    let path = dir.join(SEQUENCE_BOUND_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            let fields: Vec<&str> = text.split_whitespace().collect();
-            let parsed = match fields.as_slice() {
-                [v] if v.parse::<u64>().is_ok() => return Ok(None),
-                [v, epoch, crc] => {
-                    let body = format!("{v} {epoch}");
-                    match (v.parse::<u64>(), epoch.parse::<u64>()) {
-                        (Ok(v), Ok(e))
-                            if e != 0
-                                && format!("{:08x}", crate::format::crc32c(body.as_bytes()))
-                                    == *crc =>
-                        {
-                            Some((v, e))
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            parsed.map(Some).ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "{} is damaged (an exclusive bound above every record sequence handed out, the store epoch, a checksum); remove it: the store then takes a new epoch and earlier delete tokens stop matching",
-                        path.display()
-                    ),
-                )
-                .into()
-            })
+/// The persisted bound (0 when there is none) and whether the file was
+/// damaged: the bound only keeps sequences increasing across opens, safety
+/// comes from the store epoch, so a damaged file is not a reason to refuse
+/// the open.
+fn read_sequence_bound(dir: &Path) -> (u64, bool) {
+    let Ok(text) = std::fs::read_to_string(dir.join(SEQUENCE_BOUND_FILE)) else {
+        return (0, false);
+    };
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    if let [v, epoch, crc] = fields.as_slice() {
+        let body = format!("{v} {epoch}");
+        if format!("{:08x}", crate::format::crc32c(body.as_bytes())) == *crc
+            && let Ok(v) = v.parse()
+        {
+            return (v, false);
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
     }
+    (0, true)
 }
 
 /// Replace the bound durably (write, sync, rename, sync the directory).

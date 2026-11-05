@@ -251,21 +251,22 @@ epoch does not change between the two placements. Two mechanisms close it:
   shards of a chunk while a migration into that group holds the chunk's
   intent.
 
-A sequence names one record for the life of the node's store: the store
-persists a bound above every sequence it handed out (`sequence.bound`,
-raised at open and at every segment rollover), so compaction dropping the
-records with the highest sequences cannot make a later record reuse one
-(CON-10). A delete token is the pair (store epoch, sequence): the file
-holds the bound, the store epoch and a checksum, and a damaged file
-refuses the open, even one that still parses (CON-14). When a store has
-no bound (new, predating the file, or the file lost or removed), nothing
-proves which sequences it handed out: it takes a new random epoch, and a
-node refuses (`ABORTED`) every token of another epoch, so a sequence
-handed out again can never match an old token (CON-16). Removing a damaged
-file is therefore the operator's safe recovery (OPS-7); its only cost is
-that deletes decided before it are refused and redone after the next
-listing. Sequence arithmetic never wraps; exhaustion fails the write
-(CON-17). Records reach the in-memory index after group commit in any
+A delete token is the pair (store epoch, sequence), and the store takes a
+new random epoch (64 bits) at every open: a sequence is unique within an
+epoch, and a node refuses (`ABORTED`) every token of another epoch. So no
+token handed out before a restart can match a record written after it,
+whatever happened to the directory in between: compaction dropping the
+records with the highest sequences (CON-10), a lost or damaged bound file
+(CON-14, CON-16), a directory restored from an older copy (CON-18). The
+guarantee is probabilistic only in that two epochs collide with
+probability 2^-64 (CON-20). A delete decided before a restart is refused
+and redone after the next listing. The store holds an exclusive lock on
+its directory while open (CON-19). Sequence arithmetic never wraps;
+exhaustion fails the write (CON-17, CON-21). `sequence.bound` only keeps
+sequences increasing across opens; a damaged file is reported in the open
+report and ignored.
+
+Records reach the in-memory index after group commit in any
 order; the index keeps a runtime tombstone until every older record has
 been applied, so a conditionally deleted key is never resurrected by an
 older put that was still on its way (CON-9); a write that fails or panics

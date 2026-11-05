@@ -166,6 +166,11 @@ impl StorageNodeService {
                 "storage open found damaged records (see quarantine.log)"
             );
         }
+        if report.sequence_bound_damaged {
+            tracing::warn!(
+                "sequence.bound was damaged and ignored; the store took a new epoch as at every open"
+            );
+        }
         let epochs = EpochTable::open(&cfg.store.dir);
         let cluster = crate::cluster::ClusterFacts::open(&cfg.store.dir);
         if cluster.format_write > 0 {

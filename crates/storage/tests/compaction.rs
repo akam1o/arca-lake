@@ -634,40 +634,37 @@ fn sequences_are_not_reused_after_their_records_are_gone() {
     assert_eq!(store.get(&key(7), None).unwrap(), payload(8));
 }
 
-/// A damaged sequence bound refuses the open instead of letting sequences
-/// restart from the surviving records (Phase 3.5 audit CON-14).
+/// Every open takes a new store epoch, so a delete token cannot outlive
+/// a restart: not after a clean reopen, not after the bound file was
+/// damaged or removed, not after the directory was rolled back to an older
+/// copy (Phase 3.5 audit CON-16, CON-18). A damaged bound is reported and
+/// ignored.
 #[test]
-fn a_damaged_sequence_bound_refuses_the_open() {
-    let dir = tempfile::tempdir().unwrap();
-    let (store, _) = Store::open(config(dir.path())).unwrap();
-    store.put(key(1), &payload(1)).unwrap();
-    drop(store);
-    std::fs::write(dir.path().join("sequence.bound"), "garbage\n").unwrap();
-    let Err(e) = Store::open(config(dir.path())) else {
-        panic!("a damaged bound was accepted");
-    };
-    assert!(e.to_string().contains("sequence.bound"), "{e}");
-}
-
-/// A bound that still parses but does not match its checksum is refused
-/// too; removing the file is the recovery, and the store then takes a new
-/// epoch, so delete tokens handed out before cannot match whatever
-/// sequences it hands out again (Phase 3.5 audit CON-14, CON-16).
-#[test]
-fn a_bad_checksum_is_refused_and_a_removed_bound_changes_the_epoch() {
+fn every_open_takes_a_new_epoch_and_a_damaged_bound_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
     let (store, _) = Store::open(config(dir.path())).unwrap();
     store.put(key(9), &payload(9)).unwrap();
-    let epoch = store.store_epoch();
+    let first = store.store_epoch();
     drop(store);
-    let (store, _) = Store::open(config(dir.path())).unwrap();
-    assert_eq!(store.store_epoch(), epoch, "kept across a clean reopen");
+    let (store, report) = Store::open(config(dir.path())).unwrap();
+    assert!(!report.sequence_bound_damaged);
+    let second = store.store_epoch();
+    assert_ne!(second, first);
     drop(store);
-    let bound = dir.path().join("sequence.bound");
-    std::fs::write(&bound, format!("5 {epoch} deadbeef\n")).unwrap();
-    assert!(Store::open(config(dir.path())).is_err());
-    std::fs::remove_file(&bound).unwrap();
-    let (store, _) = Store::open(config(dir.path())).unwrap();
-    assert_ne!(store.store_epoch(), epoch);
+    std::fs::write(dir.path().join("sequence.bound"), "5 7 deadbeef\n").unwrap();
+    let (store, report) = Store::open(config(dir.path())).unwrap();
+    assert!(report.sequence_bound_damaged);
+    assert!(![first, second].contains(&store.store_epoch()));
     assert_eq!(store.get(&key(9), None).unwrap(), payload(9));
+}
+
+/// One store per directory: a second open while the first is alive is
+/// refused (Phase 3.5 audit CON-19).
+#[test]
+fn a_directory_is_opened_by_one_store_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    assert!(Store::open(config(dir.path())).is_err());
+    drop(store);
+    Store::open(config(dir.path())).unwrap();
 }
