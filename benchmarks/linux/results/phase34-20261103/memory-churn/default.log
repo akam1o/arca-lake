@@ -1,0 +1,54 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.78s
+     Running tests/memory_churn.rs (target/release/deps/memory_churn-9af18535cef9682d)
+
+running 1 test
+{"t_s":0,"rss_anon_kib":5824,"ops":0,"put_gib":0.00,"compactions":0,"segment_mib":0}
+test rss_under_sustained_churn has been running for over 60 seconds
+{"t_s":60,"rss_anon_kib":69016,"ops":11560,"put_gib":4.44,"compactions":75,"segment_mib":627}
+{"t_s":120,"rss_anon_kib":69732,"ops":23488,"put_gib":9.06,"compactions":200,"segment_mib":635}
+{"t_s":180,"rss_anon_kib":73192,"ops":34635,"put_gib":13.38,"compactions":317,"segment_mib":634}
+{"t_s":240,"rss_anon_kib":68304,"ops":45748,"put_gib":17.74,"compactions":436,"segment_mib":757}
+{"t_s":300,"rss_anon_kib":75800,"ops":56261,"put_gib":21.83,"compactions":551,"segment_mib":642}
+{"t_s":360,"rss_anon_kib":79032,"ops":68571,"put_gib":26.56,"compactions":681,"segment_mib":646}
+{"t_s":420,"rss_anon_kib":71036,"ops":80239,"put_gib":31.09,"compactions":801,"segment_mib":708}
+{"t_s":480,"rss_anon_kib":71956,"ops":90229,"put_gib":34.97,"compactions":916,"segment_mib":652}
+{"t_s":540,"rss_anon_kib":81160,"ops":101538,"put_gib":39.39,"compactions":1030,"segment_mib":759}
+{"t_s":600,"rss_anon_kib":71336,"ops":112341,"put_gib":43.61,"compactions":1147,"segment_mib":740}
+{"t_s":660,"rss_anon_kib":78552,"ops":123081,"put_gib":47.74,"compactions":1266,"segment_mib":714}
+{"t_s":720,"rss_anon_kib":74252,"ops":134544,"put_gib":52.21,"compactions":1387,"segment_mib":693}
+{"t_s":780,"rss_anon_kib":78632,"ops":145569,"put_gib":56.46,"compactions":1502,"segment_mib":701}
+{"t_s":840,"rss_anon_kib":75332,"ops":156568,"put_gib":60.69,"compactions":1617,"segment_mib":713}
+{"t_s":900,"rss_anon_kib":78880,"ops":168005,"put_gib":65.17,"compactions":1741,"segment_mib":661}
+{"t_s":960,"rss_anon_kib":79764,"ops":178281,"put_gib":69.12,"compactions":1849,"segment_mib":640}
+{"t_s":1020,"rss_anon_kib":78552,"ops":190012,"put_gib":73.71,"compactions":1978,"segment_mib":613}
+{"t_s":1080,"rss_anon_kib":78104,"ops":202286,"put_gib":78.48,"compactions":2104,"segment_mib":732}
+{"t_s":1140,"rss_anon_kib":80440,"ops":214774,"put_gib":83.38,"compactions":2242,"segment_mib":739}
+{"t_s":1200,"rss_anon_kib":87636,"ops":227442,"put_gib":88.27,"compactions":2380,"segment_mib":760}
+{"t_s":1260,"rss_anon_kib":84488,"ops":239769,"put_gib":93.01,"compactions":2512,"segment_mib":684}
+{"t_s":1320,"rss_anon_kib":86608,"ops":252122,"put_gib":97.83,"compactions":2652,"segment_mib":686}
+{"t_s":1380,"rss_anon_kib":85856,"ops":264011,"put_gib":102.41,"compactions":2778,"segment_mib":749}
+{"t_s":1440,"rss_anon_kib":78680,"ops":276130,"put_gib":107.11,"compactions":2909,"segment_mib":660}
+{"t_s":1500,"rss_anon_kib":80320,"ops":288326,"put_gib":111.85,"compactions":3038,"segment_mib":635}
+{"t_s":1560,"rss_anon_kib":86472,"ops":300360,"put_gib":116.50,"compactions":3167,"segment_mib":729}
+{"t_s":1620,"rss_anon_kib":79264,"ops":312588,"put_gib":121.25,"compactions":3300,"segment_mib":735}
+{"t_s":1680,"rss_anon_kib":79452,"ops":325106,"put_gib":126.09,"compactions":3433,"segment_mib":706}
+{"t_s":1740,"rss_anon_kib":80636,"ops":338042,"put_gib":131.09,"compactions":3569,"segment_mib":696}
+{"t_s":1800,"rss_anon_kib":82540,"ops":350626,"put_gib":135.98,"compactions":3705,"segment_mib":735}
+{"t_s":1860,"rss_anon_kib":80648,"ops":362969,"put_gib":140.77,"compactions":3834,"segment_mib":720}
+{"t_s":1920,"rss_anon_kib":80736,"ops":375380,"put_gib":145.58,"compactions":3965,"segment_mib":725}
+{"t_s":1980,"rss_anon_kib":81084,"ops":387984,"put_gib":150.46,"compactions":4098,"segment_mib":736}
+{"t_s":2040,"rss_anon_kib":81056,"ops":401223,"put_gib":155.59,"compactions":4244,"segment_mib":656}
+{"t_s":2100,"rss_anon_kib":82756,"ops":414089,"put_gib":160.64,"compactions":4386,"segment_mib":780}
+{"t_s":2160,"rss_anon_kib":87704,"ops":426223,"put_gib":165.34,"compactions":4521,"segment_mib":769}
+{"t_s":2220,"rss_anon_kib":85872,"ops":438228,"put_gib":170.02,"compactions":4645,"segment_mib":734}
+{"t_s":2280,"rss_anon_kib":81344,"ops":450420,"put_gib":174.77,"compactions":4781,"segment_mib":644}
+{"t_s":2340,"rss_anon_kib":84168,"ops":463515,"put_gib":179.79,"compactions":4909,"segment_mib":652}
+{"final":true,"rss_anon_kib":83096}
+test rss_under_sustained_churn ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2400.18s
+

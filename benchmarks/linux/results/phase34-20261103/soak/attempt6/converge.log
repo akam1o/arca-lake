@@ -1,0 +1,22 @@
+2026-11-04T04:20:06Z waiting for the workload to stop writing at 2026-11-05T05:20:06Z
+2026-11-05T05:20:07Z workload duration reached: stopping faults
+2026-11-05T05:20:09Z faults stopped; waiting for the workload's final verification
+2026-11-05T05:20:19Z workload final: violations 0
+2026-11-05T05:20:25Z end-of-soak state saved in ~/arca-soak-end/end-of-soak
+2026-11-05T05:20:25Z integrity snapshot 1
+2026-11-05T05:20:36Z snapshot 1: {"bytes":921863622,"delete_markers":188041,"latest":1219,"unreadable_or_incomplete_or_mismatched":0,"versions":190197} (exit 0)
+2026-11-05T05:20:36Z convergence: GC, compaction and reconciliation continue with their normal settings
+2026-11-05T05:46:49Z converged after 1573 s (queues empty, nothing moved for 908 s, 2 reconcile passes)
+2026-11-05T05:56:49Z idempotent: 600 s of further passes changed nothing
+2026-11-05T05:56:49Z integrity snapshot 2
+2026-11-05T05:57:00Z compare: {"added":0,"after":190197,"before":190197,"changed":0,"missing":0,"unreadable_after":0} (exit 0)
+2026-11-05T05:57:00Z verify-manifests exit 0
+2026-11-05T05:57:02Z breakdown d0: {"what":"total","segment":0,"file_bytes":752173056,"live_bytes":466142962,"live_records":2223,"dead_bytes":236403701,"dead_records":834,"tombstones_needed":726,"tombstones_droppable":9353,"tombstones_kept_by_rule":726,"tombstone_bytes":645056,"damaged_records":0,"slack_bytes":48981337,"min_seq":66458}
+2026-11-05T05:57:02Z breakdown d1: {"what":"total","segment":0,"file_bytes":673964032,"live_bytes":466136976,"live_records":2230,"dead_bytes":159590382,"dead_records":513,"tombstones_needed":310,"tombstones_droppable":9618,"tombstones_kept_by_rule":310,"tombstone_bytes":635392,"damaged_records":0,"slack_bytes":47601282,"min_seq":67877}
+2026-11-05T05:57:03Z breakdown d2: {"what":"total","segment":0,"file_bytes":481136640,"live_bytes":317344920,"live_records":1851,"dead_bytes":124249820,"dead_records":521,"tombstones_needed":469,"tombstones_droppable":7668,"tombstones_kept_by_rule":469,"tombstone_bytes":520768,"damaged_records":0,"slack_bytes":39021132,"min_seq":203400}
+2026-11-05T05:57:03Z breakdown d3: {"what":"total","segment":0,"file_bytes":280928256,"live_bytes":150088973,"live_records":995,"dead_bytes":106811201,"dead_records":680,"tombstones_needed":10,"tombstones_droppable":4858,"tombstones_kept_by_rule":10,"tombstone_bytes":311552,"damaged_records":0,"slack_bytes":23716530,"min_seq":51119}
+2026-11-05T05:57:03Z breakdown c0: {"what":"total","segment":0,"file_bytes":540082176,"live_bytes":93609306,"live_records":394,"dead_bytes":436039407,"dead_records":1111,"tombstones_needed":319,"tombstones_droppable":1062,"tombstones_kept_by_rule":415,"tombstone_bytes":88384,"damaged_records":0,"slack_bytes":10345079,"min_seq":3648994}
+2026-11-05T05:57:03Z breakdown c1: {"what":"total","segment":0,"file_bytes":215576576,"live_bytes":93609306,"live_records":394,"dead_bytes":117747545,"dead_records":360,"tombstones_needed":175,"tombstones_droppable":276,"tombstones_kept_by_rule":190,"tombstone_bytes":28864,"damaged_records":0,"slack_bytes":4190861,"min_seq":3647519}
+2026-11-05T05:57:03Z space verdict: False
+2026-11-05T05:57:10Z teardown: done
+2026-11-05T05:57:10Z done: converge converged, idempotence idempotent, snapshot 1 exit 0, compare exit 0

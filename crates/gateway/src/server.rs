@@ -78,15 +78,35 @@ pub async fn serve<B>(cfg: GatewayConfig, backend: B) -> std::io::Result<ServerH
 where
     B: S3 + Send + Sync + 'static,
 {
-    serve_with_access(cfg, backend, None::<AllowAll>).await
+    serve_with_access(cfg, backend, Some(AllowAll)).await
 }
 
-/// An `S3Access` that allows everything (no authorizer configured).
+/// The `S3Access` of a gateway without an authorizer: every signed
+/// request is allowed and an unsigned one refused, as s3s does without an
+/// access hook. It also names the operation in the request's audit record,
+/// which the audit log and the per-operation request metrics read (without
+/// it every request was counted as `op="unknown"`, Phase 3.4 soak). Without
+/// any credentials configured s3s skips access checks, and the operation
+/// stays unnamed.
 #[derive(Debug, Clone, Copy)]
 pub struct AllowAll;
 
 #[async_trait::async_trait]
-impl S3Access for AllowAll {}
+impl S3Access for AllowAll {
+    async fn check(&self, cx: &mut s3s::access::S3AccessContext<'_>) -> s3s::S3Result<()> {
+        let op = cx.s3_op().name().to_string();
+        if let Some(a) = cx.extensions_mut().get::<AuditRecord>() {
+            a.clone().with(|f| f.operation = op);
+        }
+        // s3s's default check: with credentials configured, an unsigned
+        // request is refused (only `--allow-anonymous`, which configures
+        // none, admits anonymous requests; s3s then skips this hook).
+        match cx.credentials() {
+            Some(_) => Ok(()),
+            None => Err(s3s::s3_error!(AccessDenied, "Signature is required")),
+        }
+    }
+}
 
 /// Bind and start serving `backend` with an authorizer.
 ///

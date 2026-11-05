@@ -1,0 +1,230 @@
+{
+ "ok": false,
+ "threshold": 0.5,
+ "nodes": {
+  "c0": {
+   "total": {
+    "what": "total",
+    "segment": 0,
+    "file_bytes": 540082176,
+    "live_bytes": 93609306,
+    "live_records": 394,
+    "dead_bytes": 436039407,
+    "dead_records": 1111,
+    "tombstones_needed": 319,
+    "tombstones_droppable": 1062,
+    "tombstones_kept_by_rule": 415,
+    "tombstone_bytes": 88384,
+    "damaged_records": 0,
+    "slack_bytes": 10345079,
+    "min_seq": 3648994
+   },
+   "active_segment": {
+    "what": "segment",
+    "segment": 18619,
+    "file_bytes": 268484608,
+    "live_bytes": 44498210,
+    "live_records": 204,
+    "dead_bytes": 218798908,
+    "dead_records": 525,
+    "tombstones_needed": 130,
+    "tombstones_droppable": 564,
+    "tombstones_kept_by_rule": 181,
+    "tombstone_bytes": 44416,
+    "damaged_records": 0,
+    "slack_bytes": 5143074,
+    "min_seq": 3654968
+   },
+   "unreclaimed_over_threshold": [
+    {
+     "segment": 18625,
+     "nonlive_fraction": 1.0,
+     "dead_records": 462,
+     "tombstones_droppable": 420
+    }
+   ]
+  },
+  "c1": {
+   "total": {
+    "what": "total",
+    "segment": 0,
+    "file_bytes": 215576576,
+    "live_bytes": 93609306,
+    "live_records": 394,
+    "dead_bytes": 117747545,
+    "dead_records": 360,
+    "tombstones_needed": 175,
+    "tombstones_droppable": 276,
+    "tombstones_kept_by_rule": 190,
+    "tombstone_bytes": 28864,
+    "damaged_records": 0,
+    "slack_bytes": 4190861,
+    "min_seq": 3647519
+   },
+   "active_segment": {
+    "what": "segment",
+    "segment": 18646,
+    "file_bytes": 75218944,
+    "live_bytes": 0,
+    "live_records": 0,
+    "dead_bytes": 73288769,
+    "dead_records": 186,
+    "tombstones_needed": 145,
+    "tombstones_droppable": 188,
+    "tombstones_kept_by_rule": 145,
+    "tombstone_bytes": 21312,
+    "damaged_records": 0,
+    "slack_bytes": 1908863,
+    "min_seq": 3655468
+   },
+   "unreclaimed_over_threshold": [
+    {
+     "segment": 18647,
+     "nonlive_fraction": 0.67,
+     "dead_records": 142,
+     "tombstones_droppable": 12
+    }
+   ]
+  },
+  "d0": {
+   "total": {
+    "what": "total",
+    "segment": 0,
+    "file_bytes": 752173056,
+    "live_bytes": 466142962,
+    "live_records": 2223,
+    "dead_bytes": 236403701,
+    "dead_records": 834,
+    "tombstones_needed": 726,
+    "tombstones_droppable": 9353,
+    "tombstones_kept_by_rule": 726,
+    "tombstone_bytes": 645056,
+    "damaged_records": 0,
+    "slack_bytes": 48981337,
+    "min_seq": 66458
+   },
+   "active_segment": {
+    "what": "segment",
+    "segment": 20766,
+    "file_bytes": 199741440,
+    "live_bytes": 135335591,
+    "live_records": 654,
+    "dead_bytes": 28708577,
+    "dead_records": 94,
+    "tombstones_needed": 714,
+    "tombstones_droppable": 7507,
+    "tombstones_kept_by_rule": 714,
+    "tombstone_bytes": 526144,
+    "damaged_records": 0,
+    "slack_bytes": 35171128,
+    "min_seq": 4778070
+   },
+   "unreclaimed_over_threshold": []
+  },
+  "d1": {
+   "total": {
+    "what": "total",
+    "segment": 0,
+    "file_bytes": 673964032,
+    "live_bytes": 466136976,
+    "live_records": 2230,
+    "dead_bytes": 159590382,
+    "dead_records": 513,
+    "tombstones_needed": 310,
+    "tombstones_droppable": 9618,
+    "tombstones_kept_by_rule": 310,
+    "tombstone_bytes": 635392,
+    "damaged_records": 0,
+    "slack_bytes": 47601282,
+    "min_seq": 67877
+   },
+   "active_segment": {
+    "what": "segment",
+    "segment": 20795,
+    "file_bytes": 44711936,
+    "live_bytes": 41139712,
+    "live_records": 225,
+    "dead_bytes": 0,
+    "dead_records": 0,
+    "tombstones_needed": 242,
+    "tombstones_droppable": 482,
+    "tombstones_kept_by_rule": 242,
+    "tombstone_bytes": 46336,
+    "damaged_records": 0,
+    "slack_bytes": 3525888,
+    "min_seq": 4787606
+   },
+   "unreclaimed_over_threshold": []
+  },
+  "d2": {
+   "total": {
+    "what": "total",
+    "segment": 0,
+    "file_bytes": 481136640,
+    "live_bytes": 317344920,
+    "live_records": 1851,
+    "dead_bytes": 124249820,
+    "dead_records": 521,
+    "tombstones_needed": 469,
+    "tombstones_droppable": 7668,
+    "tombstones_kept_by_rule": 469,
+    "tombstone_bytes": 520768,
+    "damaged_records": 0,
+    "slack_bytes": 39021132,
+    "min_seq": 203400
+   },
+   "active_segment": {
+    "what": "segment",
+    "segment": 9510,
+    "file_bytes": 78585856,
+    "live_bytes": 61269632,
+    "live_records": 349,
+    "dead_bytes": 0,
+    "dead_records": 0,
+    "tombstones_needed": 468,
+    "tombstones_droppable": 3526,
+    "tombstones_kept_by_rule": 468,
+    "tombstone_bytes": 255616,
+    "damaged_records": 0,
+    "slack_bytes": 17060608,
+    "min_seq": 2977924
+   },
+   "unreclaimed_over_threshold": []
+  },
+  "d3": {
+   "total": {
+    "what": "total",
+    "segment": 0,
+    "file_bytes": 280928256,
+    "live_bytes": 150088973,
+    "live_records": 995,
+    "dead_bytes": 106811201,
+    "dead_records": 680,
+    "tombstones_needed": 10,
+    "tombstones_droppable": 4858,
+    "tombstones_kept_by_rule": 10,
+    "tombstone_bytes": 311552,
+    "damaged_records": 0,
+    "slack_bytes": 23716530,
+    "min_seq": 51119
+   },
+   "active_segment": {
+    "what": "segment",
+    "segment": 13315,
+    "file_bytes": 223711232,
+    "live_bytes": 94777138,
+    "live_records": 643,
+    "dead_bytes": 105920039,
+    "dead_records": 670,
+    "tombstones_needed": 1,
+    "tombstones_droppable": 4857,
+    "tombstones_kept_by_rule": 1,
+    "tombstone_bytes": 310912,
+    "damaged_records": 0,
+    "slack_bytes": 22703143,
+    "min_seq": 3336697
+   },
+   "unreclaimed_over_threshold": []
+  }
+ }
+}

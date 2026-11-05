@@ -100,6 +100,10 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   the first group of the target tier in hash-map order (a leader change
   switched all later moves to another group). Targets are now spread by
   generation id over the tier's Active groups of the source's scheme.
+- `arca_gateway_s3_requests_total` and `_s3_request_seconds` counted every
+  request as `op="unknown"` on gateways without an authorizer (the
+  operation was named only by the owner-policy authorizer); the allow-all
+  access hook now names it and keeps refusing unsigned requests.
 - `admin integrity scrub --wait --adaptive` ignored the adaptive policy
   and ran at the fixed rate (found by the Phase 3.4 measurement).
 

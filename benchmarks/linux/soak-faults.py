@@ -26,6 +26,9 @@ import sys
 run = sys.argv[1]
 mon = sys.argv[2] if len(sys.argv) > 2 else None
 GRACE = 120
+# A fault may act before its log line: soak runs before the harness change
+# logged corrupt-shard after stopping the node and corrupting the shard.
+PRE = 30
 
 # Hold time and component of each fault kind (soak24.sh do_fault).
 KINDS = {
@@ -64,7 +67,7 @@ faults = []
 with open(os.path.join(run, "faults.log")) as f:
     for line in f:
         p = line.split()
-        if len(p) < 2 or p[1] in ("faults", "fault"):
+        if len(p) < 2 or p[1] in ("faults", "fault", "corrupt-shard-detail"):
             continue
         kind = p[1]
         hold, comp = KINDS.get(kind, (0, "unknown"))
@@ -121,7 +124,7 @@ def residual(t):
 windows = []
 rows = []
 for i, ft in enumerate(faults):
-    start, end = ft["t"], ft["t"] + ft["hold_s"]
+    start, end = ft["t"] - PRE, ft["t"] + ft["hold_s"]
     w_end = end + GRACE
     windows.append((start, w_end))
     over = [r for r in reports if r["end"] > start and r["start"] < w_end]

@@ -240,8 +240,8 @@ do_fault() { # index
     6) local c=c0; [ $(( i % 2 )) -eq 1 ] && c=c1
        fault "cache-node-kill $c"; stop "$c" KILL; wait_s 20; start_node "$c" ;;
     7) fault "net-blackhole $PROXIED 45s"; echo blackhole > "$RUN/proxy.ctl"; wait_s 45; : > "$RUN/proxy.ctl" ;;
-    8) stop "$dn" TERM
-       fault "corrupt-shard $dn $("$BIN" storage-node corrupt-shard --dir "$RUN/$dn" --pick "$RANDOM$RANDOM" 2>&1 | tr '\n' ' ')"
+    8) fault "corrupt-shard $dn (node stopped)"; stop "$dn" TERM
+       fault "corrupt-shard-detail $dn $("$BIN" storage-node corrupt-shard --dir "$RUN/$dn" --pick "$RANDOM$RANDOM" 2>&1 | tr '\n' ' ')"
        start_node "$dn" ;;
     9) fault "eio-read $dn 20"; echo "eio-read 20" > "$RUN/$dn/FAULT"; wait_s 90; : > "$RUN/$dn/FAULT" ;;
     10) fault "net-reset $PROXIED 10s"; echo reset > "$RUN/proxy.ctl"; wait_s 10; : > "$RUN/proxy.ctl" ;;
