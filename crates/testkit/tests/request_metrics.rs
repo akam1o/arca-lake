@@ -39,7 +39,11 @@ async fn requests_are_counted_by_operation_and_unsigned_ones_refused() {
             ))
             .build(),
     );
-    c.create_bucket().bucket("metrics-bkt").send().await.unwrap();
+    c.create_bucket()
+        .bucket("metrics-bkt")
+        .send()
+        .await
+        .unwrap();
     c.put_object()
         .bucket("metrics-bkt")
         .key("k")
@@ -47,7 +51,12 @@ async fn requests_are_counted_by_operation_and_unsigned_ones_refused() {
         .send()
         .await
         .unwrap();
-    c.get_object().bucket("metrics-bkt").key("k").send().await.unwrap();
+    c.get_object()
+        .bucket("metrics-bkt")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
     assert!(
         c.get_object()
             .bucket("metrics-bkt")
