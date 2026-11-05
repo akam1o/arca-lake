@@ -61,19 +61,97 @@ pub async fn migrate_chunk<S: KvStore>(
     record: &ChunkRecord,
     fault: Option<MigrateFault>,
 ) -> Result<MigrateOutcome, TierError> {
+    migrate_chunk_with(
+        meta,
+        clients,
+        coders,
+        addr_of,
+        source_group,
+        target,
+        generation,
+        index,
+        record,
+        fault,
+        async || {},
+    )
+    .await
+}
+
+/// [`migrate_chunk`] calling `before_switch` once the target is written
+/// and verified, right before the switch (tests interleave other work
+/// there).
+///
+/// # Errors
+///
+/// As [`migrate_chunk`].
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub async fn migrate_chunk_with<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    coders: &Coders,
+    addr_of: &(dyn Fn(u64) -> Option<String> + Sync),
+    source_group: &GroupRecord,
+    target: &GroupRecord,
+    generation: &GenId,
+    index: u32,
+    record: &ChunkRecord,
+    fault: Option<MigrateFault>,
+    mut before_switch: impl AsyncFnMut(),
+) -> Result<MigrateOutcome, TierError> {
     if record.placement.group_id == target.id {
         return Ok(MigrateOutcome::AlreadyThere);
     }
+    // 0. The chunk's migration intent, before any target shard exists:
+    //    reconciliation keeps the target's shards while it is held, and no
+    //    second migration of the chunk writes the same shard keys (Phase 3.5
+    //    audit CON-1, CON-2).
+    let attempt = arca_lake_metadata::records::new_gen_id();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    if !arca_lake_metadata::ops::object::begin_migration(
+        meta,
+        &record.chunk_id,
+        target.id,
+        &attempt,
+        now,
+    )
+    .await?
+    {
+        return Ok(MigrateOutcome::Skipped(
+            "another migration of the chunk is in flight",
+        ));
+    }
     // 1. Read and verify the chunk from its current placement.
-    let coder = coders.get(&record.scheme, record.data_shards, record.parity_shards)?;
-    let bytes =
-        concat_frames(read_chunk(clients, source_group, addr_of, record, coder.as_ref()).await?);
+    let read = async {
+        let coder = coders.get(&record.scheme, record.data_shards, record.parity_shards)?;
+        read_chunk(clients, source_group, addr_of, record, coder.as_ref()).await
+    };
+    let bytes = match read.await {
+        Ok(parts) => concat_frames(parts),
+        Err(e) => {
+            let _ =
+                arca_lake_metadata::ops::object::end_migration(meta, &record.chunk_id, &attempt)
+                    .await;
+            return Err(e);
+        }
+    };
 
     // 2–3. Encode with the target's profile, write every shard, read back.
-    let written = write_and_verify(clients, coders, addr_of, target, record, &bytes).await?;
+    let written = match write_and_verify(clients, coders, addr_of, target, record, &bytes).await {
+        Ok(w) => w,
+        Err(e) => {
+            // Whatever was written is deleted by `write_and_verify`.
+            let _ =
+                arca_lake_metadata::ops::object::end_migration(meta, &record.chunk_id, &attempt)
+                    .await;
+            return Err(e);
+        }
+    };
     if fault == Some(MigrateFault::BeforeSwitch) {
         return Err(TierError::Other("injected stop before switch".into()));
     }
+    before_switch().await;
 
     // 4. Switch: one transaction conditioned on the record we read.
     let expected_placement = record.placement;
@@ -93,12 +171,22 @@ pub async fn migrate_chunk<S: KvStore>(
         index,
         &expected_placement,
         &new_record,
+        &attempt,
     )
     .await?;
     if !switched {
-        cleanup(clients, &written, target.epoch).await;
+        // Delete the target only while this attempt still holds the intent:
+        // a migration that lost it (stale) must not delete shards another
+        // attempt now owns under the same keys.
+        if arca_lake_metadata::ops::object::holds_migration(meta, &record.chunk_id, &attempt)
+            .await?
+        {
+            cleanup(clients, &written, target.epoch).await;
+            arca_lake_metadata::ops::object::end_migration(meta, &record.chunk_id, &attempt)
+                .await?;
+        }
         return Ok(MigrateOutcome::Skipped(
-            "record changed or generation not committed",
+            "record changed, generation not committed, or intent lost",
         ));
     }
     if fault == Some(MigrateFault::AfterSwitch) {

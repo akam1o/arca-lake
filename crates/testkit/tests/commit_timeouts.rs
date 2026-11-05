@@ -547,3 +547,71 @@ async fn a_delete_rerun_never_deletes_an_object_written_since() {
     );
     c.shutdown().await;
 }
+
+/// On a versioning-enabled bucket an unconditional delete whose outcome
+/// stays unknown while another PUT lands is not reported as a success it
+/// cannot prove (Phase 3.5 audit CON-4): its marker is absent, so 503.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_versioned_delete_with_an_unproven_outcome_is_not_reported_done() {
+    use arca_lake_metadata::ops::object::{self, CommitInfo, Precondition};
+    use s3s::dto::{BucketVersioningStatus, PutBucketVersioningInput, VersioningConfiguration};
+    let c: TestCluster<FaultKv<MemKv>> = TestCluster::start_with(
+        Arc::new(FaultKv::new(MemKv::default())),
+        ClusterOptions::rs(3, 2, 1, MIB, 0),
+    )
+    .await;
+    let s3 = &c.backend;
+    s3::create_bucket(s3, BUCKET).await.unwrap();
+    let mut vb = PutBucketVersioningInput::builder();
+    vb.set_bucket(BUCKET.into());
+    vb.set_versioning_configuration(VersioningConfiguration {
+        status: Some(BucketVersioningStatus::from_static(
+            BucketVersioningStatus::ENABLED,
+        )),
+        ..Default::default()
+    });
+    s3.put_bucket_versioning(request(vb.build().unwrap()))
+        .await
+        .unwrap();
+    s3::put(s3, BUCKET, KEY, part(1), &s3::PutOptions::default())
+        .await
+        .unwrap();
+    let b = arca_lake_metadata::ops::bucket::get_bucket(c.meta.as_ref(), BUCKET)
+        .await
+        .unwrap();
+    c.meta.inject_on_key(
+        keys::object_current(b.id, KEY),
+        CommitFault::TimeoutWithoutApply,
+        1,
+    );
+    let meta = Arc::clone(&c.meta);
+    c.meta.interleave_next(move || {
+        std::thread::spawn(move || {
+            futures::executor::block_on(async {
+                let now = now_ms();
+                let p = object::begin_put(meta.as_ref(), BUCKET, KEY, now, 60_000)
+                    .await
+                    .unwrap();
+                object::commit_put(
+                    meta.as_ref(),
+                    &p.generation,
+                    &CommitInfo {
+                        size: 0,
+                        etag: "d41d8cd98f00b204e9800998ecf8427e".into(),
+                        ..Default::default()
+                    },
+                    &Precondition::default(),
+                    now,
+                )
+                .await
+                .unwrap();
+            });
+        })
+        .join()
+        .unwrap();
+    });
+    let r = s3::delete(s3, BUCKET, KEY).await;
+    let e = r.expect_err("a delete that did not happen is not reported done");
+    assert_eq!(e.code(), &s3s::S3ErrorCode::ServiceUnavailable, "{e:?}");
+    c.shutdown().await;
+}

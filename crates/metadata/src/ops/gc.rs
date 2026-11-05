@@ -254,6 +254,17 @@ pub async fn attribute_shard<S: KvStore>(
             if gens.is_empty() {
                 return Ok(ShardAttribution::NoGeneration);
             }
+            // A tier migration copying this chunk into this group
+            // (Phase 3.5 audit CON-1): its target is kept until the switch
+            // makes the record name it, or the intent is dropped or stale.
+            let mut cid = [0u8; 16];
+            cid[..12].copy_from_slice(&prefix);
+            cid[12..].copy_from_slice(&index.to_be_bytes());
+            let intent: Option<crate::ops::object::MigrationIntent> =
+                crate::ops::read(tx, &keys::migration(&cid)).await?;
+            if intent.is_some_and(|i| i.target_group == group_id) {
+                return Ok(ShardAttribution::Referenced);
+            }
             for (generation, header) in &gens {
                 if is_pending(header.as_ref()) {
                     return Ok(ShardAttribution::Referenced);

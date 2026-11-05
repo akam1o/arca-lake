@@ -888,6 +888,72 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     }
 }
 
+impl<S: KvStore + 'static> ClusterBackend<S> {
+    /// DeleteObject without a client precondition. Every attempt is pinned
+    /// to the version it was decided on (the pointer moved since the pin:
+    /// pin again), and the delete marker's version id is chosen once, so
+    /// that an unknown commit outcome is resolved without acting on a
+    /// version written since and without a second marker (Phase 3.5 audit
+    /// CON-1, CON-3, CON-4). When the re-run finds the pointer moved, the
+    /// first attempt is proven applied by its marker on a versioning-enabled
+    /// bucket; elsewhere the visible state is the same either way (the
+    /// other write displaced the version); an unproven versioned delete is
+    /// reported as unknown (503).
+    async fn delete_unconditional(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<object::Deleted, MetaError> {
+        let meta = self.meta.as_ref();
+        let marker = arca_lake_metadata::records::new_version_id();
+        let mut moved = 0;
+        loop {
+            let pin = object::current_identity(meta, bucket, key).await?;
+            let pinned = object::Precondition {
+                if_current: Some(pin),
+                ..object::Precondition::default()
+            };
+            match object::delete_object_as(meta, bucket, key, &pinned, &marker, now_ms()).await {
+                Err(MetaError::PreconditionFailed) if moved < 4 => moved += 1,
+                Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r))) => {
+                    return match object::delete_object_as(
+                        meta,
+                        bucket,
+                        key,
+                        &pinned,
+                        &marker,
+                        now_ms(),
+                    )
+                    .await
+                    {
+                        Err(MetaError::PreconditionFailed) => {
+                            let b =
+                                arca_lake_metadata::ops::bucket::get_bucket(meta, bucket).await?;
+                            if object::version_exists(meta, bucket, key, &marker).await? {
+                                Ok(object::Deleted {
+                                    delete_marker_version: Some(marker),
+                                    retired: None,
+                                })
+                            } else if b.versioning
+                                == arca_lake_metadata::records::Versioning::Enabled
+                            {
+                                Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r)))
+                            } else {
+                                Ok(object::Deleted {
+                                    delete_marker_version: None,
+                                    retired: None,
+                                })
+                            }
+                        }
+                        other => other,
+                    };
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
 pub(super) fn meta_err(e: MetaError) -> s3s::S3Error {
     match e {
         MetaError::NoSuchBucket => s3_error!(NoSuchBucket),
@@ -1432,51 +1498,22 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             }));
         }
         let pre = precondition(input.if_match.as_ref(), None)?;
-        // The state this delete is decided on, for a re-run (CON-1).
-        let before = object::current_generation(self.meta.as_ref(), &input.bucket, &input.key)
-            .await
-            .map_err(meta_err)?;
-        let mut result = object::delete_object_if(
-            self.meta.as_ref(),
-            &input.bucket,
-            &input.key,
-            &pre,
-            now_ms(),
-        )
-        .await;
-        if pre.is_empty()
-            && matches!(
-                result,
-                Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(_)))
-            )
-        {
-            // Re-run only against the state the delete was decided on: if
-            // the pointer moved, the first attempt was applied (or another
-            // write replaced the key) and the re-run must not delete what is
-            // there now (a newer object, or a second delete marker). Not
-            // with a client precondition: after an applied delete the
-            // re-run would answer 412 or 404 for a delete that succeeded;
-            // the unknown outcome is reported instead (503, R-72).
-            let pinned = object::Precondition {
-                if_current: Some(before),
-                ..object::Precondition::default()
-            };
-            result = match object::delete_object_if(
+        let result = if pre.is_empty() {
+            self.delete_unconditional(&input.bucket, &input.key).await
+        } else {
+            // With a client precondition an unknown outcome is not re-run:
+            // after an applied delete the re-run would answer 412 or 404
+            // for a delete that succeeded; it is reported instead (503,
+            // R-72).
+            object::delete_object_if(
                 self.meta.as_ref(),
                 &input.bucket,
                 &input.key,
-                &pinned,
+                &pre,
                 now_ms(),
             )
             .await
-            {
-                Err(MetaError::PreconditionFailed) => Ok(object::Deleted {
-                    delete_marker_version: None,
-                    retired: None,
-                }),
-                other => other,
-            };
-        }
+        };
         let d = result.map_err(meta_err)?;
         Ok(S3Response::new(DeleteObjectOutput {
             delete_marker: d.delete_marker_version.is_some().then_some(true),

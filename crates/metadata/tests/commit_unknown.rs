@@ -370,3 +370,48 @@ fn delete_version_rerun_never_deletes_a_version_written_since() {
         assert_eq!(h.pointer.etag, "b");
     });
 }
+
+/// Delete markers all have the zero generation: the re-run of a delete by
+/// version pins the marker's publication too, and does not delete a newer
+/// `null` marker written meanwhile (Phase 3.5 audit CON-3).
+#[test]
+fn delete_version_rerun_tells_null_delete_markers_apart() {
+    run(async {
+        let mem = MemKv::default();
+        let kv = FaultKv::new(mem.clone());
+        bucket::create_bucket(&kv, "b", Versioning::Suspended, 1)
+            .await
+            .unwrap();
+        arca_lake_metadata::ops::object::delete_object(&mem, "b", "k", 10)
+            .await
+            .unwrap();
+        kv.inject_on_key(
+            keys::object_current(bucket::get_bucket(&kv, "b").await.unwrap().id, "k"),
+            CommitFault::TimeoutAfterApply,
+            1,
+        );
+        let writer = mem.clone();
+        kv.interleave_next(move || {
+            std::thread::spawn(move || {
+                futures::executor::block_on(arca_lake_metadata::ops::object::delete_object(
+                    &writer, "b", "k", 20,
+                ))
+                .unwrap();
+            })
+            .join()
+            .unwrap();
+        });
+        let d = arca_lake_metadata::ops::object::delete_version(&kv, "b", "k", "null", 15)
+            .await
+            .unwrap();
+        assert!(d.existed && d.was_delete_marker, "{d:?}");
+        let current = arca_lake_metadata::ops::object::current_identity(&kv, "b", "k")
+            .await
+            .unwrap();
+        assert_eq!(
+            current.map(|c| c.published_ms),
+            Some(20),
+            "the newer null marker survives the re-run"
+        );
+    });
+}

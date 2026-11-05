@@ -569,6 +569,19 @@ pub fn retired(since_ms: u64, generation: &GenId) -> Key {
     pack(&(ROOT, "gc", since_ms, Bytes::from(&generation[..])))
 }
 
+/// Migration intent of one chunk (tier migration in flight, Phase 3.5
+/// audit CON-1/CON-2).
+#[must_use]
+pub fn migration(chunk_id: &[u8; 16]) -> Key {
+    pack(&(ROOT, "mig", Bytes::from(&chunk_id[..])))
+}
+
+/// Every migration intent.
+#[must_use]
+pub fn migrations_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "mig")))
+}
+
 /// The retirement time of a retired-queue entry.
 #[must_use]
 pub fn retired_since_from(key: &[u8]) -> Option<u64> {

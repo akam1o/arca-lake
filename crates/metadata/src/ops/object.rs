@@ -245,7 +245,34 @@ pub struct Precondition {
     /// write whose commit outcome is unknown against the state it was
     /// decided on, so that the re-run cannot act on a version written
     /// since (Phase 3.5 audit CON-1).
-    pub if_current: Option<Option<GenId>>,
+    pub if_current: Option<Option<VersionIdentity>>,
+}
+
+/// What tells published versions of a key apart: the generation and the
+/// publication time (delete markers all have the zero generation, Phase
+/// 3.5 audit CON-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VersionIdentity {
+    /// Generation (zero for a delete marker).
+    pub generation: GenId,
+    /// When it was published (`last_modified_ms` / `committed_ms`).
+    pub published_ms: u64,
+}
+
+impl VersionIdentity {
+    fn of_pointer(c: &CurrentPointer) -> Self {
+        Self {
+            generation: c.generation,
+            published_ms: c.last_modified_ms,
+        }
+    }
+
+    fn of_record(v: &VersionRecord) -> Self {
+        Self {
+            generation: v.generation,
+            published_ms: v.committed_ms,
+        }
+    }
 }
 
 impl Precondition {
@@ -267,11 +294,60 @@ pub async fn current_generation<S: KvStore>(
     bucket: &str,
     key: &str,
 ) -> Result<Option<GenId>> {
+    Ok(current_identity(store, bucket, key)
+        .await?
+        .map(|i| i.generation))
+}
+
+/// The identity of the key's current version (a delete marker's too), if
+/// any.
+///
+/// # Errors
+///
+/// [`MetaError::NoSuchBucket`].
+pub async fn current_identity<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+) -> Result<Option<VersionIdentity>> {
     transact(store, (bucket, key), |tx, env| {
         Box::pin(async move {
             let (bucket, key) = *env;
             let b = bucket_by_name(tx, bucket).await?;
-            Ok(current_pointer(tx, b.id, key).await?.map(|c| c.generation))
+            Ok(current_pointer(tx, b.id, key)
+                .await?
+                .map(|c| VersionIdentity::of_pointer(&c)))
+        })
+    })
+    .await
+}
+
+/// Whether a version with this id exists for the key (current or in the
+/// history).
+///
+/// # Errors
+///
+/// [`MetaError::NoSuchBucket`].
+pub async fn version_exists<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+    version_id: &str,
+) -> Result<bool> {
+    transact(store, (bucket, key, version_id), |tx, env| {
+        Box::pin(async move {
+            let (bucket, key, version_id) = *env;
+            let b = bucket_by_name(tx, bucket).await?;
+            if current_pointer(tx, b.id, key)
+                .await?
+                .is_some_and(|c| c.version_id == version_id)
+            {
+                return Ok(true);
+            }
+            Ok(version_records(tx, b.id, key)
+                .await?
+                .iter()
+                .any(|(_, v)| v.version_id == version_id))
         })
     })
     .await
@@ -752,10 +828,28 @@ pub async fn delete_object_if<S: KvStore>(
     pre: &Precondition,
     now_ms: u64,
 ) -> Result<Deleted> {
-    let fresh_version_id = new_version_id();
+    delete_object_as(store, bucket, key, pre, &new_version_id(), now_ms).await
+}
+
+/// [`delete_object_if`] with the delete marker's version id chosen by the
+/// caller (used on a versioning-enabled bucket), so that a re-run after an
+/// unknown commit outcome creates the same marker and the caller can tell
+/// whether the first attempt was applied ([`version_exists`]).
+///
+/// # Errors
+///
+/// As [`delete_object_if`].
+pub async fn delete_object_as<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+    pre: &Precondition,
+    fresh_version_id: &str,
+    now_ms: u64,
+) -> Result<Deleted> {
     transact(
         store,
-        (bucket, key, pre, now_ms, fresh_version_id.as_str()),
+        (bucket, key, pre, now_ms, fresh_version_id),
         |tx, env| {
             Box::pin(async move {
                 let (bucket, key, pre, now_ms, fresh_version_id) = *env;
@@ -845,13 +939,13 @@ pub async fn delete_version<S: KvStore>(
             let b = bucket_by_name(tx, bucket).await?;
             let current = current_pointer(tx, b.id, key).await?;
             if let Some(c) = current.filter(|c| c.version_id == version_id) {
-                return Ok(Some((c.generation, c.delete_marker)));
+                return Ok(Some((VersionIdentity::of_pointer(&c), c.delete_marker)));
             }
             Ok(version_records(tx, b.id, key)
                 .await?
                 .into_iter()
                 .find(|(_, v)| v.version_id == version_id)
-                .map(|(_, v)| (v.generation, v.delete_marker)))
+                .map(|(_, v)| (VersionIdentity::of_record(&v), v.delete_marker)))
         })
     })
     .await?;
@@ -884,9 +978,15 @@ pub async fn delete_version<S: KvStore>(
                         existed: true,
                     });
                 }
-                let (generation, was_delete_marker) = match (&current, &target) {
-                    (Some(c), _) if is_current => (c.generation, c.delete_marker),
-                    (_, Some((_, v))) => (v.generation, v.delete_marker),
+                let (identity, generation, was_delete_marker) = match (&current, &target) {
+                    (Some(c), _) if is_current => (
+                        VersionIdentity::of_pointer(c),
+                        c.generation,
+                        c.delete_marker,
+                    ),
+                    (_, Some((_, v))) => {
+                        (VersionIdentity::of_record(v), v.generation, v.delete_marker)
+                    }
                     _ => {
                         return Ok(DeletedVersion {
                             was_delete_marker: false,
@@ -895,7 +995,7 @@ pub async fn delete_version<S: KvStore>(
                         });
                     }
                 };
-                if generation != pinned.0 {
+                if identity != pinned.0 {
                     // The id now names another version: the pinned one is gone
                     // (this deletion's earlier attempt, or an overwrite).
                     return Ok(DeletedVersion {
@@ -992,7 +1092,7 @@ pub(crate) async fn check_preconditions<X: Txn>(
     current: Option<&CurrentPointer>,
 ) -> Result<()> {
     if let Some(expected) = &pre.if_current
-        && current.map(|c| c.generation) != *expected
+        && current.map(VersionIdentity::of_pointer) != *expected
     {
         return Err(MetaError::PreconditionFailed);
     }
@@ -1180,13 +1280,22 @@ pub async fn switch_placement<S: KvStore>(
     index: u32,
     expected: &crate::records::DurablePlacement,
     new_record: &ChunkRecord,
+    attempt: &GenId,
 ) -> Result<bool> {
     transact(
         store,
-        (*generation, index, *expected, new_record),
+        (*generation, index, *expected, new_record, *attempt),
         |tx, env| {
             Box::pin(async move {
-                let (generation, index, expected, new_record) = *env;
+                let (generation, index, expected, new_record, attempt) = *env;
+                // Only the migration holding the chunk's intent switches,
+                // and the intent goes with the switch (the target is then
+                // referenced by the record itself).
+                let intent: Option<MigrationIntent> =
+                    read(tx, &keys::migration(&new_record.chunk_id)).await?;
+                if intent.is_none_or(|i| i.attempt != attempt) {
+                    return Ok(false);
+                }
                 let header = match generation_header(tx, &generation).await {
                     Ok(h) => h,
                     Err(MetaError::NoSuchGeneration) => return Ok(false),
@@ -1204,10 +1313,145 @@ pub async fn switch_placement<S: KvStore>(
                     return Ok(false);
                 }
                 write(tx, &keys::gen_chunk(&generation, index), new_record)?;
+                tx.clear(&keys::migration(&new_record.chunk_id));
                 Ok(true)
             })
         },
     )
+    .await
+}
+
+/// A tier migration in flight for one chunk (Phase 3.5 audit CON-1,
+/// CON-2): written before any target shard, it makes reconciliation keep
+/// the target's shards and lets one migration of the chunk run at a time.
+/// It goes with the switch, or after the target was cleaned up; one older
+/// than [`MIGRATION_INTENT_TTL_MS`] can be taken over and is removed by
+/// [`expire_migrations`] (its migration can no longer switch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MigrationIntent {
+    /// Group the chunk is being copied to.
+    pub target_group: u64,
+    /// The migration attempt (random).
+    pub attempt: GenId,
+    /// When it was taken.
+    pub since_ms: u64,
+}
+
+impl crate::records::Record for MigrationIntent {}
+
+/// Age after which a migration intent is stale.
+pub const MIGRATION_INTENT_TTL_MS: u64 = 3_600_000;
+
+/// Take the migration intent of `chunk_id` for `attempt`; `false` when
+/// another live migration holds it.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn begin_migration<S: KvStore>(
+    store: &S,
+    chunk_id: &[u8; 16],
+    target_group: u64,
+    attempt: &GenId,
+    now_ms: u64,
+) -> Result<bool> {
+    transact(
+        store,
+        (*chunk_id, target_group, *attempt, now_ms),
+        |tx, env| {
+            Box::pin(async move {
+                let (chunk_id, target_group, attempt, now_ms) = *env;
+                let held: Option<MigrationIntent> = read(tx, &keys::migration(&chunk_id)).await?;
+                if held.is_some_and(|i| {
+                    i.attempt != attempt
+                        && now_ms < i.since_ms.saturating_add(MIGRATION_INTENT_TTL_MS)
+                }) {
+                    return Ok(false);
+                }
+                write(
+                    tx,
+                    &keys::migration(&chunk_id),
+                    &MigrationIntent {
+                        target_group,
+                        attempt,
+                        since_ms: now_ms,
+                    },
+                )?;
+                Ok(true)
+            })
+        },
+    )
+    .await
+}
+
+/// Whether `attempt` still holds the migration intent of `chunk_id`.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn holds_migration<S: KvStore>(
+    store: &S,
+    chunk_id: &[u8; 16],
+    attempt: &GenId,
+) -> Result<bool> {
+    transact(store, (*chunk_id, *attempt), |tx, env| {
+        Box::pin(async move {
+            let (chunk_id, attempt) = *env;
+            let held: Option<MigrationIntent> = read(tx, &keys::migration(&chunk_id)).await?;
+            Ok(held.is_some_and(|i| i.attempt == attempt))
+        })
+    })
+    .await
+}
+
+/// Drop the migration intent of `chunk_id` if `attempt` holds it (after
+/// the target was cleaned up).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn end_migration<S: KvStore>(
+    store: &S,
+    chunk_id: &[u8; 16],
+    attempt: &GenId,
+) -> Result<()> {
+    transact(store, (*chunk_id, *attempt), |tx, env| {
+        Box::pin(async move {
+            let (chunk_id, attempt) = *env;
+            let held: Option<MigrationIntent> = read(tx, &keys::migration(&chunk_id)).await?;
+            if held.is_some_and(|i| i.attempt == attempt) {
+                tx.clear(&keys::migration(&chunk_id));
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Remove migration intents older than [`MIGRATION_INTENT_TTL_MS`] (a
+/// migration that crashed): reconciliation then reclaims their targets.
+/// Returns how many were removed.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn expire_migrations<S: KvStore>(store: &S, now_ms: u64) -> Result<usize> {
+    transact(store, now_ms, |tx, now_ms| {
+        Box::pin(async move {
+            let mut n = 0;
+            for (k, v) in tx
+                .get_range(&keys::migrations_range(), 10_000, false)
+                .await?
+            {
+                let i: MigrationIntent = crate::records::decode(&v)?;
+                if *now_ms >= i.since_ms.saturating_add(MIGRATION_INTENT_TTL_MS) {
+                    tx.clear(&k);
+                    n += 1;
+                }
+            }
+            Ok(n)
+        })
+    })
     .await
 }
 

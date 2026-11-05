@@ -62,6 +62,8 @@ pub async fn run_once<S: KvStore>(
     policy: &TieringPolicy,
     now_ms: u64,
 ) -> Result<TieringReport, ControlError> {
+    // Intents of migrations that crashed: their targets become reclaimable.
+    object::expire_migrations(meta, now_ms).await?;
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
         .into_iter()

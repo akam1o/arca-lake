@@ -210,10 +210,20 @@ async fn crash_before_switch_leaves_source_authoritative_and_target_reclaimable(
         "record unchanged"
     );
     assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
-    // Target shards exist but are unreferenced: reconciliation removes them.
+    // Target shards exist; the crashed migration's intent keeps them from
+    // reconciliation (a migration paused there may still switch, Phase 3.5
+    // audit CON-1) until the intent is stale; then they are reclaimed.
     let on_target: usize = (3..6).map(|i| c.shard_count(i, fast.id)).sum();
     assert_eq!(on_target, 3);
-    assert_eq!(c.reconcile(now_ms() + 3_600_000, 0).await, 3);
+    assert_eq!(c.reconcile(now_ms() + 3_600_000, 0).await, 0);
+    let later = now_ms() + arca_lake_metadata::ops::object::MIGRATION_INTENT_TTL_MS + 1;
+    assert_eq!(
+        object::expire_migrations(c.meta.as_ref(), later)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(c.reconcile(later, 0).await, 3);
     assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
     c.shutdown().await;
 }
@@ -472,5 +482,90 @@ async fn tier_moves_spread_over_the_groups_of_the_target_tier() {
             payload(64 << 10, 900 + i)
         );
     }
+    c.shutdown().await;
+}
+
+/// A migration paused between writing its target and the switch keeps the
+/// target through a reconciliation of the target group, and a second
+/// migration of the same chunk does not run meanwhile (Phase 3.5 audit
+/// CON-1, CON-2: reconciliation deleted the target as unreferenced, and a
+/// losing migration's cleanup could delete the winner's shards; either
+/// left the committed chunk with no shards after the switch).
+#[tokio::test]
+async fn a_paused_migration_keeps_its_target_and_excludes_a_second_one() {
+    use arca_lake_tiering::migrate::migrate_chunk_with;
+    let (c, fast) = cluster().await;
+    let data = payload(usize::try_from(MIB / 2).unwrap(), 41);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let m = c.manifest(BUCKET, "o").await;
+    let source = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| g.id == m.chunks[0].1.placement.group_id)
+        .unwrap();
+    let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(c.meta.as_ref())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.id, n))
+        .collect();
+    let coders = Coders::default();
+    let mut second = None;
+    let outcome = migrate_chunk_with(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders,
+        &addr_of(&nodes),
+        &source,
+        &fast,
+        &m.pointer.generation,
+        0,
+        &m.chunks[0].1,
+        None,
+        async || {
+            // Reconcile the target group with every guard off.
+            c.reconcile(now_ms() + 3_600_000, 0).await;
+            // A second migration of the same chunk in the meantime.
+            second = Some(
+                migrate_chunk(
+                    c.meta.as_ref(),
+                    &c.clients,
+                    &coders,
+                    &addr_of(&nodes),
+                    &source,
+                    &fast,
+                    &m.pointer.generation,
+                    0,
+                    &m.chunks[0].1,
+                    None,
+                )
+                .await
+                .unwrap(),
+            );
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, MigrateOutcome::Switched { .. }),
+        "{outcome:?}"
+    );
+    assert!(
+        matches!(second, Some(MigrateOutcome::Skipped(_))),
+        "{second:?}"
+    );
+    let on_target: usize = (3..6).map(|i| c.shard_count(i, fast.id)).sum();
+    assert_eq!(on_target, 3, "the switched target keeps its shards");
+    c.backend.refresh_map().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
     c.shutdown().await;
 }
