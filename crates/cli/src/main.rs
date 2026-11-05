@@ -496,6 +496,12 @@ struct GatewayArgs {
     /// `deny`, or a comma-separated list of principal names.
     #[arg(long, default_value = "authenticated")]
     bucket_creation: String,
+    /// Address of a TLS-terminating proxy in front of the gateway whose
+    /// `x-forwarded-proto` header is believed for `aws:SecureTransport`
+    /// (repeatable). Without it the header is ignored: the gateway serves
+    /// plaintext and any client could send it.
+    #[arg(long = "trusted-proxy")]
+    trusted_proxies: Vec<std::net::IpAddr>,
     /// Disable the per-request audit record (target `arca.audit`).
     #[arg(long)]
     no_audit: bool,
@@ -1349,6 +1355,11 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
     if authorize && args.backend != "cluster" {
         return fail("--authorize owner-policy needs --backend cluster");
     }
+    let (store, credentials) = match gateway_auth(authorize, store, credentials) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
+    let trusted_proxies = args.trusted_proxies.clone();
     let bucket_creation = match args.bucket_creation.as_str() {
         "authenticated" => BucketCreation::Authenticated,
         "deny" => BucketCreation::Deny,
@@ -1443,14 +1454,15 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
         });
         queue_shutdown = Some((tx, drain));
         if authorize {
-            let store = store
-                .clone()
-                .unwrap_or_else(|| std::sync::Arc::new(CredentialStore::from_keys(&[])));
+            let Some(store) = store.clone() else {
+                return fail("internal: owner-policy without a credential store");
+            };
             let access = Authorizer::new(
                 std::sync::Arc::clone(backend.metadata()),
                 store,
                 bucket_creation,
-            );
+            )
+            .with_trusted_proxies(trusted_proxies);
             arca_lake_gateway::serve_with_access(cfg, backend, Some(access)).await
         } else {
             arca_lake_gateway::serve(cfg, backend).await
@@ -3661,6 +3673,37 @@ mod metrics_registry {
     }
 }
 
+type GatewayAuth = (
+    Option<std::sync::Arc<arca_lake_gateway::auth::CredentialStore>>,
+    Option<(String, String)>,
+);
+
+/// The credential store SigV4 and the authorizer share. Static keys become
+/// a one-key store when the authorizer is on (a separate empty store made
+/// every signed request `InvalidAccessKeyId`); the authorizer without any
+/// credentials is refused, because s3s then never calls the access hook
+/// and every request would be allowed (Phase 3.5 audit SEC-3, SEC-8).
+fn gateway_auth(
+    authorize: bool,
+    store: Option<std::sync::Arc<arca_lake_gateway::auth::CredentialStore>>,
+    credentials: Option<(String, String)>,
+) -> Result<GatewayAuth, String> {
+    match (authorize, store, credentials) {
+        (true, None, Some((ak, sk))) => Ok((
+            Some(std::sync::Arc::new(arca_lake_gateway::auth::CredentialStore::from_keys(&[(
+                ak.as_str(),
+                sk.as_str(),
+                ak.as_str(),
+            )]))),
+            None,
+        )),
+        (true, None, None) => Err(
+            "--authorize owner-policy needs credentials (--credentials-file or --access-key/--secret-key); anonymous requests are then evaluated against bucket policies".into(),
+        ),
+        (_, store, credentials) => Ok((store, credentials)),
+    }
+}
+
 #[cfg(test)]
 mod tls_args {
     //! Node RPCs never fall back to plaintext by accident (ADR-0017).
@@ -3722,5 +3765,20 @@ mod tls_args {
         assert!(t.tls.insecure_plaintext);
         let t = <T as clap::Parser>::try_parse_from(["x"]).unwrap();
         assert!(!t.tls.insecure_plaintext || std::env::var_os("ARCA_INSECURE_PLAINTEXT").is_some());
+    }
+}
+
+#[cfg(test)]
+mod gateway_auth_tests {
+    use super::*;
+
+    #[test]
+    fn the_authorizer_shares_the_signing_keys_and_never_runs_without_them() {
+        let (store, creds) = gateway_auth(true, None, Some(("ak".into(), "sk".into()))).unwrap();
+        assert!(creds.is_none());
+        assert_eq!(store.unwrap().principal_of("ak").as_deref(), Some("ak"));
+        assert!(gateway_auth(true, None, None).is_err());
+        let (store, creds) = gateway_auth(false, None, None).unwrap();
+        assert!(store.is_none() && creds.is_none());
     }
 }

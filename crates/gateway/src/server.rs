@@ -78,7 +78,9 @@ pub async fn serve<B>(cfg: GatewayConfig, backend: B) -> std::io::Result<ServerH
 where
     B: S3 + Send + Sync + 'static,
 {
-    serve_with_access(cfg, backend, Some(AllowAll)).await
+    // Without credentials s3s calls no access hook (anonymous gateway).
+    let authenticated = cfg.store.is_some() || cfg.credentials.is_some();
+    serve_with_access(cfg, backend, authenticated.then_some(AllowAll)).await
 }
 
 /// The `S3Access` of a gateway without an authorizer: every signed
@@ -130,6 +132,7 @@ where
                 .as_ref()
                 .map(|(ak, sk)| Arc::new(CredentialStore::from_keys(&[(ak, sk, ak)])))
         });
+        let authenticated = store.is_some();
         if let Some(store) = store {
             if let Some(s) = &cfg.stats {
                 s.set_credentials(Arc::clone(&store));
@@ -137,6 +140,14 @@ where
             b.set_auth(StoreAuth(store));
         }
         if let Some(a) = access {
+            // s3s skips the access hook when no authentication is set: an
+            // authorizer would then allow every request (Phase 3.5 SEC-3).
+            if !authenticated {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "an access policy needs authentication: configure credentials",
+                ));
+            }
             b.set_access(a);
         }
         b.build()

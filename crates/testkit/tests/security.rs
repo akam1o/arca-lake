@@ -698,3 +698,182 @@ async fn tenants_cannot_observe_each_others_buckets_objects_uploads_or_versions(
     denied!(b.get_object().bucket("a-bucket").key("secret-name").send());
     c.shutdown().await;
 }
+
+/// `aws:SecureTransport` cannot be satisfied by a client-sent
+/// `x-forwarded-proto` on the gateway's plaintext listener (Phase 3.5 audit
+/// SEC-2): only a configured TLS-terminating proxy is believed.
+#[tokio::test]
+async fn a_forged_forwarded_proto_header_does_not_satisfy_secure_transport() {
+    let c = cluster_with(two_tenants()).await;
+    let endpoint = format!("http://{}", c.gateway_addr);
+    let a = client(&endpoint, &c.credentials.0, &c.credentials.1);
+    let b = client(&endpoint, KEY_B, SECRET_B);
+    let bucket = "tls-only";
+    a.create_bucket().bucket(bucket).send().await.unwrap();
+    a.put_object()
+        .bucket(bucket)
+        .key("x")
+        .body(ByteStream::from_static(b"data"))
+        .send()
+        .await
+        .unwrap();
+    let policy = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Sid":"tls","Effect":"Allow","Principal":{{"AWS":"tenant-b"}},"Action":["s3:GetObject"],"Resource":"arn:aws:s3:::{bucket}/*","Condition":{{"Bool":{{"aws:SecureTransport":"true"}}}}}}]}}"#
+    );
+    a.put_bucket_policy()
+        .bucket(bucket)
+        .policy(&policy)
+        .send()
+        .await
+        .unwrap();
+    let plain = b.get_object().bucket(bucket).key("x").send().await;
+    assert_eq!(status(&plain.unwrap_err()), 403, "plaintext is not secure");
+    let forged = b
+        .get_object()
+        .bucket(bucket)
+        .key("x")
+        .customize()
+        .mutate_request(|r| {
+            r.headers_mut().insert("x-forwarded-proto", "https");
+        })
+        .send()
+        .await;
+    assert_eq!(
+        status(&forged.unwrap_err()),
+        403,
+        "a client-sent x-forwarded-proto is not believed"
+    );
+    c.shutdown().await;
+}
+
+/// DeleteObjects is authorized per entry (Phase 3.5 audit SEC-1): an
+/// explicit object-scoped deny holds inside a batch, `s3:DeleteObject` does
+/// not grant deleting a version, and a grant on objects allows the batch.
+#[tokio::test]
+async fn batch_delete_is_authorized_per_key_and_per_version() {
+    use aws_sdk_s3::types::{
+        BucketVersioningStatus, Delete, ObjectIdentifier, VersioningConfiguration,
+    };
+    let c = cluster_with(two_tenants()).await;
+    let endpoint = format!("http://{}", c.gateway_addr);
+    let a = client(&endpoint, &c.credentials.0, &c.credentials.1);
+    let b = client(&endpoint, KEY_B, SECRET_B);
+    let bucket = "batch-delete";
+    a.create_bucket().bucket(bucket).send().await.unwrap();
+    a.put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let mut versions = std::collections::HashMap::new();
+    for k in ["private/x", "public/y", "public/z"] {
+        let o = a
+            .put_object()
+            .bucket(bucket)
+            .key(k)
+            .body(ByteStream::from_static(b"data"))
+            .send()
+            .await
+            .unwrap();
+        versions.insert(k, o.version_id().unwrap().to_string());
+    }
+    let policy = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Sid":"keep","Effect":"Deny","Principal":"*","Action":["s3:DeleteObject","s3:DeleteObjectVersion"],"Resource":"arn:aws:s3:::{bucket}/private/*"}},{{"Sid":"b","Effect":"Allow","Principal":{{"AWS":"tenant-b"}},"Action":["s3:DeleteObject"],"Resource":"arn:aws:s3:::{bucket}/public/*"}}]}}"#
+    );
+    a.put_bucket_policy()
+        .bucket(bucket)
+        .policy(&policy)
+        .send()
+        .await
+        .unwrap();
+    let ident = |k: &str, v: Option<&str>| {
+        ObjectIdentifier::builder()
+            .key(k)
+            .set_version_id(v.map(str::to_string))
+            .build()
+            .unwrap()
+    };
+    let errors_of = |o: &aws_sdk_s3::operation::delete_objects::DeleteObjectsOutput| {
+        let mut e: Vec<(String, String)> = o
+            .errors()
+            .iter()
+            .map(|e| {
+                (
+                    e.key().unwrap_or("").to_string(),
+                    e.code().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        e.sort();
+        e
+    };
+    // The owner: the explicit deny on private/ holds inside the batch.
+    let out = a
+        .delete_objects()
+        .bucket(bucket)
+        .delete(
+            Delete::builder()
+                .objects(ident("private/x", Some(&versions["private/x"])))
+                .objects(ident("public/y", Some(&versions["public/y"])))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        errors_of(&out),
+        vec![("private/x".into(), "AccessDenied".into())]
+    );
+    a.get_object()
+        .bucket(bucket)
+        .key("private/x")
+        .version_id(&versions["private/x"])
+        .send()
+        .await
+        .expect("the denied version survives");
+    // Tenant b may delete public objects, not their versions.
+    let out = b
+        .delete_objects()
+        .bucket(bucket)
+        .delete(
+            Delete::builder()
+                .objects(ident("public/z", Some(&versions["public/z"])))
+                .objects(ident("public/z", None))
+                .objects(ident("private/x", None))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        errors_of(&out),
+        vec![
+            ("private/x".into(), "AccessDenied".into()),
+            ("public/z".into(), "AccessDenied".into())
+        ]
+    );
+    a.get_object()
+        .bucket(bucket)
+        .key("public/z")
+        .version_id(&versions["public/z"])
+        .send()
+        .await
+        .expect("s3:DeleteObject does not delete a version");
+    assert!(
+        a.get_object()
+            .bucket(bucket)
+            .key("public/z")
+            .send()
+            .await
+            .is_err(),
+        "the unversioned delete placed a marker"
+    );
+    c.shutdown().await;
+}

@@ -1440,12 +1440,17 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             now_ms(),
         )
         .await;
-        if matches!(
-            result,
-            Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(_)))
-        ) {
+        if pre.is_empty()
+            && matches!(
+                result,
+                Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(_)))
+            )
+        {
             // Unversioned: idempotent. Versioned: a second marker may be
             // created, which is harmless for visibility (RFC-007 §5.4).
+            // Not with a precondition: after an applied delete the retry
+            // would answer 412 or 404 for a delete that succeeded; the
+            // unknown outcome is reported instead (503, R-72).
             result = object::delete_object_if(
                 self.meta.as_ref(),
                 &input.bucket,
@@ -1468,6 +1473,12 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         req: S3Request<DeleteObjectsInput>,
     ) -> S3Result<S3Response<DeleteObjectsOutput>> {
         self.admit_write()?;
+        // Each entry is authorized on its own (SEC-1): the request names no
+        // key, so the authorizer left the decision per (key, version).
+        let gate = req
+            .extensions
+            .get::<crate::auth::EntryAuthorizer>()
+            .cloned();
         let input = req.input;
         if input.delete.objects.len() > 1000 {
             return Err(s3_error!(MalformedXML, "at most 1000 keys per request"));
@@ -1477,6 +1488,11 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         let mut errors = Vec::new();
         for o in input.delete.objects {
             let r: S3Result<DeletedObject> = async {
+                if let Some(g) = &gate
+                    && !(g.0)(&o.key, o.version_id.as_deref())
+                {
+                    return Err(s3_error!(AccessDenied));
+                }
                 if let Some(v) = &o.version_id {
                     let d = object::delete_version(
                         self.meta.as_ref(),

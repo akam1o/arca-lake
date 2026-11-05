@@ -451,6 +451,23 @@ fn uuid_v7_hex() -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal(pub String);
 
+/// Per-entry authorization of a request whose objects are named in its
+/// body (`DeleteObjects`): `(key, version id)` → allowed. Inserted into the
+/// request's extensions by the authorizer; a backend must consult it before
+/// acting on each entry (Phase 3.5 audit SEC-1: the request itself names no
+/// key, so object- and version-scoped policies did not apply).
+#[derive(Clone)]
+pub struct EntryAuthorizer(pub Arc<EntryCheck>);
+
+/// `(key, version id)` → allowed.
+pub type EntryCheck = dyn Fn(&str, Option<&str>) -> bool + Send + Sync;
+
+impl std::fmt::Debug for EntryAuthorizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EntryAuthorizer")
+    }
+}
+
 // ---- authorizer ----------------------------------------------------------
 
 /// Who may create buckets.
@@ -518,6 +535,9 @@ pub struct Authorizer<S> {
     bucket_creation: BucketCreation,
     /// Parsed policies by (bucket id, document hash), bounded.
     cache: Mutex<HashMap<u64, (u64, Arc<Policy>)>>,
+    /// Peers whose `x-forwarded-proto` is believed (a TLS-terminating
+    /// proxy that sets the header itself). Empty: the header is ignored.
+    trusted_proxies: Vec<IpAddr>,
 }
 
 impl<S> std::fmt::Debug for Authorizer<S> {
@@ -551,7 +571,17 @@ impl<S: KvStore + 'static> Authorizer<S> {
             store,
             bucket_creation,
             cache: Mutex::new(HashMap::new()),
+            trusted_proxies: Vec::new(),
         }
+    }
+
+    /// Believe `x-forwarded-proto: https` (`aws:SecureTransport`) only from
+    /// these peers. The gateway itself serves plaintext; any client could
+    /// send the header, so by default it is ignored (Phase 3.5 SEC-2).
+    #[must_use]
+    pub fn with_trusted_proxies(mut self, proxies: Vec<IpAddr>) -> Self {
+        self.trusted_proxies = proxies;
+        self
     }
 
     fn policy_of(&self, b: &BucketRecord) -> Result<Option<Arc<Policy>>, String> {
@@ -591,44 +621,7 @@ impl<S: KvStore + 'static> Authorizer<S> {
         let Some(b) = bucket else {
             return Authz::Deny("no-such-bucket".into());
         };
-        let is_owner = !b.owner.is_empty() && b.owner == principal;
-        let policy = match self.policy_of(b) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!(bucket = %b.name, error = %e, "stored bucket policy failed to parse");
-                // Rule 6: evaluation error denies, except the owner keeps the
-                // right to repair the policy.
-                if is_owner && OWNER_KEEPS.contains(&action) {
-                    return Authz::Allow("owner-override".into());
-                }
-                return Authz::Deny("error-deny".into());
-            }
-        };
-        if let Some(p) = &policy {
-            match p.evaluate(req) {
-                Decision::Deny(i) => {
-                    if is_owner && OWNER_KEEPS.contains(&action) {
-                        return Authz::Allow("owner-override".into());
-                    }
-                    return Authz::Deny(format!("deny:{}", p.sid(i).unwrap_or("")));
-                }
-                Decision::Allow(i) => {
-                    if is_owner {
-                        return Authz::Allow("owner".into());
-                    }
-                    return Authz::Allow(format!("allow:{}", p.sid(i).unwrap_or("")));
-                }
-                Decision::NoMatch => {}
-            }
-        }
-        if is_owner {
-            return Authz::Allow("owner".into());
-        }
-        Authz::Deny(if principal == policy::ANONYMOUS {
-            "anonymous-deny".into()
-        } else {
-            "default-deny".into()
-        })
+        decide_with(principal, action, b, &self.policy_of(b), req)
     }
 
     /// The credential store.
@@ -719,11 +712,12 @@ impl<S: KvStore + 'static> S3Access for Authorizer<S> {
             .extensions_mut()
             .get::<AuditRecord>()
             .and_then(|a| a.fields().source.map(|s| s.ip()));
-        let secure = cx
-            .headers()
-            .get("x-forwarded-proto")
-            .is_some_and(|v| v == "https")
-            || uri.scheme_str() == Some("https");
+        let secure = uri.scheme_str() == Some("https")
+            || (source_ip.is_some_and(|ip| self.trusted_proxies.contains(&ip))
+                && cx
+                    .headers()
+                    .get("x-forwarded-proto")
+                    .is_some_and(|v| v == "https"));
         let copy_source = cx
             .headers()
             .get("x-amz-copy-source")
@@ -804,6 +798,41 @@ impl<S: KvStore + 'static> S3Access for Authorizer<S> {
                     metadata_directive: metadata_directive.as_deref(),
                     copy_source: copy_source.as_deref(),
                 };
+                if op == "DeleteObjects" {
+                    // The keys are in the body: every entry is decided by
+                    // the backend through `EntryAuthorizer`, as AWS
+                    // authorizes `s3:DeleteObject(Version)` per key.
+                    let Some(b) = record.clone() else {
+                        note(cx, "no-such-bucket");
+                        return Err(s3_error!(AccessDenied));
+                    };
+                    let policy = self.policy_of(&b);
+                    let who = principal.clone();
+                    let gate =
+                        EntryAuthorizer(Arc::new(move |key: &str, version: Option<&str>| {
+                            let action = if version.is_some() {
+                                "s3:DeleteObjectVersion"
+                            } else {
+                                "s3:DeleteObject"
+                            };
+                            let req = PolicyRequest {
+                                principal: &who,
+                                action,
+                                key: Some(key),
+                                source_ip,
+                                secure_transport: secure,
+                                ..Default::default()
+                            };
+                            matches!(
+                                decide_with(&who, action, &b, &policy, &req),
+                                Authz::Allow(_)
+                            )
+                        }));
+                    note(cx, "per-entry");
+                    cx.extensions_mut().insert(gate);
+                    cx.extensions_mut().insert(Principal(principal));
+                    return Ok(());
+                }
                 let mut outcome = self.decide(&principal, action, record.as_ref(), &req);
                 // A copy also reads its source: authorize `s3:GetObject`
                 // (`Version`) on the source bucket, which may be another
@@ -863,6 +892,54 @@ impl<S: KvStore + 'static> S3Access for Authorizer<S> {
 #[must_use]
 pub fn status_of(e: &S3Error) -> u16 {
     e.status_code().map_or(500, |s| s.as_u16())
+}
+
+/// Decide `action` for `principal` on bucket `b` with its parsed policy.
+fn decide_with(
+    principal: &str,
+    action: &str,
+    b: &BucketRecord,
+    policy: &Result<Option<Arc<Policy>>, String>,
+    req: &PolicyRequest<'_>,
+) -> Authz {
+    let is_owner = !b.owner.is_empty() && b.owner == principal;
+    let policy = match policy {
+        Ok(p) => p.clone(),
+        Err(e) => {
+            tracing::error!(bucket = %b.name, error = %e, "stored bucket policy failed to parse");
+            // Rule 6: evaluation error denies, except the owner keeps the
+            // right to repair the policy.
+            if is_owner && OWNER_KEEPS.contains(&action) {
+                return Authz::Allow("owner-override".into());
+            }
+            return Authz::Deny("error-deny".into());
+        }
+    };
+    if let Some(p) = &policy {
+        match p.evaluate(req) {
+            Decision::Deny(i) => {
+                if is_owner && OWNER_KEEPS.contains(&action) {
+                    return Authz::Allow("owner-override".into());
+                }
+                return Authz::Deny(format!("deny:{}", p.sid(i).unwrap_or("")));
+            }
+            Decision::Allow(i) => {
+                if is_owner {
+                    return Authz::Allow("owner".into());
+                }
+                return Authz::Allow(format!("allow:{}", p.sid(i).unwrap_or("")));
+            }
+            Decision::NoMatch => {}
+        }
+    }
+    if is_owner {
+        return Authz::Allow("owner".into());
+    }
+    Authz::Deny(if principal == policy::ANONYMOUS {
+        "anonymous-deny".into()
+    } else {
+        "default-deny".into()
+    })
 }
 
 #[cfg(test)]
