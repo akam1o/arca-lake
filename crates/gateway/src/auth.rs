@@ -88,7 +88,9 @@ pub enum KeyRefusal {
 pub struct CredentialStore {
     keys: RwLock<Arc<KeySet>>,
     path: Option<PathBuf>,
-    loaded_mtime: Mutex<Option<SystemTime>>,
+    /// What the loaded key set was read from: the credentials file and
+    /// every secret file it references, with a digest of their contents.
+    loaded: Mutex<Option<Stamp>>,
     /// Failed reloads (`arca_gateway_credentials_reload_failures_total`).
     pub reload_failures: std::sync::atomic::AtomicU64,
     /// Refused access keys by [`KeyRefusal`] (unknown, inactive, expired;
@@ -125,7 +127,7 @@ impl CredentialStore {
         Self {
             keys: RwLock::new(Arc::new(set)),
             path: None,
-            loaded_mtime: Mutex::new(None),
+            loaded: Mutex::new(None),
             reload_failures: std::sync::atomic::AtomicU64::new(0),
             refusals: Default::default(),
         }
@@ -137,17 +139,17 @@ impl CredentialStore {
     ///
     /// A human-readable message (never containing a secret).
     pub fn load(path: &Path) -> Result<Self, String> {
-        let (set, mtime) = Self::read_file(path)?;
+        let (set, stamp) = Self::read_file(path)?;
         Ok(Self {
             keys: RwLock::new(Arc::new(set)),
             path: Some(path.to_path_buf()),
-            loaded_mtime: Mutex::new(mtime),
+            loaded: Mutex::new(Some(stamp)),
             reload_failures: std::sync::atomic::AtomicU64::new(0),
             refusals: Default::default(),
         })
     }
 
-    fn read_file(path: &Path) -> Result<(KeySet, Option<SystemTime>), String> {
+    fn read_file(path: &Path) -> Result<(KeySet, Stamp), String> {
         let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
         #[cfg(unix)]
         {
@@ -164,6 +166,7 @@ impl CredentialStore {
             }
         }
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut files = vec![path.to_path_buf()];
         let file: CredentialsFile =
             toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut set = KeySet::default();
@@ -180,10 +183,12 @@ impl CredentialStore {
                         } else {
                             path.parent().unwrap_or(Path::new(".")).join(f)
                         };
-                        std::fs::read_to_string(&f)
+                        let secret = std::fs::read_to_string(&f)
                             .map_err(|e| format!("{}: {e}", f.display()))?
                             .trim()
-                            .to_string()
+                            .to_string();
+                        files.push(f);
+                        secret
                     }
                     _ => {
                         return Err(format!(
@@ -223,7 +228,8 @@ impl CredentialStore {
                 }
             }
         }
-        Ok((set, meta.modified().ok()))
+        let digest = Stamp::digest_of(&files);
+        Ok((set, Stamp { files, digest }))
     }
 
     /// Reload the file if it changed. Returns whether a new key set is in
@@ -233,25 +239,27 @@ impl CredentialStore {
         let Some(path) = &self.path else {
             return false;
         };
-        let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-        if mtime
-            == *self
-                .loaded_mtime
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        {
+        // The credentials file or any secret file it references changed
+        // (Phase 3.5 SEC-7: rotating only a secret file was not noticed).
+        let unchanged = self
+            .loaded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|st| Stamp::digest_of(&st.files) == st.digest);
+        if unchanged {
             return false;
         }
         match Self::read_file(path) {
-            Ok((set, m)) => {
+            Ok((set, stamp)) => {
                 *self
                     .keys
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(set);
                 *self
-                    .loaded_mtime
+                    .loaded
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = m;
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(stamp);
                 tracing::info!(path = %path.display(), "credentials reloaded");
                 true
             }
@@ -942,6 +950,29 @@ fn decide_with(
     })
 }
 
+/// Files a key set was read from and a digest of their contents (change
+/// detection only; nothing of it is kept but the hash).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stamp {
+    files: Vec<std::path::PathBuf>,
+    digest: u64,
+}
+
+impl Stamp {
+    fn digest_of(files: &[std::path::PathBuf]) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for f in files {
+            f.hash(&mut h);
+            match std::fs::read(f) {
+                Ok(bytes) => bytes.hash(&mut h),
+                Err(e) => e.kind().hash(&mut h),
+            }
+        }
+        h.finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1032,6 +1063,41 @@ not_after = "2000-01-01T00:00:00Z"
         // Unknown fields and duplicate ids are errors.
         std::fs::write(&path, "[[principal]]\nname = \"x\"\nbogus = 1\n").unwrap();
         assert!(CredentialStore::read_file(&path).is_err());
+    }
+
+    /// Rotating only a referenced secret file is a change (Phase 3.5 audit
+    /// SEC-7: only the credentials file's mtime was watched, so the old
+    /// secret stayed valid).
+    #[test]
+    fn rotating_a_secret_file_alone_reloads_the_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.toml");
+        let secret = dir.path().join("one.secret");
+        std::fs::write(&secret, "first-secret\n").unwrap();
+        std::fs::write(
+            &path,
+            "[[principal]]\nname = \"tenant-a\"\n[[principal.key]]\nid = \"AKIAONE\"\nsecret_file = \"one.secret\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let store = CredentialStore::load(&path).unwrap();
+        let secret_now = |s: &CredentialStore| {
+            s.lookup("AKIAONE", SystemTime::now())
+                .unwrap()
+                .secret
+                .expose()
+                .to_string()
+        };
+        assert_eq!(secret_now(&store), "first-secret");
+        assert!(!store.reload_if_changed(), "nothing changed");
+        std::fs::write(&secret, "second-secret\n").unwrap();
+        assert!(store.reload_if_changed());
+        assert_eq!(secret_now(&store), "second-secret");
+        assert!(!store.reload_if_changed());
     }
 
     #[test]
