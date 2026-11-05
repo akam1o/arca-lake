@@ -503,6 +503,36 @@ unavailable database: check `--fdb-tls-verify-peers` against the server
 certificates' SANs and the client certificate against the servers'
 trust.
 
+### 10.9 Storage-node memory (Phase 3.5, R-70)
+
+Alerts `ArcaNodeHeapGrowing` (heap in use rising more than 8 MiB/h for
+6 h) and `ArcaNodeMemoryHigh` (anonymous memory above 2 GiB for 30 min).
+
+1. Compare `arca_node_process_memory_bytes{kind="heap_in_use"}` with
+   `kind="heap_free"`: growth of `heap_free` with flat `heap_in_use` is
+   glibc arena retention, not the program holding memory; setting
+   `MALLOC_ARENA_MAX=2` in the node's environment bounds it (measured in
+   the Phase 3.5 report).
+2. Compare `arca_node_index_entries`: `live` follows the shards stored,
+   `dead_tracked` the non-live records compaction has not reclaimed yet
+   (bounded by compaction), `tombstone_history` must be 0 after startup.
+   A heap growing with none of them is unexplained: capture
+   `/proc/<pid>/smaps_rollup` and the metrics, then restart.
+3. Restart safely: one node at a time, waiting for
+   `arca_controller_groups_reduced_redundancy` to be 0 and no group
+   `Repairing` first. A node restart costs one shard of redundancy for
+   the chunks written during its downtime until stripe repair finishes.
+
+### 10.10 GC backlog (Phase 3.5, R-64)
+
+`arca_controller_gc_backlog` is the retired-generation queue after the
+last pass (counted up to 200 000); `_oldest_age_seconds` its oldest entry.
+In steady state the oldest age stays near the grace period plus the GC
+interval and the backlog near the retirement rate times that. An oldest
+age growing well beyond it means GC is not keeping up: see the capacity
+measurements in the Phase 3.5 report, lower the overwrite/delete rate or
+add controller I/O capacity; space is reclaimed once it drains.
+
 ## 11. Alternatives considered
 
 - A separate admin HTTP API instead of CLI-on-cluster-file: deferred

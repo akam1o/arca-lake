@@ -172,11 +172,18 @@ groups:
         labels: { severity: ticket }
         annotations:
           summary: "Storage-node heap in use grows more than 8 MiB/h for 6 h"
-          runbook: "RFC-013 §10 (memory); compare arca_node_index_entries, restart the node in its maintenance window"
+          runbook: "RFC-013 §10.9"
       - alert: ArcaNodeMemoryHigh
         expr: arca_node_process_memory_bytes{kind="anon"} > 2 * 1024 * 1024 * 1024
         for: 30m
         labels: { severity: page }
         annotations:
           summary: "A storage node holds more than 2 GiB of anonymous memory"
-          runbook: "RFC-013 §10 (memory)"
+          runbook: "RFC-013 §10.9"
+      - alert: ArcaGcFallingBehind
+        expr: max(arca_controller_gc_backlog_oldest_age_seconds) > 3600
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "The oldest retired generation has waited more than an hour for GC"
+          runbook: "RFC-013 §10.10"

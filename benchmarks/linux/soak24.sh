@@ -330,6 +330,48 @@ cmd_teardown() {
   log "teardown: done"
 }
 
+# Shutdown reliability (Phase 3.5, R-68), on a set-up cluster without the
+# workload: gateway and controller restarted as children of this shell so
+# that their exit status is seen; a gateway is signalled while gcload drives
+# PUTs and DELETEs through it, every fifth round right after a FoundationDB
+# process restart. One line per round: process, signal, exit status, seconds
+# to exit. 0 is a clean exit; 139/134 a crash.
+cmd__shutdown_test() {
+  local rounds="${ROUNDS:-40}" out="$RUN/shutdown.txt" gcload="$REPO/target/release/gcload"
+  stop gw-a TERM; stop ctl-a TERM
+  for i in $(seq 1 "$rounds"); do
+    local sig=TERM; [ $((i % 2)) -eq 0 ] && sig=INT
+    for who in gw-a ctl-a; do
+      if [ "$who" = gw-a ]; then
+        env $(fdb_env gateway) $(node_env gw-a) "$BIN" gateway --backend cluster --cluster-file "$CF" \
+          --listen "127.0.0.1:${GWPORT[gw-a]}" --metrics-listen "127.0.0.1:${METRICS[gw-a]}" --tls-reload-secs 10 \
+          --access-key "$AK" --secret-key "$SK" --k 2 --m 1 --chunk-bytes "$CHUNK" --small-threshold "$SMALL" \
+          --failure-domain node --multipart-min-part-bytes $((1 << 20)) $CACHE_ARGS >> "$RUN/logs/shutdown-$who.log" 2>&1 &
+      else
+        env $(fdb_env controller) $(node_env ctl-a) "$BIN" controller --cluster-file "$CF" --id ctl-a \
+          --http "127.0.0.1:${METRICS[ctl-a]}" --failure-domain node --lease-secs 10 --gc-interval-secs 5 --gc-grace-secs 0 \
+          --auto-repair --repair-interval-secs 5 --health-interval-secs 2 $CACHE_ARGS >> "$RUN/logs/shutdown-$who.log" 2>&1 &
+      fi
+      local pid=$! load=""
+      sleep 4
+      if [ "$who" = gw-a ] && [ -x "$gcload" ]; then
+        "$gcload" --endpoint "http://127.0.0.1:${GWPORT[gw-a]}" --access-key "$AK" --secret-key "$SK" \
+          --bucket shutdown --mode put-delete --rates 40 --step-secs 6 --keys 50 --size 65536 > /dev/null 2>&1 &
+        load=$!
+        sleep 2
+      fi
+      [ $((i % 5)) -eq 0 ] && bash "$FDBSH" restart "$F" "$(( (i / 5) % 3 + 1 ))" > /dev/null 2>&1
+      local t0; t0="$(date +%s.%N)"
+      kill "-$sig" "$pid"
+      wait "$pid"; local rc=$?
+      local secs; secs="$(echo "$(date +%s.%N) - $t0" | bc)"
+      [ -n "$load" ] && wait "$load" 2>/dev/null
+      echo "$i $who $sig rc=$rc secs=$secs" >> "$out"
+    done
+  done
+  log "shutdown test: $(grep -c 'rc=0 ' "$out") clean of $(wc -l < "$out")"
+}
+
 cmd="${1:?setup|start|status|finish|teardown}"
 case "$cmd" in
   setup) cmd_setup ;;
@@ -339,5 +381,6 @@ case "$cmd" in
   teardown) cmd_teardown ;;
   _sampler) cmd__sampler ;;
   _faults) cmd__faults ;;
+  _shutdown_test) cmd__shutdown_test ;;
   *) echo "unknown command $cmd" >&2; exit 2 ;;
 esac
