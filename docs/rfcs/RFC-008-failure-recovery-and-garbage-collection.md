@@ -255,10 +255,15 @@ A sequence names one record for the life of the node's store: the store
 persists a bound above every sequence it handed out (`sequence.bound`,
 raised at open and at every segment rollover), so compaction dropping the
 records with the highest sequences cannot make a later record reuse one
-(CON-10). Records reach the in-memory index after group commit in any
+(CON-10). A damaged bound refuses the open (CON-14); a missing one is
+taken as a store that predates it (its sequences were never handed out as
+delete tokens). Deleting the file of an upgraded store by hand voids the
+guarantee for deletes already in flight. Records reach the in-memory index after group commit in any
 order; the index keeps a runtime tombstone until every older record has
 been applied, so a conditionally deleted key is never resurrected by an
-older put that was still on its way (CON-9).
+older put that was still on its way (CON-9); a write that fails or panics
+on its way leaves the in-flight set too (CON-13). `ListShards` reads live
+and quarantined keys from one index snapshot per page (OPS-5, OPS-6).
 
 An older node reports sequence 0 and would ignore `if_sequence`.
 Reconciliation and migration cleanup fail closed there: they delete

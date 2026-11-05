@@ -597,26 +597,31 @@ impl StorageNode for StorageNodeService {
         Self::check_version(req.protocol_version)?;
         let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
         let limit = Self::page_limit(req.limit);
-        let mut page: Vec<(ShardKey, u32, bool, u64)> = self
-            .store
-            .entries_in_group_after_sequenced(req.group_id, after, limit)
+        // Live and quarantined keys from one index snapshot (OPS-6), merged
+        // into one ordered, bounded page whose cursor is the last key of the
+        // merge (Phase 3.5 audit OPS-5: the cursor followed the live keys
+        // only, and quarantined keys beyond one page were never listed).
+        let (live, quarantined) = if req.include_quarantined {
+            self.store
+                .listing_in_group_after(req.group_id, after, limit)
+        } else {
+            (
+                self.store
+                    .entries_in_group_after_sequenced(req.group_id, after, limit),
+                Vec::new(),
+            )
+        };
+        let mut more = live.len() == limit || quarantined.len() == limit;
+        let mut page: Vec<(ShardKey, u32, bool, u64)> = live
             .into_iter()
             .map(|(k, len, seq)| (k, len, false, seq))
             .collect();
-        let mut more = page.len() == limit;
         if req.include_quarantined {
-            // Quarantined keys merged with the live ones into one ordered,
-            // bounded page whose cursor is the last key of the merge (Phase
-            // 3.5 audit OPS-5: the cursor followed the live keys only, and
-            // quarantined keys beyond one page were never listed).
-            let quarantined: Vec<_> = self
-                .store
-                .quarantined_in_group_after(req.group_id, after, limit)
-                .into_iter()
-                .map(|(k, e)| (k, e.location.payload_len, true, e.location.sequence))
-                .collect();
-            more |= quarantined.len() == limit;
-            page.extend(quarantined);
+            page.extend(
+                quarantined
+                    .into_iter()
+                    .map(|(k, e)| (k, e.location.payload_len, true, e.location.sequence)),
+            );
             page.sort_by_key(|a| a.0);
             if page.len() > limit {
                 page.truncate(limit);

@@ -143,4 +143,5 @@ loss, coordinator loss, leader failover, repair under process loss).
 - Regression tests not shown to fail on the previous code: CON-4 (an
   unproven versioned delete, the previous code had no such path), CON-8
   (the test calls the new combined operation) and OPS-3 (the previous code
-  had no paging to break).
+  had no paging to break), OPS-6 (one index snapshot per listing page;
+  the race needs a pause between two reads that no longer exist).

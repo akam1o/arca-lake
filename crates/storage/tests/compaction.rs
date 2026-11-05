@@ -633,3 +633,18 @@ fn sequences_are_not_reused_after_their_records_are_gone() {
     assert!(!store.delete_if(key(7), old).unwrap());
     assert_eq!(store.get(&key(7), None).unwrap(), payload(8));
 }
+
+/// A damaged sequence bound refuses the open instead of letting sequences
+/// restart from the surviving records (Phase 3.5 audit CON-14).
+#[test]
+fn a_damaged_sequence_bound_refuses_the_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    store.put(key(1), &payload(1)).unwrap();
+    drop(store);
+    std::fs::write(dir.path().join("sequence.bound"), "garbage\n").unwrap();
+    let Err(e) = Store::open(config(dir.path())) else {
+        panic!("a damaged bound was accepted");
+    };
+    assert!(e.to_string().contains("sequence.bound"), "{e}");
+}

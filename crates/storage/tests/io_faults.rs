@@ -498,3 +498,36 @@ fn a_damaged_record_of_a_deleted_key_is_not_quarantined_at_open() {
     ));
     assert_eq!(store.get(&key(2), None).unwrap(), payload(2, 3000));
 }
+
+/// A write that panics between its append and its index update does not
+/// stay "in flight" for ever: later deletes' tombstone history is still
+/// pruned (Phase 3.5 audit CON-13; R-70 depends on the history staying
+/// bounded).
+#[test]
+fn a_panicking_write_does_not_stop_the_tombstone_history_from_being_pruned() {
+    let _s = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path(), SyncPolicy::Always)).unwrap();
+    store.put(key(1), &payload(1, 100)).unwrap();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let a = Arc::clone(&armed);
+    set_io_hook(Some(Arc::new(move |op| {
+        if matches!(op, IoOp::SyncData { .. } | IoOp::SyncAll { .. })
+            && a.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("injected panic during the write's sync");
+        }
+        FaultOutcome::None
+    })));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.put(key(2), &payload(2, 100))
+    }));
+    set_io_hook(None);
+    assert!(r.is_err(), "the injected panic fired");
+    for i in 10..210u8 {
+        store.put(key(i), &payload(i, 100)).unwrap();
+        store.delete(key(i)).unwrap();
+    }
+    let sizes = store.index_sizes();
+    assert_eq!(sizes.tombstone_history, 0, "{sizes:?}");
+}

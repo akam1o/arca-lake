@@ -803,23 +803,14 @@ impl Store {
                 a.remove(&key);
             }
         }
-        // Forget the appended record once the index has it (or it failed).
-        let done = |store: &Self| {
-            let mut a = store
-                .appending
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if a.get(&key) == Some(&sequence) {
-                a.remove(&key);
-            }
-        };
-        let not_inflight = |store: &Self| -> u64 {
-            let mut f = store
-                .inflight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            f.remove(&sequence);
-            f.first().copied().unwrap_or(u64::MAX)
+        // Forgets the record in `appending` and `inflight` on every way out,
+        // a panic included (Phase 3.5 audit CON-13: a sequence left in
+        // `inflight` would stop the tombstone history from being pruned).
+        let mut guard = Inflight {
+            store: self,
+            key,
+            sequence,
+            applied: false,
         };
         {
             let mut st = self
@@ -832,8 +823,6 @@ impl Store {
                 if let Err(e) = w.active.sync() {
                     w.poisoned = true;
                     drop(st);
-                    done(self);
-                    not_inflight(self);
                     return Err(e);
                 }
                 st.durable = st.durable.max((segment_id, end));
@@ -849,8 +838,6 @@ impl Store {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .poisoned = true;
-                done(self);
-                not_inflight(self);
                 return Err(e);
             }
             self.timings.sync_wait.observe(t.elapsed());
@@ -873,12 +860,10 @@ impl Store {
         }
         self.log_released(&mut idx);
         // Applied: history below every record still on its way can go.
-        let lowest = not_inflight(self);
+        let lowest = guard.applied();
         idx.prune_history(lowest);
         drop(idx);
-        if data {
-            done(self);
-        }
+        drop(guard);
         Ok(Some(sequence))
     }
 
@@ -1210,6 +1195,27 @@ impl Store {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .quarantine_entry(key)
+    }
+
+    /// Live entries (with sequences) and quarantined shards of `group_id`
+    /// after `after`, each in key order and at most `limit`, from one
+    /// snapshot of the index.
+    #[must_use]
+    pub fn listing_in_group_after(
+        &self,
+        group_id: u64,
+        after: Option<ShardKey>,
+        limit: usize,
+    ) -> GroupListing {
+        // One index snapshot for both (Phase 3.5 audit OPS-6: a key moving
+        // between live and quarantined between two reads was skipped or
+        // listed twice).
+        let idx = self.index.read().unwrap_or_else(PoisonError::into_inner);
+        (
+            idx.entries_in_group_after(group_id, after, limit).collect(),
+            idx.quarantined_in_group_after(group_id, after, limit)
+                .collect(),
+        )
     }
 
     /// Quarantined shards of `group_id` after `after`, in key order, at
@@ -1713,9 +1719,22 @@ fn sequences_per_segment(cfg: &StoreConfig) -> u64 {
     cfg.segment_max_bytes / 64 + 2
 }
 
+/// The persisted bound; 0 when there is none (a store that predates it,
+/// or a new one). An unreadable bound refuses the open (Phase 3.5 audit
+/// CON-14): starting from the surviving records could hand out a sequence
+/// a pending conditional delete names.
 fn read_sequence_bound(dir: &Path) -> Result<u64> {
     match std::fs::read_to_string(dir.join(SEQUENCE_BOUND_FILE)) {
-        Ok(text) => Ok(text.trim().parse().unwrap_or(0)),
+        Ok(text) => text.trim().parse().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{SEQUENCE_BOUND_FILE} is damaged: {:?}; it must hold the highest record sequence ever handed out",
+                    text.chars().take(40).collect::<String>()
+                ),
+            )
+            .into()
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(e) => Err(e.into()),
     }
@@ -1732,4 +1751,51 @@ fn write_sequence_bound(dir: &Path, bound: u64) -> Result<()> {
     std::fs::rename(&tmp, dir.join(SEQUENCE_BOUND_FILE))?;
     File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+/// Live entries `(key, payload length, sequence)` and quarantined shards of
+/// a listing page ([`Store::listing_in_group_after`]).
+pub type GroupListing = (Vec<(ShardKey, u32, u64)>, Vec<(ShardKey, QuarantineEntry)>);
+
+/// A record appended and not yet applied to the index (see `append_if`).
+struct Inflight<'a> {
+    store: &'a Store,
+    key: ShardKey,
+    sequence: u64,
+    applied: bool,
+}
+
+impl Inflight<'_> {
+    /// The record reached the index (call with the index lock held): the
+    /// lowest sequence still on its way, `u64::MAX` when none is.
+    fn applied(&mut self) -> u64 {
+        self.applied = true;
+        let mut f = self
+            .store
+            .inflight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        f.remove(&self.sequence);
+        f.first().copied().unwrap_or(u64::MAX)
+    }
+}
+
+impl Drop for Inflight<'_> {
+    fn drop(&mut self) {
+        if !self.applied {
+            self.store
+                .inflight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&self.sequence);
+        }
+        let mut a = self
+            .store
+            .appending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if a.get(&self.key) == Some(&self.sequence) {
+            a.remove(&self.key);
+        }
+    }
 }
