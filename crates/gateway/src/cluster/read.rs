@@ -627,10 +627,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .coders
             .get(&chunk.scheme, chunk.data_shards, chunk.parity_shards)
             .map_err(|e| s3_error!(InternalError, "{e}"))?;
-        let r = arca_lake_tiering::durable::read_chunk_detailed(
+        let r = arca_lake_tiering::durable::read_chunk_alternates(
             &self.clients,
             group,
             &addr_of(map),
+            map.alternates.get(&group.id).map_or(&[][..], Vec::as_slice),
             chunk,
             coder.as_ref(),
         )

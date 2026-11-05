@@ -955,6 +955,26 @@ async fn repair_pass<S: KvStore>(
     // members and resumed repairs run in every state that admits repair.
     let intents = Intents::load(meta, &all_groups).await?;
     intents.complete_drains(meta, &all_groups, now).await?;
+    // Groups rebuilding a member without the node it left answering: their
+    // reads and repairs have one shard fewer than the profile promises
+    // until the rebuild completes (R-65). A healthy member's move keeps it.
+    let reduced = all_groups
+        .iter()
+        .filter(|g| !g.is_cache() && g.state == GroupState::Repairing)
+        .filter(|g| {
+            !intents
+                .requests
+                .get(&g.id)
+                .map(|r| r.from_node)
+                .into_iter()
+                .chain(intents.draining.iter().copied())
+                .any(|n| healthy(n) && !g.members.iter().any(|m| m.node_id == n))
+        })
+        .inspect(|g| warn!(group = g.id, "rebuilding a member without its former node: redundancy reduced until the rebuild completes"))
+        .count() as u64;
+    metrics
+        .groups_reduced_redundancy
+        .store(reduced, Ordering::Relaxed);
     // Durable groups first; cache groups only when no durable group needed
     // attention in this pass, and with a per-pass budget (RFC-006 §5.9).
     let mut durable_busy = false;

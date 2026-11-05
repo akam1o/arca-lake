@@ -100,6 +100,30 @@ pub async fn read_coded(
     crc32c: u32,
     coder: &dyn ErasureCoder,
 ) -> Result<CodedRead, TierError> {
+    read_coded_with(clients, group, addr_of, &[], chunk_id, len, crc32c, coder).await
+}
+
+/// [`read_coded`] with alternate sources: `(shard index, node)` pairs tried
+/// for a member whose shard is unavailable. A group whose member is being
+/// rebuilt names the node that member left, which still holds its shards
+/// until the group is `Active` again, so a move does not lower the read
+/// path's tolerance (Phase 3.5, R-65). Whatever the source, the chunk is
+/// verified against its length and checksum.
+///
+/// # Errors
+///
+/// As [`read_coded`].
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub async fn read_coded_with(
+    clients: &NodeClients,
+    group: &GroupRecord,
+    addr_of: AddrOf<'_>,
+    alternates: &[(usize, u64)],
+    chunk_id: [u8; 16],
+    len: u64,
+    crc32c: u32,
+    coder: &dyn ErasureCoder,
+) -> Result<CodedRead, TierError> {
     let k = usize::from(group.data_shards);
     let m = usize::from(group.parity_shards);
     let total = k + m;
@@ -117,18 +141,27 @@ pub async fn read_coded(
     );
     let fetch = |i: usize| {
         let clients = clients.clone();
-        let addr = addr_of(group.members[i].node_id);
+        let mut addrs: Vec<String> = addr_of(group.members[i].node_id).into_iter().collect();
+        addrs.extend(
+            alternates
+                .iter()
+                .filter(|(idx, _)| *idx == i)
+                .filter_map(|(_, node)| addr_of(*node)),
+        );
         let shard = ShardRef {
             group_id: group.id,
             chunk_id,
             shard_index: u16::try_from(i).unwrap_or(0),
         };
         async move {
-            let Some(addr) = addr else { return (i, None) };
-            match clients.get_shard_frames(&addr, shard, 0, 0).await {
-                Ok(f) if frames_len(&f) == layout.shard_len() => (i, Some(f)),
-                Ok(_) | Err(_) => (i, None),
+            for addr in addrs {
+                if let Ok(f) = clients.get_shard_frames(&addr, shard, 0, 0).await
+                    && frames_len(&f) == layout.shard_len()
+                {
+                    return (i, Some(f));
+                }
             }
+            (i, None)
         }
     };
     let mut shards: Vec<Option<Vec<Bytes>>> = vec![None; total];
@@ -232,6 +265,22 @@ pub async fn read_chunk_detailed(
     chunk: &ChunkRecord,
     coder: &dyn ErasureCoder,
 ) -> Result<CodedRead, TierError> {
+    read_chunk_alternates(clients, group, addr_of, &[], chunk, coder).await
+}
+
+/// [`read_chunk_detailed`] with alternate sources ([`read_coded_with`]).
+///
+/// # Errors
+///
+/// As [`read_chunk`].
+pub async fn read_chunk_alternates(
+    clients: &NodeClients,
+    group: &GroupRecord,
+    addr_of: AddrOf<'_>,
+    alternates: &[(usize, u64)],
+    chunk: &ChunkRecord,
+    coder: &dyn ErasureCoder,
+) -> Result<CodedRead, TierError> {
     if usize::from(chunk.data_shards) != usize::from(group.data_shards)
         || usize::from(chunk.parity_shards) != usize::from(group.parity_shards)
     {
@@ -244,10 +293,11 @@ pub async fn read_chunk_detailed(
             group.parity_shards
         )));
     }
-    read_coded(
+    read_coded_with(
         clients,
         group,
         addr_of,
+        alternates,
         chunk.chunk_id,
         u64::from(chunk.len),
         chunk.crc32c,

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::ops::cluster;
+use arca_lake_metadata::ops::membership::{self, NodeLifecycle};
 use arca_lake_metadata::records::{GroupRecord, GroupState, NodeRecord};
 
 /// Snapshot of nodes and groups.
@@ -16,6 +17,10 @@ pub struct ClusterMap {
     pub nodes: HashMap<u64, NodeRecord>,
     /// Groups by ID.
     pub groups: HashMap<u64, GroupRecord>,
+    /// Per group being rebuilt, alternate readers of the member being
+    /// rebuilt: `(shard index, node it left)`. The node keeps its shards
+    /// until the group is `Active` again (R-65).
+    pub alternates: HashMap<u64, Vec<(usize, u64)>>,
 }
 
 impl ClusterMap {
@@ -36,10 +41,12 @@ impl ClusterMap {
             .into_iter()
             .map(|g| (g.id, g))
             .collect();
+        let alternates = alternates(meta, &groups).await?;
         Ok(Self {
             version,
             nodes,
             groups,
+            alternates,
         })
     }
 
@@ -62,4 +69,46 @@ impl ClusterMap {
                 && g.tier == tier
         })
     }
+}
+
+/// The node each member being rebuilt left: a replace request's
+/// `from_node` for the group, or a draining node, when it is no longer a
+/// member (the controller's own sources, `RepairOptions::former`).
+async fn alternates<S: KvStore>(
+    meta: &S,
+    groups: &HashMap<u64, GroupRecord>,
+) -> Result<HashMap<u64, Vec<(usize, u64)>>, arca_lake_metadata::MetaError> {
+    let rebuilding: Vec<&GroupRecord> = groups
+        .values()
+        .filter(|g| g.state == GroupState::Repairing && g.repair_cursor.is_some())
+        .collect();
+    let mut out = HashMap::new();
+    if rebuilding.is_empty() {
+        return Ok(out);
+    }
+    let requests = membership::replace_requests(meta).await?;
+    let draining: Vec<u64> = membership::node_states(meta)
+        .await?
+        .into_iter()
+        .filter(|s| matches!(s.state, NodeLifecycle::Draining { .. }))
+        .map(|s| s.node_id)
+        .collect();
+    for g in rebuilding {
+        let Some(cursor) = g.repair_cursor else {
+            continue;
+        };
+        let index = usize::from(cursor.member);
+        let nodes: Vec<(usize, u64)> = requests
+            .iter()
+            .filter(|r| r.group == g.id)
+            .map(|r| r.from_node)
+            .chain(draining.iter().copied())
+            .filter(|n| !g.members.iter().any(|m| m.node_id == *n))
+            .map(|n| (index, n))
+            .collect();
+        if !nodes.is_empty() {
+            out.insert(g.id, nodes);
+        }
+    }
+    Ok(out)
 }

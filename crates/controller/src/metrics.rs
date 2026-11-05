@@ -71,6 +71,9 @@ pub struct Metrics {
     pub integrity_findings_total: [AtomicU64; 8],
     /// Open repair tasks by class: distinct stripes unresolved now (R-56).
     pub integrity_findings_open: [AtomicU64; 8],
+    /// Durable groups rebuilding a member whose former node does not
+    /// answer: one shard of redundancy short until the rebuild ends (R-65).
+    pub groups_reduced_redundancy: AtomicU64,
     /// Stripe repair tasks in metadata.
     pub repair_queue_depth: AtomicU64,
     /// Tasks in `Unrecoverable`.
@@ -299,6 +302,10 @@ impl Metrics {
             (
                 "arca_controller_repair_queue_depth",
                 &self.repair_queue_depth,
+            ),
+            (
+                "arca_controller_groups_reduced_redundancy",
+                &self.groups_reduced_redundancy,
             ),
             (
                 "arca_controller_repair_tasks_unrecoverable",
