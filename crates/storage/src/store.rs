@@ -493,7 +493,11 @@ impl Store {
         // Never hand out a sequence again: compaction can drop the records
         // that carried the highest ones (Phase 3.5 audit CON-10: a delete
         // conditional on an old sequence matched a new record after reopen).
-        let next_sequence = (rec.max_sequence + 1).max(read_sequence_bound(&cfg.dir)?);
+        let next_sequence = match read_sequence_bound(&cfg.dir)? {
+            Some(bound) => (rec.max_sequence + 1).max(bound),
+            None if rec.max_sequence > 0 || !ids.is_empty() => rec.max_sequence + 1 + SEQUENCE_JUMP,
+            None => rec.max_sequence + 1,
+        };
         write_sequence_bound(&cfg.dir, next_sequence + sequences_per_segment(&cfg))?;
         let store = Self {
             cfg,
@@ -787,6 +791,15 @@ impl Store {
         let end = w.active.end();
         w.next_sequence += 1;
         w.active_min_seq.get_or_insert(sequence);
+        // Forgets the record in `appending` and `inflight` on every way out,
+        // a panic included (Phase 3.5 audit CON-13: a sequence left in
+        // `inflight` would stop the tombstone history from being pruned).
+        let mut guard = Inflight {
+            store: self,
+            key,
+            sequence,
+            applied: false,
+        };
         let data = flags & FLAG_TOMBSTONE == 0;
         self.inflight
             .lock()
@@ -803,15 +816,6 @@ impl Store {
                 a.remove(&key);
             }
         }
-        // Forgets the record in `appending` and `inflight` on every way out,
-        // a panic included (Phase 3.5 audit CON-13: a sequence left in
-        // `inflight` would stop the tombstone history from being pruned).
-        let mut guard = Inflight {
-            store: self,
-            key,
-            sequence,
-            applied: false,
-        };
         {
             let mut st = self
                 .durability
@@ -934,6 +938,12 @@ impl Store {
             st.syncing = true;
             let target = st.appended;
             drop(st);
+            // Gives up the leadership if the sync below panics, so that the
+            // waiting writers elect another leader (Phase 3.5 audit CON-15).
+            let leader = SyncLeader {
+                store: self,
+                done: false,
+            };
 
             let result = (|| -> Result<()> {
                 let file = {
@@ -960,6 +970,7 @@ impl Store {
                 st.durable = st.durable.max(target);
             }
             self.durability.cv.notify_all();
+            leader.finish();
             result?;
         }
     }
@@ -1719,23 +1730,40 @@ fn sequences_per_segment(cfg: &StoreConfig) -> u64 {
     cfg.segment_max_bytes / 64 + 2
 }
 
-/// The persisted bound; 0 when there is none (a store that predates it,
-/// or a new one). An unreadable bound refuses the open (Phase 3.5 audit
-/// CON-14): starting from the surviving records could hand out a sequence
-/// a pending conditional delete names.
-fn read_sequence_bound(dir: &Path) -> Result<u64> {
-    match std::fs::read_to_string(dir.join(SEQUENCE_BOUND_FILE)) {
-        Ok(text) => text.trim().parse().map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "{SEQUENCE_BOUND_FILE} is damaged: {:?}; it must hold the highest record sequence ever handed out",
-                    text.chars().take(40).collect::<String>()
-                ),
-            )
-            .into()
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+/// Sequences skipped at open when a store with records has no bound file
+/// (one that predates it, or whose file was lost or removed by an operator
+/// after it was found damaged): far more than any store hands out, so no
+/// sequence a pending conditional delete names can come back (Phase 3.5
+/// audit CON-14).
+const SEQUENCE_JUMP: u64 = 1 << 48;
+
+/// The persisted bound, `None` when there is none. A bound that does not
+/// match its checksum refuses the open (CON-14): a damaged value could be
+/// too low. The operator's recovery is to remove the file; the store then
+/// skips [`SEQUENCE_JUMP`] sequences.
+fn read_sequence_bound(dir: &Path) -> Result<Option<u64>> {
+    let path = dir.join(SEQUENCE_BOUND_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let mut it = text.split_whitespace();
+            let parsed = match (it.next(), it.next(), it.next()) {
+                (Some(v), Some(crc), None) => v.parse::<u64>().ok().filter(|v| {
+                    format!("{:08x}", crate::format::crc32c(v.to_string().as_bytes())) == crc
+                }),
+                _ => None,
+            };
+            parsed.map(Some).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "{} is damaged (an exclusive bound above every record sequence handed out, with its checksum); remove it to have the store skip {SEQUENCE_JUMP} sequences at open",
+                        path.display()
+                    ),
+                )
+                .into()
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
@@ -1745,7 +1773,8 @@ fn write_sequence_bound(dir: &Path, bound: u64) -> Result<()> {
     let tmp = dir.join(format!("{SEQUENCE_BOUND_FILE}.tmp"));
     {
         let f = File::create(&tmp)?;
-        std::io::Write::write_all(&mut &f, format!("{bound}\n").as_bytes())?;
+        let crc = crate::format::crc32c(bound.to_string().as_bytes());
+        std::io::Write::write_all(&mut &f, format!("{bound} {crc:08x}\n").as_bytes())?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, dir.join(SEQUENCE_BOUND_FILE))?;
@@ -1796,6 +1825,33 @@ impl Drop for Inflight<'_> {
             .unwrap_or_else(PoisonError::into_inner);
         if a.get(&self.key) == Some(&self.sequence) {
             a.remove(&self.key);
+        }
+    }
+}
+
+/// The group-commit sync leadership of one writer (see `wait_durable`).
+struct SyncLeader<'a> {
+    store: &'a Store,
+    done: bool,
+}
+
+impl SyncLeader<'_> {
+    fn finish(mut self) {
+        self.done = true;
+    }
+}
+
+impl Drop for SyncLeader<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            let mut st = self
+                .store
+                .durability
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            st.syncing = false;
+            self.store.durability.cv.notify_all();
         }
     }
 }

@@ -531,3 +531,39 @@ fn a_panicking_write_does_not_stop_the_tombstone_history_from_being_pruned() {
     let sizes = store.index_sizes();
     assert_eq!(sizes.tombstone_history, 0, "{sizes:?}");
 }
+
+/// A group-commit sync leader that panics gives up the leadership: the
+/// next writer syncs and completes instead of waiting for ever (Phase 3.5
+/// audit CON-15).
+#[test]
+fn a_panicking_sync_leader_does_not_stall_later_writers() {
+    let _s = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path(), SyncPolicy::Group)).unwrap();
+    let store = Arc::new(store);
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let a = Arc::clone(&armed);
+    set_io_hook(Some(Arc::new(move |op| {
+        if matches!(op, IoOp::SyncData { .. } | IoOp::SyncAll { .. })
+            && a.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("injected panic in the sync leader");
+        }
+        FaultOutcome::None
+    })));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.put(key(1), &payload(1, 100))
+    }));
+    assert!(r.is_err() && !armed.load(std::sync::atomic::Ordering::SeqCst));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let s2 = Arc::clone(&store);
+    std::thread::spawn(move || {
+        let _ = tx.send(s2.put(key(2), &payload(2, 100)));
+    });
+    let done = rx.recv_timeout(std::time::Duration::from_secs(10));
+    set_io_hook(None);
+    assert!(
+        matches!(done, Ok(Ok(()))),
+        "a later write stalled behind the panicked leader: {done:?}"
+    );
+}

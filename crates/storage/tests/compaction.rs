@@ -648,3 +648,22 @@ fn a_damaged_sequence_bound_refuses_the_open() {
     };
     assert!(e.to_string().contains("sequence.bound"), "{e}");
 }
+
+/// A bound that still parses but does not match its checksum is refused
+/// too; removing the file is the recovery, and the store then skips far
+/// beyond every sequence it can have handed out (Phase 3.5 audit CON-14).
+#[test]
+fn a_low_bound_is_refused_and_a_removed_one_skips_ahead() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    let old = store.put_sequenced(key(9), &payload(9)).unwrap();
+    drop(store);
+    let bound = dir.path().join("sequence.bound");
+    std::fs::write(&bound, "1\n").unwrap();
+    assert!(Store::open(config(dir.path())).is_err());
+    std::fs::remove_file(&bound).unwrap();
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    let new = store.put_sequenced(key(9), &payload(10)).unwrap();
+    assert!(new > old + (1 << 40), "{new} after {old}");
+    assert!(!store.delete_if(key(9), old).unwrap());
+}
