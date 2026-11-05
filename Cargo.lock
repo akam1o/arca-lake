@@ -124,6 +124,7 @@ dependencies = [
 name = "arca-lake-common"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "serde",
  "thiserror",
  "uuid",
@@ -300,6 +301,7 @@ dependencies = [
  "arca-lake-storage",
  "bytes",
  "rustix",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
