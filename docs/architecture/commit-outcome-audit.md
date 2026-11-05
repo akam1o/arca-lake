@@ -128,6 +128,19 @@ loss, coordinator loss, leader failover, repair under process loss).
   FoundationDB; the in-memory backend accepts it (`apply_delayed` is used
   only right after the failure or the retry).
 - Client-visible wrong codes after an applied bucket create/delete (Low).
-- A versioned unconditional delete whose first attempt was not applied and
-  whose pointer moved before the re-run reports success without a marker
-  (linearized before the other write; the visible state is the same).
+- An unconditional delete on an unversioned or suspended bucket whose
+  first attempt was not applied and whose pointer moved before the re-run
+  reports success (linearized before the other write; the visible state is
+  the same). On a versioning-enabled bucket the marker decides: absent =
+  503.
+- Cache copies deleted by population, repair, invalidation and eviction
+  are not conditional on record sequences (INT-1/INT-2, Medium): a newer
+  copy under the same key can be lost, which costs a cache miss (reads
+  verify against the chunk record and fall back to the durable tier).
+- Storage nodes without record sequences (before Phase 3.5) get no
+  reconciliation or migration-cleanup deletes; their orphans wait for the
+  upgrade (CON-12).
+- Regression tests not shown to fail on the previous code: CON-4 (an
+  unproven versioned delete, the previous code had no such path), CON-8
+  (the test calls the new combined operation) and OPS-3 (the previous code
+  had no paging to break).

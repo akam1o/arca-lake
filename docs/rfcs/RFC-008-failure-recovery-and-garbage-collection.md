@@ -251,8 +251,22 @@ epoch does not change between the two placements. Two mechanisms close it:
   shards of a chunk while a migration into that group holds the chunk's
   intent.
 
-An older node ignores `if_sequence` and deletes unconditionally (the
-pre-3.5 behaviour) until it is upgraded.
+A sequence names one record for the life of the node's store: the store
+persists a bound above every sequence it handed out (`sequence.bound`,
+raised at open and at every segment rollover), so compaction dropping the
+records with the highest sequences cannot make a later record reuse one
+(CON-10). Records reach the in-memory index after group commit in any
+order; the index keeps a runtime tombstone until every older record has
+been applied, so a conditionally deleted key is never resurrected by an
+older put that was still on its way (CON-9).
+
+An older node reports sequence 0 and would ignore `if_sequence`.
+Reconciliation and migration cleanup fail closed there: they delete
+nothing on such a node, and its orphans are reclaimed after its upgrade
+(CON-12). Cache population, repair, invalidation and eviction still delete
+cache copies unconditionally (INT-1/INT-2, Medium): a lost cache copy is a
+miss, never wrong data, because cached chunks are verified against the
+chunk record and reads fall back to the durable tier.
 
 ### 6.7 Clock skew
 

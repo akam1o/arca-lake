@@ -307,8 +307,10 @@ placement between durable tiers.
      reconciliation with conditional deletes (RFC-008 §6.6 amendment). The
      migrator does not delete them itself: a delete it sent could arrive
      after a later migration back into the source group.
-  A failed or refused attempt deletes the target shards it wrote, each only
-  if the node still holds the record it wrote, then drops its intent. A
+  A switch refused while the attempt still holds the intent deletes the
+  target shards it wrote, each only if the node still holds the record it
+  wrote, then drops the intent. Other failures (a read or write error part
+  way) drop the intent and leave what was written to reconciliation. A
   crash before step 4 leaves target shards kept by the intent until it is
   stale, then reclaimed by reconciliation; a crash after step 4 leaves
   source shards that reconciliation deletes. The chunk is readable
