@@ -62,6 +62,11 @@ impl NodeConfig {
 pub struct StorageNodeService {
     store: Arc<Store>,
     epochs: Mutex<EpochTable>,
+    /// Destructive RPCs hold it shared from their fence checks to the end of
+    /// the store mutation; raising an epoch or adopting an incarnation holds
+    /// it exclusively. Once such an update is acknowledged, no delete that
+    /// passed the old fence can still run (Phase 3.5 audit SEC-6).
+    fence: tokio::sync::RwLock<()>,
     frame_bytes: usize,
     stream_progress_timeout: Duration,
     stats: Arc<NodeStats>,
@@ -179,6 +184,7 @@ impl StorageNodeService {
         Ok(Self {
             store: Arc::new(store),
             epochs: Mutex::new(epochs),
+            fence: tokio::sync::RwLock::new(()),
             frame_bytes: cfg.frame_bytes,
             stream_progress_timeout: cfg.stream_progress_timeout,
             stats: Arc::default(),
@@ -303,17 +309,24 @@ impl StorageNodeService {
 
     /// Refuse a delete whose incarnation differs from the one this node
     /// adopted (RFC-015 §5.3): a controller that predates a metadata
-    /// restore must not apply its decisions. An empty incarnation (a
-    /// caller that predates incarnations) is accepted.
+    /// restore must not apply its decisions. An empty incarnation is
+    /// accepted only until the node adopts one (Phase 3.5 audit SEC-5: a
+    /// caller could otherwise skip the fence by omitting it).
     fn check_incarnation(&self, incarnation: &[u8]) -> Result<(), tonic::Status> {
-        if incarnation.is_empty() {
-            return Ok(());
-        }
         let held = self
             .cluster
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .incarnation;
+        if incarnation.is_empty() {
+            return match held {
+                Some(h) => Err(tonic::Status::failed_precondition(format!(
+                    "incarnation rejected: node adopted {}, request carries none",
+                    crate::cluster::hex(&h)
+                ))),
+                None => Ok(()),
+            };
+        }
         match held {
             Some(h) if h.as_slice() != incarnation => {
                 Err(tonic::Status::failed_precondition(format!(
@@ -551,6 +564,7 @@ impl StorageNode for StorageNodeService {
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
         let key = Self::key(req.key)?;
+        let _fence = self.fence.read().await;
         self.check_incarnation(&req.incarnation)?;
         self.check_epoch(key.group_id, req.group_epoch)?;
         let store = Arc::clone(&self.store);
@@ -822,6 +836,7 @@ impl StorageNode for StorageNodeService {
         self.authorize(&request, arca_lake_protocol::tls::NodeRpc::UpdateGroupEpoch)?;
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
+        let _fence = self.fence.write().await;
         let epoch = self
             .epochs
             .lock()
@@ -850,7 +865,20 @@ impl StorageNode for StorageNodeService {
         let req = request.into_inner();
         // Adopt the cluster facts the controller carries (ADR-0016): the
         // incarnation only when not older than what is held, the format
-        // monotonically; both persisted before they take effect.
+        // monotonically; both persisted before they take effect. A change
+        // of incarnation waits for deletes past the old fence (SEC-6).
+        let new_incarnation = <[u8; 16]>::try_from(req.incarnation.as_ref()).is_ok_and(|inc| {
+            self.cluster
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .incarnation
+                != Some(inc)
+        });
+        let _fence = if new_incarnation {
+            Some(self.fence.write().await)
+        } else {
+            None
+        };
         {
             let mut c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
             if let Ok(inc) = <[u8; 16]>::try_from(req.incarnation.as_ref())

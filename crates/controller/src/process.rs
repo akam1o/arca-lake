@@ -261,6 +261,11 @@ async fn run<S: KvStore + 'static>(
     incarnation: [u8; 16],
 ) {
     let renew_every = cfg.lease / 3;
+    // The leader record names this process, not only its configured id: a
+    // second process started with the same id (a restart while the old
+    // one is paused) must not inherit the old one's token, or fencing
+    // could not tell them apart (Phase 3.5 audit SEC-4).
+    let holder = leader_holder(&cfg.id);
     // Heartbeat (RFC-014 §5.5) and `schema_write` refresh, leader or not.
     if let Some(every) = cfg.heartbeat {
         let meta = Arc::clone(&meta);
@@ -298,7 +303,7 @@ async fn run<S: KvStore + 'static>(
         }
         // Follower: try to acquire.
         let acquired =
-            match leader::try_acquire(meta.as_ref(), &cfg.id, now_ms(), ms(cfg.lease)).await {
+            match leader::try_acquire(meta.as_ref(), &holder, now_ms(), ms(cfg.lease)).await {
                 Ok(l) => l,
                 Err(e) => {
                     warn!(controller = %cfg.id, error = %e, "leader acquisition failed");
@@ -356,6 +361,18 @@ async fn run<S: KvStore + 'static>(
             return;
         }
     }
+}
+
+/// This process's name in the leader record: the configured id and a
+/// random instance suffix.
+fn leader_holder(id: &str) -> String {
+    let r = arca_lake_metadata::records::new_gen_id();
+    let suffix = r[8..].iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    format!("{id}@{suffix}")
 }
 
 #[allow(clippy::too_many_lines)]

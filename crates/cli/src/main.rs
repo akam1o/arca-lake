@@ -2862,6 +2862,13 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
                 }
                 Err(e) => return fail(e),
             };
+            // Deletes carry the cluster incarnation: a node that adopted one
+            // refuses a delete without it (SEC-5).
+            if let Ok(Some(st)) =
+                arca_lake_metadata::ops::compat::cluster_state(meta.as_ref()).await
+            {
+                clients.set_incarnation(Some(st.incarnation));
+            }
             let mode = if quarantine {
                 VerifyMode::Quarantine
             } else {
@@ -3093,6 +3100,13 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
                 }
                 Err(e) => return fail(e),
             };
+            // Deletes carry the cluster incarnation: a node that adopted one
+            // refuses a delete without it (SEC-5).
+            if let Ok(Some(st)) =
+                arca_lake_metadata::ops::compat::cluster_state(meta.as_ref()).await
+            {
+                clients.set_incarnation(Some(st.incarnation));
+            }
             let coders = arca_lake_controller::integrity::coders();
             let opts = arca_lake_controller::integrity::ScrubOptions {
                 page,

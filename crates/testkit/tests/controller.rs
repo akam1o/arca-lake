@@ -88,7 +88,8 @@ async fn exactly_one_leader_and_failover_after_the_lease() {
     .await;
     assert_eq!(second.token(), 2);
     let rec = leader::current(meta.as_ref()).await.unwrap().unwrap();
-    assert_eq!((rec.holder.as_str(), rec.token), ("b", 2));
+    assert!(rec.holder.starts_with("b@"), "{}", rec.holder);
+    assert_eq!(rec.token, 2);
 
     // Graceful shutdown releases the lease so a successor does not wait.
     second.shutdown().await;
@@ -298,4 +299,35 @@ async fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
     let mut out = Vec::new();
     s.read_to_end(&mut out).await.unwrap();
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Two processes with the same configured id are told apart (Phase 3.5
+/// audit SEC-4): the second does not take the first one's live lease and
+/// token, and when it takes over it gets a new token that fences the first.
+#[tokio::test]
+async fn a_second_process_with_the_same_id_does_not_share_the_leadership() {
+    let meta = Arc::new(MemKv::default());
+    let mut cfg = fast("same");
+    cfg.lease = Duration::from_secs(3);
+    let first = spawn(Arc::clone(&meta), cfg.clone()).await.unwrap();
+    wait_until("first leader", Duration::from_secs(5), async || {
+        first.is_leader()
+    })
+    .await;
+    let second = spawn(Arc::clone(&meta), cfg).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(
+        !second.is_leader(),
+        "the second process took the first one's live leadership"
+    );
+    // The first stops without releasing (crash): the second takes over
+    // with a newer token.
+    let token = first.token();
+    first.abort();
+    wait_until("second leader", Duration::from_secs(10), async || {
+        second.is_leader()
+    })
+    .await;
+    assert!(second.token() > token);
+    second.shutdown().await;
 }
