@@ -1,0 +1,840 @@
+{
+ "baseline_get_p99_ms": 65,
+ "baseline_put_p99_ms": 399,
+ "faults": 33,
+ "by_kind": {
+  "cache-node-kill": {
+   "count": 2,
+   "client_errors": 0,
+   "violations": 0,
+   "recovery_s_max": 88,
+   "worst_get_p99_ms": 309
+  },
+  "cert-rotate": {
+   "count": 2,
+   "client_errors": 0,
+   "violations": 0,
+   "recovery_s_max": 95,
+   "worst_get_p99_ms": 75
+  },
+  "controller-restart": {
+   "count": 2,
+   "client_errors": 0,
+   "violations": 0,
+   "recovery_s_max": 124,
+   "worst_get_p99_ms": 73
+  },
+  "corrupt-shard": {
+   "count": 2,
+   "client_errors": 24,
+   "violations": 0,
+   "recovery_s_max": 77,
+   "worst_get_p99_ms": 311
+  },
+  "eio-read": {
+   "count": 2,
+   "client_errors": 0,
+   "violations": 0,
+   "recovery_s_max": 196,
+   "worst_get_p99_ms": 78
+  },
+  "eio-write": {
+   "count": 2,
+   "client_errors": 0,
+   "violations": 0,
+   "recovery_s_max": 155,
+   "worst_get_p99_ms": 75
+  },
+  "fdb-process-restart": {
+   "count": 3,
+   "client_errors": 0,
+   "violations": 0,
+   "recovery_s_max": 150,
+   "worst_get_p99_ms": 94
+  },
+  "gateway-kill": {
+   "count": 3,
+   "client_errors": 151,
+   "violations": 0,
+   "recovery_s_max": 99,
+   "worst_get_p99_ms": 994
+  },
+  "leader-kill": {
+   "count": 3,
+   "client_errors": 0,
+   "violations": 0,
+   "recovery_s_max": 152,
+   "worst_get_p99_ms": 91
+  },
+  "net-blackhole": {
+   "count": 2,
+   "client_errors": 16,
+   "violations": 0,
+   "recovery_s_max": 127,
+   "worst_get_p99_ms": 5914
+  },
+  "net-delay": {
+   "count": 3,
+   "client_errors": 38,
+   "violations": 0,
+   "recovery_s_max": 240,
+   "worst_get_p99_ms": 6015
+  },
+  "net-reset": {
+   "count": 2,
+   "client_errors": 27,
+   "violations": 0,
+   "recovery_s_max": 106,
+   "worst_get_p99_ms": 308
+  },
+  "node-kill": {
+   "count": 2,
+   "client_errors": 135,
+   "violations": 0,
+   "recovery_s_max": 119,
+   "worst_get_p99_ms": 316
+  },
+  "node-restart": {
+   "count": 3,
+   "client_errors": 107,
+   "violations": 0,
+   "recovery_s_max": 120,
+   "worst_get_p99_ms": 344
+  }
+ },
+ "expected_errors": 498,
+ "unexpected": {
+  "reports_with_errors_outside_fault_windows": 0,
+  "errors_outside_fault_windows": 0,
+  "gateway_codes_outside_fault_windows": {
+   "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 30
+  },
+  "integrity_codes_anywhere": {}
+ },
+ "violations_total": 0,
+ "rows": [
+  {
+   "fault": "node-restart",
+   "target": "d0",
+   "start_utc": "2026-11-05T08:16:07Z",
+   "hold_s": 20,
+   "component": "storage node (durable)",
+   "client_errors": 35,
+   "errors_by_op": {
+    "copy": 2,
+    "multipart": 1,
+    "put": 18,
+    "put_conditional": 5,
+    "vput": 9
+   },
+   "worst_get_p99_ms": 344,
+   "worst_put_p99_ms": 4293,
+   "violations": 0,
+   "recovery_s": 120,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 115
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 4857
+   }
+  },
+  {
+   "fault": "gateway-kill",
+   "target": "gw-a",
+   "start_utc": "2026-11-05T08:26:28Z",
+   "hold_s": 5,
+   "component": "gateway",
+   "client_errors": 64,
+   "errors_by_op": {
+    "copy": 2,
+    "delete": 3,
+    "get": 14,
+    "get_range": 3,
+    "head": 8,
+    "put": 10,
+    "put_conditional": 4,
+    "vdelete": 4,
+    "vdelete_version": 5,
+    "vget": 2,
+    "vget_version": 5,
+    "vput": 4
+   },
+   "worst_get_p99_ms": 994,
+   "worst_put_p99_ms": 1325,
+   "violations": 0,
+   "recovery_s": 99,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 5167
+   }
+  },
+  {
+   "fault": "leader-kill",
+   "target": "ctl-a",
+   "start_utc": "2026-11-05T08:36:35Z",
+   "hold_s": 60,
+   "component": "controller (leader)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 91,
+   "worst_put_p99_ms": 1211,
+   "violations": 0,
+   "recovery_s": 152,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 6077
+   }
+  },
+  {
+   "fault": "fdb-process-restart",
+   "target": "1",
+   "start_utc": "2026-11-05T08:47:37Z",
+   "hold_s": 30,
+   "component": "FoundationDB",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 94,
+   "worst_put_p99_ms": 1196,
+   "violations": 0,
+   "recovery_s": 150,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7784
+   }
+  },
+  {
+   "fault": "net-delay",
+   "target": "d3 300ms",
+   "start_utc": "2026-11-05T08:58:07Z",
+   "hold_s": 120,
+   "component": "network to one durable node",
+   "client_errors": 17,
+   "errors_by_op": {
+    "get": 9,
+    "get_range": 1,
+    "vget": 1,
+    "vget_version": 6
+   },
+   "worst_get_p99_ms": 6015,
+   "worst_put_p99_ms": 14992,
+   "violations": 0,
+   "recovery_s": 240,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 6795
+   }
+  },
+  {
+   "fault": "node-kill",
+   "target": "d0",
+   "start_utc": "2026-11-05T09:10:08Z",
+   "hold_s": 30,
+   "component": "storage node (durable)",
+   "client_errors": 67,
+   "errors_by_op": {
+    "copy": 6,
+    "multipart": 3,
+    "put": 31,
+    "put_conditional": 6,
+    "vput": 21
+   },
+   "worst_get_p99_ms": 313,
+   "worst_put_p99_ms": 4085,
+   "violations": 0,
+   "recovery_s": 119,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 196
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7498
+   }
+  },
+  {
+   "fault": "cache-node-kill",
+   "target": "c0",
+   "start_utc": "2026-11-05T09:20:39Z",
+   "hold_s": 20,
+   "component": "storage node (cache)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 309,
+   "worst_put_p99_ms": 405,
+   "violations": 0,
+   "recovery_s": 88,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 6436
+   }
+  },
+  {
+   "fault": "net-blackhole",
+   "target": "d3 45s",
+   "start_utc": "2026-11-05T09:31:00Z",
+   "hold_s": 45,
+   "component": "network to one durable node",
+   "client_errors": 2,
+   "errors_by_op": {
+    "get": 1,
+    "vget_version": 1
+   },
+   "worst_get_p99_ms": 98,
+   "worst_put_p99_ms": 46218,
+   "violations": 0,
+   "recovery_s": 127,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'Unknown error', message: \"tra": 13,
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 1
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7290
+   }
+  },
+  {
+   "fault": "corrupt-shard",
+   "target": "d0",
+   "start_utc": "2026-11-05T09:41:50Z",
+   "hold_s": 5,
+   "component": "storage node (data)",
+   "client_errors": 10,
+   "errors_by_op": {
+    "put": 7,
+    "vput": 3
+   },
+   "worst_get_p99_ms": 68,
+   "worst_put_p99_ms": 2829,
+   "violations": 0,
+   "recovery_s": 77,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 26
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7335
+   }
+  },
+  {
+   "fault": "eio-read",
+   "target": "d0 20",
+   "start_utc": "2026-11-05T09:51:51Z",
+   "hold_s": 90,
+   "component": "storage node (device reads)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 77,
+   "worst_put_p99_ms": 598,
+   "violations": 0,
+   "recovery_s": 196,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 6416
+   }
+  },
+  {
+   "fault": "net-reset",
+   "target": "d3 10s",
+   "start_utc": "2026-11-05T10:03:21Z",
+   "hold_s": 10,
+   "component": "network to one durable node",
+   "client_errors": 13,
+   "errors_by_op": {
+    "copy": 2,
+    "put": 7,
+    "vput": 4
+   },
+   "worst_get_p99_ms": 308,
+   "worst_put_p99_ms": 2334,
+   "violations": 0,
+   "recovery_s": 106,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 41
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 6867
+   }
+  },
+  {
+   "fault": "cert-rotate",
+   "target": "gw-a",
+   "start_utc": "2026-11-05T10:13:32Z",
+   "hold_s": 0,
+   "component": "TLS identity",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 75,
+   "worst_put_p99_ms": 356,
+   "violations": 0,
+   "recovery_s": 95,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7962
+   }
+  },
+  {
+   "fault": "eio-write",
+   "target": "d0 5",
+   "start_utc": "2026-11-05T10:23:32Z",
+   "hold_s": 90,
+   "component": "storage node (device writes)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 72,
+   "worst_put_p99_ms": 508,
+   "violations": 0,
+   "recovery_s": 155,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'Internal error', message: \"I/": 2
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7105
+   }
+  },
+  {
+   "fault": "controller-restart",
+   "target": "(standby) ctl-a",
+   "start_utc": "2026-11-05T10:35:03Z",
+   "hold_s": 10,
+   "component": "controller (standby)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 73,
+   "worst_put_p99_ms": 430,
+   "violations": 0,
+   "recovery_s": 124,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7563
+   }
+  },
+  {
+   "fault": "node-restart",
+   "target": "d1",
+   "start_utc": "2026-11-05T10:45:13Z",
+   "hold_s": 20,
+   "component": "storage node (durable)",
+   "client_errors": 42,
+   "errors_by_op": {
+    "copy": 4,
+    "multipart": 2,
+    "put": 20,
+    "put_conditional": 6,
+    "vput": 10
+   },
+   "worst_get_p99_ms": 311,
+   "worst_put_p99_ms": 3951,
+   "violations": 0,
+   "recovery_s": 114,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 134
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7421
+   }
+  },
+  {
+   "fault": "gateway-kill",
+   "target": "gw-b",
+   "start_utc": "2026-11-05T10:55:33Z",
+   "hold_s": 5,
+   "component": "gateway",
+   "client_errors": 33,
+   "errors_by_op": {
+    "get": 7,
+    "get_range": 4,
+    "head": 1,
+    "put": 7,
+    "put_conditional": 2,
+    "vdelete": 1,
+    "vdelete_version": 2,
+    "vget": 4,
+    "vget_version": 4,
+    "vput": 1
+   },
+   "worst_get_p99_ms": 461,
+   "worst_put_p99_ms": 698,
+   "violations": 0,
+   "recovery_s": 94,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7513
+   }
+  },
+  {
+   "fault": "leader-kill",
+   "target": "ctl-b",
+   "start_utc": "2026-11-05T11:05:40Z",
+   "hold_s": 60,
+   "component": "controller (leader)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 79,
+   "worst_put_p99_ms": 540,
+   "violations": 0,
+   "recovery_s": 147,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7041
+   }
+  },
+  {
+   "fault": "fdb-process-restart",
+   "target": "2",
+   "start_utc": "2026-11-05T11:16:40Z",
+   "hold_s": 30,
+   "component": "FoundationDB",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 82,
+   "worst_put_p99_ms": 449,
+   "violations": 0,
+   "recovery_s": 147,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 5719
+   }
+  },
+  {
+   "fault": "net-delay",
+   "target": "d3 300ms",
+   "start_utc": "2026-11-05T11:27:11Z",
+   "hold_s": 120,
+   "component": "network to one durable node",
+   "client_errors": 14,
+   "errors_by_op": {
+    "get": 8,
+    "get_range": 3,
+    "vget": 1,
+    "vget_version": 2
+   },
+   "worst_get_p99_ms": 5915,
+   "worst_put_p99_ms": 14678,
+   "violations": 0,
+   "recovery_s": 236,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 6873
+   }
+  },
+  {
+   "fault": "node-kill",
+   "target": "d1",
+   "start_utc": "2026-11-05T11:39:11Z",
+   "hold_s": 30,
+   "component": "storage node (durable)",
+   "client_errors": 68,
+   "errors_by_op": {
+    "copy": 4,
+    "multipart": 4,
+    "put": 28,
+    "put_conditional": 14,
+    "vput": 18
+   },
+   "worst_get_p99_ms": 316,
+   "worst_put_p99_ms": 4336,
+   "violations": 0,
+   "recovery_s": 116,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 198
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7452
+   }
+  },
+  {
+   "fault": "cache-node-kill",
+   "target": "c1",
+   "start_utc": "2026-11-05T11:49:42Z",
+   "hold_s": 20,
+   "component": "storage node (cache)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 62,
+   "worst_put_p99_ms": 415,
+   "violations": 0,
+   "recovery_s": 85,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7325
+   }
+  },
+  {
+   "fault": "net-blackhole",
+   "target": "d3 45s",
+   "start_utc": "2026-11-05T12:00:02Z",
+   "hold_s": 45,
+   "component": "network to one durable node",
+   "client_errors": 14,
+   "errors_by_op": {
+    "get": 9,
+    "vget": 2,
+    "vget_version": 3
+   },
+   "worst_get_p99_ms": 5914,
+   "worst_put_p99_ms": 18913,
+   "violations": 0,
+   "recovery_s": 125,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'Unknown error', message: \"tra": 6,
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 1
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7753
+   }
+  },
+  {
+   "fault": "corrupt-shard",
+   "target": "d1",
+   "start_utc": "2026-11-05T12:10:53Z",
+   "hold_s": 5,
+   "component": "storage node (data)",
+   "client_errors": 14,
+   "errors_by_op": {
+    "copy": 1,
+    "put": 7,
+    "put_conditional": 2,
+    "vput": 4
+   },
+   "worst_get_p99_ms": 311,
+   "worst_put_p99_ms": 2967,
+   "violations": 0,
+   "recovery_s": 74,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 31
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7155
+   }
+  },
+  {
+   "fault": "eio-read",
+   "target": "d1 20",
+   "start_utc": "2026-11-05T12:20:53Z",
+   "hold_s": 90,
+   "component": "storage node (device reads)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 78,
+   "worst_put_p99_ms": 497,
+   "violations": 0,
+   "recovery_s": 194,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 5,
+    "gc": 7533
+   }
+  },
+  {
+   "fault": "net-reset",
+   "target": "d3 10s",
+   "start_utc": "2026-11-05T12:32:24Z",
+   "hold_s": 10,
+   "component": "network to one durable node",
+   "client_errors": 14,
+   "errors_by_op": {
+    "put": 9,
+    "put_conditional": 1,
+    "vput": 4
+   },
+   "worst_get_p99_ms": 308,
+   "worst_put_p99_ms": 2702,
+   "violations": 0,
+   "recovery_s": 103,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 44
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7345
+   }
+  },
+  {
+   "fault": "cert-rotate",
+   "target": "d1",
+   "start_utc": "2026-11-05T12:42:34Z",
+   "hold_s": 0,
+   "component": "TLS identity",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 75,
+   "worst_put_p99_ms": 435,
+   "violations": 0,
+   "recovery_s": 93,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7825
+   }
+  },
+  {
+   "fault": "eio-write",
+   "target": "d1 5",
+   "start_utc": "2026-11-05T12:52:34Z",
+   "hold_s": 90,
+   "component": "storage node (device writes)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 75,
+   "worst_put_p99_ms": 403,
+   "violations": 0,
+   "recovery_s": 153,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 6997
+   }
+  },
+  {
+   "fault": "controller-restart",
+   "target": "(standby) ctl-b",
+   "start_utc": "2026-11-05T13:04:05Z",
+   "hold_s": 10,
+   "component": "controller (standby)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 73,
+   "worst_put_p99_ms": 374,
+   "violations": 0,
+   "recovery_s": 122,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 6715
+   }
+  },
+  {
+   "fault": "node-restart",
+   "target": "d2",
+   "start_utc": "2026-11-05T13:14:15Z",
+   "hold_s": 20,
+   "component": "storage node (durable)",
+   "client_errors": 30,
+   "errors_by_op": {
+    "copy": 2,
+    "put": 17,
+    "put_conditional": 7,
+    "vput": 4
+   },
+   "worst_get_p99_ms": 113,
+   "worst_put_p99_ms": 3739,
+   "violations": 0,
+   "recovery_s": 112,
+   "gateway_codes": {
+    "ServiceUnavailable: no active stripe group can accept writes (last group failed: node <node>: code: 'The service is currently unav": 103
+   },
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7373
+   }
+  },
+  {
+   "fault": "gateway-kill",
+   "target": "gw-a",
+   "start_utc": "2026-11-05T13:24:35Z",
+   "hold_s": 5,
+   "component": "gateway",
+   "client_errors": 54,
+   "errors_by_op": {
+    "copy": 4,
+    "delete": 4,
+    "get": 12,
+    "get_range": 2,
+    "head": 1,
+    "multipart": 1,
+    "put": 12,
+    "put_conditional": 5,
+    "vdelete": 2,
+    "vdelete_version": 2,
+    "vget": 2,
+    "vget_version": 5,
+    "vput": 2
+   },
+   "worst_get_p99_ms": 84,
+   "worst_put_p99_ms": 814,
+   "violations": 0,
+   "recovery_s": 92,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7923
+   }
+  },
+  {
+   "fault": "leader-kill",
+   "target": "ctl-a",
+   "start_utc": "2026-11-05T13:34:42Z",
+   "hold_s": 60,
+   "component": "controller (leader)",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 74,
+   "worst_put_p99_ms": 481,
+   "violations": 0,
+   "recovery_s": 145,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7406
+   }
+  },
+  {
+   "fault": "fdb-process-restart",
+   "target": "3",
+   "start_utc": "2026-11-05T13:45:42Z",
+   "hold_s": 30,
+   "component": "FoundationDB",
+   "client_errors": 0,
+   "errors_by_op": {},
+   "worst_get_p99_ms": 75,
+   "worst_put_p99_ms": 512,
+   "violations": 0,
+   "recovery_s": 145,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 7592
+   }
+  },
+  {
+   "fault": "net-delay",
+   "target": "d3 300ms",
+   "start_utc": "2026-11-05T13:56:13Z",
+   "hold_s": 120,
+   "component": "network to one durable node",
+   "client_errors": 7,
+   "errors_by_op": {
+    "get": 5,
+    "get_range": 2
+   },
+   "worst_get_p99_ms": 5914,
+   "worst_put_p99_ms": 9132,
+   "violations": 0,
+   "recovery_s": 234,
+   "gateway_codes": {},
+   "residual_after_15min": {
+    "repair": 0,
+    "gc": 264
+   }
+  }
+ ]
+}

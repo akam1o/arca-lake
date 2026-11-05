@@ -189,8 +189,11 @@ cmd_run() {
       # Growing for two hours (24 samples, every one higher than 24 earlier).
       if [ "${#gc_hist[@]}" -gt 24 ]; then
         local old="${gc_hist[$((${#gc_hist[@]} - 25))]}"
-        # The first samples are the empty start, not a baseline.
-        [ "$old" -gt 0 ] && [ "$g" -gt $((old * 2 + 1000)) ] && alert "GC backlog grew from $old to $g in two hours"
+        # The first hour fills the queue up to its steady level (GC grace):
+        # compare only samples taken after it.
+        if [ "${#gc_hist[@]}" -gt 36 ] && [ "$g" -gt $((old * 2 + 1000)) ]; then
+          alert "GC backlog grew from $old to $g in two hours"
+        fi
       fi
     fi
     if [ "${free:-0}" -lt $((STOP_FREE_GIB << 30)) ]; then safe_stop "free disk $free bytes"; break; fi
