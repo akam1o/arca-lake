@@ -24,6 +24,7 @@ version-bump = ["arca-lake-common/version-bump"]
 fault-injection = ["arca-lake-storage-node/fault-injection"]
 
 [dependencies]
+libc.workspace = true
 arca-lake-common.workspace = true
 arca-lake-controller.workspace = true
 arca-lake-gateway.workspace = true

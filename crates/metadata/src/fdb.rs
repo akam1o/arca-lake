@@ -123,6 +123,12 @@ pub fn check_cluster_file_transport(cluster_file: &str, tls: bool) -> Result<(),
     }
 }
 
+/// Whether [`ensure_network`] started the client network in this process.
+#[must_use]
+pub fn network_started() -> bool {
+    NETWORK.get().is_some()
+}
+
 /// Default per-transaction timeout (overridable with `ARCA_FDB_TX_TIMEOUT_MS`).
 pub const DEFAULT_TX_TIMEOUT_MS: i32 = 10_000;
 

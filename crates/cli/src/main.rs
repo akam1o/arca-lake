@@ -1150,17 +1150,55 @@ enum IntegrityCommand {
     VerifyManifests,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging(cli.log_json);
-    match cli.command {
-        Command::Gateway(args) => run_gateway(args).await,
-        Command::StorageNode(args) => run_storage_node(args).await,
-        Command::Tls { command } => run_tls(command),
-        Command::Controller(args) => run_controller(args).await,
-        Command::Admin(args) => run_admin(args).await,
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let code = rt.block_on(async {
+        match cli.command {
+            Command::Gateway(args) => run_gateway(args).await,
+            Command::StorageNode(args) => run_storage_node(args).await,
+            Command::Tls { command } => run_tls(command),
+            Command::Controller(args) => run_controller(args).await,
+            Command::Admin(args) => run_admin(args).await,
+        }
+    });
+    // Every task has stopped and every worker thread is joined.
+    drop(rt);
+    exit_past_the_metadata_client(code)
+}
+
+/// End the process without running exit handlers once the FoundationDB
+/// client network has been started (R-68): its thread is never stopped
+/// (stopping it with handles alive crashed every test binary), and
+/// `exit()` then ran the client library's static destructors while that
+/// thread was still running, which crashed a cleanly stopped gateway or
+/// controller now and then (SIGSEGV after "shutting down"). All work is
+/// done and the runtime is gone at this point; only the standard streams
+/// need flushing.
+#[cfg(feature = "fdb")]
+#[allow(unsafe_code)]
+fn exit_past_the_metadata_client(code: ExitCode) -> ExitCode {
+    use std::io::Write as _;
+    if !arca_lake_metadata::fdb::network_started() {
+        return code;
     }
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    let status = (0..=u8::MAX)
+        .find(|v| ExitCode::from(*v) == code)
+        .map_or(1, i32::from);
+    // SAFETY: `_exit` takes a status and never returns; it skips atexit
+    // handlers and static destructors on purpose (see above).
+    unsafe { libc::_exit(status) }
+}
+
+#[cfg(not(feature = "fdb"))]
+fn exit_past_the_metadata_client(code: ExitCode) -> ExitCode {
+    code
 }
 
 fn init_logging(json: bool) {

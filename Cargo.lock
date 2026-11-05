@@ -115,6 +115,7 @@ dependencies = [
  "arca-lake-storage-node",
  "arca-lake-tiering",
  "clap",
+ "libc",
  "tokio",
  "tracing",
  "tracing-subscriber",

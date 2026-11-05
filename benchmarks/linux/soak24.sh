@@ -363,7 +363,7 @@ cmd__shutdown_test() {
       [ $((i % 5)) -eq 0 ] && bash "$FDBSH" restart "$F" "$(( (i / 5) % 3 + 1 ))" > /dev/null 2>&1
       local t0; t0="$(date +%s.%N)"
       kill "-$sig" "$pid"
-      wait "$pid"; local rc=$?
+      local rc=0; wait "$pid" || rc=$?
       local secs; secs="$(echo "$(date +%s.%N) - $t0" | bc)"
       [ -n "$load" ] && wait "$load" 2>/dev/null
       echo "$i $who $sig rc=$rc secs=$secs" >> "$out"
