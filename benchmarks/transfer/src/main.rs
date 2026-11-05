@@ -511,6 +511,7 @@ impl pb::storage_node_server::StorageNode for GrpcServer {
         Ok(tonic::Response::new(pb::PutShardResponse {
             crc32c: crc,
             bytes_received: received,
+            sequence: 0,
         }))
     }
 

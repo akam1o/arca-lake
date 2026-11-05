@@ -5,7 +5,6 @@
 //! eagerly here or later by reconciliation.
 
 use arca_lake_metadata::KvStore;
-use arca_lake_metadata::ops::cluster;
 use arca_lake_metadata::records::{ChunkRecord, GenId, GroupRecord};
 use arca_lake_protocol::client::concat_frames;
 use arca_lake_protocol::client::{NodeClients, ShardRef};
@@ -193,18 +192,10 @@ pub async fn migrate_chunk_with<S: KvStore>(
         return Err(TierError::Other("injected stop after switch".into()));
     }
 
-    // 5. Retire the source shards (best effort; reconciliation finishes).
-    let source = cluster::get_group(meta, source_group.id).await?;
-    for (i, member) in source.members.iter().enumerate() {
-        if let Some(addr) = addr_of(member.node_id) {
-            let shard = ShardRef {
-                group_id: source.id,
-                chunk_id: record.chunk_id,
-                shard_index: u16::try_from(i).unwrap_or(0),
-            };
-            let _ = clients.delete_shard(&addr, shard, source.epoch).await;
-        }
-    }
+    // 5. The source shards are left to reconciliation, which deletes only
+    //    the records it listed: a delete sent from here could arrive after
+    //    a later migration put the chunk back into the source group and
+    //    remove those shards (Phase 3.5 audit CON-5).
     Ok(MigrateOutcome::Switched {
         from: source_group.id,
         to: target.id,
@@ -220,7 +211,7 @@ async fn write_and_verify(
     target: &GroupRecord,
     record: &ChunkRecord,
     bytes: &[u8],
-) -> Result<Vec<(String, ShardRef)>, TierError> {
+) -> Result<Vec<(String, ShardRef, u64)>, TierError> {
     let target_coder = coders.get(&target.scheme, target.data_shards, target.parity_shards)?;
     let k = usize::from(target.data_shards);
     let (_, shards) = encode_chunk(target_coder.as_ref(), k, bytes)?;
@@ -232,7 +223,7 @@ async fn write_and_verify(
             shards.len()
         )));
     }
-    let mut written: Vec<(String, ShardRef)> = Vec::new();
+    let mut written: Vec<(String, ShardRef, u64)> = Vec::new();
     for (i, member) in target.members.iter().enumerate() {
         let addr = addr_of(member.node_id)
             .ok_or_else(|| TierError::Other(format!("unknown node {}", member.node_id)))?;
@@ -255,9 +246,9 @@ async fn write_and_verify(
                 "target {addr} stored shard {i} with a different checksum"
             )));
         }
-        written.push((addr, shard));
+        written.push((addr, shard, resp.sequence));
     }
-    for (i, (addr, shard)) in written.iter().enumerate() {
+    for (i, (addr, shard, _)) in written.iter().enumerate() {
         let back = clients
             .get_shard(addr, *shard, 0, 0)
             .await
@@ -275,8 +266,13 @@ async fn write_and_verify(
     Ok(written)
 }
 
-async fn cleanup(clients: &NodeClients, written: &[(String, ShardRef)], epoch: u64) {
-    for (addr, shard) in written {
-        let _ = clients.delete_shard(addr, *shard, epoch).await;
+/// Delete the target shards this attempt wrote, each only while the node
+/// still holds the record this attempt wrote (a later write under the same
+/// key is left alone, Phase 3.5 audit CON-6).
+async fn cleanup(clients: &NodeClients, written: &[(String, ShardRef, u64)], epoch: u64) {
+    for (addr, shard, sequence) in written {
+        let _ = clients
+            .delete_shard_if(addr, *shard, epoch, *sequence)
+            .await;
     }
 }

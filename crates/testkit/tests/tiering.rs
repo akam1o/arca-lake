@@ -137,7 +137,9 @@ async fn migration_copies_verifies_switches_and_retires() {
     );
     c.backend.refresh_map().await.unwrap();
     assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
-    // Source shards retired, target shards present: same total.
+    // Source shards are left to reconciliation (it deletes only what it
+    // listed, Phase 3.5 audit CON-5); then the total is unchanged.
+    assert_eq!(c.reconcile(now_ms() + 3_600_000, 0).await, 9);
     assert_eq!(c.total_shards().await, before);
     for i in 0..3 {
         assert_eq!(c.shard_count(i, source.id), 0, "source retired");
@@ -566,6 +568,99 @@ async fn a_paused_migration_keeps_its_target_and_excludes_a_second_one() {
     let on_target: usize = (3..6).map(|i| c.shard_count(i, fast.id)).sum();
     assert_eq!(on_target, 3, "the switched target keeps its shards");
     c.backend.refresh_map().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    c.shutdown().await;
+}
+
+/// A chunk migrated A→B and back B→A: deletes decided on A's shards before
+/// the return (by reconciliation or the first migration's cleanup) do not
+/// remove the shards the return wrote (Phase 3.5 audit CON-5).
+#[tokio::test]
+async fn deletes_decided_before_a_migration_back_do_not_remove_its_shards() {
+    use arca_lake_protocol::client::ShardRef;
+    let (c, fast) = cluster().await;
+    let data = payload(usize::try_from(MIB / 2).unwrap(), 51);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let m = c.manifest(BUCKET, "o").await;
+    let a = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| g.id == m.chunks[0].1.placement.group_id)
+        .unwrap();
+    let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(c.meta.as_ref())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.id, n))
+        .collect();
+    let coders = Coders::default();
+    // What a delete of A's shards would have named when they were listed.
+    let mut stale = Vec::new();
+    for (i, member) in a.members.iter().enumerate() {
+        let addr = nodes[&member.node_id].address.clone();
+        let page = c
+            .clients
+            .list_shards_page_with(&addr, a.id, None, 100, false)
+            .await
+            .unwrap();
+        let shard = ShardRef {
+            group_id: a.id,
+            chunk_id: m.chunks[0].1.chunk_id,
+            shard_index: u16::try_from(i).unwrap(),
+        };
+        stale.push((addr, shard, page.sequences[&shard]));
+    }
+    let go = migrate_chunk(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders,
+        &addr_of(&nodes),
+        &a,
+        &fast,
+        &m.pointer.generation,
+        0,
+        &m.chunks[0].1,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(go, MigrateOutcome::Switched { .. }), "{go:?}");
+    let moved = c.manifest(BUCKET, "o").await;
+    let back = migrate_chunk(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders,
+        &addr_of(&nodes),
+        &fast,
+        &a,
+        &m.pointer.generation,
+        0,
+        &moved.chunks[0].1,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(back, MigrateOutcome::Switched { .. }), "{back:?}");
+    // The stale deletes arrive now.
+    for (addr, shard, seq) in &stale {
+        let r = c.clients.delete_shard_if(addr, *shard, a.epoch, *seq).await;
+        assert!(
+            r.is_err(),
+            "a stale delete removed a shard the return wrote"
+        );
+    }
+    c.backend.refresh_map().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    c.reconcile(now_ms() + 3_600_000, 0).await;
     assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
     c.shutdown().await;
 }

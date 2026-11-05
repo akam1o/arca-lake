@@ -23,7 +23,7 @@ use crate::storage::v1 as pb;
 use crate::storage::v1::storage_node_client::StorageNodeClient;
 
 /// Shard identity on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ShardRef {
     /// Stripe group.
     pub group_id: u64,
@@ -43,6 +43,9 @@ pub struct ShardPage {
     pub quarantined: Vec<(ShardRef, u64)>,
     /// Cursor for the next page, if any.
     pub next: Option<ShardRef>,
+    /// The node's record sequence of each listed shard (absent from an
+    /// older node): what a conditional delete of it names.
+    pub sequences: std::collections::HashMap<ShardRef, u64>,
 }
 
 /// Classification of one shard by the node's deep verification
@@ -1080,6 +1083,23 @@ impl NodeClients {
         shard: ShardRef,
         epoch: u64,
     ) -> Result<(), tonic::Status> {
+        self.delete_shard_if(addr, shard, epoch, 0).await
+    }
+
+    /// Delete a shard only if the node's newest record of it has sequence
+    /// `if_sequence` (0: unconditionally). A changed record answers
+    /// `ABORTED` ([`Self::is_changed`]).
+    ///
+    /// # Errors
+    ///
+    /// RPC errors.
+    pub async fn delete_shard_if(
+        &self,
+        addr: &str,
+        shard: ShardRef,
+        epoch: u64,
+        if_sequence: u64,
+    ) -> Result<(), tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::DeleteShard,
@@ -1097,6 +1117,7 @@ impl NodeClients {
                         .incarnation()
                         .map(|i| Bytes::copy_from_slice(&i))
                         .unwrap_or_default(),
+                    if_sequence,
                 };
                 client.delete_shard(req).await?;
                 Ok(())
@@ -1155,10 +1176,14 @@ impl NodeClients {
                 let resp = client.list_shards(req).await?.into_inner();
                 let mut entries = Vec::new();
                 let mut quarantined = Vec::new();
+                let mut sequences = std::collections::HashMap::new();
                 for e in resp.entries {
                     let Some(key) = e.key.as_ref().and_then(ShardRef::from_pb) else {
                         continue;
                     };
+                    if e.sequence != 0 {
+                        sequences.insert(key, e.sequence);
+                    }
                     if e.quarantined {
                         quarantined.push((key, e.payload_len));
                     } else {
@@ -1168,6 +1193,7 @@ impl NodeClients {
                 Ok(ShardPage {
                     entries,
                     quarantined,
+                    sequences,
                     next: resp
                         .next
                         .as_ref()
@@ -1177,6 +1203,12 @@ impl NodeClients {
             })
         })
         .await
+    }
+
+    /// Whether a conditional delete was refused because the shard changed.
+    #[must_use]
+    pub fn is_changed(status: &tonic::Status) -> bool {
+        status.code() == tonic::Code::Aborted
     }
 
     /// Every shard of a group on the node (walks all pages).

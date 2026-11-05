@@ -60,6 +60,9 @@ pub struct ReconcileReport {
     pub kept_referenced: usize,
     /// Shards kept because they are younger than the minimum age.
     pub kept_young: usize,
+    /// Shards whose delete the node refused because the record changed
+    /// since the listing (written again under the same key: kept).
+    pub kept_changed: usize,
 }
 
 impl ReconcileReport {
@@ -135,7 +138,7 @@ pub async fn run_once<S: KvStore>(
 }
 
 /// Generations collected at once.
-const GC_CONCURRENCY: usize = 8;
+const GC_CONCURRENCY: usize = 32;
 /// Shard deletes of one generation in flight at once.
 const DELETE_CONCURRENCY: usize = 16;
 
@@ -528,6 +531,7 @@ pub async fn reconcile_node<S: KvStore>(
                 now_ms,
                 min_age_ms,
                 *shard,
+                page.sequences.get(shard).copied().unwrap_or(0),
                 &mut report,
             )
             .await?;
@@ -549,8 +553,22 @@ async fn reconcile_shard<S: KvStore>(
     now_ms: u64,
     min_age_ms: u64,
     shard: ShardRef,
+    sequence: u64,
     report: &mut ReconcileReport,
 ) -> Result<(), ControlError> {
+    // Every delete below names the record the listing showed: one written
+    // since under the same key (a migration or repair) is not touched
+    // (Phase 3.5 audit CON-5/CON-6). 0 (an older node) is unconditional.
+    let mut delete = async |epoch: u64| -> Result<bool, ControlError> {
+        match delete_one(clients, node_addr, shard, epoch, sequence).await {
+            Ok(()) => Ok(true),
+            Err(ControlError::Node { status, .. }) if NodeClients::is_changed(&status) => {
+                report.kept_changed += 1;
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
+    };
     let is_member = group.members.iter().any(|m| m.node_id == node_id);
     if !is_member {
         if group.state == GroupState::Repairing {
@@ -568,8 +586,9 @@ async fn reconcile_shard<S: KvStore>(
             report.kept_referenced += 1;
             return Ok(());
         }
-        delete_one(clients, node_addr, shard, current.epoch).await?;
-        report.former_member_deleted += 1;
+        if delete(current.epoch).await? {
+            report.former_member_deleted += 1;
+        }
         return Ok(());
     }
     // A member holds exactly the shard index of its position; a copy under
@@ -577,8 +596,9 @@ async fn reconcile_shard<S: KvStore>(
     // (RFC-008 §8.4, Unexpected Shard).
     let position = group.members.iter().position(|m| m.node_id == node_id);
     if position.is_some_and(|p| usize::from(shard.shard_index) != p) {
-        delete_one(clients, node_addr, shard, group.epoch).await?;
-        report.orphans_deleted += 1;
+        if delete(group.epoch).await? {
+            report.orphans_deleted += 1;
+        }
         return Ok(());
     }
     let (prefix, index) = split_chunk_id(&shard.chunk_id);
@@ -596,8 +616,9 @@ async fn reconcile_shard<S: KvStore>(
         }
         gc::ShardAttribution::Unreferenced => {}
     }
-    delete_one(clients, node_addr, shard, group.epoch).await?;
-    report.orphans_deleted += 1;
+    if delete(group.epoch).await? {
+        report.orphans_deleted += 1;
+    }
     Ok(())
 }
 
@@ -606,8 +627,12 @@ async fn delete_one(
     node_addr: &str,
     shard: ShardRef,
     epoch: u64,
+    if_sequence: u64,
 ) -> Result<(), ControlError> {
-    match clients.delete_shard(node_addr, shard, epoch).await {
+    match clients
+        .delete_shard_if(node_addr, shard, epoch, if_sequence)
+        .await
+    {
         Ok(()) => Ok(()),
         Err(s) if s.code() == tonic::Code::NotFound => Ok(()),
         Err(status) => Err(ControlError::Node {

@@ -469,3 +469,32 @@ fn a_segment_creation_failing_after_the_file_exists_does_not_block_later_writes(
         );
     }
 }
+
+/// A damaged record of a key deleted since is not quarantined at open: the
+/// tombstone history the rebuild uses is still there when damaged records
+/// are applied (Phase 3.5 audit OPS-4).
+#[test]
+fn a_damaged_record_of_a_deleted_key_is_not_quarantined_at_open() {
+    let _s = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path(), SyncPolicy::Group)).unwrap();
+    store.put(key(1), &payload(1, 3000)).unwrap();
+    store.put(key(2), &payload(2, 3000)).unwrap();
+    {
+        use std::os::unix::fs::FileExt as _;
+        let loc = store.locate(&key(1)).unwrap();
+        let path = dir.path().join(format!("seg-{:016x}.arca", loc.segment_id));
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.write_all_at(&[0xFF], loc.payload_offset() + 10).unwrap();
+    }
+    store.delete(key(1)).unwrap();
+    drop(store);
+    let (store, report) = Store::open(config(dir.path(), SyncPolicy::Group)).unwrap();
+    assert!(report.quarantined.is_empty(), "{report:?}");
+    assert!(store.quarantine_entry(&key(1)).is_none());
+    assert!(matches!(
+        store.get(&key(1), None),
+        Err(StorageError::NotFound)
+    ));
+    assert_eq!(store.get(&key(2), None).unwrap(), payload(2, 3000));
+}

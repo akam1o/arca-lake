@@ -101,3 +101,44 @@ async fn an_epoch_raise_is_acknowledged_only_after_deletes_past_the_old_fence() 
     );
     n.shutdown().await;
 }
+
+/// A delete decided on a listing names the record it saw: after the key
+/// is written again it is refused (ABORTED) and the new record survives
+/// (Phase 3.5 audit CON-5/CON-6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_decided_on_an_old_record_does_not_remove_a_newer_one() {
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let addr = n.local_addr.to_string();
+    let c = NodeClients::new(Duration::from_secs(5));
+    let first = c
+        .put_shard(&addr, shard(5), 0, Bytes::from(vec![1u8; 4096]), 1024)
+        .await
+        .unwrap();
+    let page = c
+        .list_shards_page_with(&addr, 1, None, 100, true)
+        .await
+        .unwrap();
+    let listed = page.sequences[&shard(5)];
+    assert_eq!(listed, first.sequence);
+    let again = Bytes::from(vec![2u8; 4096]);
+    let second = c
+        .put_shard(&addr, shard(5), 0, again.clone(), 1024)
+        .await
+        .unwrap();
+    assert!(second.sequence > first.sequence);
+    let e = c
+        .delete_shard_if(&addr, shard(5), 0, listed)
+        .await
+        .unwrap_err();
+    assert!(NodeClients::is_changed(&e), "{e}");
+    assert_eq!(c.get_shard(&addr, shard(5), 0, 0).await.unwrap(), again);
+    c.delete_shard_if(&addr, shard(5), 0, second.sequence)
+        .await
+        .unwrap();
+    assert!(c.get_shard(&addr, shard(5), 0, 0).await.is_err());
+    n.shutdown().await;
+}

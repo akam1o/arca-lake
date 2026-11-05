@@ -418,7 +418,7 @@ impl MemIndex {
         group_id: u64,
         after: Option<ShardKey>,
         limit: usize,
-    ) -> impl Iterator<Item = (ShardKey, u32)> + '_ {
+    ) -> impl Iterator<Item = (ShardKey, u32, u64)> + '_ {
         let start = match after {
             Some(k) => Bound::Excluded(k),
             None => Bound::Included(ShardKey {
@@ -430,7 +430,7 @@ impl MemIndex {
         self.map
             .range((start, Bound::Unbounded))
             .take_while(move |(k, _)| k.group_id == group_id)
-            .map(|(k, loc)| (*k, loc.payload_len))
+            .map(|(k, loc)| (*k, loc.payload_len, loc.sequence))
             .take(limit)
     }
 

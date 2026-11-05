@@ -415,3 +415,62 @@ fn delete_version_rerun_tells_null_delete_markers_apart() {
         );
     });
 }
+
+/// Two delete markers published in the same millisecond are told apart: a
+/// delete pinned to the first does not act on the second (Phase 3.5 audit
+/// CON-7).
+#[test]
+fn markers_of_the_same_millisecond_are_different_versions() {
+    run(async {
+        use arca_lake_metadata::ops::object;
+        let kv = MemKv::default();
+        bucket::create_bucket(&kv, "b", Versioning::Enabled, 1)
+            .await
+            .unwrap();
+        object::delete_object(&kv, "b", "k", 10).await.unwrap();
+        let first = object::current_identity(&kv, "b", "k").await.unwrap();
+        object::delete_object(&kv, "b", "k", 10).await.unwrap();
+        let pinned = Precondition {
+            if_current: Some(first),
+            ..Precondition::default()
+        };
+        let r = object::delete_object_as(&kv, "b", "k", &pinned, "pinned-marker", 10).await;
+        assert!(
+            matches!(r, Err(MetaError::PreconditionFailed)),
+            "the pointer moved to another marker: {r:?}"
+        );
+    });
+}
+
+/// Stale migration intents are found beyond a first page of young ones
+/// (Phase 3.5 audit OPS-3).
+#[test]
+fn stale_migration_intents_beyond_a_page_of_young_ones_expire() {
+    run(async {
+        use arca_lake_metadata::ops::object::{self, MIGRATION_INTENT_TTL_MS};
+        let kv = MemKv::default();
+        let now = 10 * MIGRATION_INTENT_TTL_MS;
+        // 1500 young intents with low chunk ids, then one stale one.
+        for i in 0..1500u32 {
+            let mut c = [0u8; 16];
+            c[12..].copy_from_slice(&i.to_be_bytes());
+            assert!(
+                object::begin_migration(&kv, &c, 1, &[1; 16], now)
+                    .await
+                    .unwrap()
+            );
+        }
+        let stale = [0xffu8; 16];
+        assert!(
+            object::begin_migration(&kv, &stale, 1, &[2; 16], 1)
+                .await
+                .unwrap()
+        );
+        assert_eq!(object::expire_migrations(&kv, now).await.unwrap(), 1);
+        assert!(
+            !object::holds_migration(&kv, &stale, &[2; 16])
+                .await
+                .unwrap()
+        );
+    });
+}

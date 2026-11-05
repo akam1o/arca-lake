@@ -366,6 +366,11 @@ pub struct Store {
     /// segment holds a non-live record of its key any more) or its live
     /// records changed.
     compaction_blocked: Mutex<HashMap<u64, (Vec<ShardKey>, usize)>>,
+    /// Data records appended and not yet in the index (waiting for group
+    /// commit): `key → sequence`. Inserted under the writer lock, removed
+    /// after the index took the record, so that [`Self::delete_if`] sees
+    /// every record appended before it.
+    appending: Mutex<HashMap<ShardKey, u64>>,
     durability: Durability,
     timings: StoreTimings,
     quarantine_log: QuarantineLog,
@@ -430,7 +435,6 @@ impl Store {
         for (i, &id) in ids.iter().enumerate() {
             Self::recover_segment(&cfg, id, i + 1 == ids.len(), &mut rec)?;
         }
-        rec.index.finish_rebuild();
 
         let device_id = rec
             .device_id
@@ -478,6 +482,10 @@ impl Store {
             }
         }
         rec.index.drain_released();
+        // The tombstone history goes only now: the damaged records above
+        // were checked against it (Phase 3.5 audit OPS-4: an older damaged
+        // record of a deleted key was quarantined).
+        rec.index.finish_rebuild();
         let store = Self {
             cfg,
             device_id,
@@ -491,6 +499,7 @@ impl Store {
             index: RwLock::new(rec.index),
             readers: RwLock::new(rec.readers),
             compaction_blocked: Mutex::new(HashMap::new()),
+            appending: Mutex::new(HashMap::new()),
             durability: Durability {
                 state: Mutex::new(DurState {
                     durable: start,
@@ -660,7 +669,33 @@ impl Store {
     ///
     /// Fails on I/O errors or if `payload` exceeds `u32::MAX` bytes.
     pub fn put(&self, key: ShardKey, payload: &[u8]) -> Result<()> {
-        self.append(key, 0, payload)
+        self.put_sequenced(key, payload).map(|_| ())
+    }
+
+    /// [`Self::put`], returning the record's sequence (what a later
+    /// [`Self::delete_if`] names).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::put`].
+    pub fn put_sequenced(&self, key: ShardKey, payload: &[u8]) -> Result<u64> {
+        self.append_if(key, 0, payload, None)
+            .map(Option::unwrap_or_default)
+    }
+
+    /// Delete `key` only if its newest record (live or quarantined, or
+    /// appended and not yet indexed) has sequence `sequence`; `false` when
+    /// it has another one or none (Phase 3.5 audit CON-5/CON-6: a delete
+    /// decided on a listing must not remove a record written since under
+    /// the same key). Checked and written under the writer lock, so no
+    /// record can be appended in between.
+    ///
+    /// # Errors
+    ///
+    /// Fails on I/O errors.
+    pub fn delete_if(&self, key: ShardKey, sequence: u64) -> Result<bool> {
+        self.append_if(key, FLAG_TOMBSTONE, &[], Some(sequence))
+            .map(|s| s.is_some())
     }
 
     /// Delete a shard by writing a tombstone.
@@ -684,7 +719,42 @@ impl Store {
     }
 
     fn append(&self, key: ShardKey, flags: u8, payload: &[u8]) -> Result<()> {
+        self.append_if(key, flags, payload, None).map(|_| ())
+    }
+
+    /// The newest sequence of `key` the store knows (appended, live or
+    /// quarantined). Call with the writer lock held.
+    fn newest_sequence(&self, key: &ShardKey) -> Option<u64> {
+        if let Some(&s) = self
+            .appending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+        {
+            return Some(s);
+        }
+        let idx = self.index.read().unwrap_or_else(PoisonError::into_inner);
+        idx.get(key)
+            .map(|l| l.sequence)
+            .or_else(|| idx.quarantine_entry(key).map(|q| q.location.sequence))
+    }
+
+    /// Append a record; with `if_newest`, only if the key's newest record
+    /// has that sequence (`Ok(None)` otherwise). Returns the sequence.
+    #[allow(clippy::too_many_lines)]
+    fn append_if(
+        &self,
+        key: ShardKey,
+        flags: u8,
+        payload: &[u8],
+        if_newest: Option<u64>,
+    ) -> Result<Option<u64>> {
         let mut w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(expected) = if_newest
+            && self.newest_sequence(&key) != Some(expected)
+        {
+            return Ok(None);
+        }
         let append_started = Instant::now();
         if w.active.end() >= self.cfg.segment_max_bytes || w.poisoned {
             let t = Instant::now();
@@ -707,6 +777,28 @@ impl Store {
         let end = w.active.end();
         w.next_sequence += 1;
         w.active_min_seq.get_or_insert(sequence);
+        let data = flags & FLAG_TOMBSTONE == 0;
+        {
+            let mut a = self
+                .appending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if data {
+                a.insert(key, sequence);
+            } else {
+                a.remove(&key);
+            }
+        }
+        // Forget the appended record once the index has it (or it failed).
+        let done = |store: &Self| {
+            let mut a = store
+                .appending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if a.get(&key) == Some(&sequence) {
+                a.remove(&key);
+            }
+        };
         {
             let mut st = self
                 .durability
@@ -717,6 +809,8 @@ impl Store {
             if self.cfg.sync == SyncPolicy::Always {
                 if let Err(e) = w.active.sync() {
                     w.poisoned = true;
+                    drop(st);
+                    done(self);
                     return Err(e);
                 }
                 st.durable = st.durable.max((segment_id, end));
@@ -732,6 +826,7 @@ impl Store {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .poisoned = true;
+                done(self);
                 return Err(e);
             }
             self.timings.sync_wait.observe(t.elapsed());
@@ -753,7 +848,11 @@ impl Store {
             idx.tombstone(key, sequence);
         }
         self.log_released(&mut idx);
-        Ok(())
+        drop(idx);
+        if data {
+            done(self);
+        }
+        Ok(Some(sequence))
     }
 
     /// Seal the active segment (making it fully durable) and start a new one.
@@ -1152,6 +1251,22 @@ impl Store {
         after: Option<ShardKey>,
         limit: usize,
     ) -> Vec<(ShardKey, u32)> {
+        self.index
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries_in_group_after(group_id, after, limit)
+            .map(|(k, len, _)| (k, len))
+            .collect()
+    }
+
+    /// [`Self::entries_in_group_after`] with each record's sequence.
+    #[must_use]
+    pub fn entries_in_group_after_sequenced(
+        &self,
+        group_id: u64,
+        after: Option<ShardKey>,
+        limit: usize,
+    ) -> Vec<(ShardKey, u32, u64)> {
         self.index
             .read()
             .unwrap_or_else(PoisonError::into_inner)

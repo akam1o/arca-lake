@@ -370,3 +370,52 @@ async fn a_version_byte_above_this_build_is_refused_and_schema_write_is_clamped(
         .unwrap_err();
     assert!(e.to_string().contains("unknown record version"), "{e}");
 }
+
+/// A cancellation before the downgrade cut-off and the controller's raise
+/// of `schema_write` cannot both win: the raise goes with the cursor
+/// advance in one transaction (Phase 3.5 audit CON-8: the raise landed
+/// after a cancellation and left the gate raised with no cursor).
+#[tokio::test]
+async fn a_cancelled_upgrade_never_raises_the_schema_write_gate() {
+    use arca_lake_metadata::ops::compat::VersionKey;
+    let c = cluster().await;
+    let meta = Arc::clone(&c.meta);
+    let target = Target {
+        schema: keys::SCHEMA_VERSION + 1,
+        ..current_target()
+    };
+    compat::request_finalize(meta.as_ref(), target, vec![], "admin", now_ms())
+        .await
+        .unwrap();
+    for (from, to) in [
+        (UpgradeStep::Requested, UpgradeStep::Preconditioned),
+        (UpgradeStep::Preconditioned, UpgradeStep::Migrated),
+    ] {
+        assert!(
+            compat::advance_upgrade(meta.as_ref(), from, to, 1, "test", now_ms())
+                .await
+                .unwrap()
+        );
+    }
+    let before = compat::gate(meta.as_ref()).await.unwrap().schema_write;
+    // The operator cancels while the controller is about to raise.
+    compat::clear_upgrade(meta.as_ref(), true).await.unwrap();
+    let advanced = compat::advance_upgrade_raising(
+        meta.as_ref(),
+        UpgradeStep::Migrated,
+        UpgradeStep::SchemaWriteRaised,
+        Some((VersionKey::SchemaWrite, target.schema)),
+        1,
+        "test",
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert!(!advanced);
+    assert_eq!(
+        compat::gate(meta.as_ref()).await.unwrap().schema_write,
+        before,
+        "the gate was raised for a cancelled upgrade"
+    );
+    c.shutdown().await;
+}

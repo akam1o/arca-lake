@@ -480,17 +480,18 @@ impl StorageNode for StorageNodeService {
         let (queue_wait, store_time, result) = tokio::task::spawn_blocking(move || {
             let queue_wait = queued.elapsed();
             let t = Instant::now();
-            let r = store.put(key, &payload);
+            let r = store.put_sequenced(key, &payload);
             (queue_wait, t.elapsed(), r)
         })
         .await
         .map_err(|e| tonic::Status::internal(e.to_string()))?;
         self.stats.put_queue.observe(queue_wait);
         self.stats.put_store.observe(store_time);
-        result.map_err(Self::storage_status)?;
+        let sequence = result.map_err(Self::storage_status)?;
         Ok(tonic::Response::new(pb::PutShardResponse {
             crc32c: crc,
             bytes_received: header.payload_len,
+            sequence,
         }))
     }
 
@@ -568,10 +569,22 @@ impl StorageNode for StorageNodeService {
         self.check_incarnation(&req.incarnation)?;
         self.check_epoch(key.group_id, req.group_epoch)?;
         let store = Arc::clone(&self.store);
-        tokio::task::spawn_blocking(move || store.delete(key))
-            .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?
-            .map_err(Self::storage_status)?;
+        let if_sequence = req.if_sequence;
+        let deleted = tokio::task::spawn_blocking(move || {
+            if if_sequence == 0 {
+                store.delete(key).map(|()| true)
+            } else {
+                store.delete_if(key, if_sequence)
+            }
+        })
+        .await
+        .map_err(|e| tonic::Status::internal(e.to_string()))?
+        .map_err(Self::storage_status)?;
+        if !deleted {
+            return Err(tonic::Status::aborted(
+                "shard changed since the delete was decided",
+            ));
+        }
         Ok(tonic::Response::new(pb::DeleteShardResponse {}))
     }
 
@@ -584,17 +597,17 @@ impl StorageNode for StorageNodeService {
         Self::check_version(req.protocol_version)?;
         let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
         let limit = Self::page_limit(req.limit);
-        let mut page: Vec<(ShardKey, u32, bool)> = self
+        let mut page: Vec<(ShardKey, u32, bool, u64)> = self
             .store
-            .entries_in_group_after(req.group_id, after, limit)
+            .entries_in_group_after_sequenced(req.group_id, after, limit)
             .into_iter()
-            .map(|(k, len)| (k, len, false))
+            .map(|(k, len, seq)| (k, len, false, seq))
             .collect();
         let more = page.len() == limit;
         if req.include_quarantined {
             // Quarantined keys of the same window, merged in key order; the
             // cursor stays the last live key so that paging is unchanged.
-            let bound = page.last().map(|(k, _, _)| *k);
+            let bound = page.last().map(|(k, _, _, _)| *k);
             for (k, e) in self
                 .store
                 .quarantined_in_group_after(req.group_id, after, limit)
@@ -602,19 +615,20 @@ impl StorageNode for StorageNodeService {
                 if more && bound.is_some_and(|b| k > b) {
                     break;
                 }
-                page.push((k, e.location.payload_len, true));
+                page.push((k, e.location.payload_len, true, e.location.sequence));
             }
             page.sort_by_key(|a| a.0);
         }
         let next = more
-            .then(|| page.last().map(|(k, _, _)| Self::pb_key(k)))
+            .then(|| page.last().map(|(k, _, _, _)| Self::pb_key(k)))
             .flatten();
         let entries = page
             .into_iter()
-            .map(|(k, len, quarantined)| pb::ShardEntry {
+            .map(|(k, len, quarantined, sequence)| pb::ShardEntry {
                 key: Some(Self::pb_key(&k)),
                 payload_len: u64::from(len),
                 quarantined,
+                sequence,
             })
             .collect();
         Ok(tonic::Response::new(pb::ListShardsResponse {

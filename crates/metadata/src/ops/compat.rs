@@ -407,7 +407,7 @@ pub async fn raise_version<S: KvStore>(store: &S, key: VersionKey, value: u64) -
 }
 
 /// Which gate value [`raise_version`] changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VersionKey {
     /// `("al","meta","schema")`.
     Schema,
@@ -554,18 +554,45 @@ pub async fn advance_upgrade<S: KvStore>(
     note: &str,
     now_ms: u64,
 ) -> Result<bool> {
+    advance_upgrade_raising(store, from, to, None, token, note, now_ms).await
+}
+
+/// [`advance_upgrade`] that also raises a version gate in the same
+/// transaction, only if the cursor is at `from` (Phase 3.5 audit CON-8: a
+/// raise in its own transaction could land after a cancellation that saw
+/// the cursor before the cut-off, leaving the gate raised and no cursor).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn advance_upgrade_raising<S: KvStore>(
+    store: &S,
+    from: UpgradeStep,
+    to: UpgradeStep,
+    raise: Option<(VersionKey, u64)>,
+    token: u64,
+    note: &str,
+    now_ms: u64,
+) -> Result<bool> {
     transact(
         store,
-        (from, to, token, note.to_string(), now_ms),
+        (from, to, raise, token, note.to_string(), now_ms),
         |tx, env| {
             Box::pin(async move {
-                let (from, to, token, note, now_ms) = env;
+                let (from, to, raise, token, note, now_ms) = env;
                 let cur: Option<UpgradeCursor> = read(tx, &keys::upgrade_cursor()).await?;
                 let Some(mut cur) = cur else {
                     return Ok(false);
                 };
                 if cur.step != *from {
                     return Ok(false);
+                }
+                if let Some((key, value)) = raise {
+                    let k = key.key();
+                    let current = u64_of(tx.get(&k).await?).unwrap_or(0);
+                    if *value > current {
+                        tx.set(&k, &value.to_le_bytes());
+                    }
                 }
                 cur.step = *to;
                 cur.updated_ms = *now_ms;

@@ -447,9 +447,17 @@ pub async fn reconcile_node<S: KvStore>(
                 report.kept += 1;
                 continue;
             }
-            match clients.delete_shard(node_addr, *shard, group.epoch).await {
+            // Only the record listed: a copy populated since under the same
+            // key is not touched (Phase 3.5 audit INT-1).
+            let seq = page.sequences.get(shard).copied().unwrap_or(0);
+            match clients
+                .delete_shard_if(node_addr, *shard, group.epoch, seq)
+                .await
+            {
                 Ok(()) => report.orphans_deleted += 1,
-                Err(s) if s.code() == tonic::Code::NotFound => {}
+                Err(s) if s.code() == tonic::Code::NotFound || NodeClients::is_changed(&s) => {
+                    report.kept += 1;
+                }
                 Err(status) => {
                     return Err(TierError::Node {
                         addr: node_addr.to_string(),

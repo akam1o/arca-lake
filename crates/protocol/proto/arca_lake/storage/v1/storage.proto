@@ -36,6 +36,9 @@ message PutShardRequest {
 message PutShardResponse {
   uint32 crc32c = 1;
   uint64 bytes_received = 2;
+  // The stored record's sequence on this node (0 from an older node): what
+  // a conditional DeleteShard of this write names.
+  uint64 sequence = 3;
 }
 
 message GetShardRequest {
@@ -58,6 +61,12 @@ message DeleteShardRequest {
   // that has adopted an incarnation rejects a different one; empty is
   // accepted (a caller that predates incarnations).
   bytes incarnation = 4;
+  // Non-zero: delete only if the key's newest record on the node has this
+  // sequence (from ListShards or PutShard); otherwise ABORTED and nothing
+  // changes. A delete decided on what a caller saw cannot remove a record
+  // written since under the same key (Phase 3.5). An older node ignores
+  // it and deletes unconditionally.
+  uint64 if_sequence = 5;
 }
 
 message DeleteShardResponse {}
@@ -83,6 +92,8 @@ message ShardEntry {
   ShardKey key = 1;
   uint64 payload_len = 2;
   bool quarantined = 3;
+  // The record's sequence on this node (0 from an older node).
+  uint64 sequence = 4;
 }
 
 message ListShardsResponse {

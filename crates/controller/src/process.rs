@@ -773,7 +773,9 @@ fn is_state_refusal(e: &ControlError) -> bool {
 const GC_BATCH: usize = 1000;
 /// Retired-queue entries counted for the backlog gauge at most.
 const GC_BACKLOG_CAP: usize = 200_000;
-/// Longest a GC pass keeps running batches.
+/// Shortest budget of a GC pass for running batches; the budget is the GC
+/// interval when that is longer, so that a backlog is worked on without
+/// idle intervals (R-64: a 30 s budget every 60 s halved the throughput).
 const GC_PASS_BUDGET: Duration = Duration::from_secs(30);
 
 async fn gc_pass<S: KvStore>(
@@ -806,7 +808,7 @@ async fn gc_pass<S: KvStore>(
         }
         info!(?report, "gc pass");
         let full = report.collected >= GC_BATCH || report.expired >= GC_BATCH;
-        if !full || started.elapsed() >= GC_PASS_BUDGET {
+        if !full || started.elapsed() >= GC_PASS_BUDGET.max(cfg.gc_interval) {
             break;
         }
     }

@@ -257,6 +257,9 @@ pub struct VersionIdentity {
     pub generation: GenId,
     /// When it was published (`last_modified_ms` / `committed_ms`).
     pub published_ms: u64,
+    /// Its ordinal: every publication of a key takes the next one, so two
+    /// markers published in the same millisecond differ (CON-7).
+    pub ordinal: u64,
 }
 
 impl VersionIdentity {
@@ -264,13 +267,15 @@ impl VersionIdentity {
         Self {
             generation: c.generation,
             published_ms: c.last_modified_ms,
+            ordinal: c.next_ordinal.saturating_sub(1),
         }
     }
 
-    fn of_record(v: &VersionRecord) -> Self {
+    fn of_record(ordinal: u64, v: &VersionRecord) -> Self {
         Self {
             generation: v.generation,
             published_ms: v.committed_ms,
+            ordinal,
         }
     }
 }
@@ -945,7 +950,7 @@ pub async fn delete_version<S: KvStore>(
                 .await?
                 .into_iter()
                 .find(|(_, v)| v.version_id == version_id)
-                .map(|(_, v)| (VersionIdentity::of_record(&v), v.delete_marker)))
+                .map(|(o, v)| (VersionIdentity::of_record(o, &v), v.delete_marker)))
         })
     })
     .await?;
@@ -984,9 +989,11 @@ pub async fn delete_version<S: KvStore>(
                         c.generation,
                         c.delete_marker,
                     ),
-                    (_, Some((_, v))) => {
-                        (VersionIdentity::of_record(v), v.generation, v.delete_marker)
-                    }
+                    (_, Some((o, v))) => (
+                        VersionIdentity::of_record(*o, v),
+                        v.generation,
+                        v.delete_marker,
+                    ),
                     _ => {
                         return Ok(DeletedVersion {
                             was_delete_marker: false,
@@ -1436,23 +1443,40 @@ pub async fn end_migration<S: KvStore>(
 ///
 /// Backend errors.
 pub async fn expire_migrations<S: KvStore>(store: &S, now_ms: u64) -> Result<usize> {
-    transact(store, now_ms, |tx, now_ms| {
-        Box::pin(async move {
-            let mut n = 0;
-            for (k, v) in tx
-                .get_range(&keys::migrations_range(), 10_000, false)
-                .await?
-            {
-                let i: MigrationIntent = crate::records::decode(&v)?;
-                if *now_ms >= i.since_ms.saturating_add(MIGRATION_INTENT_TTL_MS) {
-                    tx.clear(&k);
-                    n += 1;
+    // Bounded pages over the whole range (Phase 3.5 audit OPS-3: one page
+    // of young intents hid every later stale one).
+    const PAGE: usize = 1000;
+    let full = keys::migrations_range();
+    let mut begin = full.begin.clone();
+    let mut removed = 0;
+    loop {
+        let range = crate::kv::KeyRange::new(begin.clone(), full.end.clone());
+        let (n, last, more) = transact(store, (range, now_ms), |tx, env| {
+            Box::pin(async move {
+                let (range, now_ms) = env;
+                let entries = tx.get_range(range, PAGE, false).await?;
+                let more = entries.len() == PAGE;
+                let mut n = 0;
+                for (k, v) in &entries {
+                    let i: MigrationIntent = crate::records::decode(v)?;
+                    if *now_ms >= i.since_ms.saturating_add(MIGRATION_INTENT_TTL_MS) {
+                        tx.clear(k);
+                        n += 1;
+                    }
                 }
-            }
-            Ok(n)
+                Ok((n, entries.last().map(|(k, _)| k.clone()), more))
+            })
         })
-    })
-    .await
+        .await?;
+        removed += n;
+        match last {
+            Some(mut k) if more => {
+                k.push(0);
+                begin = k;
+            }
+            _ => return Ok(removed),
+        }
+    }
 }
 
 /// Access record of a generation for automatic tiering (RFC-006 §5.8).

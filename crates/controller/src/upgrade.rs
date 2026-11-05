@@ -137,11 +137,12 @@ pub async fn upgrade_pass<S: KvStore>(
         }
         UpgradeStep::Migrated => {
             // Step 3: the downgrade cut-off.
-            let v = compat::raise_version(meta, VersionKey::SchemaWrite, target.schema).await?;
-            if compat::advance_upgrade(
+            let v = target.schema;
+            if compat::advance_upgrade_raising(
                 meta,
                 UpgradeStep::Migrated,
                 UpgradeStep::SchemaWriteRaised,
+                Some((VersionKey::SchemaWrite, v)),
                 token,
                 &format!("schema_write = {v} (downgrade cut-off)"),
                 now_ms,
