@@ -808,7 +808,10 @@ pub async fn discard_parts<S: KvStore>(
     batch: usize,
     now_ms: u64,
 ) -> Result<usize> {
-    transact(
+    // Re-run after an unknown commit outcome (R-72): a part record is
+    // cleared in the transaction that retires its generation, so a re-run
+    // after an applied commit finds fewer records and retires nothing twice.
+    transact_idempotent(
         store,
         (bucket_id, key, *upload_id, batch.max(1), now_ms),
         |tx, env| {
@@ -857,7 +860,11 @@ pub async fn abort<S: KvStore>(
     key: &str,
     upload_id: &UploadId,
 ) -> Result<MultipartRecord> {
-    transact(store, (bucket, key, *upload_id), |tx, env| {
+    // Re-run after an unknown commit outcome (R-71, R-72): `Aborting` is
+    // accepted again, so a re-run after an applied commit succeeds; one
+    // after a Complete that won instead answers `NoSuchUpload`. Leaving the
+    // outcome to the client parked the parts until the controller sweep.
+    transact_idempotent(store, (bucket, key, *upload_id), |tx, env| {
         Box::pin(async move {
             let (bucket, key, upload_id) = *env;
             let b = bucket_by_name(tx, bucket).await?;

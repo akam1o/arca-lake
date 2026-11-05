@@ -426,9 +426,31 @@ async fn scenario() {
             rc.is_err(),
             "the complete cannot have won if the object is absent"
         );
-        if open_uploads(&c.backend).await.contains(&u2) {
-            // Neither reached the store: abort now so that no orphan stays.
-            abort(&c.backend, "mp-2", &u2).await.unwrap();
+        // An abort answered with an error may still have been applied
+        // (`Aborting`, no longer listed as open) or not (still open): like
+        // any S3 client, retry it until it is decided. Before the gateway
+        // re-ran an abort with an unknown outcome, this case left the parts
+        // committed until the controller sweep (R-71).
+        if ra.is_err() {
+            wait_for_store(&c).await;
+            let mut decided = false;
+            for attempt in 0..5 {
+                match abort(&c.backend, "mp-2", &u2).await {
+                    Ok(()) => {
+                        decided = true;
+                        break;
+                    }
+                    Err(e) if e.code() == &s3s::S3ErrorCode::NoSuchUpload => {
+                        decided = true;
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("abort retry {attempt}: {e}");
+                        wait_for_store(&c).await;
+                    }
+                }
+            }
+            assert!(decided, "the abort is decided within five retries");
         }
     }
     chaos.run("start 1").await;

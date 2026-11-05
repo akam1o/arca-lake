@@ -339,41 +339,19 @@ impl Txn for FdbTx {
     }
 }
 
-/// FoundationDB error codes we map specially.
-mod codes {
-    pub const TRANSACTION_TIMED_OUT: i32 = 1031;
-    pub const TRANSACTION_TOO_LARGE: i32 = 2101;
-    pub const KEY_TOO_LARGE: i32 = 2102;
-    pub const VALUE_TOO_LARGE: i32 = 2103;
-}
-
+/// Errors before the commit: nothing was sent for commit (R-72).
 fn map_err(e: FdbError) -> KvError {
-    let limits = Limits::FOUNDATIONDB;
-    match e.code() {
-        codes::TRANSACTION_TOO_LARGE => KvError::TooLarge {
-            what: "transaction",
-            limit: limits.max_transaction_bytes,
-            actual: 0,
-        },
-        codes::KEY_TOO_LARGE => KvError::TooLarge {
-            what: "key",
-            limit: limits.max_key_bytes,
-            actual: 0,
-        },
-        codes::VALUE_TOO_LARGE => KvError::TooLarge {
-            what: "value",
-            limit: limits.max_value_bytes,
-            actual: 0,
-        },
-        // A timed-out transaction is not retried blindly: with the cluster
-        // unavailable every retry would wait the full timeout again.
-        codes::TRANSACTION_TIMED_OUT => KvError::Backend(format!("transaction timed out: {e}")),
-        _ if e.is_maybe_committed() => KvError::CommitUnknown(e.to_string()),
-        _ if e.is_retryable() => KvError::Conflict,
-        _ => KvError::Backend(e.to_string()),
-    }
+    crate::fdb_errors::classify(
+        e.code(),
+        &e.to_string(),
+        crate::fdb_errors::Phase::Operation,
+    )
 }
 
+/// Errors of the commit itself: unknown outcome unless the code proves the
+/// commit was rejected (a timeout cancels the transaction, which may still
+/// commit; R-72, `fdb_errors`).
 fn map_commit_err(e: &foundationdb::TransactionCommitError) -> KvError {
-    map_err(FdbError::from_code(e.code()))
+    let e = FdbError::from_code(e.code());
+    crate::fdb_errors::classify(e.code(), &e.to_string(), crate::fdb_errors::Phase::Commit)
 }

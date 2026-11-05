@@ -242,6 +242,14 @@ pub struct Precondition {
     pub if_none_match_any: bool,
 }
 
+impl Precondition {
+    /// No condition at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.if_match.is_none() && !self.if_none_match_any
+    }
+}
+
 /// Result of a successful commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Committed {
@@ -798,7 +806,10 @@ pub async fn delete_version<S: KvStore>(
     version_id: &str,
     now_ms: u64,
 ) -> Result<DeletedVersion> {
-    transact(store, (bucket, key, version_id, now_ms), |tx, env| {
+    // Re-run after an unknown commit outcome (R-72): a version that is gone
+    // answers `existed: false`, so a re-run after an applied commit neither
+    // fails nor retires anything twice.
+    transact_idempotent(store, (bucket, key, version_id, now_ms), |tx, env| {
         Box::pin(async move {
             let (bucket, key, version_id, now_ms) = *env;
             let b = bucket_by_name(tx, bucket).await?;

@@ -21,7 +21,28 @@ pub enum CommitFault {
     UnknownWithoutApply,
     /// Drop the transaction and report a backend error (store unavailable).
     Unavailable,
+    /// Apply the commit, then report what the FoundationDB backend reports
+    /// for a commit that timed out (R-72: the timeout cancels the
+    /// transaction after the proxy may already have committed it).
+    TimeoutAfterApply,
+    /// Report a commit timeout; the transaction is never applied.
+    TimeoutWithoutApply,
+    /// Report a commit timeout and keep the transaction: it is committed
+    /// later by [`FaultKv::apply_delayed`], against whatever changed
+    /// meanwhile (a late commit that may still conflict, as in the store).
+    TimeoutDelayed,
 }
+
+/// The error a commit timeout produces in the FoundationDB backend.
+fn timeout_error() -> KvError {
+    crate::fdb_errors::classify(
+        crate::fdb_errors::codes::TRANSACTION_TIMED_OUT,
+        "injected: transaction timed out during commit",
+        crate::fdb_errors::Phase::Commit,
+    )
+}
+
+type Parked = Arc<Mutex<Vec<Box<dyn std::any::Any + Send>>>>;
 
 type Matcher = dyn Fn(&[Key]) -> bool + Send + Sync;
 
@@ -38,6 +59,7 @@ pub struct FaultKv<S> {
     inner: S,
     rules: Arc<Mutex<Vec<FaultRule>>>,
     fired: Arc<Mutex<Vec<CommitFault>>>,
+    parked: Parked,
 }
 
 impl<S: std::fmt::Debug> std::fmt::Debug for FaultKv<S> {
@@ -55,6 +77,7 @@ impl<S> FaultKv<S> {
             inner,
             rules: Arc::default(),
             fired: Arc::default(),
+            parked: Arc::default(),
         }
     }
 
@@ -103,7 +126,41 @@ impl<S> FaultKv<S> {
     }
 }
 
-impl<S: KvStore> KvStore for FaultKv<S> {
+impl<S: KvStore> FaultKv<S>
+where
+    S::Tx: Send + 'static,
+{
+    /// Commit every transaction held back by [`CommitFault::TimeoutDelayed`],
+    /// in the order they were held, and return their results (a late
+    /// commit conflicts if what it read changed meanwhile).
+    pub async fn apply_delayed(&self) -> Vec<Result<u64, KvError>> {
+        let held: Vec<_> =
+            std::mem::take(&mut *self.parked.lock().unwrap_or_else(PoisonError::into_inner));
+        let mut out = Vec::new();
+        for tx in held {
+            match tx.downcast::<S::Tx>() {
+                Ok(tx) => out.push((*tx).commit().await),
+                Err(_) => out.push(Err(KvError::Backend(
+                    "parked transaction of another type".into(),
+                ))),
+            }
+        }
+        out
+    }
+
+    /// Transactions held back and not yet applied.
+    pub fn delayed_count(&self) -> usize {
+        self.parked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
+impl<S: KvStore> KvStore for FaultKv<S>
+where
+    S::Tx: 'static,
+{
     type Tx = FaultTx<S::Tx>;
 
     async fn begin(&self) -> Result<Self::Tx, KvError> {
@@ -112,6 +169,7 @@ impl<S: KvStore> KvStore for FaultKv<S> {
             written: Vec::new(),
             rules: Arc::clone(&self.rules),
             fired: Arc::clone(&self.fired),
+            parked: Arc::clone(&self.parked),
         })
     }
 
@@ -126,6 +184,7 @@ pub struct FaultTx<T> {
     written: Vec<Key>,
     rules: Arc<Mutex<Vec<FaultRule>>>,
     fired: Arc<Mutex<Vec<CommitFault>>>,
+    parked: Parked,
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for FaultTx<T> {
@@ -137,7 +196,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for FaultTx<T> {
     }
 }
 
-impl<T: Txn> Txn for FaultTx<T> {
+impl<T: Txn + 'static> Txn for FaultTx<T> {
     async fn get(&mut self, key: &[u8]) -> Result<Option<Value>, KvError> {
         self.inner.get(key).await
     }
@@ -204,6 +263,18 @@ impl<T: Txn> Txn for FaultTx<T> {
                 "injected: request lost before apply".into(),
             )),
             CommitFault::Unavailable => Err(KvError::Backend("injected: store unavailable".into())),
+            CommitFault::TimeoutAfterApply => {
+                self.inner.commit().await?;
+                Err(timeout_error())
+            }
+            CommitFault::TimeoutWithoutApply => Err(timeout_error()),
+            CommitFault::TimeoutDelayed => {
+                self.parked
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(Box::new(self.inner));
+                Err(timeout_error())
+            }
         }
     }
 }
