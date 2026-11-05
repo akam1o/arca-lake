@@ -1801,8 +1801,11 @@ fn reserve(next: u64, n: u64) -> Result<u64> {
 /// comes from the store epoch, so a damaged file is not a reason to refuse
 /// the open.
 fn read_sequence_bound(dir: &Path) -> (u64, bool) {
-    let Ok(text) = std::fs::read_to_string(dir.join(SEQUENCE_BOUND_FILE)) else {
-        return (0, false);
+    let text = match std::fs::read_to_string(dir.join(SEQUENCE_BOUND_FILE)) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (0, false),
+        // Unreadable or not UTF-8: reported like a damaged one (OPS-9).
+        Err(_) => return (0, true),
     };
     let fields: Vec<&str> = text.split_whitespace().collect();
     if let [v, epoch, crc] = fields.as_slice() {

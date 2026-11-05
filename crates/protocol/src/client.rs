@@ -1144,8 +1144,24 @@ impl NodeClients {
         self.with_faults(ctx, |_| {
             self.unary(async {
                 let mut client = self.client(addr)?;
+                let negotiated = self.version_for(addr).await?;
+                // A conditional delete goes only to a node that enforces it,
+                // and always at a version a node that does not would refuse:
+                // a node rolled back since the negotiation answers
+                // FAILED_PRECONDITION instead of deleting unconditionally
+                // (Phase 3.5 audit CON-22).
+                let protocol_version = if token.is_some() {
+                    if negotiated < pb::CONDITIONAL_DELETE_VERSION {
+                        return Err(tonic::Status::aborted(
+                            "the node does not enforce conditional deletes",
+                        ));
+                    }
+                    negotiated.max(pb::CONDITIONAL_DELETE_VERSION)
+                } else {
+                    negotiated
+                };
                 let req = pb::DeleteShardRequest {
-                    protocol_version: self.version_for(addr).await?,
+                    protocol_version,
                     key: Some(shard.pb()),
                     group_epoch: epoch,
                     incarnation: self

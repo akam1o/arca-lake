@@ -24,10 +24,17 @@ pub mod storage {
         tonic::include_proto!("arca_lake.storage.v1");
 
         /// Newest protocol version this build speaks (`P_cur`, RFC-014
-        /// §5.2); version 2 exists only in a `version-bump` build
-        /// (ADR-0016).
+        /// §5.2); one more in a `version-bump` build (ADR-0016). Version 2
+        /// (Phase 3.5): `DeleteShard.if_sequence`/`if_store_epoch` are
+        /// enforced; a version-1 node ignores them and deletes
+        /// unconditionally, so conditional deletes are sent at version 2
+        /// or not at all ([`CONDITIONAL_DELETE_VERSION`]).
         #[allow(clippy::cast_possible_truncation)]
-        pub const PROTOCOL_VERSION: u32 = 1 + arca_lake_common::compat::BUMP as u32;
+        pub const PROTOCOL_VERSION: u32 = 2 + arca_lake_common::compat::BUMP as u32;
+
+        /// Oldest protocol version whose nodes enforce conditional deletes
+        /// (record sequence and store epoch).
+        pub const CONDITIONAL_DELETE_VERSION: u32 = 2;
 
         /// Oldest protocol version this build accepts (`P_cur − 1`, but
         /// never below 1).

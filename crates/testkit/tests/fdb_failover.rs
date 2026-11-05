@@ -72,6 +72,31 @@ async fn wait_for_store(c: &TestCluster<FdbKv>) {
     .await;
 }
 
+/// Until five probe commits in a row succeed.
+async fn settle(kv: &FdbKv) {
+    let mut ok = 0;
+    let start = std::time::Instant::now();
+    while ok < 5 {
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "the store did not settle"
+        );
+        let r = arca_lake_metadata::transact(kv, (), |tx, ()| {
+            Box::pin(async move {
+                tx.set(b"zz-failover-probe", b"1");
+                Ok(())
+            })
+        })
+        .await;
+        if r.is_ok() {
+            ok += 1;
+        } else {
+            ok = 0;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
 /// Multipart helpers (RFC-007 A10).
 async fn create_upload(s3: &impl S3, key: &str) -> String {
     s3.create_multipart_upload(request(CreateMultipartUploadInput {
@@ -190,6 +215,11 @@ async fn scenario() {
     kv.clear_range_blocking(&arca_lake_metadata::keys::all_range())
         .await
         .unwrap();
+    // An earlier scenario's chaos may have restarted processes moments
+    // ago: cluster setup (group creation is not idempotent, so its unknown
+    // outcomes are not retried) waits until commits go through again (one
+    // setup failed with 1021 right after a restart).
+    settle(&kv).await;
     let mut c = TestCluster::start_with(
         Arc::new(kv),
         ClusterOptions {
@@ -785,6 +815,11 @@ async fn recovery_scenario() {
     kv.clear_range_blocking(&arca_lake_metadata::keys::all_range())
         .await
         .unwrap();
+    // An earlier scenario's chaos may have restarted processes moments
+    // ago: cluster setup (group creation is not idempotent, so its unknown
+    // outcomes are not retried) waits until commits go through again (one
+    // setup failed with 1021 right after a restart).
+    settle(&kv).await;
     let mut c = TestCluster::start_with(
         Arc::new(kv),
         ClusterOptions {

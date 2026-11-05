@@ -259,7 +259,10 @@ whatever happened to the directory in between: compaction dropping the
 records with the highest sequences (CON-10), a lost or damaged bound file
 (CON-14, CON-16), a directory restored from an older copy (CON-18). The
 guarantee is probabilistic only in that two epochs collide with
-probability 2^-64 (CON-20). A delete decided before a restart is refused
+probability about 2^-64 (CON-20). The directory lock is an advisory OS
+lock: it assumes a local file system (on NFS it depends on the server's
+lock support) and that nobody replaces the directory or `store.lock`
+while the node runs. A delete decided before a restart is refused
 and redone after the next listing. The store holds an exclusive lock on
 its directory while open (CON-19). Sequence arithmetic never wraps;
 exhaustion fails the write (CON-17, CON-21). `sequence.bound` only keeps
@@ -274,6 +277,11 @@ on its way leaves the in-flight set too (CON-13), and a group-commit
 sync leader that fails or panics hands the leadership on (CON-15). `ListShards` reads live
 and quarantined keys from one index snapshot per page (OPS-5, OPS-6).
 
+Conditional deletes need wire protocol 2 (Phase 3.5; a version-1 node
+ignores the new fields and deletes unconditionally). A client sends a
+conditional delete only to a node that negotiated version 2 and always at
+version 2 or higher, so a node rolled back to a version-1 binary since the
+negotiation refuses it (outside its window) instead of deleting (CON-22).
 An older node reports sequence 0 and would ignore `if_sequence`.
 Reconciliation and migration cleanup fail closed there: they delete
 nothing on such a node, and its orphans are reclaimed after its upgrade
