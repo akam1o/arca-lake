@@ -26,6 +26,12 @@ the previous code. The full mutation inventory is in
 | Authorization without authentication | refused at startup and in `serve_with_access`; owner-policy with static keys shares one credential store (SEC-3, SEC-8) | s3s skips the access hook without authentication |
 | Credential rotation | reload when the credentials file or any referenced secret file changes, stamped from the bytes parsed (SEC-7, OPS-2) | the credentials file's mtime |
 | Multipart sweep | one bounded page of the upload space per transaction (OPS-1) | one transaction over every upload |
+| Deletes of reusable shard keys | Nodes return record sequences (PutShard, ListShards) and honour `DeleteShard.if_sequence`; reconciliation and migration cleanup delete only the records they saw or wrote; a migration leaves its source to reconciliation (CON-5, CON-6) | unconditional deletes fenced by the group epoch only (the epoch does not change between two placements of a chunk in one group: a stale delete removed a later placement) |
+| Tier migration concurrency | a per-chunk intent taken before the target is written, kept by reconciliation, required by the switch, expired after one hour (CON-1, CON-2) | protecting targets by age (a committed generation is old); a `Deleting` state (does not stop RPCs already sent) |
+| Version identity on re-runs | generation, publication time and ordinal (CON-3, CON-7) | the generation alone (all delete markers share the zero generation) |
+| Upgrade cut-off | the `schema_write` raise and the cursor advance in one transaction (CON-8) | two transactions (a cancellation in between left the gate raised without a cursor) |
+| Process exit with the FoundationDB client | `_exit` after the runtime has stopped and the standard streams are flushed (R-68: 13 of 80 signalled shutdowns crashed in the client library's static destructors) | stopping the network at exit (handles still alive: every test binary crashed) |
+| GC cadence | a pass runs batches for at least the GC interval when the backlog is full; 32 generations at once (R-64) | a 30 s budget every interval, 8 at once (about 20 generations/s on the reference VM) |
 
 ## Consequences
 

@@ -288,6 +288,10 @@ placement between durable tiers.
   times within `promote_window` to the tier above. Tier order is the
   configuration order of durable tiers.
 - Migration (DD-6 state machine, per chunk):
+  0. Take the chunk's migration intent `("al","mig",chunk) = { target
+     group, attempt, since }` (Phase 3.5): refused while another attempt's
+     intent is younger than one hour. While it is held, reconciliation
+     keeps the target group's shards of the chunk.
   1. Read the chunk from the current durable placement (decode if needed)
      and verify its CRC.
   2. Encode with the target tier's profile and write all shards to a
@@ -296,15 +300,19 @@ placement between durable tiers.
   3. Verify: read the shards back from the target (`VerifyShards` of the
      chunk's keys) before switching.
   4. Switch: one transaction that re-reads the chunk record, requires the
-     generation to be `Committed` and the record's placement to be the
-     one read in step 1, and writes the new placement, scheme, and `k+m`.
-  5. Retire: the old shards are now unreferenced (their chunk record is
-     placed elsewhere) and are deleted by reconciliation, or eagerly by
-     the migrator after the switch (deletes carry the old group's epoch).
-  A crash before step 4 leaves target shards that reconciliation deletes
-  (unreferenced); a crash after step 4 leaves source shards that
-  reconciliation deletes. The chunk is readable throughout from whichever
-  placement the record names.
+     generation to be `Committed`, the record's placement to be the one
+     read in step 1 and the intent to be this attempt's, writes the new
+     placement, scheme, and `k+m`, and drops the intent.
+  5. Retire: the old shards are now unreferenced and are deleted by
+     reconciliation with conditional deletes (RFC-008 §6.6 amendment). The
+     migrator does not delete them itself: a delete it sent could arrive
+     after a later migration back into the source group.
+  A failed or refused attempt deletes the target shards it wrote, each only
+  if the node still holds the record it wrote, then drops its intent. A
+  crash before step 4 leaves target shards kept by the intent until it is
+  stale, then reclaimed by reconciliation; a crash after step 4 leaves
+  source shards that reconciliation deletes. The chunk is readable
+  throughout from whichever placement the record names.
 
 ### 5.9 Cache protection (Phase 2.1)
 

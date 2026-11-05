@@ -231,6 +231,29 @@ decisions were made in fenced transactions that fail once a successor
 exists (RFC-011 §5.3), and RPCs it issued before losing leadership carry
 epochs that current members check.
 
+**Phase 3.5 amendment (audit CON-5, CON-6).** Fact 2 holds for
+generations but not for *placements*: tier migration writes a committed
+chunk's shards into a group under the same keys, and a chunk migrated
+A→B→A has its keys in A twice. A delete decided before the return (by
+reconciliation, or by the first migration's eager source cleanup) could
+arrive after it and remove the shards the record now names; the group
+epoch does not change between the two placements. Two mechanisms close it:
+
+- **Conditional deletes.** A node returns each record's sequence from
+  `PutShard` and `ListShards`; `DeleteShard.if_sequence` deletes only if
+  the key's newest record (appended, live or quarantined) still has that
+  sequence, checked and written under the store's writer lock, and
+  answers `ABORTED` otherwise. Reconciliation (durable and cache) deletes
+  only the records it listed; a migration cleans up only what it wrote and
+  leaves its source to reconciliation. GC of retired generations stays
+  unconditional (fact 2 holds for them).
+- **Migration intents** (RFC-006 §5.8): reconciliation keeps a group's
+  shards of a chunk while a migration into that group holds the chunk's
+  intent.
+
+An older node ignores `if_sequence` and deletes unconditionally (the
+pre-3.5 behaviour) until it is upgraded.
+
 ### 6.7 Clock skew
 
 Safety never depends on clocks agreeing: every decision is a transaction

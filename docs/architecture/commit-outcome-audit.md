@@ -66,9 +66,9 @@ version ids such as `null` are reused).
 | `complete` | `complete_resolving` re-runs with the root id chosen before the first attempt; `Completed{root}` for that root = same answer | idempotent by root id | `phase31.rs::complete_with_unknown_*`, `commit_timeouts.rs` (Complete) |
 | `abort` (multipart, Open→Aborting) | re-run: `Aborting` is accepted again; a Complete that won answers `NoSuchUpload` | R-71: an applied abort reported as failed left the parts until the sweep | `commit_timeouts.rs::abort_whose_commit_times_out_*` |
 | `discard_parts` | re-run: a part record is cleared in the transaction that retires its generation | nothing retired twice | as above |
-| `delete_object_if` (unconditional) | gateway re-runs once with the internal precondition `if_current` = the pointer the delete was decided on; a moved pointer means done | cannot delete an object written since or add a second marker (CON-1) | `commit_timeouts.rs::a_delete_rerun_*` |
+| `delete_object_as` (unconditional DeleteObject) | every attempt carries the internal precondition `if_current` = the version identity (generation, publication time, ordinal) it was decided on and the same pre-chosen marker id; a moved pointer before the commit = pin again; after an unknown outcome the re-run's moved pointer is resolved by the marker (versioning enabled: present = done, absent = 503) or, unversioned/suspended, as done (the other write displaced the version) | never acts on a version written since, never a second marker, never claims a versioned delete it cannot prove (CON-1, CON-3, CON-4, CON-7) | `commit_timeouts.rs::a_delete_rerun_*`, `::a_versioned_delete_*`, `commit_unknown.rs::markers_of_the_same_millisecond_*` |
 | `delete_object_if` (If-Match) | not re-run; 503 (unknown) | a re-run would answer 412/404 for a delete that succeeded | `commit_timeouts.rs::deletes_*` |
-| `delete_version` (DeleteObject/DeleteObjects with a version) | version pinned to its generation first; re-run deletes only while the id still names it | a reused `null` id cannot make the re-run delete a newer version (CON-1) | `commit_unknown.rs::delete_version_rerun_*`, `commit_timeouts.rs::deletes_*` |
+| `delete_version` (DeleteObject/DeleteObjects with a version) | version pinned to its identity (generation, publication time, ordinal) first; re-run deletes only while the id still names it | a reused `null` id or marker cannot make the re-run delete a newer version (CON-1, CON-3) | `commit_unknown.rs::delete_version_rerun_*`, `commit_timeouts.rs::deletes_*` |
 | `create_bucket_owned`, `delete_bucket` | error to the client (503); the client's retry answers `BucketAlreadyExists`/`NoSuchBucket` | no data effect; wrong code only after an applied commit | — (Low, documented) |
 | `set_versioning`, `set_policy`, `set_owner` | error to the client; a retry writes the same value | idempotent | — |
 | `record_access`, `reset_access` | best effort, counters for tiering | affects tiering timing only | — |
@@ -93,7 +93,8 @@ version ids such as `null` are reused).
 | `set_scrub_cursor`, `set_manifest_cursor` | progress only | — | — |
 | `create_group`, `register_node`, `touch_node` | admin/health retry; `touch_node` is a liveness timestamp | idempotent or harmless | — |
 | `drain_node`, `cancel_drain`, `update_drain`, `request_replace`, `clear_replace`, `note_replace_error` | operator retry; the controller re-reads intents each pass | records of intent, state-checked | `membership_faults.rs` |
-| `switch_placement` (tiering) | error: the copy is *not* removed; the next pass re-reads the chunk record | applied: the source is unreferenced and reconciled; not applied: the target copy is | `tiering.rs` |
+| `begin_migration`, `end_migration`, `expire_migrations` | error: the next pass re-reads the intent; a held intent of a crashed attempt expires after one hour | intents protect targets and serialize migrations of a chunk; deletes are conditional on node record sequences | `tiering.rs::a_paused_migration_*`, `::deletes_decided_before_*`, `commit_unknown.rs::stale_migration_*` |
+| `switch_placement` (tiering) | error: the copy is *not* removed; the next pass re-reads the chunk record; only the attempt holding the intent switches | applied: the source is unreferenced and reconciled conditionally; not applied: the intent keeps the target until cleaned up or stale | `tiering.rs` |
 | cache `insert`/`remove`/`touch`/`set_pinned`/`finish_cache` | error: no copy deleted on error; cache reconciliation removes copies no placement names | reads verify against the chunk record and fall back to the durable tier | `cache*.rs` |
 
 ### Leadership, recovery, upgrade
@@ -105,6 +106,7 @@ version ids such as `null` are reused).
 | `release` | best effort; the lease expires | — | — |
 | `finalize` (recovery) | the operator re-runs; an applied finalize leaves the cluster `Active` and the re-run is refused by state | single transaction; audit record per attempt | `recovery_finalize.rs` |
 | `activate_read_only`, `restart_verification`, `set_cursor`, `set_progress`, `set_report`, `set_node_caps`, `append_upgrade_audit` | state-checked re-run by the operator or the next pass | — | `recovery*.rs`, `fdb_restore.rs` |
+| `advance_upgrade_raising` (`schema_write` cut-off) | the next pass re-reads the cursor; the raise happens only with the cursor advance | a cancellation cannot leave the gate raised without a cursor (CON-8) | `upgrade.rs::a_cancelled_upgrade_*` |
 | `compat::init`, `set_phase`, `transition`, `mark_restoring`, `raise_version`, `request_finalize`, `advance_upgrade`, `note_upgrade_error`, `clear_upgrade`, `heartbeat`, `remove_heartbeat` | operator or the next pass re-reads the gate state; version raises are monotonic | — | `upgrade.rs`, `mixed_version.rs` |
 
 ## 4. Fault injection
