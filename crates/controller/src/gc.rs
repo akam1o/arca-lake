@@ -27,7 +27,7 @@ use arca_lake_metadata::records::{
     GroupState, MultipartState, NodeRecord, VersionRecord, decode,
 };
 use arca_lake_metadata::{KvStore, MetaError, Txn, keys, transact};
-use arca_lake_protocol::client::{NodeClients, ShardRef};
+use arca_lake_protocol::client::{NodeClients, RecordToken, ShardRef};
 
 use crate::ControlError;
 
@@ -535,7 +535,7 @@ pub async fn reconcile_node<S: KvStore>(
                 now_ms,
                 min_age_ms,
                 *shard,
-                page.sequences.get(shard).copied().unwrap_or(0),
+                page.sequences.get(shard).copied().unwrap_or_default(),
                 &mut report,
             )
             .await?;
@@ -557,7 +557,7 @@ async fn reconcile_shard<S: KvStore>(
     now_ms: u64,
     min_age_ms: u64,
     shard: ShardRef,
-    sequence: u64,
+    sequence: RecordToken,
     report: &mut ReconcileReport,
 ) -> Result<(), ControlError> {
     // Every delete below names the record the listing showed: one written
@@ -565,7 +565,7 @@ async fn reconcile_shard<S: KvStore>(
     // (Phase 3.5 audit CON-5/CON-6). An older node reports no sequence and
     // would delete unconditionally: nothing is deleted there (CON-12).
     let mut delete = async |epoch: u64| -> Result<bool, ControlError> {
-        if sequence == 0 {
+        if !sequence.is_some() {
             report.kept_no_sequence += 1;
             return Ok(false);
         }
@@ -636,10 +636,10 @@ async fn delete_one(
     node_addr: &str,
     shard: ShardRef,
     epoch: u64,
-    if_sequence: u64,
+    token: RecordToken,
 ) -> Result<(), ControlError> {
     match clients
-        .delete_shard_if(node_addr, shard, epoch, if_sequence)
+        .delete_shard_if(node_addr, shard, epoch, token)
         .await
     {
         Ok(()) => Ok(()),

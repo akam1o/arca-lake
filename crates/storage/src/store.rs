@@ -357,6 +357,8 @@ fn file_len(f: &File) -> u64 {
 pub struct Store {
     cfg: StoreConfig,
     device_id: [u8; 16],
+    /// Store epoch: half of every delete token ([`Store::store_epoch`]).
+    epoch: u64,
     writer: Mutex<Writer>,
     index: RwLock<MemIndex>,
     readers: RwLock<BTreeMap<u64, SegmentInfo>>,
@@ -416,6 +418,7 @@ impl Store {
     ///
     /// Fails on I/O errors, unsupported formats, mixed device IDs, or
     /// geometry that differs from existing segments.
+    #[allow(clippy::too_many_lines)]
     pub fn open(cfg: StoreConfig) -> Result<(Self, OpenReport)> {
         validate_geometry(cfg.record_alignment, cfg.block_size)?;
         let cfg_format_write = cfg.format_write;
@@ -493,15 +496,23 @@ impl Store {
         // Never hand out a sequence again: compaction can drop the records
         // that carried the highest ones (Phase 3.5 audit CON-10: a delete
         // conditional on an old sequence matched a new record after reopen).
-        let next_sequence = match read_sequence_bound(&cfg.dir)? {
-            Some(bound) => (rec.max_sequence + 1).max(bound),
-            None if rec.max_sequence > 0 || !ids.is_empty() => rec.max_sequence + 1 + SEQUENCE_JUMP,
-            None => rec.max_sequence + 1,
+        // Without a bound (a new store, one that predates it, or a bound
+        // lost or removed) nothing proves which sequences were handed out:
+        // a new store epoch makes every earlier delete token stale instead
+        // (Phase 3.5 audit CON-16; a token is the epoch and the sequence).
+        let (next_sequence, store_epoch) = match read_sequence_bound(&cfg.dir)? {
+            Some((bound, epoch)) => ((rec.max_sequence + 1).max(bound), epoch),
+            None => (rec.max_sequence + 1, new_store_epoch()),
         };
-        write_sequence_bound(&cfg.dir, next_sequence + sequences_per_segment(&cfg))?;
+        write_sequence_bound(
+            &cfg.dir,
+            reserve(next_sequence, sequences_per_segment(&cfg))?,
+            store_epoch,
+        )?;
         let store = Self {
             cfg,
             device_id,
+            epoch: store_epoch,
             writer: Mutex::new(Writer {
                 active,
                 poisoned: false,
@@ -779,6 +790,10 @@ impl Store {
             self.timings.rollover.observe(t.elapsed());
         }
         let sequence = w.next_sequence;
+        if sequence == u64::MAX {
+            // Never wrap (CON-17): a reused sequence could match a token.
+            return Err(std::io::Error::other("record sequences exhausted").into());
+        }
         let header = RecordHeader::for_payload(key, flags, sequence, payload, self.cfg.block_size)?;
         let offset = match w.active.append(&header, payload) {
             Ok(o) => o,
@@ -884,7 +899,8 @@ impl Store {
         // Every sequence the new segment can take stays below the bound.
         write_sequence_bound(
             &self.cfg.dir,
-            w.next_sequence + sequences_per_segment(&self.cfg),
+            reserve(w.next_sequence, sequences_per_segment(&self.cfg))?,
+            self.epoch,
         )?;
         let start = (id, new.end());
         {
@@ -1411,6 +1427,15 @@ impl Store {
         Ok(out)
     }
 
+    /// The store epoch: changes when the store cannot prove which record
+    /// sequences it handed out (its bound was missing at open). A delete
+    /// token is `(store epoch, sequence)`; the node refuses one of another
+    /// epoch.
+    #[must_use]
+    pub fn store_epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// Entry counts of the in-memory index (R-70 diagnostics).
     #[must_use]
     pub fn index_sizes(&self) -> crate::IndexSizes {
@@ -1730,33 +1755,50 @@ fn sequences_per_segment(cfg: &StoreConfig) -> u64 {
     cfg.segment_max_bytes / 64 + 2
 }
 
-/// Sequences skipped at open when a store with records has no bound file
-/// (one that predates it, or whose file was lost or removed by an operator
-/// after it was found damaged): far more than any store hands out, so no
-/// sequence a pending conditional delete names can come back (Phase 3.5
-/// audit CON-14).
-const SEQUENCE_JUMP: u64 = 1 << 48;
+/// A random, non-zero store epoch.
+fn new_store_epoch() -> u64 {
+    let b = *uuid::Uuid::new_v4().as_bytes();
+    u64::from_le_bytes(b[..8].try_into().unwrap_or_default()).max(1)
+}
 
-/// The persisted bound, `None` when there is none. A bound that does not
-/// match its checksum refuses the open (CON-14): a damaged value could be
-/// too low. The operator's recovery is to remove the file; the store then
-/// skips [`SEQUENCE_JUMP`] sequences.
-fn read_sequence_bound(dir: &Path) -> Result<Option<u64>> {
+/// `next + n`, refusing to wrap (Phase 3.5 audit CON-17).
+fn reserve(next: u64, n: u64) -> Result<u64> {
+    next.checked_add(n)
+        .ok_or_else(|| std::io::Error::other("record sequences exhausted").into())
+}
+
+/// The persisted bound and store epoch; `None` when there is no bound
+/// file, or one of the earlier single-value format (no epoch). A bound that
+/// does not match its checksum refuses the open (CON-14). The operator's
+/// recovery is to remove the file: the store then takes a new epoch, and
+/// delete tokens handed out before can no longer match (CON-16).
+fn read_sequence_bound(dir: &Path) -> Result<Option<(u64, u64)>> {
     let path = dir.join(SEQUENCE_BOUND_FILE);
     match std::fs::read_to_string(&path) {
         Ok(text) => {
-            let mut it = text.split_whitespace();
-            let parsed = match (it.next(), it.next(), it.next()) {
-                (Some(v), Some(crc), None) => v.parse::<u64>().ok().filter(|v| {
-                    format!("{:08x}", crate::format::crc32c(v.to_string().as_bytes())) == crc
-                }),
+            let fields: Vec<&str> = text.split_whitespace().collect();
+            let parsed = match fields.as_slice() {
+                [v] if v.parse::<u64>().is_ok() => return Ok(None),
+                [v, epoch, crc] => {
+                    let body = format!("{v} {epoch}");
+                    match (v.parse::<u64>(), epoch.parse::<u64>()) {
+                        (Ok(v), Ok(e))
+                            if e != 0
+                                && format!("{:08x}", crate::format::crc32c(body.as_bytes()))
+                                    == *crc =>
+                        {
+                            Some((v, e))
+                        }
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
             parsed.map(Some).ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
-                        "{} is damaged (an exclusive bound above every record sequence handed out, with its checksum); remove it to have the store skip {SEQUENCE_JUMP} sequences at open",
+                        "{} is damaged (an exclusive bound above every record sequence handed out, the store epoch, a checksum); remove it: the store then takes a new epoch and earlier delete tokens stop matching",
                         path.display()
                     ),
                 )
@@ -1769,12 +1811,13 @@ fn read_sequence_bound(dir: &Path) -> Result<Option<u64>> {
 }
 
 /// Replace the bound durably (write, sync, rename, sync the directory).
-fn write_sequence_bound(dir: &Path, bound: u64) -> Result<()> {
+fn write_sequence_bound(dir: &Path, bound: u64, epoch: u64) -> Result<()> {
     let tmp = dir.join(format!("{SEQUENCE_BOUND_FILE}.tmp"));
     {
         let f = File::create(&tmp)?;
-        let crc = crate::format::crc32c(bound.to_string().as_bytes());
-        std::io::Write::write_all(&mut &f, format!("{bound} {crc:08x}\n").as_bytes())?;
+        let body = format!("{bound} {epoch}");
+        let crc = crate::format::crc32c(body.as_bytes());
+        std::io::Write::write_all(&mut &f, format!("{body} {crc:08x}\n").as_bytes())?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, dir.join(SEQUENCE_BOUND_FILE))?;

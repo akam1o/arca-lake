@@ -512,6 +512,7 @@ impl pb::storage_node_server::StorageNode for GrpcServer {
             crc32c: crc,
             bytes_received: received,
             sequence: 0,
+            store_epoch: 0,
         }))
     }
 

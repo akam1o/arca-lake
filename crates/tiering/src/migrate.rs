@@ -7,7 +7,7 @@
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::records::{ChunkRecord, GenId, GroupRecord};
 use arca_lake_protocol::client::concat_frames;
-use arca_lake_protocol::client::{NodeClients, ShardRef};
+use arca_lake_protocol::client::{NodeClients, RecordToken, ShardRef};
 
 use crate::TierError;
 use crate::durable::{Coders, encode_chunk, read_chunk};
@@ -211,7 +211,7 @@ async fn write_and_verify(
     target: &GroupRecord,
     record: &ChunkRecord,
     bytes: &[u8],
-) -> Result<Vec<(String, ShardRef, u64)>, TierError> {
+) -> Result<Vec<(String, ShardRef, RecordToken)>, TierError> {
     let target_coder = coders.get(&target.scheme, target.data_shards, target.parity_shards)?;
     let k = usize::from(target.data_shards);
     let (_, shards) = encode_chunk(target_coder.as_ref(), k, bytes)?;
@@ -223,7 +223,7 @@ async fn write_and_verify(
             shards.len()
         )));
     }
-    let mut written: Vec<(String, ShardRef, u64)> = Vec::new();
+    let mut written: Vec<(String, ShardRef, RecordToken)> = Vec::new();
     for (i, member) in target.members.iter().enumerate() {
         let addr = addr_of(member.node_id)
             .ok_or_else(|| TierError::Other(format!("unknown node {}", member.node_id)))?;
@@ -246,7 +246,7 @@ async fn write_and_verify(
                 "target {addr} stored shard {i} with a different checksum"
             )));
         }
-        written.push((addr, shard, resp.sequence));
+        written.push((addr, shard, RecordToken::of_put(&resp)));
     }
     for (i, (addr, shard, _)) in written.iter().enumerate() {
         let back = clients
@@ -269,11 +269,11 @@ async fn write_and_verify(
 /// Delete the target shards this attempt wrote, each only while the node
 /// still holds the record this attempt wrote (a later write under the same
 /// key is left alone, Phase 3.5 audit CON-6).
-async fn cleanup(clients: &NodeClients, written: &[(String, ShardRef, u64)], epoch: u64) {
+async fn cleanup(clients: &NodeClients, written: &[(String, ShardRef, RecordToken)], epoch: u64) {
     for (addr, shard, sequence) in written {
         // 0: an older node, where the delete would be unconditional
         // (CON-12): left to reconciliation after the node's upgrade.
-        if *sequence != 0 {
+        if sequence.is_some() {
             let _ = clients
                 .delete_shard_if(addr, *shard, epoch, *sequence)
                 .await;

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use arca_lake_protocol::client::{NodeClients, ShardRef};
+use arca_lake_protocol::client::{NodeClients, RecordToken, ShardRef};
 use arca_lake_protocol::storage::v1::HealthRequest;
 use arca_lake_storage::faults::{self, FaultOutcome, IoOp};
 use arca_lake_storage_node::{NodeConfig, serve};
@@ -123,7 +123,7 @@ async fn a_delete_decided_on_an_old_record_does_not_remove_a_newer_one() {
         .await
         .unwrap();
     let listed = page.sequences[&shard(5)];
-    assert_eq!(listed, first.sequence);
+    assert_eq!(listed, RecordToken::of_put(&first));
     let again = Bytes::from(vec![2u8; 4096]);
     let second = c
         .put_shard(&addr, shard(5), 0, again.clone(), 1024)
@@ -136,7 +136,7 @@ async fn a_delete_decided_on_an_old_record_does_not_remove_a_newer_one() {
         .unwrap_err();
     assert!(NodeClients::is_changed(&e), "{e}");
     assert_eq!(c.get_shard(&addr, shard(5), 0, 0).await.unwrap(), again);
-    c.delete_shard_if(&addr, shard(5), 0, second.sequence)
+    c.delete_shard_if(&addr, shard(5), 0, RecordToken::of_put(&second))
         .await
         .unwrap();
     assert!(c.get_shard(&addr, shard(5), 0, 0).await.is_err());
@@ -193,5 +193,47 @@ async fn quarantined_shards_beyond_one_page_are_listed() {
     }
     assert_eq!(live, vec![1]);
     assert_eq!(quarantined, vec![2, 3, 4, 5, 6]);
+    n.shutdown().await;
+}
+
+/// A node whose store lost its sequence bound takes a new store epoch:
+/// delete tokens handed out before the restart are refused (nothing is
+/// deleted), and a new listing hands out tokens that work (Phase 3.5 audit
+/// CON-16: without the bound the store could hand an old sequence out
+/// again and an old token would match a new record).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tokens_from_before_a_lost_sequence_bound_are_refused() {
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let c = NodeClients::new(Duration::from_secs(5));
+    let addr = n.local_addr.to_string();
+    let put = c
+        .put_shard(&addr, shard(6), 0, Bytes::from(vec![6u8; 4096]), 1024)
+        .await
+        .unwrap();
+    let old = RecordToken::of_put(&put);
+    n.shutdown().await;
+    std::fs::remove_file(dir.path().join("sequence.bound")).unwrap();
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let addr = n.local_addr.to_string();
+    let e = c
+        .delete_shard_if(&addr, shard(6), 0, old)
+        .await
+        .unwrap_err();
+    assert!(NodeClients::is_changed(&e), "{e}");
+    assert!(c.get_shard(&addr, shard(6), 0, 0).await.is_ok());
+    let page = c
+        .list_shards_page_with(&addr, 1, None, 100, false)
+        .await
+        .unwrap();
+    let fresh = page.sequences[&shard(6)];
+    assert_ne!(fresh.store_epoch, old.store_epoch);
+    c.delete_shard_if(&addr, shard(6), 0, fresh).await.unwrap();
+    assert!(c.get_shard(&addr, shard(6), 0, 0).await.is_err());
     n.shutdown().await;
 }

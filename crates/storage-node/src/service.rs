@@ -492,6 +492,7 @@ impl StorageNode for StorageNodeService {
             crc32c: crc,
             bytes_received: header.payload_len,
             sequence,
+            store_epoch: self.store.store_epoch(),
         }))
     }
 
@@ -570,6 +571,13 @@ impl StorageNode for StorageNodeService {
         self.check_epoch(key.group_id, req.group_epoch)?;
         let store = Arc::clone(&self.store);
         let if_sequence = req.if_sequence;
+        // A token of another store epoch names a sequence this store may
+        // have handed out again since (Phase 3.5 audit CON-16): refused.
+        if if_sequence != 0 && req.if_store_epoch != store.store_epoch() {
+            return Err(tonic::Status::aborted(
+                "delete token of another store epoch",
+            ));
+        }
         let deleted = tokio::task::spawn_blocking(move || {
             if if_sequence == 0 {
                 store.delete(key).map(|()| true)
@@ -631,6 +639,7 @@ impl StorageNode for StorageNodeService {
         let next = more
             .then(|| page.last().map(|(k, _, _, _)| Self::pb_key(k)))
             .flatten();
+        let store_epoch = self.store.store_epoch();
         let entries = page
             .into_iter()
             .map(|(k, len, quarantined, sequence)| pb::ShardEntry {
@@ -638,6 +647,7 @@ impl StorageNode for StorageNodeService {
                 payload_len: u64::from(len),
                 quarantined,
                 sequence,
+                store_epoch,
             })
             .collect();
         Ok(tonic::Response::new(pb::ListShardsResponse {

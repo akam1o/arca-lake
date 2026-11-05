@@ -650,20 +650,24 @@ fn a_damaged_sequence_bound_refuses_the_open() {
 }
 
 /// A bound that still parses but does not match its checksum is refused
-/// too; removing the file is the recovery, and the store then skips far
-/// beyond every sequence it can have handed out (Phase 3.5 audit CON-14).
+/// too; removing the file is the recovery, and the store then takes a new
+/// epoch, so delete tokens handed out before cannot match whatever
+/// sequences it hands out again (Phase 3.5 audit CON-14, CON-16).
 #[test]
-fn a_low_bound_is_refused_and_a_removed_one_skips_ahead() {
+fn a_bad_checksum_is_refused_and_a_removed_bound_changes_the_epoch() {
     let dir = tempfile::tempdir().unwrap();
     let (store, _) = Store::open(config(dir.path())).unwrap();
-    let old = store.put_sequenced(key(9), &payload(9)).unwrap();
+    store.put(key(9), &payload(9)).unwrap();
+    let epoch = store.store_epoch();
+    drop(store);
+    let (store, _) = Store::open(config(dir.path())).unwrap();
+    assert_eq!(store.store_epoch(), epoch, "kept across a clean reopen");
     drop(store);
     let bound = dir.path().join("sequence.bound");
-    std::fs::write(&bound, "1\n").unwrap();
+    std::fs::write(&bound, format!("5 {epoch} deadbeef\n")).unwrap();
     assert!(Store::open(config(dir.path())).is_err());
     std::fs::remove_file(&bound).unwrap();
     let (store, _) = Store::open(config(dir.path())).unwrap();
-    let new = store.put_sequenced(key(9), &payload(10)).unwrap();
-    assert!(new > old + (1 << 40), "{new} after {old}");
-    assert!(!store.delete_if(key(9), old).unwrap());
+    assert_ne!(store.store_epoch(), epoch);
+    assert_eq!(store.get(&key(9), None).unwrap(), payload(9));
 }

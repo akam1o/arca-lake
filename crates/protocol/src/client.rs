@@ -33,6 +33,40 @@ pub struct ShardRef {
     pub shard_index: u16,
 }
 
+/// What a conditional delete names: the record's sequence on the node and
+/// the node store's epoch (Phase 3.5 audit CON-16). `sequence == 0` (an
+/// older node, or [`RecordToken::NONE`]) is no token at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct RecordToken {
+    /// Store epoch.
+    pub store_epoch: u64,
+    /// Record sequence.
+    pub sequence: u64,
+}
+
+impl RecordToken {
+    /// No token: an unconditional delete.
+    pub const NONE: Self = Self {
+        store_epoch: 0,
+        sequence: 0,
+    };
+
+    /// The token of a write, from its response.
+    #[must_use]
+    pub fn of_put(r: &pb::PutShardResponse) -> Self {
+        Self {
+            store_epoch: r.store_epoch,
+            sequence: r.sequence,
+        }
+    }
+
+    /// Whether the node handed out a token (newer nodes always do).
+    #[must_use]
+    pub fn is_some(&self) -> bool {
+        self.sequence != 0
+    }
+}
+
 /// One page of a shard listing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShardPage {
@@ -43,9 +77,8 @@ pub struct ShardPage {
     pub quarantined: Vec<(ShardRef, u64)>,
     /// Cursor for the next page, if any.
     pub next: Option<ShardRef>,
-    /// The node's record sequence of each listed shard (absent from an
-    /// older node): what a conditional delete of it names.
-    pub sequences: std::collections::HashMap<ShardRef, u64>,
+    /// The delete token of each listed shard (absent from an older node).
+    pub sequences: std::collections::HashMap<ShardRef, RecordToken>,
 }
 
 /// Classification of one shard by the node's deep verification
@@ -1083,12 +1116,14 @@ impl NodeClients {
         shard: ShardRef,
         epoch: u64,
     ) -> Result<(), tonic::Status> {
-        self.delete_shard_if(addr, shard, epoch, 0).await
+        self.delete_shard_if(addr, shard, epoch, RecordToken::NONE)
+            .await
     }
 
-    /// Delete a shard only if the node's newest record of it has sequence
-    /// `if_sequence` (0: unconditionally). A changed record answers
-    /// `ABORTED` ([`Self::is_changed`]).
+    /// Delete a shard only if the node's newest record of it is the one
+    /// `token` names ([`RecordToken::NONE`]: unconditionally). A changed
+    /// record or a store of another epoch answers `ABORTED`
+    /// ([`Self::is_changed`]).
     ///
     /// # Errors
     ///
@@ -1098,7 +1133,7 @@ impl NodeClients {
         addr: &str,
         shard: ShardRef,
         epoch: u64,
-        if_sequence: u64,
+        token: RecordToken,
     ) -> Result<(), tonic::Status> {
         let ctx = RpcContext {
             addr,
@@ -1117,7 +1152,8 @@ impl NodeClients {
                         .incarnation()
                         .map(|i| Bytes::copy_from_slice(&i))
                         .unwrap_or_default(),
-                    if_sequence,
+                    if_sequence: token.sequence,
+                    if_store_epoch: token.store_epoch,
                 };
                 client.delete_shard(req).await?;
                 Ok(())
@@ -1182,7 +1218,13 @@ impl NodeClients {
                         continue;
                     };
                     if e.sequence != 0 {
-                        sequences.insert(key, e.sequence);
+                        sequences.insert(
+                            key,
+                            RecordToken {
+                                store_epoch: e.store_epoch,
+                                sequence: e.sequence,
+                            },
+                        );
                     }
                     if e.quarantined {
                         quarantined.push((key, e.payload_len));

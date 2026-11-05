@@ -39,6 +39,8 @@ message PutShardResponse {
   // The stored record's sequence on this node (0 from an older node): what
   // a conditional DeleteShard of this write names.
   uint64 sequence = 3;
+  // The node store's epoch: with `sequence`, the delete token of this write.
+  uint64 store_epoch = 4;
 }
 
 message GetShardRequest {
@@ -67,6 +69,10 @@ message DeleteShardRequest {
   // written since under the same key (Phase 3.5). An older node ignores
   // it and deletes unconditionally.
   uint64 if_sequence = 5;
+  // With `if_sequence`: the store epoch the token was handed out under. A
+  // node whose store took another epoch (it lost track of the sequences it
+  // handed out) answers ABORTED.
+  uint64 if_store_epoch = 6;
 }
 
 message DeleteShardResponse {}
@@ -94,6 +100,8 @@ message ShardEntry {
   bool quarantined = 3;
   // The record's sequence on this node (0 from an older node).
   uint64 sequence = 4;
+  // The node store's epoch (see DeleteShardRequest.if_store_epoch).
+  uint64 store_epoch = 5;
 }
 
 message ListShardsResponse {
