@@ -73,7 +73,10 @@ jobs:
       # Kept outside ~/.cache/arca-lake, which the tools cache step archives.
       - name: build in a target directory that outlives the checkout
         run: |
-          dir="$HOME/.cache/arca-lake-target"
+          # One directory per runner: jobs of two runners on one host must
+          # not share it (one job's size cleanup deleted files another job
+          # was linking).
+          dir="$HOME/.cache/arca-lake-target-${RUNNER_NAME// /_}"
           # Start over once the directory has grown past 20 GB.
           if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
@@ -171,7 +174,10 @@ jobs:
       # Kept outside ~/.cache/arca-lake, which the tools cache step archives.
       - name: build in a target directory that outlives the checkout
         run: |
-          dir="$HOME/.cache/arca-lake-target"
+          # One directory per runner: jobs of two runners on one host must
+          # not share it (one job's size cleanup deleted files another job
+          # was linking).
+          dir="$HOME/.cache/arca-lake-target-${RUNNER_NAME// /_}"
           # Start over once the directory has grown past 20 GB.
           if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
@@ -306,7 +312,10 @@ jobs:
       # Kept outside ~/.cache/arca-lake, which the tools cache step archives.
       - name: build in a target directory that outlives the checkout
         run: |
-          dir="$HOME/.cache/arca-lake-target"
+          # One directory per runner: jobs of two runners on one host must
+          # not share it (one job's size cleanup deleted files another job
+          # was linking).
+          dir="$HOME/.cache/arca-lake-target-${RUNNER_NAME// /_}"
           # Start over once the directory has grown past 20 GB.
           if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
