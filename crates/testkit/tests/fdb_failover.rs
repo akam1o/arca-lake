@@ -212,13 +212,29 @@ async fn scenario() {
     let path = std::env::var("ARCA_FDB_CLUSTER_FILE").ok();
     // A short timeout so that a lost quorum fails fast (test configuration).
     let kv = FdbKv::open_with_timeout(path.as_deref(), 5_000).expect("open FoundationDB");
-    kv.clear_range_blocking(&arca_lake_metadata::keys::all_range())
-        .await
-        .unwrap();
     // An earlier scenario's chaos may have restarted processes moments
-    // ago: cluster setup (group creation is not idempotent, so its unknown
-    // outcomes are not retried) waits until commits go through again (one
-    // setup failed with 1021 right after a restart).
+    // ago: setup waits until commits go through again (two setups failed
+    // with 1021 right after a restart, once in the clear below, once in
+    // group creation, which is not idempotent and so is not retried). The
+    // clear is idempotent: an unknown outcome is retried.
+    settle(&kv).await;
+    let mut cleared = false;
+    for _ in 0..5 {
+        match kv
+            .clear_range_blocking(&arca_lake_metadata::keys::all_range())
+            .await
+        {
+            Ok(()) => {
+                cleared = true;
+                break;
+            }
+            Err(e) => {
+                eprintln!("setup clear: {e}; settling again");
+                settle(&kv).await;
+            }
+        }
+    }
+    assert!(cleared, "the setup clear never committed");
     settle(&kv).await;
     let mut c = TestCluster::start_with(
         Arc::new(kv),
@@ -812,13 +828,29 @@ async fn recovery_scenario() {
     };
     let path = std::env::var("ARCA_FDB_CLUSTER_FILE").ok();
     let kv = FdbKv::open_with_timeout(path.as_deref(), 5_000).expect("open FoundationDB");
-    kv.clear_range_blocking(&arca_lake_metadata::keys::all_range())
-        .await
-        .unwrap();
     // An earlier scenario's chaos may have restarted processes moments
-    // ago: cluster setup (group creation is not idempotent, so its unknown
-    // outcomes are not retried) waits until commits go through again (one
-    // setup failed with 1021 right after a restart).
+    // ago: setup waits until commits go through again (two setups failed
+    // with 1021 right after a restart, once in the clear below, once in
+    // group creation, which is not idempotent and so is not retried). The
+    // clear is idempotent: an unknown outcome is retried.
+    settle(&kv).await;
+    let mut cleared = false;
+    for _ in 0..5 {
+        match kv
+            .clear_range_blocking(&arca_lake_metadata::keys::all_range())
+            .await
+        {
+            Ok(()) => {
+                cleared = true;
+                break;
+            }
+            Err(e) => {
+                eprintln!("setup clear: {e}; settling again");
+                settle(&kv).await;
+            }
+        }
+    }
+    assert!(cleared, "the setup clear never committed");
     settle(&kv).await;
     let mut c = TestCluster::start_with(
         Arc::new(kv),
