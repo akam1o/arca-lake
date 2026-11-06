@@ -405,7 +405,7 @@ jobs:
           ARCA_FDB_FAILOVER: "1"
           ARCA_CHAOS_DOCKER: "1"
           ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
-        run: cargo test -p arca-lake-testkit --features fdb --test it fdb_failover:: -- --nocapture --test-threads=1
+        run: "cargo test -p arca-lake-testkit --features fdb --test it fdb_failover:: -- --nocapture --test-threads=1"
       - name: stop the cluster
         if: always()
         run: sudo docker rm -f arca-fdb >/dev/null 2>&1 || true
