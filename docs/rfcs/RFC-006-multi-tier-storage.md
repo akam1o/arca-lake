@@ -447,7 +447,7 @@ Measurements belong to RFC-009.
 
 ## 11. Acceptance criteria and Phase 2 status
 
-Phase 2 tests: `crates/testkit/tests/cache.rs` (in-memory) and
+Phase 2 tests: `crates/testkit/tests/it/cache.rs` (in-memory) and
 `cache_fdb.rs` (FoundationDB, CI job `fdb` and `deploy/dev/fdb-test.sh`),
 `tiering.rs`, and `crates/metadata/tests/cache_model.rs`. Decisions are
 recorded in ADR-0009; the roadmap page is `docs/roadmap/phase-2.md`.

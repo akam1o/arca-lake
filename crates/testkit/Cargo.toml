@@ -10,7 +10,7 @@ publish = false
 
 [features]
 default = []
-# Run the end-to-end suite on FoundationDB (`tests/e2e_fdb.rs`).
+# Run the end-to-end suite on FoundationDB (`tests/it/e2e_fdb.rs`).
 fdb = ["arca-lake-metadata/fdb"]
 
 [dependencies]
@@ -38,36 +38,8 @@ tracing.workspace = true
 aws-sdk-s3.workspace = true
 aws-credential-types.workspace = true
 
-[[test]]
-name = "e2e_fdb"
-required-features = ["fdb"]
-
-[[test]]
-name = "faults_fdb"
-required-features = ["fdb"]
-
-[[test]]
-name = "fdb_failover"
-required-features = ["fdb"]
-
-[[test]]
-name = "cache_fdb"
-required-features = ["fdb"]
-
-[[test]]
-name = "cache_ec_fdb"
-required-features = ["fdb"]
-
 [lints]
 workspace = true
-
-[[test]]
-name = "mixed_version"
-required-features = ["fdb"]
-
-[[test]]
-name = "fdb_restore"
-required-features = ["fdb"]
 
 [[test]]
 name = "fdb_tls"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the FoundationDB failover test against a three-process cluster
-# (`crates/testkit/tests/fdb_failover.rs`).
+# (`crates/testkit/tests/it/fdb_failover.rs`).
 #
 # One container (arca-fdb) runs three fdbserver processes through
 # fdb-multi-entrypoint.sh; the cluster is configured `double` with three
@@ -86,7 +86,7 @@ docker run -d --name "$TEST_CONTAINER" \
     apt-get update -qq >/dev/null
     apt-get install -y -qq "$deb" libclang-dev >/dev/null
     echo "$FDB_CLUSTER_FILE_CONTENTS" > /tmp/fdb.cluster
-    exec cargo test -p arca-lake-testkit --features fdb --test fdb_failover -- --nocapture --test-threads=1
+    exec cargo test -p arca-lake-testkit --features fdb --test it fdb_failover:: -- --nocapture --test-threads=1
   ' >/dev/null
 
 # Chaos driver: answer kill/start requests until the test container exits.

@@ -737,8 +737,8 @@ mod fdb {
 }
 
 /// Phase 3.4 §10 measurement (run explicitly, release build):
-/// `cargo test --release -p arca-lake-testkit --test membership_faults
-/// measure_member_move -- --ignored --nocapture`. One member of a 4+2
+/// `cargo test --release -p arca-lake-testkit --test it
+/// membership_faults::measure_member_move -- --ignored --nocapture`. One member of a 4+2
 /// group with `CHUNKS` chunks of 1 MiB is moved to a spare node by EC
 /// reconstruction (k shard reads per chunk) and by direct copy from the
 /// leaving member (one read per shard; falls back to reconstruction for a

@@ -116,7 +116,7 @@ request lost before apply, store unavailable, and since Phase 3.5 commit
 timeouts after apply, without apply and delayed (`apply_delayed` commits a
 held transaction later, against whatever changed meanwhile), plus
 `interleave_next` (a writer between an applied commit and its lost reply).
-`crates/testkit/tests/commit_timeouts.rs` hits every commit of UploadPart,
+`crates/testkit/tests/it/commit_timeouts.rs` hits every commit of UploadPart,
 Complete, the gateway's abort, multipart Abort and DELETE with each outcome
 and requires nothing lost, nothing leaked, nothing reported failed that
 succeeded. Real FoundationDB: `fdb_failover.rs` (process loss, quorum

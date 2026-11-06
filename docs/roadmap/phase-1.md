@@ -27,7 +27,7 @@ Durability and consistency come first; performance work is Phase 4.
 
 ## What the integration tests verify
 
-Run with `cargo test -p arca-lake-testkit --test e2e` (the AWS CLI test
+Run with `cargo test -p arca-lake-testkit --test it e2e::` (the AWS CLI test
 skips when `aws` is not installed).
 
 | Area | Test | Verified behaviour |

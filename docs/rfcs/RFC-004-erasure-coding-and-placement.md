@@ -380,7 +380,7 @@ backend, real storage engines and gRPC):
 | `m_ack < m` (under-protected chunks) | Not implemented; `m_ack = m` enforced (OD-17) |
 | Failure-domain-aware group creation | *Verified* at unit level (`arca-lake-placement`); E2E clusters use one device per host |
 | Capacity-weighted group choice | Not implemented (free capacity is not reported yet; groups are rotated) |
-| Repair resumable after controller crash; stale repair stopped by a second membership change; writes during repair; DELETE during repair | *Verified* (`crates/testkit/tests/repair.rs`) |
+| Repair resumable after controller crash; stale repair stopped by a second membership change; writes during repair; DELETE during repair | *Verified* (`crates/testkit/tests/it/repair.rs`) |
 | Repair completion verified (existence, lengths, checksums of the rebuilt member, chunk records' scheme/placement/CRC) | *Verified* (`repair_completion.rs`) |
 | Automatic repair of unhealthy members by the controller process | *Verified* in-process (`controller.rs::health_monitor_triggers_auto_repair_…`) |
 | Repair rate limiting and prioritization | Not implemented |

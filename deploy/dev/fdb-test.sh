@@ -5,7 +5,7 @@
 # that shares its network namespace, installs the FoundationDB client
 # library inside it, and runs
 # the FoundationDB-backed metadata protocol tests and the end-to-end suite
-# (`crates/testkit/tests/e2e_fdb.rs`).
+# (`crates/testkit/tests/it/e2e_fdb.rs`).
 #
 # No image is built: some Docker-compatible runtimes do not support
 # `docker build` well, so the client library is installed at container start
@@ -88,8 +88,6 @@ docker run --rm \
     # One test binary per invocation: linking two of them in parallel has
     # been seen to exhaust the memory of a small container runtime.
     cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1 "$@"
-    cargo test -p arca-lake-testkit --features fdb --test e2e_fdb -- --nocapture --test-threads=1 "$@"
-    cargo test -p arca-lake-testkit --features fdb --test faults_fdb -- --nocapture --test-threads=1 "$@"
-    cargo test -p arca-lake-testkit --features fdb --test cache_fdb -- --nocapture --test-threads=1 "$@"
-    exec cargo test -p arca-lake-testkit --features fdb --test cache_ec_fdb -- --nocapture --test-threads=1 "$@"
+    exec cargo test -p arca-lake-testkit --features fdb --test it -- --nocapture --test-threads=1 \
+      e2e_fdb:: faults_fdb:: cache_fdb:: cache_ec_fdb:: "$@"
   ' -- "$@"

@@ -117,11 +117,10 @@ jobs:
           echo "$dir" >> "$GITHUB_PATH"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features
+      # No doc tests: the workspace has none, and compiling the empty
+      # doctest harness of every crate took one to two and a half minutes.
       - name: test (all features)
-        run: |
-          set -euo pipefail
-          cargo nextest run --workspace --all-features --no-fail-fast
-          cargo test --workspace --all-features --doc
+        run: cargo nextest run --workspace --all-features --no-fail-fast
       - run: cargo doc --workspace --no-deps --all-features
 
   fdb:
@@ -228,7 +227,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
-          cargo test -p arca-lake-testkit --features fdb --test e2e_fdb --test faults_fdb --test cache_fdb --test cache_ec_fdb -- --nocapture --test-threads=1
+          cargo test -p arca-lake-testkit --features fdb --test it -- --nocapture --test-threads=1 e2e_fdb:: faults_fdb:: cache_fdb:: cache_ec_fdb::
       - name: mixed-version rolling upgrade (two binaries, RFC-014 §5.7)
         env:
           ARCA_FDB_TESTS: "1"
@@ -241,7 +240,7 @@ jobs:
           cargo build -p arca-lake --features fdb,version-bump --target-dir "$CARGO_TARGET_DIR/bump"
           ARCA_BIN_OLD="$CARGO_TARGET_DIR/debug/arca-lake" \
           ARCA_BIN_NEW="$CARGO_TARGET_DIR/bump/debug/arca-lake" \
-            cargo test -p arca-lake-testkit --features fdb --test mixed_version -- --nocapture --test-threads=1
+            cargo test -p arca-lake-testkit --features fdb --test it mixed_version:: -- --nocapture --test-threads=1
       - name: metadata restore drill (fdbbackup/fdbrestore, RFC-015 §5.3.1)
         env:
           ARCA_FDB_TESTS: "1"
@@ -255,7 +254,7 @@ jobs:
           sudo docker exec "$FDB_CONTAINER" mkdir -p /var/fdb/backup
           sudo docker exec -d "$FDB_CONTAINER" backup_agent -C /var/fdb/fdb.cluster
           ARCA_FDB_BACKUP_CMD="sudo docker exec $FDB_CONTAINER" \
-            cargo test -p arca-lake-testkit --features fdb --test fdb_restore -- --nocapture --test-threads=1
+            cargo test -p arca-lake-testkit --features fdb --test it fdb_restore:: -- --nocapture --test-threads=1
       - name: stop FoundationDB server
         if: always()
         run: sudo docker rm -f "$FDB_CONTAINER" >/dev/null 2>&1 || true
@@ -393,20 +392,20 @@ jobs:
           sudo docker exec arca-fdb mkdir -p /var/fdb/backup
           sudo docker exec -d arca-fdb backup_agent -C /var/fdb/fdb.cluster
           ARCA_FDB_BACKUP_CMD="sudo docker exec arca-fdb" \
-            cargo test -p arca-lake-testkit --features fdb --test fdb_restore -- --nocapture --test-threads=1
+            cargo test -p arca-lake-testkit --features fdb --test it fdb_restore:: -- --nocapture --test-threads=1
       - name: member moves under FoundationDB process and quorum loss (Phase 3.4 §4)
         env:
           ARCA_FDB_TESTS: "1"
           ARCA_CHAOS_DOCKER: "1"
           ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
-        run: "cargo test -p arca-lake-testkit --features fdb --test membership_faults fdb:: -- --nocapture --test-threads=1"
+        run: "cargo test -p arca-lake-testkit --features fdb --test it membership_faults::fdb:: -- --nocapture --test-threads=1"
       - name: run the failover test
         env:
           ARCA_FDB_TESTS: "1"
           ARCA_FDB_FAILOVER: "1"
           ARCA_CHAOS_DOCKER: "1"
           ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
-        run: cargo test -p arca-lake-testkit --features fdb --test fdb_failover -- --nocapture --test-threads=1
+        run: cargo test -p arca-lake-testkit --features fdb --test it fdb_failover:: -- --nocapture --test-threads=1
       - name: stop the cluster
         if: always()
         run: sudo docker rm -f arca-fdb >/dev/null 2>&1 || true
