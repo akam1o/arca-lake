@@ -197,7 +197,7 @@ jobs:
         run: |
           set -euo pipefail
           docker() { sudo docker "$@"; }
-          docker rm -f "$FDB_CONTAINER" >/dev/null 2>&1 || true
+          docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
           # Bridge network, with the server advertising its container
           # address (reachable from the runner host): no port shared with a
           # concurrent run on the same host. Same topology as the failover
@@ -257,7 +257,7 @@ jobs:
             cargo test -p arca-lake-testkit --features fdb --test it fdb_restore:: -- --nocapture --test-threads=1
       - name: stop FoundationDB server
         if: always()
-        run: sudo docker rm -f "$FDB_CONTAINER" >/dev/null 2>&1 || true
+        run: sudo docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
 
   fdb-failover:
     name: FoundationDB failover (3 processes)
@@ -338,7 +338,7 @@ jobs:
           # Bridge network: the processes advertise the container's address,
           # which the runner host can reach directly (same topology as the
           # local script, where fdbcli and the test container reach it).
-          docker rm -f arca-fdb >/dev/null 2>&1 || true
+          docker rm -f -v arca-fdb >/dev/null 2>&1 || true
           docker run -d --name arca-fdb \
             -v "$PWD/deploy/dev/fdb-multi-entrypoint.sh:/entry.sh:ro" \
             --entrypoint bash "foundationdb/foundationdb:${FDB_VERSION}" /entry.sh
@@ -408,7 +408,7 @@ jobs:
         run: "cargo test -p arca-lake-testkit --features fdb --test it fdb_failover:: -- --nocapture --test-threads=1"
       - name: stop the cluster
         if: always()
-        run: sudo docker rm -f arca-fdb >/dev/null 2>&1 || true
+        run: sudo docker rm -f -v arca-fdb >/dev/null 2>&1 || true
 
   # Four short checks in one job: their work takes seconds, and every job
   # on the runner costs about 20 s of setup and teardown.
