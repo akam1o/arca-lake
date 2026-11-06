@@ -54,6 +54,9 @@ for mode in $MODES; do
   base="$mode"; extra=()
   case "$mode" in
     overwrite-get) base=overwrite; extra=(--get-pct 50) ;;
+    # Parts of the gateway's minimum part size (the soak layout's
+    # --multipart-min-part-bytes): smaller ones fail Complete.
+    multipart) extra=(--size $((1 << 20))) ;;
     overwrite-scrub) base=overwrite
       # Scrub every durable group while the load runs.
       for g in 1 2 3 4 5 6; do

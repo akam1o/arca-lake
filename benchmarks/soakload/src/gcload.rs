@@ -93,37 +93,19 @@ async fn one(c: &Client, a: &Args, k: u64, x: u64, data: &bytes::Bytes) -> Resul
                 .await
                 .map_err(|x| e(&x))?;
             let id = up.upload_id().unwrap_or_default().to_string();
-            let mut parts = Vec::new();
-            for n in 1..=2 {
-                let p = c
-                    .upload_part()
+            let r = multipart_body(c, a, &key, &id, data, e).await;
+            if r.is_err() {
+                // An upload left open keeps its parts (S3 semantics): abort
+                // it, as a well-behaved client does.
+                let _ = c
+                    .abort_multipart_upload()
                     .bucket(&a.bucket)
                     .key(&key)
                     .upload_id(&id)
-                    .part_number(n)
-                    .body(ByteStream::from(data.clone()))
                     .send()
-                    .await
-                    .map_err(|x| e(&x))?;
-                parts.push(
-                    CompletedPart::builder()
-                        .part_number(n)
-                        .e_tag(p.e_tag().unwrap_or_default())
-                        .build(),
-                );
+                    .await;
             }
-            c.complete_multipart_upload()
-                .bucket(&a.bucket)
-                .key(&key)
-                .upload_id(&id)
-                .multipart_upload(
-                    CompletedMultipartUpload::builder()
-                        .set_parts(Some(parts))
-                        .build(),
-                )
-                .send()
-                .await
-                .map_err(|x| e(&x))?;
+            r?;
         }
         _ => {
             c.put_object()
@@ -280,4 +262,46 @@ async fn main() {
             })
         );
     }
+}
+
+async fn multipart_body(
+    c: &Client,
+    a: &Args,
+    key: &str,
+    id: &str,
+    data: &bytes::Bytes,
+    e: impl Fn(&dyn std::fmt::Debug) -> String,
+) -> Result<(), String> {
+    let mut parts = Vec::new();
+    for n in 1..=2 {
+        let p = c
+            .upload_part()
+            .bucket(&a.bucket)
+            .key(key)
+            .upload_id(id)
+            .part_number(n)
+            .body(ByteStream::from(data.clone()))
+            .send()
+            .await
+            .map_err(|x| e(&x))?;
+        parts.push(
+            CompletedPart::builder()
+                .part_number(n)
+                .e_tag(p.e_tag().unwrap_or_default())
+                .build(),
+        );
+    }
+    c.complete_multipart_upload()
+        .bucket(&a.bucket)
+        .key(key)
+        .upload_id(id)
+        .multipart_upload(
+            CompletedMultipartUpload::builder()
+                .set_parts(Some(parts))
+                .build(),
+        )
+        .send()
+        .await
+        .map_err(|x| e(&x))?;
+    Ok(())
 }
