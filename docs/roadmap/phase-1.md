@@ -27,8 +27,9 @@ Durability and consistency come first; performance work is Phase 4.
 
 ## What the integration tests verify
 
-Run with `cargo test -p arca-lake-testkit --test it e2e::` (the AWS CLI test
-skips when `aws` is not installed).
+Run with `cargo test -p arca-lake-testkit --test it e2e` (the `e2e` module;
+the `e2e_fdb` tests the filter also selects skip without FoundationDB, and
+the AWS CLI test skips when `aws` is not installed).
 
 | Area | Test | Verified behaviour |
 | --- | --- | --- |
