@@ -528,10 +528,15 @@ Alerts `ArcaNodeHeapGrowing` (heap in use rising more than 8 MiB/h for
 `arca_controller_gc_backlog` is the retired-generation queue after the
 last pass (counted up to 200 000); `_oldest_age_seconds` its oldest entry.
 In steady state the oldest age stays near the grace period plus the GC
-interval and the backlog near the retirement rate times that. An oldest
-age growing well beyond it means GC is not keeping up: see the capacity
-measurements in the Phase 3.5 report, lower the overwrite/delete rate or
-add controller I/O capacity; space is reclaimed once it drains.
+interval and the backlog near the retirement rate times that. GC is not
+keeping up when the backlog keeps growing (`ArcaGcBacklogGrowing`) or the
+oldest age grows well beyond that (`ArcaGcFallingBehind`). The oldest age
+alone can stay near the grace period while the backlog grows: a multipart
+root's parts are retired only once the root is collected. There is no
+admission control: retired data holds its space until collected, so the
+device alerts (`ArcaDeviceFilling`, `ArcaDeviceFull`) follow. Lower the
+overwrite/delete rate (see the Phase 3.5 capacity measurements) or add
+device bandwidth; space is reclaimed once the backlog drains.
 
 ## 11. Alternatives considered
 

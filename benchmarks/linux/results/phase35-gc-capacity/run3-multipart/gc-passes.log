@@ -1,0 +1,16 @@
+2026-11-06T14:23:21.697669Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:24:21.742875Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:25:22.294393Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:26:23.052742Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:27:24.582434Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:28:26.536696Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:29:31.945035Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 109, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:30:41.442174Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 272, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:31:51.848972Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 387, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:32:57.881110Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 678, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:34:04.601413Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 1000, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:34:05.003258Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 142, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:35:15.729448Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 1000, shards_deleted: 654, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:35:18.100110Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 516, shards_deleted: 0, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:36:29.683682Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 1000, shards_deleted: 1632, skipped_referenced: 0, deferred: 0 }
+2026-11-06T14:40:40.563053Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 205, shards_deleted: 0, skipped_referenced: 0, deferred: 775 }

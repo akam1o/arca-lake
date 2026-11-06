@@ -187,3 +187,14 @@ groups:
         annotations:
           summary: "The oldest retired generation has waited more than an hour for GC"
           runbook: "RFC-013 §10.10"
+      - alert: ArcaGcBacklogGrowing
+        # The retired queue growing for half an hour: retirements outpace
+        # GC. The oldest entry's age alone misses it when retirements arrive
+        # in steps (a multipart root's parts enter the queue only once the
+        # root is collected), R-64.
+        expr: deriv(max(arca_controller_gc_backlog)[30m:1m]) > 0 and max(arca_controller_gc_backlog) > 10000
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "The GC backlog has grown for 30 minutes; disk space is not reclaimed as fast as it is retired"
+          runbook: "RFC-013 §10.10"

@@ -1,0 +1,5 @@
+{"achieved_ops_s":19.995909305943393,"end_unix_s":1793916226,"errors":0,"last_error":"","mode":"put-delete","p95_ms":190.390166,"p99_ms":447.56843299999997,"step_s":240.0,"target_ops_s":20}
+{"achieved_ops_s":39.96198226740882,"end_unix_s":1793916467,"errors":0,"last_error":"","mode":"put-delete","p95_ms":403.528365,"p99_ms":777.411519,"step_s":240.0,"target_ops_s":40}
+{"achieved_ops_s":79.93492350064815,"end_unix_s":1793916707,"errors":0,"last_error":"","mode":"put-delete","p95_ms":433.579184,"p99_ms":830.6913820000001,"step_s":240.0,"target_ops_s":80}
+{"achieved_ops_s":98.47717039552224,"end_unix_s":1793917097,"errors":0,"last_error":"","mode":"put-delete","p95_ms":508.32077899999996,"p99_ms":809.2601980000001,"step_s":390.0,"target_ops_s":160}
+{"achieved_ops_s":104.87991729152351,"end_unix_s":1793917829,"errors":0,"last_error":"","mode":"put-delete","p95_ms":493.541163,"p99_ms":755.063696,"step_s":732.0,"target_ops_s":320}
