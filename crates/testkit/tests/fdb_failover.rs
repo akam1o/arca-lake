@@ -72,13 +72,17 @@ async fn wait_for_store(c: &TestCluster<FdbKv>) {
     .await;
 }
 
-/// Until five probe commits in a row succeed.
+/// Until probe commits have succeeded without a failure for 10 s (at
+/// least five of them): a cluster just created or just restarted can still
+/// answer 1021 a few seconds after its first good commits (one setup's
+/// node registration did, right after five quick successes).
 async fn settle(kv: &FdbKv) {
-    let mut ok = 0;
     let start = std::time::Instant::now();
-    while ok < 5 {
+    let mut since: Option<std::time::Instant> = None;
+    let mut ok = 0;
+    loop {
         assert!(
-            start.elapsed() < Duration::from_secs(120),
+            start.elapsed() < Duration::from_secs(180),
             "the store did not settle"
         );
         let r = arca_lake_metadata::transact(kv, (), |tx, ()| {
@@ -90,10 +94,15 @@ async fn settle(kv: &FdbKv) {
         .await;
         if r.is_ok() {
             ok += 1;
+            let first = *since.get_or_insert_with(std::time::Instant::now);
+            if ok >= 5 && first.elapsed() >= Duration::from_secs(10) {
+                return;
+            }
         } else {
             ok = 0;
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            since = None;
         }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
