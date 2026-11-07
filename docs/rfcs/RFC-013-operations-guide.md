@@ -270,10 +270,26 @@ metadata backup holds no shard data.
 
 ## 6. Capacity and quotas
 
-- Durable capacity: sum of group members' free bytes; gateways refuse
-  writes with `503` when no group has room (`choose_group` fails).
+- Durable capacity (Phase 3.6, RFC-008 §6.8, ADR-0020): every storage
+  node keeps a reserve (two segments and 64 MiB, or 2 % of the device;
+  `--reserve-bytes`) that client, migration and cache writes cannot use;
+  repair may go down to the repair floor; deletes always pass. The
+  controller leader turns the devices' reports, the groups' room and the
+  GC backlog into a state per tier (`normal`, `warning`, `throttled`,
+  `write_rejected`, `recovery_only`; `arca_controller_backpressure_state`)
+  that gateways enforce with `503 SlowDown` and `Retry-After`. Reads,
+  deletes, aborts and multipart completion are never refused for
+  capacity. A group whose fullest member has room for fewer than 64
+  maximum shards leaves placement: with an erasure-coded group, one full
+  member stops the group however much room the others have.
+- Size devices so that the reserve is not needed in normal operation:
+  the GC backlog holds retired data for about the grace period plus the
+  GC interval at the overwrite/delete rate (multipart parts included,
+  ADR-0020), and the active segment of each node (up to one segment) is
+  not compacted (R-69).
 - Alerts at 80 % used per node (`arca_node_segment_bytes` /
-  device size, exported by the node in Phase 3.2).
+  device size, exported by the node in Phase 3.2) and on the admission
+  state (§8).
 - Cache: `arca_controller_cache_usage_bytes` against capacity;
   watermarks (RFC-006 §5.4).
 - Per-bucket usage counters (Phase 3.1, with multipart accounting) feed
@@ -307,9 +323,9 @@ Main families by process (see the registry for every row):
 
 | Process | Families |
 | --- | --- |
-| controller | leadership and fencing token; node counts (`_nodes_registered`, renamed from `_nodes_total` in Phase 3.4, and `_nodes_unhealthy`); GC; member repair (`_groups_repairing`); cache tier and tiering; scrubbing; integrity findings and stripe repair queue (`_data_integrity_status`); manifest scrub; cluster phase and upgrade step; scheduler/guard counters; TLS |
-| gateway | read-path integrity; read-through cache (25 counters); node RPC retries and timeouts; PUT phases; population queue; metadata transactions; S3 requests by operation and status class, latency by operation, bytes (Phase 3.4); access-key refusals by reason and credential reload failures (Phase 3.4); TLS |
-| node | node phases; quarantine; corrupt reads and node scrub work; compaction and segment/live bytes (Phase 3.4); device free/total bytes for placement (Phase 3.4); TLS |
+| controller | leadership and fencing token; node counts (`_nodes_registered`, renamed from `_nodes_total` in Phase 3.4, and `_nodes_unhealthy`); GC, with stage timing, transactions and bytes, backlog in bytes and reclaim rate (Phase 3.6); write admission state, durable capacity by kind, groups out of placement (Phase 3.6); member repair (`_groups_repairing`); cache tier and tiering; scrubbing; integrity findings and stripe repair queue (`_data_integrity_status`); manifest scrub; cluster phase and upgrade step; scheduler/guard counters; TLS |
+| gateway | read-path integrity; write admission state, record age, throttled and rejected requests, node capacity refusals, chunks without a group with capacity (Phase 3.6); read-through cache (25 counters); node RPC retries and timeouts; PUT phases; population queue; metadata transactions; S3 requests by operation and status class, latency by operation, bytes (Phase 3.4); access-key refusals by reason and credential reload failures (Phase 3.4); TLS |
+| node | node phases; quarantine; corrupt reads and node scrub work; compaction and segment/live bytes (Phase 3.4); device free/total bytes for placement (Phase 3.4); device capacity by kind and capacity admission by class (Phase 3.6); TLS |
 
 Not implemented (listed before Phase 3.4, removed from the registry until
 they exist): request rate limiting and per-principal budgets, and a TLS
@@ -335,6 +351,11 @@ process exports). Severity `page` = data at risk or service down, `ticket`
 | `ArcaNodeUnhealthy` | a node unhealthy for 5 min (page when several in one group) | ticket | §5.5 |
 | `ArcaClusterNotActive` | cluster not Active for 30 min | ticket | §5.9 |
 | `ArcaNodeRpcExhaustion`, `ArcaMetadataConflicts` | node RPCs out of retries; > 5 % metadata conflicts | ticket | ADR-0011, RFC-009 §6.17 |
+| `ArcaCapacityWarning` / `ArcaCapacityCritical` | a tier in `warning` or worse for 15 min / refusing new data for 2 min | ticket / page | §10.11 |
+| `ArcaGcUnableToKeepUp` | throttled while the GC backlog (bytes) still grows, 30 min | ticket | §10.10 |
+| `ArcaRepairReserveLow` | a device's free space below 1.5 × its repair floor | page | §10.11 |
+| `ArcaAdmissionRejectionHigh` | gateways refuse more than one write per second with `SlowDown` for 10 min | ticket | §10.11 |
+| `ArcaCapacityReportStale` | the admission record unchanged for 2 min (no leader evaluates capacity) | page | §10.11, §5.6 |
 | `ArcaCacheOverWatermark` | cache above its high watermark for 30 min | ticket | RFC-006 §5.4 |
 | `ArcaCertificateExpiring`, `ArcaTlsReloadRefused`, `ArcaRpcsDenied`, `ArcaPlaintextNodeRpcs`, `ArcaAuthFailureSpike` | certificate within 14 days; refused reload; RPCs refused by role; plaintext node; access-key refusals | ticket | §10.8, ADR-0017, audit log |
 
@@ -523,20 +544,57 @@ Alerts `ArcaNodeHeapGrowing` (heap in use rising more than 8 MiB/h for
    `Repairing` first. A node restart costs one shard of redundancy for
    the chunks written during its downtime until stripe repair finishes.
 
-### 10.10 GC backlog (Phase 3.5, R-64)
+### 10.10 GC backlog (Phase 3.5, R-64; Phase 3.6)
 
 `arca_controller_gc_backlog` is the retired-generation queue after the
-last pass (counted up to 200 000); `_oldest_age_seconds` its oldest entry.
+last pass (counted up to 200 000); `_bytes` its logical bytes (entries
+written before Phase 3.6 carry no size), `_physical_bytes` an estimate
+with the groups' coding overhead, `_oldest_age_seconds` its oldest entry,
+`arca_controller_gc_reclaim_bytes_per_second` what GC gave back recently.
 In steady state the oldest age stays near the grace period plus the GC
-interval and the backlog near the retirement rate times that. GC is not
-keeping up when the backlog keeps growing (`ArcaGcBacklogGrowing`) or the
-oldest age grows well beyond that (`ArcaGcFallingBehind`). The oldest age
-alone can stay near the grace period while the backlog grows: a multipart
-root's parts are retired only once the root is collected. There is no
-admission control: retired data holds its space until collected, so the
-device alerts (`ArcaDeviceFilling`, `ArcaDeviceFull`) follow. Lower the
-overwrite/delete rate (see the Phase 3.5 capacity measurements) or add
-device bandwidth; space is reclaimed once the backlog drains.
+interval and the backlog near the retirement rate times that; a
+multipart object's parts are retired as of its root and collected in the
+same pass (ADR-0020). GC is not keeping up when the backlog keeps growing
+(`ArcaGcBacklogGrowing`, `ArcaGcUnableToKeepUp`) or the oldest age grows
+well beyond that (`ArcaGcFallingBehind`).
+
+Where the time goes: `arca_controller_gc_stage_seconds{stage}`. On the
+validation hosts the metadata stages take milliseconds per generation and
+a DeleteShard waits for the node's group commit; a slow `delete_rpc`
+points at the device (or at a node that cannot write tombstones: a full
+device, §10.11), a slow `verify`/`finish` at FoundationDB. Writes are
+throttled to the reclaim rate before the devices fill (§6); lower the
+overwrite/delete rate or add device bandwidth if the backlog stays high.
+
+### 10.11 Writes refused or throttled for capacity (Phase 3.6)
+
+Clients see `503 SlowDown` with `Retry-After`; the message says
+"write rate limited" (throttled), "new data refused" (write rejected or
+recovery only) or "no stripe group has capacity" (every group was left
+out or refused). Reads, deletes and completions keep working.
+
+1. `arca_controller_backpressure_state` and the leader's log line
+   "write admission state changed" give the tier and the reason.
+2. `arca_controller_capacity_bytes{kind}`: `headroom` is what client
+   writes may still use; `reclaimable` what compaction can give back;
+   `arca_controller_admission_excluded_groups` the groups out of
+   placement. Per device: `arca_node_capacity_bytes{kind}` (a group is out
+   when one member is short: check `available` against `reserved` on each
+   member).
+3. Space comes back from deletes, GC (after the grace) and compaction
+   (`arca_node_compaction_*`); the state then lifts one step per dwell
+   time (60 s), so writes return gradually. Add devices or nodes for a
+   lasting fix; `admin replace-member` moves a member off a full device.
+4. A stale record (`ArcaCapacityReportStale`): no controller leader is
+   publishing (§5.6); gateways throttle after 30 s and refuse new data
+   after 5 min until one is back.
+5. Nodes refusing writes (`arca_node_admission_refused_total{class}`,
+   `arca_gateway_node_capacity_refusals_total`) while the tier is
+   `normal` means devices filled faster than the controller saw (a device
+   shared with other data, or a burst within one health interval); the
+   reserve is what protects the cluster then. Repair refusals
+   (`class="repair"`) mean the device is at its repair floor: free space
+   before anything else (`ArcaRepairReserveLow`).
 
 ## 11. Alternatives considered
 

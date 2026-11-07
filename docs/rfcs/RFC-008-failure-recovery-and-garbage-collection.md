@@ -300,6 +300,106 @@ retries, nothing becomes visible (`expiry_and_commit_exclude_each_other`,
 `pending_generation_is_never_collected_before_its_lease_…`). A controller
 clock far behind delays reclamation.
 
+### 6.8 Capacity, admission and backpressure (Phase 3.6, ADR-0020)
+
+**Multipart GC.** A completed upload's root is retired like any
+generation. When GC collects it (after the grace), root steps of at most
+256 references per transaction retire its part generations *as of the
+root's retirement time*, then clear the references and leftover part
+records; the root is finished once none is left (I-MP2). A reader reaches
+the parts only through the root, so the grace the root served covers
+them; parts never listed in the completion have been unreachable since
+it. Before Phase 3.6 the parts were retired as of the root step and
+served a second grace, so every multipart object kept its data for two
+grace periods (R-64). A controller pass runs another batch when a root
+step retired parts (they are due at once). An aborted upload's parts are
+retired by `discard_parts` at the abort and serve their own grace. Each
+generation costs three metadata transactions (verify, finish, and the
+root step for roots); 10 000 parts are retired in 40 steps.
+
+**Linearization point of physical capacity.** Storage nodes admit every
+`PutShard` before taking its body: the write's payload plus a record
+overhead must leave the device at or above its class's floor, counting
+every admitted write not yet ended. The admission and the hold are one
+critical section on the node; the hold ends when the RPC ends (stored,
+failed or cancelled). This is the only point where space is decided;
+whatever the gateways or the controller believe, no two writes can be
+admitted against the same bytes.
+
+| Class | Floor | Writers |
+| --- | --- | --- |
+| client | reserve | gateways (PUT, UploadPart, copies) |
+| migration | reserve | tier migration |
+| cache | reserve | cache population (cache nodes) |
+| repair | repair floor | member rebuild, stripe repair, cache shard rebuild |
+| delete | none | GC, reconciliation, eviction (a tombstone frees space) |
+
+The reserve is `max(2 × segment_max + 64 MiB, 2 % of the device)`, at most
+a quarter of it (`--reserve-bytes` overrides); the repair floor is one
+segment and 16 MiB, kept for a compaction output and a segment rollover.
+The reserve also covers quarantine sidecars and administrative writes.
+
+**Reservation state machine.** A hold has two states, `held` (admitted)
+and `released` (the RPC ended); nothing is persisted. Gateway crash: the
+stream ends, the node releases. Node crash or restart: there are no holds
+after it, and the device's free space already reflects what was stored.
+CommitUnknown: holds do not involve metadata; the shards written for a
+generation whose commit outcome is unknown are the generation's like any
+others (collected if it never becomes visible, §5.2), and the space they
+take is visible to the next admission through the device's free space.
+Shards of a chunk that a member refused are an incomplete stripe of a
+pending generation: no chunk record names them, and reconciliation
+removes them once the generation is gone (§6.3).
+
+**Backpressure states** (per tier, controller leader, every health pass):
+
+| State | Entered when (any) | Gateways |
+| --- | --- | --- |
+| `recovery_only` | usable free < 2 %; no fresh capacity report from any member of the tier | refuse new data and new uploads |
+| `write_rejected` | usable free < 5 %; every writable group lacks room (a member with room for fewer than 64 maximum shards) | refuse new data and new uploads |
+| `throttled` | usable free < 10 %; full within 1 h at the free-space trend or the GC backlog's growth (each over ≥ 5 min) | new data at GC's reclaim rate (client bytes, ≥ 1 MiB/s), split over gateways |
+| `warning` | usable free < 20 %; full within 4 h; a member's report stale | admit |
+| `normal` | otherwise | admit |
+
+Usable free is the tier's free bytes above the devices' reserves (minus
+writes in flight) over their size minus the reserves. A worse state
+applies at once; a better one needs its thresholds 3 points better for
+the dwell time (60 s) and is entered one step at a time, so that writes
+come back gradually; the throttle's token bucket starts empty. Reports
+are judged by the controller's receipt time. Deletes, aborts,
+CompleteMultipartUpload, bucket operations and reads are never refused
+for capacity.
+
+**Crash recovery of the state.** The state machines live in the leader's
+memory. A new leader starts every tier at `normal` and evaluates from
+fresh reports at its first health pass; until it has heard a member, the
+tier is `recovery_only` (fail closed). Gateways treat the published
+record as at least `throttled` once unchanged for its TTL (30 s) and as
+`write_rejected` after 5 min (no leader evaluates capacity); with no
+record at all (a controller that predates it) they admit, and the nodes'
+reserve holds. A metadata outage keeps the gateway's last record, which
+then ages as above.
+
+**Errors.** Capacity refusals are `503 SlowDown` with `Retry-After`; the
+message says whether the tier is throttled, refuses new data, or no group
+had capacity. Other placement failures and metadata failures stay
+`503 ServiceUnavailable`; authorization failures `403`. A node answers
+`RESOURCE_EXHAUSTED` for a capacity refusal and for ENOSPC/EDQUOT from
+its store; it is not retried by the node client and does not close the
+connection.
+
+**Durable vs cache capacity.** Durable tiers are governed by the state
+machine above and the nodes' reserve. Cache tiers are bounded by the
+cache capacity and watermarks (RFC-006 §5.4); their nodes keep the same
+reserve against cache population (class `cache`), and their admission
+state is published but does not gate client writes. The GC backlog is
+charged to the durable tiers.
+
+**Compaction and repair without room.** Compaction skips a segment whose
+live bytes do not fit in the free space (`skipped_no_space`); repair
+writes stop at the repair floor (`RESOURCE_EXHAUSTED`), the task is
+retried by the repair scheduler once space returns.
+
 ## 7. Repair completion and metadata order
 
 1. Fence reachable members (`UpdateGroupEpoch`); the replacement must

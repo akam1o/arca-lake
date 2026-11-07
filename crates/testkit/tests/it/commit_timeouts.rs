@@ -7,7 +7,8 @@
 //! each of those outcomes in turn; afterwards the client retries what failed
 //! and completes the upload, garbage collection and reconciliation run, and
 //! the test requires the object to read back whole and the stored shards to
-//! be exactly the completed object's: nothing lost, nothing leaked.
+//! be exactly the completed object's: nothing lost, nothing leaked, and no
+//! node still holding capacity for a write (Phase 3.6).
 
 #![allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
 
@@ -260,6 +261,17 @@ async fn scenario(target: Target, fault: CommitFault, late: Late) -> Result<(), 
             "{total} shards, expected {}: leftovers {left:?}; {log:?}",
             baseline + 6
         ));
+    }
+    // Capacity holds (Phase 3.6) involve no metadata: whatever the commit
+    // outcomes, none is left on any node once the writes have ended.
+    for i in 0..c.nodes.len() {
+        let d = c.node_service(i).device_capacity().unwrap();
+        if d.inflight_bytes != 0 {
+            return Err(format!(
+                "node {i} still holds {} bytes; {log:?}",
+                d.inflight_bytes
+            ));
+        }
     }
     c.shutdown().await;
     Ok(())

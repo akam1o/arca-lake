@@ -114,16 +114,19 @@ end() { # test dir
   grep -h 'write admission state changed' "$RUN"/logs/ctl-*.log > "$1/admission-transitions.log" 2>/dev/null
   bash "$SOAK" teardown > "$1/teardown.log" 2>&1
 }
-# Wait until the leader's backlog is drained (or `max` seconds).
+# Wait until the leader's backlog is drained (or `max` seconds). The
+# gauge is refreshed by GC passes: what was retired just now is in it only
+# after the grace and a pass.
 drain_wait() { # dir max
   local t0; t0="$(date +%s)"
+  sleep $((GC_GRACE_SECS + 3 * GC_INTERVAL_SECS))
   while :; do
     local b; b="$(leader_metrics | metric arca_controller_gc_backlog)"
     [ "${b:-1}" = 0 ] && break
     [ $(( $(date +%s) - t0 )) -ge "$2" ] && break
     sleep 10
   done
-  echo "{\"drain_s\":$(( $(date +%s) - t0 )),\"backlog\":${b:-null}}" >> "$1/drain.jsonl"
+  echo "{\"drain_s\":$(( $(date +%s) - t0 )),\"backlog\":${b:-null}}" >> "$1/backlog-drain.jsonl"
 }
 
 test_A() {

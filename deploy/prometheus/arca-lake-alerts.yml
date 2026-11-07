@@ -122,6 +122,55 @@ groups:
         annotations:
           summary: "A storage device is more than 90 % full"
           runbook: "RFC-013 §5.3, §6"
+      # Write admission (Phase 3.6, ADR-0020; RFC-013 §10.11).
+      - alert: ArcaCapacityWarning
+        expr: max(arca_controller_backpressure_state) >= 1 and max(arca_controller_leader) == 1
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "A tier is low on capacity or filling within hours (write admission warning or worse)"
+          runbook: "RFC-013 §10.11"
+      - alert: ArcaCapacityCritical
+        # 3 = write rejected, 4 = recovery only: new data is refused.
+        expr: max(arca_controller_backpressure_state) >= 3
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "A tier refuses new data (write rejected or recovery only)"
+          runbook: "RFC-013 §10.11"
+      - alert: ArcaGcUnableToKeepUp
+        # Throttled with a growing backlog: GC reclaims less than is retired.
+        expr: max(arca_controller_backpressure_state) >= 2 and deriv(max(arca_controller_gc_backlog_bytes)[30m:1m]) > 0
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Writes are throttled and the GC backlog still grows"
+          runbook: "RFC-013 §10.10"
+      - alert: ArcaRepairReserveLow
+        # Free space at most one and a half times the repair floor: repair
+        # and compaction are about to stop.
+        expr: arca_node_capacity_bytes{kind="available"} < 1.5 * arca_node_capacity_bytes{kind="repair_floor"} and arca_node_capacity_bytes{kind="total"} > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "A storage device is near its repair floor; repair and compaction will stop"
+          runbook: "RFC-013 §10.11"
+      - alert: ArcaAdmissionRejectionHigh
+        expr: sum(rate(arca_gateway_admission_rejected_total[5m])) + sum(rate(arca_gateway_admission_throttled_total[5m])) > 1
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Gateways refuse writes with SlowDown for capacity"
+          runbook: "RFC-013 §10.11"
+      - alert: ArcaCapacityReportStale
+        # The admission record has not changed for two minutes: no leader
+        # evaluates capacity (gateways throttle after 30 s, refuse after 5 min).
+        expr: max(arca_gateway_admission_record_age_seconds) > 120
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "No controller has published write admission for two minutes"
+          runbook: "RFC-013 §10.11, §5.6"
       - alert: ArcaCacheOverWatermark
         expr: max(arca_controller_cache_over_watermark) == 1
         for: 30m

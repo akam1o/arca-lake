@@ -176,6 +176,7 @@ pub async fn pass<S: KvStore>(
         .filter(|p| p.kind == ProcKind::Gateway && now_ms.saturating_sub(p.last_ms) <= 60_000)
         .count();
     let mut totals = Totals::default();
+    let mut counted = std::collections::HashSet::new();
     let mut record = AdmissionRecord {
         computed_ms: now_ms,
         ttl_ms: RECORD_TTL_MS,
@@ -275,7 +276,8 @@ pub async fn pass<S: KvStore>(
                 .or_default()
                 .step(policy, &inputs);
             if !is_cache {
-                for d in &devices {
+                // A device serves several tiers' groups: counted once.
+                for d in devices.iter().filter(|d| counted.insert(d.node_id)) {
                     totals.total += d.total;
                     totals.usable += d.usable();
                     totals.headroom += d.headroom();
@@ -283,7 +285,8 @@ pub async fn pass<S: KvStore>(
                     totals.reclaimable += d.reclaimable;
                     totals.inflight += d.inflight;
                 }
-                totals.gc_backlog_physical += backlog_physical as u64;
+                totals.gc_backlog_physical =
+                    totals.gc_backlog_physical.max(backlog_physical as u64);
                 totals.excluded_groups += decision.excluded_groups.len() as u64;
             }
             record.tiers.push(TierAdmission {

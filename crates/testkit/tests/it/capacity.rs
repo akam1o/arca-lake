@@ -60,6 +60,10 @@ async fn reclaim(c: &TestCluster, keys: &[String]) {
         s3::delete(&c.backend, BUCKET, k).await.unwrap();
     }
     c.gc(now_ms() + 3_600_000, 0).await;
+    compact_all(c);
+}
+
+fn compact_all(c: &TestCluster) {
     for i in 0..3 {
         let store = c.node_store(i);
         for seg in store.compaction_candidates(0.05).unwrap() {
@@ -300,5 +304,201 @@ async fn stale_or_missing_capacity_reports_fail_closed() {
         .await
         .unwrap();
     assert_eq!(tracker.worst(), State::RecoveryOnly);
+    c.shutdown().await;
+}
+
+#[tokio::test]
+async fn repair_stops_on_a_full_target_and_resumes_once_it_has_room() {
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(3, 2, 1, MIB, 64 << 10)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let mut keys = Vec::new();
+    for i in 0..6 {
+        let key = format!("r{i}");
+        let data = Bytes::from(random_bytes(usize::try_from(2 * MIB).unwrap(), 40 + i));
+        s3::put(
+            &c.backend,
+            BUCKET,
+            &key,
+            data.clone(),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+        keys.push((key, data));
+    }
+    let group = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| !g.is_cache())
+        .unwrap();
+    let lost = c.node_index(&group.members[0]).unwrap();
+    c.stop_node(lost).await;
+    // The replacement has room for about half of the member's 6 MiB.
+    let target = c.add_node().await;
+    c.set_node_capacity(target, Some(4 * MIB)).await;
+    let result = c.repair_with(group.id, 0, target, async |_| Ok(())).await;
+    let e = result.expect_err("a target without room cannot take the member");
+    assert!(format!("{e}").contains("insufficient capacity"), "{e}");
+    let dev = c.node_service(target).device_capacity().unwrap();
+    assert!(dev.available_bytes >= dev.repair_floor_bytes, "{dev:?}");
+    // Nothing was lost meanwhile: reads are served from the other members.
+    for (k, data) in &keys {
+        assert_eq!(&s3::get(&c.backend, BUCKET, k).await.unwrap().0, data);
+    }
+    // Room again: the repair resumes and completes.
+    c.set_node_capacity(target, None).await;
+    c.repair(group.id, 0, target).await;
+    let repaired = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| g.id == group.id)
+        .unwrap();
+    assert_eq!(
+        repaired.state,
+        arca_lake_metadata::records::GroupState::Active
+    );
+    assert!(
+        repaired
+            .members
+            .iter()
+            .any(|m| m.node_id == c.nodes[target].id)
+    );
+    for (k, data) in &keys {
+        assert_eq!(&s3::get(&c.backend, BUCKET, k).await.unwrap().0, data);
+    }
+    c.shutdown().await;
+}
+
+fn controller(id: &str) -> arca_lake_controller::process::ControllerConfig {
+    let mut c = arca_lake_controller::process::ControllerConfig::new(id);
+    c.lease = std::time::Duration::from_millis(800);
+    c.health_interval = std::time::Duration::from_millis(100);
+    c.gc_interval = std::time::Duration::from_millis(200);
+    c.gc_grace = std::time::Duration::ZERO;
+    c.reconcile_interval = std::time::Duration::from_secs(3600);
+    c.failure_domain = "host".into();
+    c.admission.dwell_ms = 500;
+    c.admission.group_min_shards = 4;
+    c.admission.min_rate_bytes_per_s = 32.0 * 1024.0 * 1024.0;
+    c.admission_max_chunk_bytes = MIB;
+    c
+}
+
+async fn published_state(c: &TestCluster) -> Option<(u64, u8)> {
+    admission::current(c.meta.as_ref())
+        .await
+        .unwrap()
+        .and_then(|r| r.tier("default").map(|t| (r.computed_ms, t.state)))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_leader_rebuilds_the_admission_state_from_fresh_reports() {
+    use arca_lake_controller::process::spawn;
+    let c = capped(160 * MIB).await;
+    let a = spawn(Arc::clone(&c.meta), controller("ctl-a"))
+        .await
+        .unwrap();
+    // Fill until the leader refuses new data.
+    let mut keys = Vec::new();
+    let start = Instant::now();
+    for n in 0.. {
+        assert!(start.elapsed().as_secs() < 60, "never rejected");
+        let key = format!("l{n}");
+        if s3::put(&c.backend, BUCKET, &key, body(&key), &PutOptions::default())
+            .await
+            .is_ok()
+        {
+            keys.push(key);
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if published_state(&c).await.is_some_and(|(_, s)| s >= 3) {
+            break;
+        }
+        // The gateway's refresh, without waiting for its timer.
+        let rec = admission::current(c.meta.as_ref()).await.unwrap();
+        c.backend.cluster().admission.observe(rec, Instant::now());
+    }
+    let (t0, s0) = published_state(&c).await.unwrap();
+    assert!(s0 >= 3, "never rejected");
+    // The leader dies; its record stays as it was.
+    a.shutdown().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(published_state(&c).await.unwrap().0, t0, "no publisher");
+    // A new leader evaluates from the nodes' fresh reports: still full,
+    // still refused; nothing is inherited but the data on the devices.
+    let b = spawn(Arc::clone(&c.meta), controller("ctl-b"))
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let (t1, s1) = loop {
+        if let Some((t, s)) = published_state(&c).await
+            && t > t0
+        {
+            break (t, s);
+        }
+        assert!(
+            start.elapsed().as_secs() < 20,
+            "the new leader never published"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert!(t1 > t0);
+    assert!(
+        s1 >= 3,
+        "a new leader must not admit onto full devices ({s1})"
+    );
+    // Space back: the new leader collects (it has given the nodes the
+    // cluster's incarnation: deletes without it are refused) and lifts
+    // the state step by step.
+    for k in &keys {
+        s3::delete(&c.backend, BUCKET, k).await.unwrap();
+    }
+    let start = Instant::now();
+    while arca_lake_metadata::ops::gc::backlog(c.meta.as_ref(), 10)
+        .await
+        .unwrap()
+        .0
+        > 0
+    {
+        assert!(
+            start.elapsed().as_secs() < 30,
+            "the new leader never collected"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    compact_all(&c);
+    let start = Instant::now();
+    while published_state(&c).await.unwrap().1 != 0 {
+        assert!(
+            start.elapsed().as_secs() < 30,
+            "never back to normal: {:?} now {} nodes {:?}",
+            admission::current(c.meta.as_ref()).await.unwrap(),
+            now_ms(),
+            (0..3)
+                .map(|i| c.node_service(i).device_capacity().unwrap())
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let rec = admission::current(c.meta.as_ref()).await.unwrap();
+    c.backend.cluster().admission.observe(rec, Instant::now());
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "after",
+        body("after"),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_reserves_kept(&c);
+    b.shutdown().await;
     c.shutdown().await;
 }

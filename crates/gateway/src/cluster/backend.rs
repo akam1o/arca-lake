@@ -633,6 +633,30 @@ pub(super) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Bodies of refused writes read (and dropped) before answering, at most:
+/// a client that sends its whole body before reading the response (most
+/// SDKs) would otherwise see the connection close instead of the `503`.
+const REFUSED_BODY_DRAIN: usize = 16 << 20;
+
+/// `err`, after reading what is left of `body` up to [`REFUSED_BODY_DRAIN`]
+/// bytes within 10 s.
+async fn refuse_after_body(body: Option<s3s::dto::StreamingBlob>, err: S3Error) -> S3Error {
+    use futures::StreamExt as _;
+    if let Some(mut body) = body {
+        let drain = async {
+            let mut read = 0usize;
+            while let Some(Ok(b)) = body.next().await {
+                read += b.len();
+                if read >= REFUSED_BODY_DRAIN {
+                    break;
+                }
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(10), drain).await;
+    }
+    err
+}
+
 impl<S: KvStore + 'static> ClusterBackend<S> {
     /// Create a backend and load the cluster map.
     ///
@@ -1437,7 +1461,9 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         req: S3Request<PutObjectInput>,
     ) -> S3Result<S3Response<PutObjectOutput>> {
         self.admit_write()?;
-        self.admit_data(req.input.content_length)?;
+        if let Err(e) = self.admit_data(req.input.content_length) {
+            return Err(refuse_after_body(req.input.body, e).await);
+        }
         let trailing = req.trailing_headers.clone();
         let input = req.input;
         let Some(body) = input.body else {
@@ -1933,7 +1959,9 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         req: S3Request<UploadPartInput>,
     ) -> S3Result<S3Response<UploadPartOutput>> {
         self.admit_write()?;
-        self.admit_data(req.input.content_length)?;
+        if let Err(e) = self.admit_data(req.input.content_length) {
+            return Err(refuse_after_body(req.input.body, e).await);
+        }
         let trailing = req.trailing_headers.clone();
         let input = req.input;
         let Some(body) = input.body else {

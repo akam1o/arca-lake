@@ -6,6 +6,51 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Added (Phase 3.6)
+
+- Capacity admission on storage nodes (ADR-0020): every shard write is
+  admitted against the device's free space minus the writes in flight;
+  client, migration and cache writes stop at a reserve (`--reserve-bytes`;
+  default two segments and 64 MiB, or 2 % of the device), repair at the
+  repair floor, deletes always pass. `PutShardHeader.write_class`;
+  `RESOURCE_EXHAUSTED` for capacity refusals and ENOSPC/EDQUOT;
+  `Health.devices` (per-device capacity: total, available, allocated,
+  live, reclaimable, quarantined, reserved, in flight, repair floor).
+- Write backpressure per tier: the controller leader evaluates `normal`,
+  `warning`, `throttled`, `write_rejected`, `recovery_only` with
+  hysteresis (`--admission-dwell-secs`, `--admission-max-chunk-bytes`,
+  `--admission-group-min-shards`) and publishes an admission record;
+  gateways throttle new data to the GC reclaim rate, refuse it when
+  rejected (`503 SlowDown` with `Retry-After`), skip groups without room,
+  and keep reads, deletes and completions open.
+- GC stage timing and volume (`arca_controller_gc_stage_seconds`,
+  `_gc_transactions_total`, `_gc_reclaimed_bytes_total`,
+  `_gc_roots_collected_total`, `_gc_parts_retired_total`), the backlog in
+  bytes, capacity and admission gauges on every process, six alerts and
+  runbook RFC-013 §10.11.
+- `gc_bench` (GC by workload, in-memory and FoundationDB metadata),
+  `benchmarks/linux/capacity-tests.sh` (GC saturation, multipart
+  saturation, capacity exhaustion, failure injection), `gcload --verify`
+  and `--mode drain`.
+
+### Changed (Phase 3.6)
+
+- A capacity refusal is `503 SlowDown` (was `503 ServiceUnavailable` with
+  an internal node error); a refused PUT or UploadPart body up to 16 MiB
+  is read before the answer, so that clients see the `503`.
+- Compaction skips a segment whose live bytes do not fit in the free
+  space.
+
+### Fixed (Phase 3.6)
+
+- A completed multipart object's parts served a second grace period
+  after their root was collected, holding every multipart object's data
+  for two grace periods (R-64); they are now retired as of the root and
+  collected in the same pass.
+- Cache eviction, invalidation and a failed population's cleanup could
+  delete a newer cache copy under the same key (R-73); cache copies are
+  now deleted by the tokens their writes returned.
+
 ### Added
 
 - Phase 3.4 (security hardening and production readiness; ADR-0017,
