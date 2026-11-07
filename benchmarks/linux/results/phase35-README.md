@@ -64,9 +64,17 @@ two-hourly full verification of the acknowledged-write ledger clean. At
 restarting a gateway or controller, a seventh full verification completed
 clean); at 06:02 Z two stopped again with the disk saturated, and the run
 was stopped. Not reached: the end of the workload, convergence and the
-integrity snapshots. A 2 h A/B against the Phase 3.4 build (a8dc96b, which
-had run 25 h on this host in Phase 3.4) stopped the same way 1.5 min into
-its load, so the cause is the host's disk under this load, not Phase 3.5's
-changes; idle fsync latency was normal (p50 0.9 ms). The repeated soak puts
-FoundationDB on a second virtual disk (`FDB_DIR`).
-
+integrity snapshots. A 2 h A/B against the Phase 3.4 build
+(a8dc96b, which had run 25 h on this host in Phase 3.4) stopped the same
+way 1.5 min into its load (`ab-phase34-build/`), so Phase 3.5's changes are
+not the cause. A retry with FoundationDB on a second virtual disk
+(`FDB_DIR`, `retry-fdb-on-sdb/`) stopped the same way 80 s in: the TLog's
+persistent-state commit exceeded `TLOG_MAX_CREATE_DURATION` (10 s,
+`IoTimeoutError` context `TLogCommit`), with the second disk 63 % busy but
+an average queue depth of 10.8. Idle fsync latency was normal (p50 about
+1 ms) and the second disk's fsync rose to p99 33 ms under a sequential
+660 MB/s write on the first: the two virtual disks share backing storage,
+and since about 05:18 Z concurrent synchronous writes stalled for more than
+10 s. The long soak was ended there: 13 h without violations, then an
+environment failure; convergence and the integrity snapshots were not
+reached.
