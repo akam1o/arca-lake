@@ -115,6 +115,9 @@ pub struct Inputs {
     /// Change of the tier's free bytes per second recently (negative =
     /// filling).
     pub free_change_bytes_per_s: f64,
+    /// Physical bytes a logical byte of client data takes (the coding
+    /// overhead; 0 = 1).
+    pub overhead: f64,
     /// Now, unix ms.
     pub now_ms: u64,
 }
@@ -378,10 +381,28 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
 
 /// Throttled: take in what GC gives back (so that the backlog stops
 /// growing), never less than the floor.
+///
+/// Plus what the headroom affords over the horizon: admitting only the
+/// reclaim rate would ratchet down (GC reclaims what was admitted a grace
+/// period earlier), while reclaim plus `headroom / horizon` keeps the tier
+/// at least the horizon away from full at a net fill rate.
+#[allow(clippy::cast_precision_loss)]
 fn throttle_rate(policy: &Policy, inputs: &Inputs) -> f64 {
-    inputs
-        .gc_reclaim_bytes_per_s
-        .max(policy.min_rate_bytes_per_s)
+    let fresh_headroom: u64 = inputs
+        .devices
+        .iter()
+        .filter(|d| {
+            d.sampled_ms > 0 && inputs.now_ms.saturating_sub(d.sampled_ms) <= policy.stale_ms
+        })
+        .map(Device::headroom)
+        .sum();
+    let overhead = if inputs.overhead > 0.0 {
+        inputs.overhead
+    } else {
+        1.0
+    };
+    let afforded = fresh_headroom as f64 / overhead / policy.horizon_s.max(1.0);
+    (inputs.gc_reclaim_bytes_per_s + afforded).max(policy.min_rate_bytes_per_s)
 }
 
 #[cfg(test)]
@@ -482,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn a_growing_backlog_throttles_to_the_reclaim_rate_before_the_space_is_short() {
+    fn a_growing_backlog_throttles_before_the_space_is_short() {
         let p = Policy::default();
         let mut i = tier(60);
         // 224 GiB headroom, backlog growing 100 MiB/s: full in ~38 min.
@@ -490,13 +511,15 @@ mod tests {
         i.gc_reclaim_bytes_per_s = 30.0 * f64::from(1u32 << 20);
         let d = Machine::default().step(&p, &i);
         assert_eq!(d.state, State::Throttled, "{}", d.reason);
-        assert!((d.rate_bytes_per_s - 30.0 * f64::from(1u32 << 20)).abs() < 1.0);
-        // Slow GC never throttles below the floor.
+        // Plus what the headroom affords over the horizon (224 GiB / 1 h).
+        let afforded = 224.0 * f64::from(1u32 << 30) / 3600.0;
+        assert!((d.rate_bytes_per_s - 30.0 * f64::from(1u32 << 20) - afforded).abs() < 1.0);
+        // Slow GC and no headroom never throttle below the floor.
         i.gc_reclaim_bytes_per_s = 0.0;
-        assert_eq!(
-            Machine::default().step(&p, &i).rate_bytes_per_s,
-            p.min_rate_bytes_per_s
-        );
+        for dev in &mut i.devices {
+            dev.available = dev.reserved;
+        }
+        assert_eq!(throttle_rate(&p, &i), p.min_rate_bytes_per_s);
     }
 
     #[test]

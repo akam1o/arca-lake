@@ -268,6 +268,7 @@ pub async fn pass<S: KvStore>(
                 gc_reclaim_bytes_per_s: if is_cache { 0.0 } else { reclaim / overhead },
                 gc_backlog_growth_bytes_per_s: growth,
                 free_change_bytes_per_s: free_change,
+                overhead,
                 now_ms,
             };
             let decision = g

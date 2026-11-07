@@ -358,7 +358,7 @@ removes them once the generation is gone (§6.3).
 | --- | --- | --- |
 | `recovery_only` | usable free < 2 %; no fresh capacity report from any member of the tier | refuse new data and new uploads |
 | `write_rejected` | usable free < 5 %; every writable group lacks room (a member with room for fewer than 64 maximum shards, or no member heard from at all) | refuse new data and new uploads |
-| `throttled` | usable free < 10 %; full within 1 h at the free-space trend or the GC backlog's growth (each over ≥ 5 min) | new data at GC's reclaim rate (client bytes, ≥ 1 MiB/s), split over gateways |
+| `throttled` | usable free < 10 %; full within 1 h at the free-space trend or the GC backlog's growth (each over ≥ 5 min) | new data at GC's reclaim rate plus headroom / 1 h (client bytes, ≥ 1 MiB/s), split over gateways |
 | `warning` | usable free < 20 %; full within 4 h; a member's report stale | admit |
 | `normal` | otherwise | admit |
 
