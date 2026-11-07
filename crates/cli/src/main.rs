@@ -579,6 +579,12 @@ struct StorageNodeArgs {
     /// of the file system's and this minus the segment bytes.
     #[arg(long)]
     capacity_bytes: Option<u64>,
+    /// Bytes kept free for compaction output, segment rollover, quarantine
+    /// and repair: client, migration and cache writes are refused when a
+    /// write would leave less (default: two segments and 64 MiB, or 2 % of
+    /// the device, at most a quarter of it).
+    #[arg(long)]
+    reserve_bytes: Option<u64>,
     #[command(flatten)]
     tls: TlsArgs,
     #[command(subcommand)]
@@ -680,6 +686,18 @@ struct ControllerArgs {
     /// GC interval in seconds.
     #[arg(long, default_value_t = 30)]
     gc_interval_secs: u64,
+    /// Write admission: seconds a better state must hold before the tier
+    /// moves to it (one step at a time).
+    #[arg(long, default_value_t = 60)]
+    admission_dwell_secs: u64,
+    /// Write admission: largest chunk the gateways write (bytes); a group
+    /// whose fullest member has room for fewer than
+    /// `--admission-group-min-shards` of its shards leaves placement.
+    #[arg(long, default_value_t = 8 << 20)]
+    admission_max_chunk_bytes: u64,
+    /// See `--admission-max-chunk-bytes`.
+    #[arg(long, default_value_t = 64)]
+    admission_group_min_shards: u64,
     /// Reconciliation interval in seconds.
     #[arg(long, default_value_t = 300)]
     reconcile_interval_secs: u64,
@@ -1542,6 +1560,7 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
         return fail("--compaction-min-dead-fraction must be between 0 and 1");
     }
     cfg.capacity_bytes = args.capacity_bytes;
+    cfg.reserve_bytes = args.reserve_bytes;
     cfg.compaction = arca_lake_storage_node::compactor::CompactionPolicy {
         interval: Duration::from_secs(args.compaction_interval_secs),
         min_dead_fraction: args.compaction_min_dead_fraction,
@@ -1805,6 +1824,9 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.gc_grace = Duration::from_secs(args.gc_grace_secs);
     cfg.min_orphan_age = Duration::from_secs(args.min_orphan_age_secs);
     cfg.gc_interval = Duration::from_secs(args.gc_interval_secs);
+    cfg.admission.dwell_ms = args.admission_dwell_secs.saturating_mul(1000);
+    cfg.admission.group_min_shards = args.admission_group_min_shards.max(1);
+    cfg.admission_max_chunk_bytes = args.admission_max_chunk_bytes.max(1);
     cfg.reconcile_interval = Duration::from_secs(args.reconcile_interval_secs);
     cfg.repair_interval = Duration::from_secs(args.repair_interval_secs);
     cfg.health_interval = Duration::from_secs(args.health_interval_secs);

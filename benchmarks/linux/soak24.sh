@@ -18,6 +18,10 @@
 # the FoundationDB data, logs and PKI; a directory on another device keeps its commits from
 # competing with the storage nodes' writes -- on one shared VM disk FoundationDB stopped with
 # io_timeout under the soak's load in Phase 3.5; RUN/fdb then links to it).
+# Capacity tests (Phase 3.6): NODE_DATA_DIR puts the storage nodes' directories there (one
+# capacity-limited file system per node: NODE_DATA_DIR/<node> may be a mount point),
+# NODE_EXTRA_ARGS and CONTROLLER_EXTRA_ARGS are appended to the nodes' and controllers' command
+# lines, GC_INTERVAL_SECS (60) and GC_GRACE_SECS (300) set the controllers' GC.
 #
 # Faults (round robin, one every FAULT_GAP_SECS): storage node SIGTERM
 # restart, storage node SIGKILL, gateway kill, controller leader kill,
@@ -83,7 +87,7 @@ pid_ok() { # name -> true if the PID file names a live process of ours
   pid="$(cat "$f")"
   exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
   case "$exe" in "$BIN"|"$SOAKLOAD"|"$FAULTPROXY"|"${FDBSERVER:-/usr/sbin/fdbserver}"|/usr/bin/bash|/bin/bash) ;; *) return 1 ;; esac
-  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -- "$RUN"
+  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -e "$RUN" -e "${NODE_DATA_DIR:-$RUN}"
 }
 launch() { # name env... -- command...
   local name="$1"; shift
@@ -118,8 +122,8 @@ node_id() { cat "$RUN/ids/$1"; }
 start_node() { # name
   local n="$1"
   launch "$n" $(node_env "$n") -- "$BIN" storage-node --listen "127.0.0.1:${LISTEN[$n]}" \
-    --dir "$RUN/$n" --metrics-listen "127.0.0.1:${METRICS[$n]}" --tls-reload-secs 10 \
-    --segment-max-bytes $((256 << 20)) --compaction-interval-secs 30
+    --dir "${NODE_DATA_DIR:-$RUN}/$n" --metrics-listen "127.0.0.1:${METRICS[$n]}" --tls-reload-secs 10 \
+    --segment-max-bytes $((256 << 20)) --compaction-interval-secs 30 ${NODE_EXTRA_ARGS:-}
 }
 CACHE_ARGS="--cache-tier fast --cache-capacity-bytes $((256 << 20)) --cache-high-watermark 0.9 --cache-low-watermark 0.7 --cache-max-populations 4"
 start_controller() { # name
@@ -127,11 +131,11 @@ start_controller() { # name
   launch "$n" $(fdb_env controller) $(node_env "$n") -- "$BIN" controller --cluster-file "$CF" --id "$n" \
     --http "127.0.0.1:${METRICS[$n]}" --failure-domain node --lease-secs 10 --tls-reload-secs 10 \
     --auto-repair --unhealthy-after-secs 120 --repair-interval-secs 60 --health-interval-secs 10 \
-    --gc-interval-secs 60 --gc-grace-secs 300 --min-orphan-age-secs 600 --reconcile-interval-secs 900 \
+    --gc-interval-secs "${GC_INTERVAL_SECS:-60}" --gc-grace-secs "${GC_GRACE_SECS:-300}" --min-orphan-age-secs 600 --reconcile-interval-secs 900 \
     --scrub-interval-secs 3600 --scrub-rate-mib 16 --stripe-repair-interval-secs 30 \
     --tiering-tier cold --tiering-tier default --tiering-promote-reads 3 --tiering-promote-window-secs 900 \
     --tiering-demote-after-secs 3600 --tiering-interval-secs 300 --evict-interval-secs 10 \
-    $CACHE_ARGS
+    $CACHE_ARGS ${CONTROLLER_EXTRA_ARGS:-}
 }
 start_gateway() { # name
   local n="$1"
@@ -202,7 +206,7 @@ sample_once() {
   for n in "${!METRICS[@]}"; do
     curl -s -m 5 "http://127.0.0.1:${METRICS[$n]}/metrics" 2>/dev/null | grep -v '^#' | sed "s/^/$t $n /"
   done | gzip -c >> "$RUN/metrics.log.gz"
-  for n in $NODES; do echo "$t $n $(du -sb "$RUN/$n" 2>/dev/null | cut -f1)"; done >> "$RUN/disk.log"
+  for n in $NODES; do echo "$t $n $(du -sb "${NODE_DATA_DIR:-$RUN}/$n" 2>/dev/null | cut -f1)"; done >> "$RUN/disk.log"
   # FoundationDB counters only (no topology or identifiers kept).
   fdbcli -C "$CF" --tls-certificate-file "$F/pki/admin/cert.pem" --tls-key-file "$F/pki/admin/key.pem" \
     --tls-ca-file "$F/pki/ca/ca.pem" --timeout 10 --exec 'status json' 2>/dev/null \
@@ -248,14 +252,14 @@ do_fault() { # index
        fault "cache-node-kill $c"; stop "$c" KILL; wait_s 20; start_node "$c" ;;
     7) fault "net-blackhole $PROXIED 45s"; echo blackhole > "$RUN/proxy.ctl"; wait_s 45; : > "$RUN/proxy.ctl" ;;
     8) fault "corrupt-shard $dn (node stopped)"; stop "$dn" TERM
-       fault "corrupt-shard-detail $dn $("$BIN" storage-node corrupt-shard --dir "$RUN/$dn" --pick "$RANDOM$RANDOM" 2>&1 | tr '\n' ' ')"
+       fault "corrupt-shard-detail $dn $("$BIN" storage-node corrupt-shard --dir "${NODE_DATA_DIR:-$RUN}/$dn" --pick "$RANDOM$RANDOM" 2>&1 | tr '\n' ' ')"
        start_node "$dn" ;;
-    9) fault "eio-read $dn 20"; echo "eio-read 20" > "$RUN/$dn/FAULT"; wait_s 90; : > "$RUN/$dn/FAULT" ;;
+    9) fault "eio-read $dn 20"; echo "eio-read 20" > "${NODE_DATA_DIR:-$RUN}/$dn/FAULT"; wait_s 90; : > "${NODE_DATA_DIR:-$RUN}/$dn/FAULT" ;;
     10) fault "net-reset $PROXIED 10s"; echo reset > "$RUN/proxy.ctl"; wait_s 10; : > "$RUN/proxy.ctl" ;;
     11) local who
         case $(( i % 3 )) in 0) who=gw-a; issue gw-a gateway gw-a ;; 1) who="$dn"; issue "$dn" node "$(node_id "$dn")" ;; *) who=ctl-a; issue ctl-a controller ctl-a ;; esac
         fault "cert-rotate $who" ;;
-    12) fault "eio-write $dn 5"; echo "eio-write 5" > "$RUN/$dn/FAULT"; wait_s 90; : > "$RUN/$dn/FAULT" ;;
+    12) fault "eio-write $dn 5"; echo "eio-write 5" > "${NODE_DATA_DIR:-$RUN}/$dn/FAULT"; wait_s 90; : > "${NODE_DATA_DIR:-$RUN}/$dn/FAULT" ;;
     13) local o=ctl-a; [ "$(leader)" = ctl-a ] && o=ctl-b
         fault "controller-restart (standby) $o"; stop "$o" TERM; wait_s 10; start_controller "$o" ;;
   esac
@@ -274,7 +278,7 @@ cmd__faults() {
     for c in ctl-a ctl-b; do pid_ok "$c" || { fault "restart-missing $c"; start_controller "$c"; }; done
     wait_s "$FAULT_GAP_SECS"
   done
-  : > "$RUN/proxy.ctl"; for n in $NODES; do : > "$RUN/$n/FAULT"; done
+  : > "$RUN/proxy.ctl"; for n in $NODES; do : > "${NODE_DATA_DIR:-$RUN}/$n/FAULT"; done
   fault "faults stopped"
 }
 
@@ -302,7 +306,7 @@ cmd_finish() {
   log "finish: waiting for the workload's final verification"
   while pid_ok soakload; do sleep 10; done
   while pid_ok faults; do sleep 2; done
-  : > "$RUN/proxy.ctl"; for n in $NODES; do : > "$RUN/$n/FAULT"; done
+  : > "$RUN/proxy.ctl"; for n in $NODES; do : > "${NODE_DATA_DIR:-$RUN}/$n/FAULT"; done
   log "finish: settle 600 s (GC, repair, reconcile)"
   sleep 600
   sample_once
@@ -327,7 +331,7 @@ cmd_teardown() {
   local me; me="$(id -u)"
   for d in /proc/[0-9]*; do
     [ "$(stat -c %u "$d" 2>/dev/null)" = "$me" ] || continue
-    tr '\0' ' ' < "$d/cmdline" 2>/dev/null | grep -q -- "$RUN/" || continue
+    tr '\0' ' ' < "$d/cmdline" 2>/dev/null | grep -q -e "$RUN/" -e "${NODE_DATA_DIR:-$RUN}/" || continue
     case "$(readlink "$d/exe" 2>/dev/null)" in
       "$BIN"|"$SOAKLOAD"|"$FAULTPROXY"|"${FDBSERVER:-/usr/sbin/fdbserver}")
         log "teardown: stopping leftover pid ${d#/proc/}"

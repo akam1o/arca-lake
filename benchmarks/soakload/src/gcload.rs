@@ -9,8 +9,12 @@
 //! deletes the key's oldest version beyond two), `multipart` (overwrites
 //! by two-part multipart uploads: a root and two parts retired each).
 //! `--get-pct` adds GETs (cache population and eviction on a cluster with
-//! a cache tier). One JSON line per step: target and achieved rate,
-//! errors, PUT p95/p99.
+//! a cache tier). `drain` deletes every object of the bucket under
+//! `--prefix` and exits (capacity tests: give the space back). One JSON line per step: target and achieved rate,
+//! errors (those answered `SlowDown`, the capacity admission's refusal,
+//! counted apart), write and read p50/p95/p99. `--verify` reads every key
+//! whose write was acknowledged after the last step and checks its bytes
+//! (Phase 3.6: no acknowledged write lost under backpressure).
 
 #![allow(
     clippy::cast_precision_loss,
@@ -43,7 +47,7 @@ struct Args {
     secret_key: String,
     #[arg(long, default_value = "gcload")]
     bucket: String,
-    #[arg(long, value_parser = ["put-only", "overwrite", "put-delete", "versioned", "multipart"])]
+    #[arg(long, value_parser = ["put-only", "overwrite", "put-delete", "versioned", "multipart", "drain"])]
     mode: String,
     /// Working set of keys.
     #[arg(long, default_value_t = 2000)]
@@ -62,6 +66,18 @@ struct Args {
     /// Percent of operations that are GETs of a random key.
     #[arg(long, default_value_t = 0)]
     get_pct: u64,
+    /// After the last step, read back every acknowledged key.
+    #[arg(long)]
+    verify: bool,
+    /// Prefix of the keys (several runs on one bucket).
+    #[arg(long, default_value = "")]
+    prefix: String,
+}
+
+/// What one operation was.
+enum Op {
+    Write(String),
+    Read,
 }
 
 fn pct(v: &mut [f64], p: f64) -> f64 {
@@ -72,16 +88,16 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
     v[((v.len() as f64 - 1.0) * p).round() as usize]
 }
 
-async fn one(c: &Client, a: &Args, k: u64, x: u64, data: &bytes::Bytes) -> Result<(), String> {
+async fn one(c: &Client, a: &Args, k: u64, x: u64, data: &bytes::Bytes) -> Result<Op, String> {
     let key = if a.mode == "put-only" {
-        format!("p/{x:016x}")
+        format!("{}p/{x:016x}", a.prefix)
     } else {
-        format!("k/{k:06}")
+        format!("{}k/{k:06}", a.prefix)
     };
-    let e = |e: &dyn std::fmt::Debug| format!("{e:?}").chars().take(200).collect::<String>();
+    let e = |e: &dyn std::fmt::Debug| format!("{e:?}").chars().take(300).collect::<String>();
     if a.get_pct > 0 && x % 100 < a.get_pct {
         let _ = c.get_object().bucket(&a.bucket).key(&key).send().await;
-        return Ok(());
+        return Ok(Op::Read);
     }
     match a.mode.as_str() {
         "multipart" => {
@@ -157,7 +173,40 @@ async fn one(c: &Client, a: &Args, k: u64, x: u64, data: &bytes::Bytes) -> Resul
             }
         }
     }
-    Ok(())
+    Ok(Op::Write(key))
+}
+
+/// Read back every acknowledged key: `(checked, missing, wrong)`.
+async fn verify(c: &Client, a: &Args, keys: &[String]) -> (u64, u64, u64) {
+    let want = if a.mode == "multipart" {
+        2 * a.size
+    } else {
+        a.size
+    };
+    let (mut checked, mut missing, mut wrong) = (0, 0, 0);
+    for key in keys {
+        checked += 1;
+        match c.get_object().bucket(&a.bucket).key(key).send().await {
+            Ok(o) => match o.body.collect().await {
+                Ok(b) => {
+                    let b = b.into_bytes();
+                    if b.len() as u64 != want || b.iter().any(|&x| x != 7) {
+                        wrong += 1;
+                        eprintln!("verify: {key}: {} bytes, content differs", b.len());
+                    }
+                }
+                Err(e) => {
+                    wrong += 1;
+                    eprintln!("verify: {key}: body: {e}");
+                }
+            },
+            Err(e) => {
+                missing += 1;
+                eprintln!("verify: {key}: {e:?}");
+            }
+        }
+    }
+    (checked, missing, wrong)
 }
 
 #[tokio::main]
@@ -191,7 +240,54 @@ async fn main() {
             .await
             .expect("enable versioning");
     }
+    if a.mode == "drain" {
+        let (mut deleted, mut failed) = (0u64, 0u64);
+        let mut token: Option<String> = None;
+        loop {
+            let page = c
+                .list_objects_v2()
+                .bucket(&a.bucket)
+                .prefix(&a.prefix)
+                .set_continuation_token(token.clone())
+                .send()
+                .await
+                .expect("list");
+            let keys: Vec<String> = page
+                .contents()
+                .iter()
+                .filter_map(|o| o.key().map(str::to_string))
+                .collect();
+            let mut set = tokio::task::JoinSet::new();
+            for k in keys {
+                let (c, bucket) = (c.clone(), a.bucket.clone());
+                set.spawn(
+                    async move { c.delete_object().bucket(bucket).key(k).send().await.is_ok() },
+                );
+            }
+            while let Some(r) = set.join_next().await {
+                if r.unwrap_or(false) {
+                    deleted += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+            token = page.next_continuation_token().map(str::to_string);
+            if token.is_none() {
+                break;
+            }
+        }
+        println!(
+            "{}",
+            serde_json::json!({"mode": "drain", "deleted": deleted, "failed": failed})
+        );
+        return;
+    }
     let data = bytes::Bytes::from(vec![7u8; usize::try_from(a.size).unwrap_or(0)]);
+    // Keys whose write was acknowledged (a key written and deleted by
+    // `put-delete` is not readable afterwards: not tracked).
+    let acked = Arc::new(std::sync::Mutex::new(
+        std::collections::BTreeSet::<String>::new(),
+    ));
     let rates: Vec<u64> = a
         .rates
         .split(',')
@@ -203,7 +299,9 @@ async fn main() {
         let issued = Arc::new(AtomicU64::new(0));
         let ok = Arc::new(AtomicU64::new(0));
         let errors = Arc::new(AtomicU64::new(0));
+        let slowdowns = Arc::new(AtomicU64::new(0));
         let lat = Arc::new(std::sync::Mutex::new(Vec::<f64>::new()));
+        let read_lat = Arc::new(std::sync::Mutex::new(Vec::<f64>::new()));
         let last_error = Arc::new(std::sync::Mutex::new(String::new()));
         let mut tasks = Vec::new();
         for w in 0..a.workers {
@@ -214,6 +312,11 @@ async fn main() {
                 Arc::clone(&errors),
                 Arc::clone(&lat),
                 Arc::clone(&last_error),
+            );
+            let (slowdowns, read_lat, acked) = (
+                Arc::clone(&slowdowns),
+                Arc::clone(&read_lat),
+                Arc::clone(&acked),
             );
             tasks.push(tokio::spawn(async move {
                 // Distinct per worker and per step: `put-only` must never
@@ -233,13 +336,26 @@ async fn main() {
                     x ^= x << 17;
                     let t = Instant::now();
                     match one(&c, &a, x % a.keys, x, &data).await {
-                        Ok(()) => {
+                        Ok(Op::Write(key)) => {
                             ok.fetch_add(1, Ordering::Relaxed);
                             lat.lock().unwrap().push(t.elapsed().as_secs_f64() * 1e3);
+                            if a.mode != "put-delete" {
+                                acked.lock().unwrap().insert(key);
+                            }
+                        }
+                        Ok(Op::Read) => {
+                            read_lat
+                                .lock()
+                                .unwrap()
+                                .push(t.elapsed().as_secs_f64() * 1e3);
                         }
                         Err(e) => {
-                            errors.fetch_add(1, Ordering::Relaxed);
-                            *last_error.lock().unwrap() = e;
+                            if e.contains("SlowDown") {
+                                slowdowns.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                errors.fetch_add(1, Ordering::Relaxed);
+                                *last_error.lock().unwrap() = e;
+                            }
                         }
                     }
                 }
@@ -250,17 +366,32 @@ async fn main() {
         }
         let secs = started.elapsed().as_secs_f64();
         let mut l = std::mem::take(&mut *lat.lock().unwrap());
+        let mut r = std::mem::take(&mut *read_lat.lock().unwrap());
         println!(
             "{}",
             serde_json::json!({
                 "mode": a.mode, "target_ops_s": rate, "step_s": secs.round(),
                 "end_unix_s": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
                 "achieved_ops_s": ok.load(Ordering::Relaxed) as f64 / secs,
+                "reads_s": r.len() as f64 / secs,
                 "errors": errors.load(Ordering::Relaxed),
-                "p95_ms": pct(&mut l, 0.95), "p99_ms": pct(&mut l, 0.99),
+                "slowdown": slowdowns.load(Ordering::Relaxed),
+                "p50_ms": pct(&mut l, 0.50), "p95_ms": pct(&mut l, 0.95), "p99_ms": pct(&mut l, 0.99),
+                "read_p50_ms": pct(&mut r, 0.50), "read_p95_ms": pct(&mut r, 0.95), "read_p99_ms": pct(&mut r, 0.99),
                 "last_error": *last_error.lock().unwrap(),
             })
         );
+    }
+    if a.verify {
+        let keys: Vec<String> = acked.lock().unwrap().iter().cloned().collect();
+        let (checked, missing, wrong) = verify(&c, &a, &keys).await;
+        println!(
+            "{}",
+            serde_json::json!({"mode": a.mode, "verify": {"checked": checked, "missing": missing, "wrong": wrong}})
+        );
+        if missing + wrong > 0 {
+            std::process::exit(1);
+        }
     }
 }
 

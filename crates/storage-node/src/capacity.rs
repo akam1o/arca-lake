@@ -227,15 +227,22 @@ mod tests {
         let a = std::sync::Arc::new(Admission::new(Reserve::new(64 * MIB, 16 * MIB)));
         let free = 64 * MIB + 10 * (MIB + RECORD_OVERHEAD);
         let ok = std::sync::Arc::new(AtomicU64::new(0));
+        // Every thread decides before any hold is released.
+        let all = std::sync::Arc::new(std::sync::Barrier::new(32));
         let handles: Vec<_> = (0..32)
             .map(|_| {
-                let (a, ok) = (std::sync::Arc::clone(&a), std::sync::Arc::clone(&ok));
+                let (a, ok, all) = (
+                    std::sync::Arc::clone(&a),
+                    std::sync::Arc::clone(&ok),
+                    std::sync::Arc::clone(&all),
+                );
                 std::thread::spawn(move || {
-                    if let Ok(h) = a.admit(Some(free), WriteClass::Client, MIB) {
+                    let h = a.admit(Some(free), WriteClass::Client, MIB);
+                    if h.is_ok() {
                         ok.fetch_add(1, Ordering::SeqCst);
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                        drop(h);
                     }
+                    all.wait();
+                    drop(h);
                 })
             })
             .collect();
