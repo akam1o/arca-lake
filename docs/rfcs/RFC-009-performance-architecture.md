@@ -950,6 +950,41 @@ during PUT. `compare.py` applies its tolerances only to later runs with
 that label (`docs/verification/performance-regression.md`).
 
 
+### 6.20 Phase 3.6: GC throughput by workload (R-64)
+
+`gc_bench` (`crates/testkit/tests/it/gc_bench.rs`, ignored; 3 in-process
+nodes, 2 + 1, chunks of 1 MiB, two groups) retires generations of each
+workload, then runs GC passes (grace 0, batches of 1 000, 32 at once)
+until the queue is empty, recording `GcStats` per stage. Validation host,
+release build; generations collected per second:
+
+| Workload | FDB metadata, tmpfs nodes | in-memory, disk nodes | same, 60 MiB/s PUT load | same, second disk | macOS laptop |
+| --- | --- | --- | --- | --- | --- |
+| 256 KiB overwrite | 1 798 | 4 794 | 2 112 | 4 208 | 214 |
+| 1 MiB overwrite | 2 279 | 5 439 | 1 676 | 4 746 | 191 |
+| 16 MiB overwrite | 328 | 447 | 84 | 339 | 14 |
+| versioned 256 KiB | 2 591 | 4 494 | 4 885 | 5 074 | 221 |
+| multipart 2 × 1 MiB | 2 235 | 6 266 | 1 077 | 6 635 | 365 |
+| multipart 2 × 8 MiB | 824 | 1 310 | 1 205 | 219 | 41 |
+| multipart 2 × 64 MiB | 118 | 85 | 125 | 15 | 5 |
+| 100 / 1 000 / 10 000 parts, complete then delete (metadata only) | 1 664 / 1 393 / 1 012 | 5 122 / 4 042 / 2 076 | — | 1 426 / 1 376 / 996 | 212 / — / — |
+
+Per generation: ~3 metadata transactions (verify, finish; root step for
+roots), no conflicts. On FoundationDB verify takes 2–4 ms, finish 3–7 ms,
+a root step 1–2 ms; a DeleteShard 1–2 ms on tmpfs, 4–20 ms on the
+virtual disks (it waits for the node's group commit; under 60 MiB/s of
+client PUTs 10–40 ms), about 100 ms on macOS (`F_FULLFSYNC`). Large
+objects are bound by the number of shard deletes (one per chunk shard).
+A 10 000-part upload completes in 2 transactions (189 ms on
+FoundationDB) and an abort plus discard takes 43 transactions (1.5 s);
+GC heap growth stays under 2 MiB.
+
+The 14 generations/s of the Phase 3.5 multipart soak was not a
+throughput limit: parts served a second grace after their root (fixed,
+ADR-0020), so retired data accumulated for twice the grace, the soak's
+devices filled, and GC then stalled on tombstone appends that failed for
+lack of space. GC parallelism was not changed.
+
 ## 7. Interpretation
 
 *Verified on this environment* (one run each; see §4 for the error
