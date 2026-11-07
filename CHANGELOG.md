@@ -49,7 +49,8 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   collected in the same pass.
 - Cache eviction, invalidation and a failed population's cleanup could
   delete a newer cache copy under the same key (R-73); cache copies are
-  now deleted by the tokens their writes returned.
+  now deleted by the tokens their writes returned (copies without tokens
+  are left to reconciliation).
 
 ### Added
 

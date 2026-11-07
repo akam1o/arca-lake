@@ -159,9 +159,25 @@ impl Admission {
         class: WriteClass,
         payload: u64,
     ) -> Result<Held<'_>, Refusal> {
+        self.admit_with(|| free, class, payload)
+    }
+
+    /// [`Self::admit`], sampling the free space with `free` while the
+    /// admission lock is held: a sample taken before it could predate
+    /// writes that were stored (and released their holds) meanwhile.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::admit`].
+    pub fn admit_with(
+        &self,
+        free: impl FnOnce() -> Option<u64>,
+        class: WriteClass,
+        payload: u64,
+    ) -> Result<Held<'_>, Refusal> {
         let needed = payload.saturating_add(RECORD_OVERHEAD);
         let mut g = self.inflight.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(free) = free {
+        if let Some(free) = free() {
             let available = free.saturating_sub(*g);
             let floor = self.reserve.floor(class);
             if available.saturating_sub(needed) < floor || available < needed {

@@ -229,8 +229,10 @@ fn tokens_of(written: &[(String, ShardRef, RecordToken)]) -> Vec<CacheShardToken
 /// record: a newer copy written under the same key since is kept (a later
 /// eviction or reconciliation removes it when no placement names it). A
 /// member without one (a copy recorded before tokens, or an older node)
-/// is deleted unconditionally, as before. Returns the deletes that failed
-/// (orphans for reconciliation).
+/// is not deleted: an unconditional delete could remove a copy populated
+/// meanwhile, which its new placement then names; reconciliation removes
+/// it once no placement does (it lists fresh tokens). Returns the deletes
+/// that failed (orphans for reconciliation).
 pub async fn delete_copy(
     clients: &NodeClients,
     group: &GroupRecord,
@@ -251,13 +253,17 @@ pub async fn delete_copy(
             chunk_id,
             shard_index: index,
         };
-        let token = (tokens.group_id == group.id)
+        let Some(token) = (tokens.group_id == group.id)
             .then(|| tokens.of(index))
             .flatten()
-            .map_or(RecordToken::NONE, |t| RecordToken {
+            .filter(|t| t.sequence != 0)
+            .map(|t| RecordToken {
                 store_epoch: t.store_epoch,
                 sequence: t.sequence,
-            });
+            })
+        else {
+            continue;
+        };
         match clients.delete_shard_if(&addr, shard, epoch, token).await {
             Ok(()) => {}
             Err(s) if s.code() == tonic::Code::NotFound || NodeClients::is_changed(&s) => {}

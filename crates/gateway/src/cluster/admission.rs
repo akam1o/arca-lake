@@ -12,7 +12,9 @@
 //!
 //! A record that stops changing is trusted less: after its TTL the gateway
 //! acts as if at least `throttled`, after [`STALE_REJECT`] as if
-//! `write_rejected` (fail closed while no leader evaluates capacity). No
+//! `write_rejected` (fail closed while no leader evaluates capacity).
+//! A record already old by this gateway's clock when first seen (beyond
+//! its TTL and a skew allowance) starts aged. No
 //! record at all (a controller that predates Phase 3.6) admits: the storage
 //! nodes' reserve still refuses writes that would cross it.
 //!
@@ -46,6 +48,16 @@ const STALE_RATE: f64 = 4.0 * 1024.0 * 1024.0;
 
 /// Seconds of rate the bucket holds at most.
 const BURST_SECS: f64 = 2.0;
+
+/// Seconds of debt the bucket may run up at most (one large request may
+/// not lock the gateway out for longer than a client retries).
+const DEBT_SECS: f64 = 30.0;
+
+/// A record computed longer ago than its TTL plus this (by this gateway's
+/// wall clock) is already aged when first seen: a gateway that starts
+/// while no controller publishes does not trust an old record afresh.
+/// Clock skew beyond it makes a fresh record look old (fail closed).
+const SKEW_ALLOWANCE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default)]
 struct Seen {
@@ -122,6 +134,14 @@ impl WriteAdmission {
 
     /// The record as just read (`None`: none published).
     pub fn observe(&self, record: Option<AdmissionRecord>, now: Instant) {
+        let wall_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        self.observe_at(record, now, wall_ms);
+    }
+
+    /// [`Self::observe`] with this gateway's wall clock `wall_ms`.
+    pub fn observe_at(&self, record: Option<AdmissionRecord>, now: Instant, wall_ms: u64) {
         let mut s = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         let changed = match (&s.record, &record) {
             (Some(a), Some(b)) => a.computed_ms != b.computed_ms,
@@ -129,7 +149,12 @@ impl WriteAdmission {
             _ => true,
         };
         if changed {
-            s.changed = record.as_ref().map(|_| now);
+            s.changed = record.as_ref().map(|r| {
+                // Age already accrued before this gateway saw it.
+                let age = Duration::from_millis(wall_ms.saturating_sub(r.computed_ms));
+                let trusted = Duration::from_millis(r.ttl_ms) + SKEW_ALLOWANCE;
+                now.checked_sub(age.saturating_sub(trusted)).unwrap_or(now)
+            });
         }
         s.record = record;
     }
@@ -213,7 +238,8 @@ impl WriteAdmission {
                 ))
             }
             THROTTLED => {
-                let rate = e.rate_bytes_per_s.max(1.0);
+                // A record without a rate (older controller): the floor.
+                let rate = e.rate_bytes_per_s.max(f64::from(1u32 << 20));
                 let mut g = self.bucket.lock().unwrap_or_else(PoisonError::into_inner);
                 // A throttle starts empty: the first requests after a
                 // recovery do not arrive as one burst.
@@ -237,7 +263,7 @@ impl WriteAdmission {
                         wait,
                     ));
                 }
-                b.tokens -= bytes as f64;
+                b.tokens = (b.tokens - bytes as f64).max(-rate * DEBT_SECS);
                 Ok(())
             }
             _ => {
@@ -343,6 +369,12 @@ mod tests {
         }
     }
 
+    /// Seen at `now`, just computed (by the record's own clock).
+    fn seen(a: &WriteAdmission, r: AdmissionRecord, now: Instant) {
+        let wall = r.computed_ms;
+        a.observe_at(Some(r), now, wall);
+    }
+
     fn retry_after(e: &S3Error) -> u64 {
         e.headers()
             .and_then(|h| h.get(http::header::RETRY_AFTER))
@@ -356,7 +388,7 @@ mod tests {
         let a = WriteAdmission::new("durable");
         assert!(a.admit_data(64 * MIB).is_ok());
         let t0 = Instant::now();
-        a.observe(Some(record(1, WRITE_REJECTED, 0, 1)), t0);
+        seen(&a, record(1, WRITE_REJECTED, 0, 1), t0);
         let e = a.admit_data_at(1, t0).unwrap_err();
         assert_eq!(*e.code(), s3s::S3ErrorCode::SlowDown);
         assert!(retry_after(&e) >= 30);
@@ -370,7 +402,7 @@ mod tests {
         let a = WriteAdmission::new("durable");
         let t0 = Instant::now();
         // 8 MiB/s over 2 gateways: 4 MiB/s here.
-        a.observe(Some(record(1, THROTTLED, 8 * MIB, 2)), t0);
+        seen(&a, record(1, THROTTLED, 8 * MIB, 2), t0);
         let mut admitted = 0u64;
         let mut refused = 0;
         for ms in (0..10_000u64).step_by(10) {
@@ -398,23 +430,53 @@ mod tests {
     fn a_record_that_stops_changing_throttles_then_rejects() {
         let a = WriteAdmission::new("durable");
         let t0 = Instant::now();
-        a.observe(Some(record(1, NORMAL, 0, 1)), t0);
+        seen(&a, record(1, NORMAL, 0, 1), t0);
         assert_eq!(a.effective(t0).state, NORMAL);
         // Refreshed but unchanged (the leader stopped publishing).
-        a.observe(Some(record(1, NORMAL, 0, 1)), t0 + Duration::from_secs(20));
+        seen(&a, record(1, NORMAL, 0, 1), t0 + Duration::from_secs(20));
         assert_eq!(a.effective(t0 + Duration::from_secs(31)).state, THROTTLED);
         assert_eq!(a.effective(t0 + STALE_REJECT).state, WRITE_REJECTED);
         // A new computation: trusted again.
         let t1 = t0 + STALE_REJECT + Duration::from_secs(1);
-        a.observe(Some(record(2, NORMAL, 0, 1)), t1);
+        seen(&a, record(2, NORMAL, 0, 1), t1);
         assert_eq!(a.effective(t1).state, NORMAL);
+    }
+
+    #[test]
+    fn a_record_already_old_when_first_seen_is_not_trusted_afresh() {
+        let a = WriteAdmission::new("durable");
+        let t0 = Instant::now();
+        // Computed an hour ago (the controller has been down since).
+        let wall = 10_000_000_000;
+        a.observe_at(Some(record(wall - 3_600_000, NORMAL, 0, 1)), t0, wall);
+        assert_eq!(a.effective(t0).state, WRITE_REJECTED);
+        // Computed a few seconds ago: trusted.
+        let b = WriteAdmission::new("durable");
+        b.observe_at(Some(record(wall - 5_000, NORMAL, 0, 1)), t0, wall);
+        assert_eq!(b.effective(t0).state, NORMAL);
+    }
+
+    #[test]
+    fn debt_is_bounded() {
+        let a = WriteAdmission::new("durable");
+        let t0 = Instant::now();
+        seen(&a, record(1, THROTTLED, 2 * MIB, 1), t0);
+        let _ = a.admit_data_at(1, t0);
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(
+            a.admit_data_at(100 << 30, t1).is_ok(),
+            "one request may go into debt"
+        );
+        // At most DEBT_SECS of rate: admitted again within about that.
+        let t2 = t1 + Duration::from_secs(31);
+        assert!(a.admit_data_at(MIB, t2).is_ok());
     }
 
     #[test]
     fn other_tiers_are_not_affected() {
         let a = WriteAdmission::new("archive");
         let t0 = Instant::now();
-        a.observe(Some(record(1, RECOVERY_ONLY, 0, 1)), t0);
+        seen(&a, record(1, RECOVERY_ONLY, 0, 1), t0);
         assert!(a.admit_data_at(MIB, t0).is_ok());
     }
 }

@@ -505,12 +505,13 @@ impl StorageNode for StorageNodeService {
         let expected = usize::try_from(header.payload_len)
             .map_err(|_| tonic::Status::invalid_argument("payload too large"))?;
         // Capacity admission (Phase 3.6): decided before the body is taken,
-        // held until the write ends.
+        // on free space sampled under the admission lock, held until the
+        // write ends.
         let class = pb::WriteClass::try_from(header.write_class).unwrap_or(pb::WriteClass::Client);
         let _held = self
             .admission
-            .admit(
-                self.device_space().map(|(free, _)| free),
+            .admit_with(
+                || self.device_space().map(|(free, _)| free),
                 class,
                 header.payload_len,
             )

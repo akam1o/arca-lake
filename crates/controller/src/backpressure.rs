@@ -198,6 +198,18 @@ impl Machine {
 
     /// Evaluate `inputs` and move the state.
     pub fn step(&mut self, policy: &Policy, inputs: &Inputs) -> Decision {
+        let mut d = self.step_inner(policy, inputs);
+        // The rate belongs to the state applied, which may be held or
+        // stepped to while the inputs alone call for another one.
+        d.rate_bytes_per_s = if d.state == State::Throttled {
+            throttle_rate(policy, inputs)
+        } else {
+            0.0
+        };
+        d
+    }
+
+    fn step_inner(&mut self, policy: &Policy, inputs: &Inputs) -> Decision {
         let raw = evaluate(policy, inputs, 0.0);
         if raw.state >= self.state {
             // Worse or the same: at once.
@@ -286,7 +298,8 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
             .iter()
             .filter_map(|&n| by_node(n).map(Device::headroom))
             .min()
-            .unwrap_or(u64::MAX);
+            // No member heard from at all: nothing known, not used.
+            .unwrap_or(0);
         if room < min_room {
             out.excluded_groups.push(g.id);
         } else {
@@ -358,13 +371,17 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
     out.state = state;
     out.reason = reason;
     if state == State::Throttled {
-        // Take in what GC gives back (so that the backlog stops growing),
-        // never less than the floor.
-        out.rate_bytes_per_s = inputs
-            .gc_reclaim_bytes_per_s
-            .max(policy.min_rate_bytes_per_s);
+        out.rate_bytes_per_s = throttle_rate(policy, inputs);
     }
     out
+}
+
+/// Throttled: take in what GC gives back (so that the backlog stops
+/// growing), never less than the floor.
+fn throttle_rate(policy: &Policy, inputs: &Inputs) -> f64 {
+    inputs
+        .gc_reclaim_bytes_per_s
+        .max(policy.min_rate_bytes_per_s)
 }
 
 #[cfg(test)]
@@ -437,7 +454,12 @@ mod tests {
         now += 10_000;
         assert_eq!(m.step(&p, &at(60, now)).state, State::WriteRejected);
         now += p.dwell_ms;
-        assert_eq!(m.step(&p, &at(60, now)).state, State::Throttled, "one step");
+        let d = m.step(&p, &at(60, now));
+        assert_eq!(d.state, State::Throttled, "one step");
+        assert!(
+            d.rate_bytes_per_s >= p.min_rate_bytes_per_s,
+            "a throttle entered on the way back has a rate: {d:?}"
+        );
         now += 1;
         assert_eq!(
             m.step(&p, &at(60, now)).state,

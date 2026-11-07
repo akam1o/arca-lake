@@ -134,6 +134,22 @@ and refresh it on any epoch-mismatch error or on a timer. A write chooses
 an `active` group of the bucket's profile and tier, weighted by free
 capacity.
 
+**Capacity in placement (Phase 3.6, ADR-0020).** A chunk needs room on
+every member of its group: one full member stops the group however much
+room the others have. The controller leader leaves a group out of
+placement when its fullest member (by fresh report) has room above its
+reserve for fewer than 64 maximum shards (`--admission-group-min-shards`,
+`--admission-max-chunk-bytes`); gateways skip those groups. A member not
+heard from recently is no capacity evidence (its group fails writes on
+its own). Every group of a tier out: the tier is `write_rejected` (RFC-008
+§6.8). A member that refuses a shard for capacity (`RESOURCE_EXHAUSTED`)
+makes the gateway try the next group; when every group tried refused for
+capacity the request fails with `503 SlowDown`. Capacity imbalance
+between members therefore costs usable space: the Phase 3.6 capacity test
+(4 nodes, 2 groups of 3) refused new data with two members full and two
+at 37 %, which is correct for the groups but is space a rebalance would
+recover (R-82).
+
 ### 5.4 Placement epoch and fencing
 
 - Every group record carries `epoch`. Storage nodes persist, per group they

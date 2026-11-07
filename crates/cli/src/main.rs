@@ -3599,6 +3599,11 @@ fn render_compaction_stats(
             &c.errors,
         ),
         (
+            "arca_node_compaction_skipped_no_space_total",
+            "segments not compacted because the device lacked room for their live bytes",
+            &c.skipped_no_space,
+        ),
+        (
             "arca_node_compaction_copied_bytes_total",
             "live payload bytes copied by compaction",
             &c.copied_bytes,

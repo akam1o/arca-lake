@@ -2,9 +2,9 @@
 //! shards are deleted by the tokens the nodes returned when it was
 //! written, so that an eviction, an invalidation or a failed population's
 //! cleanup never removes a newer copy written under the same key since.
-//! Copies without tokens (recorded before, or on an older node) are
-//! deleted unconditionally, as before; a node that restarted refuses old
-//! tokens and its copy is left to reconciliation.
+//! Copies without tokens (recorded before, or on an older node) are not
+//! deleted blindly but left to reconciliation, like those on a node that
+//! restarted and refuses old tokens.
 
 use std::collections::HashMap;
 
@@ -186,12 +186,19 @@ async fn a_failed_population_cleans_up_only_the_shards_it_wrote() {
     // A's cleanup: B's copy stays (before R-73 it was deleted here).
     assert_eq!(s.delete(s.group.epoch, &a_tokens).await, 0);
     assert!(s.copy().await.is_some());
-    // A copy recorded without tokens (before this change) is still
-    // deleted unconditionally.
+    // A copy recorded without tokens (before this change) is not deleted
+    // blindly: an unconditional delete could hit a newer copy. Once no
+    // placement names it, reconciliation removes it.
     assert_eq!(
         s.delete(s.group.epoch, &CacheCopyTokens::default()).await,
         0
     );
+    assert!(s.copy().await.is_some());
+    meta_cache::remove(s.c.meta.as_ref(), &s.generation, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(s.c.reconcile_cache().await, 1);
     assert_eq!(s.copy().await, None);
     s.c.shutdown().await;
 }

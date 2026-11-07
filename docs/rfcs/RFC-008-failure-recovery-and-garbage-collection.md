@@ -320,8 +320,9 @@ root step for roots); 10 000 parts are retired in 40 steps.
 **Linearization point of physical capacity.** Storage nodes admit every
 `PutShard` before taking its body: the write's payload plus a record
 overhead must leave the device at or above its class's floor, counting
-every admitted write not yet ended. The admission and the hold are one
-critical section on the node; the hold ends when the RPC ends (stored,
+every admitted write not yet ended. The free-space sample, the check and
+the hold are one critical section on the node (a sample taken before it
+could predate writes stored meanwhile); the hold ends when the RPC ends (stored,
 failed or cancelled). This is the only point where space is decided;
 whatever the gateways or the controller believe, no two writes can be
 admitted against the same bytes.
@@ -356,7 +357,7 @@ removes them once the generation is gone (§6.3).
 | State | Entered when (any) | Gateways |
 | --- | --- | --- |
 | `recovery_only` | usable free < 2 %; no fresh capacity report from any member of the tier | refuse new data and new uploads |
-| `write_rejected` | usable free < 5 %; every writable group lacks room (a member with room for fewer than 64 maximum shards) | refuse new data and new uploads |
+| `write_rejected` | usable free < 5 %; every writable group lacks room (a member with room for fewer than 64 maximum shards, or no member heard from at all) | refuse new data and new uploads |
 | `throttled` | usable free < 10 %; full within 1 h at the free-space trend or the GC backlog's growth (each over ≥ 5 min) | new data at GC's reclaim rate (client bytes, ≥ 1 MiB/s), split over gateways |
 | `warning` | usable free < 20 %; full within 4 h; a member's report stale | admit |
 | `normal` | otherwise | admit |
@@ -365,7 +366,9 @@ Usable free is the tier's free bytes above the devices' reserves (minus
 writes in flight) over their size minus the reserves. A worse state
 applies at once; a better one needs its thresholds 3 points better for
 the dwell time (60 s) and is entered one step at a time, so that writes
-come back gradually; the throttle's token bucket starts empty. Reports
+come back gradually; the throttle's token bucket starts empty, carries
+the reclaim-rate floor whenever the applied state is `throttled` (also on
+the way back), and may go at most 30 s of rate into debt. Reports
 are judged by the controller's receipt time. Deletes, aborts,
 CompleteMultipartUpload, bucket operations and reads are never refused
 for capacity.
@@ -375,7 +378,10 @@ memory. A new leader starts every tier at `normal` and evaluates from
 fresh reports at its first health pass; until it has heard a member, the
 tier is `recovery_only` (fail closed). Gateways treat the published
 record as at least `throttled` once unchanged for its TTL (30 s) and as
-`write_rejected` after 5 min (no leader evaluates capacity); with no
+`write_rejected` after 5 min (no leader evaluates capacity); a record
+already older than its TTL plus 60 s by the gateway's clock when first
+seen (a gateway started while no leader publishes) is aged accordingly;
+with no
 record at all (a controller that predates it) they admit, and the nodes'
 reserve holds. A metadata outage keeps the gateway's last record, which
 then ages as above.

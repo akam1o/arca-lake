@@ -127,6 +127,26 @@ the output, compare-and-swapping the index entries, and unlinking the source.
 A fault-injection hook at each step is part of the public API so that tests
 (and later chaos tooling) can interrupt it. Reads holding the old file
 complete on the unlinked inode. Candidates are chosen by dead-byte fraction.
+Compaction writes its output before it frees the source: a segment whose
+live bytes (plus 1/64 and 1 MiB) do not fit in the device's free space is
+skipped and counted (`arca_node_compaction_skipped_no_space_total`,
+Phase 3.6); an
+out-of-space error mid-copy leaves the store as it was.
+
+**Capacity admission (Phase 3.6, RFC-008 §6.8).** The node admits every
+`PutShard` before taking its body against the device's free space (the
+file system's, capped by `--capacity-bytes` minus the segment bytes)
+minus the writes it has admitted and not yet ended; client, migration and
+cache writes must leave the reserve (`--reserve-bytes`, default
+`max(2 × segment_max + 64 MiB, 2 %)`, at most a quarter of the device),
+repair the repair floor (one segment and 16 MiB). Deletes are never
+refused: a tombstone is what frees space, and GC must work on a full
+device. A refused write is `RESOURCE_EXHAUSTED` ("insufficient capacity");
+so is an ENOSPC or EDQUOT from the store. `Health.devices` reports the
+device's total, available, allocated (segment files), live, reclaimable,
+quarantined, reserved and in-flight bytes, the repair floor and the
+sampling time; the node exports them as `arca_node_capacity_bytes{kind}`
+with `arca_node_admission_refused_total{class}`.
 
 ### 5.6a Durable quarantine and resynchronising recovery (Phase 3.2)
 

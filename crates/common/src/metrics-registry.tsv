@@ -159,6 +159,7 @@ arca_node_compaction_blocked_segments	gauge	node	segments	-	segments skipped bec
 arca_node_compaction_copied_bytes_total	counter	node	bytes	-	live payload bytes copied by compaction
 arca_node_compaction_errors_total	counter	node	errors	-	compactions that failed and were left for the next pass
 arca_node_compaction_reclaimed_bytes_total	counter	node	bytes	-	segment bytes released by compaction
+arca_node_compaction_skipped_no_space_total	counter	node	segments	-	segments not compacted because the device lacked room for their live bytes (compaction writes the copy before it frees the source)
 arca_node_compactions_total	counter	node	segments	-	sealed segments compacted
 arca_node_corrupt_reads_total	counter	node	reads	-	reads that found a corrupt record
 arca_node_dead_records	gauge	node	records	-	non-live data records still on the device (what keeps tombstones needed)

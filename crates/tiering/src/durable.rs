@@ -442,7 +442,10 @@ async fn delete_written(
     written: &[(String, ShardRef, RecordToken)],
     epoch: u64,
 ) {
-    for (addr, shard, token) in written {
+    // Only records this call wrote (by token): a shard without one (an
+    // older node) is left to reconciliation rather than deleted
+    // unconditionally over a concurrent writer's copy.
+    for (addr, shard, token) in written.iter().filter(|(_, _, t)| t.is_some()) {
         let _ = clients.delete_shard_if(addr, *shard, epoch, *token).await;
     }
 }

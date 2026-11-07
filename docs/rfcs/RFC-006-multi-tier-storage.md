@@ -223,6 +223,30 @@ pinned entries. Evicting an entry: delete the placement and index entry
 and subtract usage in one transaction, then delete the copy on the node
 (a failed delete leaves an orphan for reconciliation).
 
+**Conditional cache deletes (Phase 3.6, R-73).** The record tokens (store
+epoch, sequence) the nodes return for a copy's shard writes are kept next
+to its placement (`("al","g",gen,"xt",index)`, removed with it); eviction,
+invalidation and a failed population's cleanup delete each member's shard
+only if it is still that record. A newer copy written under the same key
+since (a population after the eviction removed the record, or a
+population that won the insert) is kept; a repair of a degraded copy
+records the tokens of the shards it rewrote (if the placement still names
+its group). A node that restarted has a new store epoch and refuses older
+tokens: the copy is then an orphan that reconciliation (which lists fresh
+tokens) removes once no placement names it. Placements recorded before
+Phase 3.6, and nodes that hand out no tokens, get no delete: their
+copies are left to reconciliation (an unconditional delete could remove a
+copy populated meanwhile that its new placement names). On a node that
+predates tokens reconciliation keeps them too (R-74) until it is
+upgraded.
+
+**Cache capacity (Phase 3.6).** The cache tier is bounded by its capacity
+and watermarks as above; its nodes also keep the storage node's reserve
+against cache population (write class `cache`), so a cache device never
+fills past it whatever the watermarks say. The controller publishes the
+cache tier's admission state, but it does not gate client writes (they
+go to durable tiers).
+
 Admission is refused only when a copy would exceed `capacityBytes`;
 eviction starts when usage exceeds the high watermark and stops at the
 low watermark, so under a read-through workload usage oscillates between
