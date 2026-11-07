@@ -1,0 +1,1 @@
+<Event Severity="30" Time="1794041169.177842" DateTime="2026-11-07T08:46:09Z" Type="PeerUnavailableForLongTime" ID="0000000000000000" SuppressedEventCount="0" PeerAddr="127.0.0.1:4802:tls" PeerAddress="127.0.0.1:4802:tls" ThreadID="1830693507592643540" Machine="127.0.0.1:4801" LogGroup="default" Roles="CD,SS,TL" />

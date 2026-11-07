@@ -14,7 +14,10 @@
 #
 # Environment: RUN (default ~/arca-soak; on a real disk, not a tmpfs), DURATION_SECS (86400),
 # FAULT_GAP_SECS (900), FAULT_START_SECS (600), WORKERS (8), REPO (this checkout; release build
-# with `--features fdb,fault-injection` and the soakload binaries).
+# with `--features fdb,fault-injection` and the soakload binaries), FDB_DIR (default RUN/fdb:
+# the FoundationDB data, logs and PKI; a directory on another device keeps its commits from
+# competing with the storage nodes' writes -- on one shared VM disk FoundationDB stopped with
+# io_timeout under the soak's load in Phase 3.5; RUN/fdb then links to it).
 #
 # Faults (round robin, one every FAULT_GAP_SECS): storage node SIGTERM
 # restart, storage node SIGKILL, gateway kill, controller leader kill,
@@ -145,6 +148,10 @@ cmd_setup() {
   [ -e "$RUN" ] && { echo "$RUN exists; teardown and remove it first" >&2; exit 2; }
   for b in "$BIN" "$SOAKLOAD" "$FAULTPROXY"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2; }; done
   mkdir -p "$RUN/ids" "$RUN/pids" "$RUN/logs"
+  if [ -n "${FDB_DIR:-}" ]; then
+    [ -e "$FDB_DIR" ] && { echo "$FDB_DIR exists; remove it first" >&2; exit 2; }
+    mkdir -p "$FDB_DIR"; ln -s "$FDB_DIR" "$RUN/fdb"
+  fi
   log "setup: FoundationDB (3 processes, TLS)"
   # Bounded memory: three processes share the host with the cluster.
   ARCA_BIN="$BIN" TRUST_DOMAIN="$FDB_TD" FDB_EXTRA_ARGS="--memory 2GiB --cache-memory 256MiB" bash "$FDBSH" start "$F" 4800 tls > "$RUN/logs/fdb-setup.log" 2>&1

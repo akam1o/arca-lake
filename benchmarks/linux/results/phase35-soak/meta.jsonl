@@ -1,0 +1,181 @@
+{"t": 1793981772, "gc": 1, "gc_oldest_age_s": 0, "pend": 1, "repair": 0, "mpu": 0}
+{"t": 1793982078, "gc": 3769, "gc_oldest_age_s": 306, "pend": 3, "repair": 0, "mpu": 155}
+{"t": 1793982382, "gc": 5808, "gc_oldest_age_s": 318, "pend": 6, "repair": 27, "mpu": 201}
+{"t": 1793982686, "gc": 5813, "gc_oldest_age_s": 302, "pend": 0, "repair": 0, "mpu": 183}
+{"t": 1793982989, "gc": 6686, "gc_oldest_age_s": 347, "pend": 2, "repair": 0, "mpu": 210}
+{"t": 1793983291, "gc": 6687, "gc_oldest_age_s": 332, "pend": 3, "repair": 0, "mpu": 216}
+{"t": 1793983594, "gc": 6557, "gc_oldest_age_s": 318, "pend": 4, "repair": 0, "mpu": 212}
+{"t": 1793983896, "gc": 6579, "gc_oldest_age_s": 303, "pend": 2, "repair": 0, "mpu": 184}
+{"t": 1793984199, "gc": 7370, "gc_oldest_age_s": 352, "pend": 3, "repair": 0, "mpu": 265}
+{"t": 1793984502, "gc": 7191, "gc_oldest_age_s": 341, "pend": 2, "repair": 0, "mpu": 210}
+{"t": 1793984804, "gc": 7007, "gc_oldest_age_s": 329, "pend": 3, "repair": 0, "mpu": 220}
+{"t": 1793985107, "gc": 6775, "gc_oldest_age_s": 319, "pend": 2, "repair": 0, "mpu": 211}
+{"t": 1793985410, "gc": 6966, "gc_oldest_age_s": 306, "pend": 2, "repair": 0, "mpu": 215}
+{"t": 1793985712, "gc": 7874, "gc_oldest_age_s": 357, "pend": 0, "repair": 0, "mpu": 251}
+{"t": 1793986015, "gc": 7448, "gc_oldest_age_s": 345, "pend": 0, "repair": 0, "mpu": 221}
+{"t": 1793986317, "gc": 4800, "gc_oldest_age_s": 333, "pend": 3, "repair": 0, "mpu": 164}
+{"t": 1793986620, "gc": 6839, "gc_oldest_age_s": 326, "pend": 0, "repair": 0, "mpu": 226}
+{"t": 1793986922, "gc": 7067, "gc_oldest_age_s": 315, "pend": 0, "repair": 0, "mpu": 207}
+{"t": 1793987225, "gc": 6343, "gc_oldest_age_s": 305, "pend": 0, "repair": 0, "mpu": 191}
+{"t": 1793987527, "gc": 7733, "gc_oldest_age_s": 356, "pend": 2, "repair": 0, "mpu": 229}
+{"t": 1793987830, "gc": 7015, "gc_oldest_age_s": 342, "pend": 1, "repair": 0, "mpu": 231}
+{"t": 1793988132, "gc": 7172, "gc_oldest_age_s": 331, "pend": 0, "repair": 0, "mpu": 229}
+{"t": 1793988435, "gc": 7105, "gc_oldest_age_s": 319, "pend": 3, "repair": 0, "mpu": 226}
+{"t": 1793988737, "gc": 6897, "gc_oldest_age_s": 307, "pend": 1, "repair": 0, "mpu": 225}
+{"t": 1793989040, "gc": 6254, "gc_oldest_age_s": 326, "pend": 0, "repair": 0, "mpu": 190}
+{"t": 1793989343, "gc": 6511, "gc_oldest_age_s": 313, "pend": 5, "repair": 0, "mpu": 203}
+{"t": 1793989645, "gc": 6593, "gc_oldest_age_s": 309, "pend": 3, "repair": 0, "mpu": 223}
+{"t": 1793989948, "gc": 7330, "gc_oldest_age_s": 351, "pend": 0, "repair": 0, "mpu": 216}
+{"t": 1793990250, "gc": 7147, "gc_oldest_age_s": 339, "pend": 0, "repair": 0, "mpu": 216}
+{"t": 1793990553, "gc": 7290, "gc_oldest_age_s": 329, "pend": 2, "repair": 0, "mpu": 219}
+{"t": 1793990855, "gc": 6963, "gc_oldest_age_s": 317, "pend": 2, "repair": 0, "mpu": 223}
+{"t": 1793991157, "gc": 6604, "gc_oldest_age_s": 303, "pend": 1, "repair": 0, "mpu": 213}
+{"t": 1793991460, "gc": 7707, "gc_oldest_age_s": 355, "pend": 1, "repair": 0, "mpu": 246}
+{"t": 1793991762, "gc": 7376, "gc_oldest_age_s": 342, "pend": 4, "repair": 19, "mpu": 226}
+{"t": 1793992065, "gc": 7126, "gc_oldest_age_s": 332, "pend": 2, "repair": 0, "mpu": 227}
+{"t": 1793992367, "gc": 7130, "gc_oldest_age_s": 321, "pend": 2, "repair": 0, "mpu": 214}
+{"t": 1793992669, "gc": 6923, "gc_oldest_age_s": 309, "pend": 2, "repair": 0, "mpu": 217}
+{"t": 1793992972, "gc": 7162, "gc_oldest_age_s": 354, "pend": 1, "repair": 0, "mpu": 222}
+{"t": 1793993274, "gc": 7121, "gc_oldest_age_s": 340, "pend": 1, "repair": 0, "mpu": 246}
+{"t": 1793993577, "gc": 6890, "gc_oldest_age_s": 327, "pend": 3, "repair": 0, "mpu": 220}
+{"t": 1793993879, "gc": 6532, "gc_oldest_age_s": 315, "pend": 1, "repair": 0, "mpu": 220}
+{"t": 1793994182, "gc": 6399, "gc_oldest_age_s": 303, "pend": 3, "repair": 0, "mpu": 211}
+{"t": 1793994484, "gc": 7722, "gc_oldest_age_s": 353, "pend": 3, "repair": 0, "mpu": 212}
+{"t": 1793994787, "gc": 7433, "gc_oldest_age_s": 341, "pend": 2, "repair": 0, "mpu": 217}
+{"t": 1793995089, "gc": 7036, "gc_oldest_age_s": 329, "pend": 2, "repair": 0, "mpu": 211}
+{"t": 1793995391, "gc": 6963, "gc_oldest_age_s": 318, "pend": 3, "repair": 0, "mpu": 196}
+{"t": 1793995694, "gc": 6696, "gc_oldest_age_s": 309, "pend": 2, "repair": 2, "mpu": 224}
+{"t": 1793995996, "gc": 8178, "gc_oldest_age_s": 361, "pend": 1, "repair": 0, "mpu": 254}
+{"t": 1793996298, "gc": 7664, "gc_oldest_age_s": 347, "pend": 1, "repair": 0, "mpu": 253}
+{"t": 1793996601, "gc": 7121, "gc_oldest_age_s": 335, "pend": 1, "repair": 0, "mpu": 223}
+{"t": 1793996903, "gc": 6829, "gc_oldest_age_s": 321, "pend": 3, "repair": 0, "mpu": 239}
+{"t": 1793997206, "gc": 6534, "gc_oldest_age_s": 309, "pend": 0, "repair": 0, "mpu": 248}
+{"t": 1793997508, "gc": 8002, "gc_oldest_age_s": 360, "pend": 0, "repair": 0, "mpu": 234}
+{"t": 1793997811, "gc": 7367, "gc_oldest_age_s": 346, "pend": 3, "repair": 0, "mpu": 232}
+{"t": 1793998113, "gc": 7459, "gc_oldest_age_s": 335, "pend": 2, "repair": 0, "mpu": 244}
+{"t": 1793998416, "gc": 6921, "gc_oldest_age_s": 322, "pend": 2, "repair": 0, "mpu": 215}
+{"t": 1793998718, "gc": 6648, "gc_oldest_age_s": 308, "pend": 2, "repair": 0, "mpu": 198}
+{"t": 1793999021, "gc": 7783, "gc_oldest_age_s": 359, "pend": 5, "repair": 0, "mpu": 212}
+{"t": 1793999323, "gc": 5317, "gc_oldest_age_s": 345, "pend": 0, "repair": 0, "mpu": 196}
+{"t": 1793999625, "gc": 7710, "gc_oldest_age_s": 337, "pend": 2, "repair": 0, "mpu": 233}
+{"t": 1793999927, "gc": 7236, "gc_oldest_age_s": 324, "pend": 3, "repair": 0, "mpu": 192}
+{"t": 1794000230, "gc": 5909, "gc_oldest_age_s": 309, "pend": 1, "repair": 24, "mpu": 188}
+{"t": 1794000532, "gc": 7399, "gc_oldest_age_s": 359, "pend": 2, "repair": 1, "mpu": 240}
+{"t": 1794000835, "gc": 7070, "gc_oldest_age_s": 345, "pend": 2, "repair": 13, "mpu": 216}
+{"t": 1794001137, "gc": 7154, "gc_oldest_age_s": 334, "pend": 1, "repair": 2, "mpu": 227}
+{"t": 1794001440, "gc": 6876, "gc_oldest_age_s": 323, "pend": 0, "repair": 2, "mpu": 224}
+{"t": 1794001742, "gc": 6943, "gc_oldest_age_s": 312, "pend": 3, "repair": 1, "mpu": 219}
+{"t": 1794002045, "gc": 6184, "gc_oldest_age_s": 364, "pend": 1, "repair": 4, "mpu": 195}
+{"t": 1794002347, "gc": 6946, "gc_oldest_age_s": 344, "pend": 1, "repair": 0, "mpu": 209}
+{"t": 1794002649, "gc": 7035, "gc_oldest_age_s": 333, "pend": 1, "repair": 0, "mpu": 244}
+{"t": 1794002952, "gc": 6967, "gc_oldest_age_s": 321, "pend": 3, "repair": 11, "mpu": 217}
+{"t": 1794003254, "gc": 6641, "gc_oldest_age_s": 310, "pend": 0, "repair": 0, "mpu": 217}
+{"t": 1794003557, "gc": 7480, "gc_oldest_age_s": 335, "pend": 5, "repair": 0, "mpu": 230}
+{"t": 1794003859, "gc": 7553, "gc_oldest_age_s": 348, "pend": 1, "repair": 9, "mpu": 255}
+{"t": 1794004161, "gc": 7255, "gc_oldest_age_s": 334, "pend": 2, "repair": 0, "mpu": 240}
+{"t": 1794004464, "gc": 6734, "gc_oldest_age_s": 321, "pend": 2, "repair": 1, "mpu": 217}
+{"t": 1794004766, "gc": 6660, "gc_oldest_age_s": 306, "pend": 1, "repair": 0, "mpu": 243}
+{"t": 1794005069, "gc": 7347, "gc_oldest_age_s": 357, "pend": 1, "repair": 0, "mpu": 259}
+{"t": 1794005372, "gc": 7656, "gc_oldest_age_s": 346, "pend": 0, "repair": 0, "mpu": 259}
+{"t": 1794005674, "gc": 7635, "gc_oldest_age_s": 335, "pend": 2, "repair": 0, "mpu": 218}
+{"t": 1794005976, "gc": 7087, "gc_oldest_age_s": 323, "pend": 1, "repair": 0, "mpu": 199}
+{"t": 1794006279, "gc": 6657, "gc_oldest_age_s": 308, "pend": 0, "repair": 0, "mpu": 198}
+{"t": 1794006581, "gc": 7651, "gc_oldest_age_s": 358, "pend": 2, "repair": 0, "mpu": 234}
+{"t": 1794006883, "gc": 7293, "gc_oldest_age_s": 343, "pend": 1, "repair": 0, "mpu": 229}
+{"t": 1794007186, "gc": 7300, "gc_oldest_age_s": 332, "pend": 1, "repair": 0, "mpu": 226}
+{"t": 1794007488, "gc": 6687, "gc_oldest_age_s": 317, "pend": 1, "repair": 0, "mpu": 231}
+{"t": 1794007791, "gc": 6635, "gc_oldest_age_s": 306, "pend": 1, "repair": 0, "mpu": 232}
+{"t": 1794008093, "gc": 7424, "gc_oldest_age_s": 357, "pend": 1, "repair": 0, "mpu": 236}
+{"t": 1794008396, "gc": 7262, "gc_oldest_age_s": 345, "pend": 2, "repair": 0, "mpu": 218}
+{"t": 1794008698, "gc": 6689, "gc_oldest_age_s": 333, "pend": 1, "repair": 0, "mpu": 200}
+{"t": 1794009001, "gc": 6390, "gc_oldest_age_s": 313, "pend": 3, "repair": 0, "mpu": 212}
+{"t": 1794009303, "gc": 6597, "gc_oldest_age_s": 301, "pend": 2, "repair": 0, "mpu": 202}
+{"t": 1794009608, "gc": 6399, "gc_oldest_age_s": 340, "pend": 0, "repair": 0, "mpu": 210}
+{"t": 1794009912, "gc": 6487, "gc_oldest_age_s": 323, "pend": 0, "repair": 0, "mpu": 191}
+{"t": 1794010215, "gc": 6943, "gc_oldest_age_s": 313, "pend": 1, "repair": 0, "mpu": 232}
+{"t": 1794010518, "gc": 6729, "gc_oldest_age_s": 313, "pend": 1, "repair": 0, "mpu": 196}
+{"t": 1794010820, "gc": 7265, "gc_oldest_age_s": 350, "pend": 1, "repair": 0, "mpu": 231}
+{"t": 1794011123, "gc": 6977, "gc_oldest_age_s": 338, "pend": 0, "repair": 0, "mpu": 224}
+{"t": 1794011425, "gc": 6861, "gc_oldest_age_s": 327, "pend": 0, "repair": 0, "mpu": 207}
+{"t": 1794011728, "gc": 6763, "gc_oldest_age_s": 315, "pend": 2, "repair": 0, "mpu": 236}
+{"t": 1794012030, "gc": 6764, "gc_oldest_age_s": 303, "pend": 2, "repair": 7, "mpu": 250}
+{"t": 1794012333, "gc": 5263, "gc_oldest_age_s": 334, "pend": 5, "repair": 0, "mpu": 194}
+{"t": 1794012636, "gc": 6329, "gc_oldest_age_s": 305, "pend": 1, "repair": 0, "mpu": 192}
+{"t": 1794012938, "gc": 7635, "gc_oldest_age_s": 357, "pend": 1, "repair": 0, "mpu": 249}
+{"t": 1794013241, "gc": 7632, "gc_oldest_age_s": 345, "pend": 1, "repair": 0, "mpu": 240}
+{"t": 1794013543, "gc": 7350, "gc_oldest_age_s": 333, "pend": 0, "repair": 0, "mpu": 239}
+{"t": 1794013845, "gc": 7042, "gc_oldest_age_s": 321, "pend": 1, "repair": 0, "mpu": 224}
+{"t": 1794014148, "gc": 6628, "gc_oldest_age_s": 310, "pend": 1, "repair": 0, "mpu": 228}
+{"t": 1794014451, "gc": 7400, "gc_oldest_age_s": 346, "pend": 0, "repair": 0, "mpu": 248}
+{"t": 1794014753, "gc": 7196, "gc_oldest_age_s": 346, "pend": 1, "repair": 0, "mpu": 221}
+{"t": 1794015056, "gc": 7213, "gc_oldest_age_s": 335, "pend": 0, "repair": 0, "mpu": 231}
+{"t": 1794015358, "gc": 6243, "gc_oldest_age_s": 322, "pend": 1, "repair": 0, "mpu": 219}
+{"t": 1794015661, "gc": 6956, "gc_oldest_age_s": 313, "pend": 1, "repair": 2, "mpu": 238}
+{"t": 1794015964, "gc": 6722, "gc_oldest_age_s": 318, "pend": 2, "repair": 0, "mpu": 211}
+{"t": 1794016266, "gc": 7280, "gc_oldest_age_s": 352, "pend": 2, "repair": 0, "mpu": 227}
+{"t": 1794016569, "gc": 7262, "gc_oldest_age_s": 342, "pend": 1, "repair": 0, "mpu": 235}
+{"t": 1794016871, "gc": 7068, "gc_oldest_age_s": 329, "pend": 3, "repair": 0, "mpu": 234}
+{"t": 1794017174, "gc": 7034, "gc_oldest_age_s": 319, "pend": 2, "repair": 0, "mpu": 224}
+{"t": 1794017476, "gc": 6799, "gc_oldest_age_s": 306, "pend": 2, "repair": 0, "mpu": 221}
+{"t": 1794017779, "gc": 7909, "gc_oldest_age_s": 357, "pend": 1, "repair": 0, "mpu": 251}
+{"t": 1794018082, "gc": 7246, "gc_oldest_age_s": 346, "pend": 3, "repair": 0, "mpu": 227}
+{"t": 1794018384, "gc": 6686, "gc_oldest_age_s": 330, "pend": 1, "repair": 0, "mpu": 231}
+{"t": 1794018687, "gc": 6739, "gc_oldest_age_s": 319, "pend": 1, "repair": 0, "mpu": 225}
+{"t": 1794018989, "gc": 6501, "gc_oldest_age_s": 306, "pend": 1, "repair": 0, "mpu": 205}
+{"t": 1794019292, "gc": 7646, "gc_oldest_age_s": 359, "pend": 1, "repair": 0, "mpu": 246}
+{"t": 1794019595, "gc": 7214, "gc_oldest_age_s": 347, "pend": 0, "repair": 0, "mpu": 230}
+{"t": 1794019897, "gc": 7364, "gc_oldest_age_s": 336, "pend": 1, "repair": 0, "mpu": 243}
+{"t": 1794020200, "gc": 7025, "gc_oldest_age_s": 325, "pend": 0, "repair": 0, "mpu": 234}
+{"t": 1794020502, "gc": 6726, "gc_oldest_age_s": 311, "pend": 2, "repair": 0, "mpu": 228}
+{"t": 1794020805, "gc": 6758, "gc_oldest_age_s": 310, "pend": 2, "repair": 0, "mpu": 193}
+{"t": 1794021107, "gc": 7428, "gc_oldest_age_s": 350, "pend": 3, "repair": 0, "mpu": 227}
+{"t": 1794021410, "gc": 7440, "gc_oldest_age_s": 339, "pend": 1, "repair": 0, "mpu": 212}
+{"t": 1794021712, "gc": 7024, "gc_oldest_age_s": 326, "pend": 0, "repair": 0, "mpu": 214}
+{"t": 1794022014, "gc": 6862, "gc_oldest_age_s": 313, "pend": 2, "repair": 0, "mpu": 231}
+{"t": 1794022317, "gc": 6693, "gc_oldest_age_s": 312, "pend": 0, "repair": 0, "mpu": 196}
+{"t": 1794022620, "gc": 6956, "gc_oldest_age_s": 351, "pend": 2, "repair": 0, "mpu": 224}
+{"t": 1794022922, "gc": 7062, "gc_oldest_age_s": 337, "pend": 1, "repair": 0, "mpu": 244}
+{"t": 1794023225, "gc": 6701, "gc_oldest_age_s": 324, "pend": 1, "repair": 0, "mpu": 193}
+{"t": 1794023528, "gc": 6843, "gc_oldest_age_s": 314, "pend": 0, "repair": 0, "mpu": 219}
+{"t": 1794023830, "gc": 6833, "gc_oldest_age_s": 301, "pend": 0, "repair": 0, "mpu": 234}
+{"t": 1794024133, "gc": 7754, "gc_oldest_age_s": 351, "pend": 4, "repair": 0, "mpu": 271}
+{"t": 1794024435, "gc": 7395, "gc_oldest_age_s": 339, "pend": 4, "repair": 0, "mpu": 242}
+{"t": 1794024738, "gc": 7126, "gc_oldest_age_s": 328, "pend": 1, "repair": 0, "mpu": 201}
+{"t": 1794025040, "gc": 6570, "gc_oldest_age_s": 316, "pend": 1, "repair": 0, "mpu": 215}
+{"t": 1794025343, "gc": 7078, "gc_oldest_age_s": 356, "pend": 6, "repair": 0, "mpu": 210}
+{"t": 1794025645, "gc": 4961, "gc_oldest_age_s": 313, "pend": 0, "repair": 0, "mpu": 163}
+{"t": 1794025948, "gc": 6707, "gc_oldest_age_s": 305, "pend": 1, "repair": 0, "mpu": 263}
+{"t": 1794026250, "gc": 7667, "gc_oldest_age_s": 355, "pend": 0, "repair": 0, "mpu": 249}
+{"t": 1794026553, "gc": 7119, "gc_oldest_age_s": 341, "pend": 0, "repair": 0, "mpu": 211}
+{"t": 1794026855, "gc": 6899, "gc_oldest_age_s": 328, "pend": 0, "repair": 0, "mpu": 232}
+{"t": 1794027158, "gc": 6819, "gc_oldest_age_s": 315, "pend": 1, "repair": 0, "mpu": 240}
+{"t": 1794027460, "gc": 6837, "gc_oldest_age_s": 304, "pend": 0, "repair": 0, "mpu": 226}
+{"t": 1794027763, "gc": 7982, "gc_oldest_age_s": 355, "pend": 0, "repair": 0, "mpu": 238}
+{"t": 1794028065, "gc": 7520, "gc_oldest_age_s": 343, "pend": 0, "repair": 0, "mpu": 229}
+{"t": 1794028368, "gc": 5872, "gc_oldest_age_s": 307, "pend": 0, "repair": 0, "mpu": 208}
+{"t": 1794028670, "gc": 7674, "gc_oldest_age_s": 358, "pend": 0, "repair": 0, "mpu": 252}
+{"t": 1794028975, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794029517, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794030059, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794030601, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794031143, "gc": 5788, "gc_oldest_age_s": 272, "pend": 2, "repair": 4, "mpu": 190}
+{"t": 1794031445, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794031987, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794032529, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794033070, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794033612, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794034154, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794034695, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794035237, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794035779, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794036320, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794036862, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794037404, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794037945, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794038487, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794039029, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794039570, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794040112, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794040654, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794041195, "gc": null, "pend": null, "repair": null, "mpu": null}
+{"t": 1794041737, "gc": null, "pend": null, "repair": null, "mpu": null}

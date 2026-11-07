@@ -1,0 +1,83 @@
+2026-11-06T16:26:11Z node-restart d0
+2026-11-06T16:41:31Z gateway-kill gw-a
+2026-11-06T16:56:37Z leader-kill skipped (leader '<user>@<host>')
+2026-11-06T17:11:38Z fdb-process-restart 1
+2026-11-06T17:27:08Z net-delay d3 300ms 120s
+2026-11-06T17:44:09Z node-kill d0
+2026-11-06T17:59:41Z cache-node-kill c0
+2026-11-06T18:15:02Z net-blackhole d3 45s
+2026-11-06T18:30:48Z corrupt-shard d0 (node stopped)
+2026-11-06T18:30:53Z corrupt-shard-detail d0 picked group 2 chunk 01a1b219c08773b38fa9469e00000000 index 1 flipped one byte of the payload at offset 30691468 (segment 1103 record offset 30613504) 
+2026-11-06T18:45:54Z eio-read d0 20
+2026-11-06T19:02:25Z net-reset d3 10s
+2026-11-06T19:17:35Z cert-rotate gw-a
+2026-11-06T19:32:36Z eio-write d0 5
+2026-11-06T19:49:07Z controller-restart (standby) ctl-a
+2026-11-06T20:04:27Z node-restart d1
+2026-11-06T20:19:47Z gateway-kill gw-b
+2026-11-06T20:34:54Z leader-kill skipped (leader '<user>@<host>')
+2026-11-06T20:49:55Z fdb-process-restart 2
+2026-11-06T21:05:25Z net-delay d3 300ms 120s
+2026-11-06T21:22:26Z node-kill d1
+2026-11-06T21:37:56Z cache-node-kill c1
+2026-11-06T21:53:17Z net-blackhole d3 45s
+2026-11-06T22:09:04Z corrupt-shard d1 (node stopped)
+2026-11-06T22:09:11Z corrupt-shard-detail d1 picked group 2 chunk 01a1b2e7fc0f7591ad4cd79f00000000 index 2 flipped one byte of the payload at offset 237753940 (segment 2923 record offset 237608960) 
+2026-11-06T22:24:13Z eio-read d1 20
+2026-11-06T22:40:44Z net-reset d3 10s
+2026-11-06T22:55:56Z cert-rotate d1
+2026-11-06T23:10:57Z eio-write d1 5
+2026-11-06T23:27:28Z controller-restart (standby) ctl-a
+2026-11-06T23:42:40Z node-restart d2
+2026-11-06T23:58:00Z gateway-kill gw-a
+2026-11-07T00:13:06Z leader-kill skipped (leader '<user>@<host>')
+2026-11-07T00:28:08Z fdb-process-restart 3
+2026-11-07T00:43:39Z net-delay d3 300ms 120s
+2026-11-07T01:00:41Z node-kill d2
+2026-11-07T01:16:11Z cache-node-kill c0
+2026-11-07T01:31:32Z net-blackhole d3 45s
+2026-11-07T01:47:20Z corrupt-shard d2 (node stopped)
+2026-11-07T01:47:26Z corrupt-shard-detail d2 picked group 3 chunk 01a1b3a85ebf748fa288265000000000 index 0 flipped one byte of the payload at offset 96523320 (segment 3609 record offset 96522240) 
+2026-11-07T02:02:27Z eio-read d2 20
+2026-11-07T02:18:59Z net-reset d3 10s
+2026-11-07T02:34:10Z cert-rotate ctl-a
+2026-11-07T02:49:10Z eio-write d2 5
+2026-11-07T03:05:41Z controller-restart (standby) ctl-a
+2026-11-07T03:20:53Z node-restart d3
+2026-11-07T03:36:15Z gateway-kill gw-b
+2026-11-07T03:51:22Z leader-kill skipped (leader '<user>@<host>')
+2026-11-07T04:06:23Z fdb-process-restart 1
+2026-11-07T04:21:55Z net-delay d3 300ms 120s
+2026-11-07T04:38:55Z node-kill d3
+2026-11-07T04:54:26Z cache-node-kill c1
+2026-11-07T05:09:46Z net-blackhole d3 45s
+2026-11-07T05:25:33Z corrupt-shard d3 (node stopped)
+2026-11-07T05:25:35Z corrupt-shard-detail d3 picked group 2 chunk 01a1b459cbe67675b0cf538000000000 index 0 flipped one byte of the payload at offset 3155012 (segment 3163 record offset 3129344) 
+2026-11-07T05:40:35Z eio-read d3 20
+2026-11-07T05:57:07Z net-reset d3 10s
+2026-11-07T06:12:18Z cert-rotate gw-a
+2026-11-07T06:27:19Z eio-write d3 5
+2026-11-07T06:44:20Z controller-restart (standby) ctl-a
+2026-11-07T06:59:41Z node-restart d0
+2026-11-07T07:00:02Z restart-missing ctl-a
+2026-11-07T07:15:02Z gateway-kill gw-a
+2026-11-07T07:15:07Z restart-missing ctl-a
+2026-11-07T07:30:37Z leader-kill skipped (leader '')
+2026-11-07T07:30:38Z restart-missing gw-a
+2026-11-07T07:30:38Z restart-missing ctl-a
+2026-11-07T07:45:38Z fdb-process-restart 2
+2026-11-07T07:46:09Z restart-missing gw-a
+2026-11-07T07:46:09Z restart-missing ctl-a
+2026-11-07T08:01:09Z net-delay d3 300ms 120s
+2026-11-07T08:03:10Z restart-missing gw-a
+2026-11-07T08:03:10Z restart-missing ctl-a
+2026-11-07T08:18:11Z node-kill d0
+2026-11-07T08:18:41Z restart-missing gw-a
+2026-11-07T08:18:41Z restart-missing ctl-a
+2026-11-07T08:33:42Z cache-node-kill c0
+2026-11-07T08:34:02Z restart-missing gw-a
+2026-11-07T08:34:02Z restart-missing ctl-a
+2026-11-07T08:49:03Z net-blackhole d3 45s
+2026-11-07T08:49:49Z restart-missing gw-a
+2026-11-07T08:49:49Z restart-missing ctl-a
+2026-11-07T09:00:17Z faults stopped

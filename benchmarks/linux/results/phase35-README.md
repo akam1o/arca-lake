@@ -52,3 +52,21 @@ drain is timed after each mode (`drain.txt`).
 | `run2-modes` | 764fcf3 (GC: budget at least the interval, 32 at once) | overwrite, put-delete, versioned, multipart | 256 KiB objects; multipart invalid (256 KiB parts are below the cluster's 1 MiB minimum: every Complete failed and gcload left the uploads open, fixed in 238b883) |
 | `run3-multipart` | 238b883 | multipart, 2 × 1 MiB parts | stopped at the 80 ops/s step with the disk 97 % full: GC collected about 14 generations/s against about 120 retired/s; `gc-passes.log` holds the leader's pass reports |
 
+## phase35-soak (first 24 h attempt, the soak host, 9abee45)
+
+`soak24.sh` with the Phase 3.4 configuration (8 workers, a fault every
+900 s), everything on the VM's single disk. The disk was 95–98 % busy for
+the whole run (`host.jsonl`, `io_ms`). For 13 h: no violation, every
+two-hourly full verification of the acknowledged-write ledger clean. At
+05:18 Z all three FoundationDB processes stopped with `io_timeout` (1521,
+`fdb-trace/`); the harness has no supervisor to restart them
+(`operator.log`: restarted by hand at 05:54 Z; the cluster recovered without
+restarting a gateway or controller, a seventh full verification completed
+clean); at 06:02 Z two stopped again with the disk saturated, and the run
+was stopped. Not reached: the end of the workload, convergence and the
+integrity snapshots. A 2 h A/B against the Phase 3.4 build (a8dc96b, which
+had run 25 h on this host in Phase 3.4) stopped the same way 1.5 min into
+its load, so the cause is the host's disk under this load, not Phase 3.5's
+changes; idle fsync latency was normal (p50 0.9 ms). The repeated soak puts
+FoundationDB on a second virtual disk (`FDB_DIR`).
+
