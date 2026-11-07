@@ -13,22 +13,33 @@ arca_backup_verify_duration_seconds	gauge	backup	seconds	-	time the last verific
 arca_backup_verify_last_run_timestamp_seconds	gauge	backup	unix_seconds	-	end of the last backup verification run
 arca_backup_verify_last_success_timestamp_seconds	gauge	backup	unix_seconds	-	end of the last backup verification without findings
 arca_backup_verify_success	gauge	backup	bool	-	1 when the last backup verification found nothing
+arca_controller_admission_excluded_groups	gauge	controller	groups	-	durable groups left out of placement because a member lacks room (leader)
+arca_controller_backpressure_state	gauge	controller	state	-	worst write admission state of the tiers (0 normal, 1 warning, 2 throttled, 3 write rejected, 4 recovery only; leader)
 arca_controller_cache_chunks_reconstructed_total	counter	controller	chunks	-	cache chunks rebuilt by cache-group repair
 arca_controller_cache_evicted_total	counter	controller	chunks	-	cache copies evicted by the LRU pass
 arca_controller_cache_over_watermark	gauge	controller	bool	-	1 while cache usage is above the high watermark
 arca_controller_cache_repairs_completed_total	counter	controller	repairs	-	cache-group member repairs completed
 arca_controller_cache_repairs_started_total	counter	controller	repairs	-	cache-group member repairs started
 arca_controller_cache_usage_bytes	gauge	controller	bytes	-	bytes recorded as cached on the cache tier
+arca_controller_capacity_bytes	gauge	controller	bytes	kind=total|usable|headroom|reserved|reclaimable|inflight	durable tiers: device bytes, bytes minus the reserves, free bytes client writes may still use, the reserves, bytes compaction can reclaim, admitted writes in flight (leader)
 arca_controller_chunks_demoted_total	counter	controller	chunks	-	chunks moved to a colder tier by automatic tiering
 arca_controller_chunks_promoted_total	counter	controller	chunks	-	chunks moved to a hotter tier by automatic tiering
 arca_controller_chunks_reconstructed_total	counter	controller	chunks	-	durable chunks rebuilt by member replacement
 arca_controller_cluster_phase	gauge	controller	enum	-	cluster phase: 0 Active, 1 ReadOnly, 2 Restoring, 3 VerificationPending, 4 RecoveryRequired
 arca_controller_data_integrity_status	gauge	controller	enum	-	0 clean, 1 repairs pending or failed, 2 unrecoverable stripes
 arca_controller_gc_backlog	gauge	controller	generations	-	retired generations waiting for GC after the last pass (leader; counted up to 200000)
+arca_controller_gc_backlog_bytes	gauge	controller	bytes	-	logical bytes of the retired generations waiting for GC (entries written before Phase 3.6 carry no size; leader)
 arca_controller_gc_backlog_oldest_age_seconds	gauge	controller	seconds	-	age of the oldest retired generation waiting for GC after the last pass (leader)
+arca_controller_gc_backlog_physical_bytes	gauge	controller	bytes	-	GC backlog in physical bytes, estimated with the groups' coding overhead (leader)
 arca_controller_gc_collected_total	counter	controller	generations	-	retired generations whose shards GC deleted
+arca_controller_gc_parts_retired_total	counter	controller	generations	-	part generations retired by multipart root steps
 arca_controller_gc_passes_total	counter	controller	passes	-	GC batches run
+arca_controller_gc_reclaim_bytes_per_second	gauge	controller	bytes_per_second	-	physical bytes GC reclaimed per second recently (moving average; leader)
+arca_controller_gc_reclaimed_bytes_total	counter	controller	bytes	-	physical bytes of the shards GC deleted or found already gone (shard size times shard count of each chunk)
+arca_controller_gc_roots_collected_total	counter	controller	generations	-	multipart roots collected (their parts were retired first)
 arca_controller_gc_skipped_referenced_total	counter	controller	generations	-	retired-queue entries naming a referenced generation (invariant violation when > 0)
+arca_controller_gc_stage_seconds	histogram	controller	seconds	stage=expire|discover|root_step|verify|delete_rpc|delete_generation|finish|collect|batch	time of each GC stage: expiring pending leases, reading the retired queue, one multipart root step, one reference check, one DeleteShard RPC, every delete of one generation, removing one generation's metadata, one generation end to end, one batch
+arca_controller_gc_transactions_total	counter	controller	transactions	kind=verify|finish|root_step	metadata transactions GC ran, by kind
 arca_controller_groups_reduced_redundancy	gauge	controller	groups	-	durable groups rebuilding a member while the node it left does not answer: one shard of redundancy short until the rebuild completes (a healthy member's move keeps the leaving node as a reader)
 arca_controller_groups_repairing	gauge	controller	groups	-	groups in Repairing at the last repair pass
 arca_controller_guard_refusals_total	counter	controller	transactions	-	metadata writes refused by the cluster-state guard at commit
@@ -71,6 +82,10 @@ arca_controller_tls_reload_failures_total	counter	controller	reloads	-	TLS reloa
 arca_controller_tls_reloads_total	counter	controller	reloads	-	TLS material reloads that changed it
 arca_controller_tls_rpcs_denied_total	counter	controller	rpcs	-	RPCs refused by the role authorization table
 arca_controller_upgrade_step	gauge	controller	enum	-	rolling-upgrade finalize step (0 none … 5)
+arca_gateway_admission_record_age_seconds	gauge	gateway	seconds	-	seconds since the admission record last changed (0 = no record)
+arca_gateway_admission_rejected_total	counter	gateway	requests	-	requests refused with SlowDown because the tier refuses new data
+arca_gateway_admission_state	gauge	gateway	state	-	write admission state this gateway applies to its tier (0 normal, 1 warning, 2 throttled, 3 write rejected, 4 recovery only; includes escalation of a stale record)
+arca_gateway_admission_throttled_total	counter	gateway	requests	-	requests refused with SlowDown by the throttle
 arca_gateway_auth_failures_total	counter	gateway	requests	reason=unknown_key|inactive_key|expired_key	requests refused for their access key, by reason
 arca_gateway_cache_admission_rejected_capacity_total	counter	gateway	events	-	read-through cache: admission rejected capacity (RFC-006 §5.3)
 arca_gateway_cache_admission_rejected_generation_total	counter	gateway	events	-	read-through cache: admission rejected generation (RFC-006 §5.3)
@@ -105,11 +120,13 @@ arca_gateway_meta_txn_attempts_total	counter	gateway	transactions	-	metadata tra
 arca_gateway_meta_txn_conflicts_total	counter	gateway	transactions	-	metadata transaction conflicts (retried)
 arca_gateway_meta_txn_exhausted_total	counter	gateway	transactions	-	metadata transactions that ran out of retries
 arca_gateway_meta_txn_unknown_retries_total	counter	gateway	transactions	-	commits with an unknown outcome that were resolved
+arca_gateway_node_capacity_refusals_total	counter	gateway	shards	-	shard writes storage nodes refused for capacity
 arca_gateway_node_rpc_deadline_exceeded_total	counter	gateway	rpcs	-	shard streams that missed their deadline
 arca_gateway_node_rpc_exhausted_total	counter	gateway	rpcs	-	node RPCs that ran out of retries
 arca_gateway_node_rpc_retries_total	counter	gateway	rpcs	-	node RPC retries
 arca_gateway_node_rpc_stalled_total	counter	gateway	rpcs	-	shard streams aborted for lack of progress
 arca_gateway_node_rpc_unary_timeouts_total	counter	gateway	rpcs	-	unary node RPCs that timed out
+arca_gateway_placement_capacity_failures_total	counter	gateway	chunks	-	chunks no stripe group had capacity for (the request failed with SlowDown)
 arca_gateway_population_queue_completed_total	counter	gateway	populations	-	cache populations completed
 arca_gateway_population_queue_deferred_for_reads_total	counter	gateway	populations	-	cache populations deferred while reads were busy
 arca_gateway_population_queue_dropped_full_total	counter	gateway	populations	-	cache populations dropped: queue full
@@ -133,6 +150,9 @@ arca_gateway_tls_reloads_total	counter	gateway	reloads	-	TLS material reloads th
 arca_gateway_tls_rpcs_denied_total	counter	gateway	rpcs	-	RPCs refused by the role authorization table
 arca_gateway_unreadable_reads_total	counter	gateway	reads	-	GETs that failed with an integrity error
 arca_node_active_segment_id	gauge	node	id	-	segment being appended to (never compacted)
+arca_node_admission_admitted_total	counter	node	writes	-	shard writes admitted by capacity admission
+arca_node_admission_refused_total	counter	node	writes	class=client|repair|migration|cache	shard writes refused because the device would keep less than the class's floor (RESOURCE_EXHAUSTED)
+arca_node_capacity_bytes	gauge	node	bytes	kind=total|available|allocated|live|reclaimable|quarantined|reserved|repair_floor|inflight	the device: size the node may use, bytes free, segment files, live payload in them, bytes compaction can reclaim, quarantined bytes, the reserve client writes stop at, the floor repair stops at, admitted writes in flight
 arca_node_compaction_backlog_bytes	gauge	node	bytes	-	non-live bytes of the segments still waiting for compaction after the last pass
 arca_node_compaction_backlog_segments	gauge	node	segments	-	sealed segments over the dead-fraction threshold still waiting for compaction after the last pass
 arca_node_compaction_blocked_segments	gauge	node	segments	-	segments skipped because every tombstone in them is still needed

@@ -477,6 +477,16 @@ impl<S: KvStore + 'static> TestCluster<S> {
         Ok(())
     }
 
+    /// Another gateway backend on the same metadata and nodes (concurrent
+    /// gateways).
+    ///
+    /// # Errors
+    ///
+    /// The startup gate's refusal.
+    pub async fn extra_backend(&self) -> Result<ClusterBackend<S>, arca_lake_metadata::MetaError> {
+        ClusterBackend::new(Arc::clone(&self.meta), self.cluster_cfg.clone()).await
+    }
+
     /// Stop node `i` (its process is gone until [`TestCluster::start_node`]).
     pub async fn stop_node(&mut self, i: usize) {
         if let Some(h) = self.nodes[i].handle.take() {

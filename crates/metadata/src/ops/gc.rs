@@ -124,6 +124,66 @@ pub async fn backlog<S: KvStore>(store: &S, cap: usize) -> Result<(usize, Option
     .await
 }
 
+/// The retired queue measured (Phase 3.6, R-64).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Backlog {
+    /// Entries counted (at most the cap).
+    pub entries: usize,
+    /// Logical bytes the counted entries carry.
+    pub bytes: u64,
+    /// Counted entries that carry no size (written before Phase 3.6).
+    pub without_size: usize,
+    /// When the oldest entry was retired.
+    pub oldest_ms: Option<u64>,
+    /// The cap was reached: more entries exist.
+    pub truncated: bool,
+}
+
+/// Measure the retired queue up to `cap` entries, one bounded page per
+/// transaction (a single transaction over a large queue would outlast the
+/// store's transaction time limit).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn backlog_bytes<S: KvStore>(store: &S, cap: usize) -> Result<Backlog> {
+    const PAGE: usize = 5000;
+    let full = keys::retired_until_range(u64::MAX);
+    let mut begin = full.begin.clone();
+    let mut out = Backlog::default();
+    while out.entries < cap {
+        let range = KeyRange::new(begin.clone(), full.end.clone());
+        let want = PAGE.min(cap - out.entries);
+        let page = transact(store, (range, want), |tx, env| {
+            Box::pin(async move {
+                let (range, want) = env;
+                tx.get_range(range, *want, false).await.map_err(Into::into)
+            })
+        })
+        .await?;
+        if out.oldest_ms.is_none() {
+            out.oldest_ms = page.first().and_then(|(k, _)| keys::retired_since_from(k));
+        }
+        for (_, v) in &page {
+            match <[u8; 8]>::try_from(v.as_slice()) {
+                Ok(b) => out.bytes = out.bytes.saturating_add(u64::from_le_bytes(b)),
+                Err(_) => out.without_size += 1,
+            }
+        }
+        out.entries += page.len();
+        if page.len() < want {
+            return Ok(out);
+        }
+        let Some((last, _)) = page.last() else {
+            return Ok(out);
+        };
+        begin.clone_from(last);
+        begin.push(0);
+    }
+    out.truncated = true;
+    Ok(out)
+}
+
 /// Remove all metadata of a retired generation. Call only after its shards
 /// have been deleted from every storage node.
 ///

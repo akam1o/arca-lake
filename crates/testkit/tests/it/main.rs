@@ -20,6 +20,7 @@ mod cache_ec;
 mod cache_ec_fdb;
 #[cfg(feature = "fdb")]
 mod cache_fdb;
+mod capacity;
 mod commit_timeouts;
 mod controller;
 mod e2e;
@@ -33,6 +34,7 @@ mod faults_fdb;
 mod fdb_failover;
 #[cfg(feature = "fdb")]
 mod fdb_restore;
+mod gc_bench;
 mod gc_safety;
 mod integrity;
 mod member_move_redundancy;

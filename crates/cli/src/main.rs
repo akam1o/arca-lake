@@ -1475,6 +1475,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 render_put_stats(&mut out, &stats_backend.put_stats());
                 render_queue_and_txn_stats(&mut out, &stats_backend.population_queue_stats());
                 render_integrity_stats(&mut out, &stats_backend.integrity_stats());
+                render_admission_stats(&mut out, &stats_backend.cluster().admission.snapshot());
                 s3_stats.render(&mut out);
                 out += &arca_lake_protocol::tls::render_metrics(
                     "arca_gateway",
@@ -1567,6 +1568,11 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
             let mut out = render_node_stats(&service.stats(), &service.store().timings());
             render_compaction_stats(&mut out, service.compaction_stats());
             render_device_space(&mut out, service.device_space());
+            render_node_capacity(
+                &mut out,
+                service.device_capacity().ok().as_ref(),
+                service.admission_counts(),
+            );
             out += &arca_lake_protocol::tls::render_metrics(
                 "arca_node",
                 service.tls_stats().as_deref(),
@@ -3465,6 +3471,81 @@ fn render_queue_and_txn_stats(
     }
 }
 
+fn render_node_capacity(
+    out: &mut String,
+    device: Option<&arca_lake_protocol::storage::v1::DeviceCapacity>,
+    counts: (u64, [u64; 4]),
+) {
+    use std::fmt::Write as _;
+    let d = device.copied().unwrap_or_default();
+    let _ = writeln!(out, "# TYPE arca_node_capacity_bytes gauge");
+    for (kind, v) in [
+        ("total", d.total_bytes),
+        ("available", d.available_bytes),
+        ("allocated", d.allocated_bytes),
+        ("live", d.live_bytes),
+        ("reclaimable", d.reclaimable_bytes),
+        ("quarantined", d.quarantined_bytes),
+        ("reserved", d.reserved_bytes),
+        ("repair_floor", d.repair_floor_bytes),
+        ("inflight", d.inflight_bytes),
+    ] {
+        let _ = writeln!(out, "arca_node_capacity_bytes{{kind=\"{kind}\"}} {v}");
+    }
+    let _ = writeln!(
+        out,
+        "# TYPE arca_node_admission_admitted_total counter\narca_node_admission_admitted_total {}",
+        counts.0
+    );
+    let _ = writeln!(out, "# TYPE arca_node_admission_refused_total counter");
+    for (class, v) in ["client", "repair", "migration", "cache"]
+        .iter()
+        .zip(counts.1)
+    {
+        let _ = writeln!(
+            out,
+            "arca_node_admission_refused_total{{class=\"{class}\"}} {v}"
+        );
+    }
+}
+
+fn render_admission_stats(
+    out: &mut String,
+    a: &arca_lake_gateway::cluster::admission::AdmissionStatsSnapshot,
+) {
+    use std::fmt::Write as _;
+    for (name, kind, value) in [
+        ("arca_gateway_admission_state", "gauge", u64::from(a.state)),
+        (
+            "arca_gateway_admission_record_age_seconds",
+            "gauge",
+            a.record_age_secs,
+        ),
+        (
+            "arca_gateway_admission_throttled_total",
+            "counter",
+            a.throttled,
+        ),
+        (
+            "arca_gateway_admission_rejected_total",
+            "counter",
+            a.rejected,
+        ),
+        (
+            "arca_gateway_node_capacity_refusals_total",
+            "counter",
+            a.node_capacity_refusals,
+        ),
+        (
+            "arca_gateway_placement_capacity_failures_total",
+            "counter",
+            a.placement_capacity_failures,
+        ),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} {kind}\n{name} {value}");
+    }
+}
+
 fn render_device_space(out: &mut String, space: Option<(u64, u64)>) {
     use std::fmt::Write as _;
     let (free, total) = space.unwrap_or((0, 0));
@@ -3668,6 +3749,7 @@ mod metrics_registry {
         render_put_stats(&mut out, &Default::default());
         render_queue_and_txn_stats(&mut out, &Default::default());
         render_integrity_stats(&mut out, &Default::default());
+        render_admission_stats(&mut out, &Default::default());
         let s3 = arca_lake_gateway::requests::S3Stats::default();
         s3.record("PutObject", 200, 10, 0, Duration::from_millis(3));
         s3.record("", 403, 0, 0, Duration::from_millis(1));
@@ -3680,6 +3762,7 @@ mod metrics_registry {
         let mut out = render_node_stats(&Default::default(), &Default::default());
         render_compaction_stats(&mut out, &Default::default());
         render_device_space(&mut out, Some((1, 2)));
+        render_node_capacity(&mut out, None, (0, [0; 4]));
         out += &arca_lake_protocol::tls::render_metrics("arca_node", tls(tls_on).as_ref());
         arca_lake_common::metrics::annotate(&out)
     }

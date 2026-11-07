@@ -153,6 +153,8 @@ pub struct ClusterWatch {
     pub refused: std::sync::atomic::AtomicU64,
     /// Refreshes that failed (the last state was kept).
     pub refresh_failures: std::sync::atomic::AtomicU64,
+    /// Write admission from the controller's record (Phase 3.6).
+    pub admission: super::admission::WriteAdmission,
 }
 
 /// Interval of the cluster-state refresh.
@@ -669,6 +671,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             state: RwLock::new(Some(state.clone())),
             refused: std::sync::atomic::AtomicU64::new(0),
             refresh_failures: std::sync::atomic::AtomicU64::new(0),
+            admission: super::admission::WriteAdmission::new(cfg.tier.clone()),
         });
         let base = Arc::clone(&meta);
         let meta_repair = Arc::new(GuardedKv::new(
@@ -762,6 +765,15 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         self.cluster.admit(false)
     }
 
+    /// Capacity admission of new client data (Phase 3.6): `len` bytes, or
+    /// one maximum chunk when the length is not known up front.
+    pub(super) fn admit_data(&self, len: Option<i64>) -> Result<(), s3s::S3Error> {
+        let bytes = len
+            .and_then(|l| u64::try_from(l).ok())
+            .unwrap_or(self.cfg.profile.max_chunk_bytes);
+        self.cluster.admission.admit_data(bytes)
+    }
+
     /// Refresh the cluster state and `schema_write` every
     /// [`CLUSTER_REFRESH`] while the backend lives.
     fn spawn_cluster_refresh(meta: Arc<S>, watch: std::sync::Weak<ClusterWatch>) {
@@ -777,6 +789,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                             arca_lake_metadata::records::set_schema_write(sw);
                         }
                         w.set(g.cluster);
+                        // A failed read keeps the last record, which then
+                        // ages into a stricter state (fail closed).
+                        if let Ok(rec) =
+                            arca_lake_metadata::ops::admission::current(meta.as_ref()).await
+                        {
+                            w.admission.observe(rec, std::time::Instant::now());
+                        }
                     }
                     Err(e) => {
                         // A metadata outage keeps the last known state: the
@@ -1418,6 +1437,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         req: S3Request<PutObjectInput>,
     ) -> S3Result<S3Response<PutObjectOutput>> {
         self.admit_write()?;
+        self.admit_data(req.input.content_length)?;
         let trailing = req.trailing_headers.clone();
         let input = req.input;
         let Some(body) = input.body else {
@@ -1603,6 +1623,8 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         req: S3Request<CopyObjectInput>,
     ) -> S3Result<S3Response<CopyObjectOutput>> {
         self.admit_write()?;
+        // The source size is not known yet: one chunk is charged.
+        self.admit_data(None)?;
         let input = req.input;
         let CopySource::Bucket {
             bucket: src_bucket,
@@ -1860,6 +1882,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         req: S3Request<CreateMultipartUploadInput>,
     ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
         self.admit_write()?;
+        self.cluster.admission.admit_start()?;
         let owner = principal_of(&req);
         let input = req.input;
         let (algorithm, kind) = multipart_checksum_spec(
@@ -1910,6 +1933,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         req: S3Request<UploadPartInput>,
     ) -> S3Result<S3Response<UploadPartOutput>> {
         self.admit_write()?;
+        self.admit_data(req.input.content_length)?;
         let trailing = req.trailing_headers.clone();
         let input = req.input;
         let Some(body) = input.body else {
@@ -1962,6 +1986,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         req: S3Request<UploadPartCopyInput>,
     ) -> S3Result<S3Response<UploadPartCopyOutput>> {
         self.admit_write()?;
+        self.admit_data(None)?;
         let input = req.input;
         let CopySource::Bucket {
             bucket: src_bucket,

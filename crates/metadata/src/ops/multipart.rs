@@ -977,6 +977,12 @@ pub async fn sweep_candidates<S: KvStore>(
 /// up to `batch` remaining part records of the upload. Returns `true` while
 /// work remains. Refuses a root that is not `Retiring`.
 ///
+/// The parts are retired as of the root's retirement, not `now_ms`: a
+/// reader reaches a completed upload's parts only through its root, so the
+/// grace the root has served covers them (Phase 3.6, R-64; a second grace
+/// kept every multipart object's data for two grace periods). Parts never
+/// listed in the completion have been unreachable since it.
+///
 /// # Errors
 ///
 /// [`MetaError::WrongGenerationState`] if the root is not retiring.
@@ -986,31 +992,53 @@ pub async fn finish_root_step<S: KvStore>(
     batch: usize,
     now_ms: u64,
 ) -> Result<bool> {
+    Ok(finish_root_step_counted(store, root, batch, now_ms)
+        .await?
+        .0)
+}
+
+/// [`finish_root_step`], also returning how many part generations the
+/// step retired.
+///
+/// # Errors
+///
+/// As [`finish_root_step`].
+pub async fn finish_root_step_counted<S: KvStore>(
+    store: &S,
+    root: &GenId,
+    batch: usize,
+    now_ms: u64,
+) -> Result<(bool, usize)> {
     transact(store, (*root, batch.max(1), now_ms), |tx, env| {
         Box::pin(async move {
             let (root, batch, now_ms) = *env;
             let header = match generation_header(tx, &root).await {
                 Ok(h) => h,
-                Err(MetaError::NoSuchGeneration) => return Ok(false),
+                Err(MetaError::NoSuchGeneration) => return Ok((false, 0)),
                 Err(e) => return Err(e),
             };
-            if !matches!(header.state, GenState::Retiring { .. }) {
+            let GenState::Retiring { since_ms } = header.state else {
                 return Err(MetaError::WrongGenerationState(
                     header.state.name(),
                     "retiring",
                 ));
-            }
-            let GenKind::MultipartRoot { upload_id, .. } = header.kind else {
-                return Ok(false);
             };
+            let GenKind::MultipartRoot { upload_id, .. } = header.kind else {
+                return Ok((false, 0));
+            };
+            let since = since_ms.min(now_ms);
             let refs = tx
                 .get_range(&keys::part_refs_range(&root), batch, false)
                 .await?;
             let mut n = 0;
+            let mut retired = 0;
             for (k, v) in &refs {
                 let r: PartRef = decode(v)?;
                 match generation_header(tx, &r.generation).await {
-                    Ok(h) => retire(tx, &r.generation, &h, now_ms)?,
+                    Ok(h) => {
+                        retire(tx, &r.generation, &h, since)?;
+                        retired += 1;
+                    }
                     Err(MetaError::NoSuchGeneration) => {}
                     Err(e) => return Err(e),
                 }
@@ -1018,7 +1046,7 @@ pub async fn finish_root_step<S: KvStore>(
                 n += 1;
             }
             if n >= batch {
-                return Ok(true);
+                return Ok((true, retired));
             }
             // Remaining part records (unlisted parts a dead gateway never
             // discarded, or redundant records): all garbage now.
@@ -1028,7 +1056,10 @@ pub async fn finish_root_step<S: KvStore>(
             for (k, v) in &parts {
                 let rec: PartRecord = decode(v)?;
                 match generation_header(tx, &rec.generation).await {
-                    Ok(h) => retire(tx, &rec.generation, &h, now_ms)?,
+                    Ok(h) => {
+                        retire(tx, &rec.generation, &h, since)?;
+                        retired += 1;
+                    }
                     Err(MetaError::NoSuchGeneration) => {}
                     Err(e) => return Err(e),
                 }
@@ -1036,10 +1067,10 @@ pub async fn finish_root_step<S: KvStore>(
                 n += 1;
             }
             if n >= batch {
-                return Ok(true);
+                return Ok((true, retired));
             }
             tx.clear(&keys::mpu(header.bucket_id, &header.key, &upload_id));
-            Ok(false)
+            Ok((false, retired))
         })
     })
     .await

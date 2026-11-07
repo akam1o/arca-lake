@@ -1307,7 +1307,16 @@ pub(crate) fn retire<X: Txn>(
         ..header.clone()
     };
     write(tx, &keys::gen_header(generation), &retiring)?;
-    tx.set(&keys::retired(now_ms, generation), &[]);
+    // The entry carries the generation's logical bytes, so that the backlog
+    // can be measured in bytes (Phase 3.6). A multipart root holds no
+    // chunks of its own: its parts carry theirs when the root retires them.
+    // Entries written before carry nothing (counted as unknown).
+    let bytes = if matches!(header.kind, crate::records::GenKind::MultipartRoot { .. }) {
+        0
+    } else {
+        header.size
+    };
+    tx.set(&keys::retired(now_ms, generation), &bytes.to_le_bytes());
     Ok(())
 }
 

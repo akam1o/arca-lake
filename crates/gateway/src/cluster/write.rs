@@ -732,6 +732,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// Encode one chunk and write its shards to a stripe group, retrying
     /// with a refreshed map on epoch rejection and with another group on
     /// node failures.
+    #[allow(clippy::too_many_lines)]
     async fn place_chunk(
         &self,
         generation: GenId,
@@ -767,8 +768,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let crc = arca_lake_storage::format::crc32c(&chunk);
         self.put_stats.encode.observe(encode_started.elapsed());
 
-        let mut tried: Vec<u64> = Vec::new();
+        // Groups the controller left out of placement for capacity (Phase
+        // 3.6) are not tried.
+        let mut tried: Vec<u64> = self.cluster.admission.excluded_groups();
+        let excluded = tried.len();
         let mut last_reason: Option<String> = None;
+        // Every group that was tried refused for capacity.
+        let mut all_capacity = true;
         let mut map = self.map_up_to_date().await.map_err(meta_err)?;
         for attempt in 0..4u32 {
             let Some(group) = self.choose_group(
@@ -782,6 +788,9 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 // otherwise always land in the same group.
                 placement_salt(&cid).wrapping_add(u64::from(attempt)),
             ) else {
+                if all_capacity && (last_reason.is_some() || excluded > 0) {
+                    return Err(self.capacity_exhausted(index, last_reason.as_deref()));
+                }
                 return Err(match last_reason {
                     Some(reason) => s3_error!(
                         ServiceUnavailable,
@@ -816,8 +825,17 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                     map = self.refresh_map().await.map_err(meta_err)?;
                     // Same group, fresh epoch: do not mark it as tried.
                 }
+                Err(WriteError::Capacity(reason)) => {
+                    tracing::warn!(group = group.id, index, %reason, "group refused the chunk for capacity");
+                    last_reason = Some(reason.clone());
+                    tried.push(group.id);
+                    if attempt == 3 && all_capacity {
+                        return Err(self.capacity_exhausted(index, Some(&reason)));
+                    }
+                }
                 Err(WriteError::Failed(reason)) => {
                     tracing::warn!(group = group.id, index, %reason, "shard write failed");
+                    all_capacity = false;
                     last_reason = Some(reason.clone());
                     tried.push(group.id);
                     if attempt == 3 {
@@ -868,6 +886,22 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         map.groups.get(&id).cloned()
     }
 
+    /// The error of a chunk no group could take for capacity: retryable
+    /// `SlowDown` (space comes back as GC and compaction run).
+    fn capacity_exhausted(&self, index: u32, reason: Option<&str>) -> S3Error {
+        self.cluster
+            .admission
+            .placement_capacity_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        super::admission::slow_down(
+            &format!(
+                "chunk {index}: no stripe group has capacity for it ({})",
+                reason.unwrap_or("every group is out of placement")
+            ),
+            30,
+        )
+    }
+
     /// Write all shards of a chunk to the group's members in parallel. The
     /// chunk is protected when all data shards and at least `m_ack` parity
     /// shards are acknowledged (Phase 1 requires all: `m_ack = m`).
@@ -915,6 +949,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                     Err(status) if NodeClients::is_epoch_rejected(&status) => {
                         Err(WriteError::StaleEpoch)
                     }
+                    // The node is healthy, only full: keep its connection.
+                    Err(status) if NodeClients::is_capacity_refused(&status) => Err(
+                        WriteError::Capacity(format!("node {addr}: {}", status.message())),
+                    ),
                     Err(status) => {
                         clients.forget(&addr);
                         Err(WriteError::Failed(format!("node {addr}: {status}")))
@@ -924,16 +962,31 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         });
         let results = futures::future::join_all(futures).await;
         let mut failed = Vec::new();
+        let mut capacity = 0u64;
         for r in results {
             match r {
                 Ok(()) => {}
                 Err(WriteError::StaleEpoch) => return Err(WriteError::StaleEpoch),
+                Err(WriteError::Capacity(reason)) => {
+                    capacity += 1;
+                    failed.push(reason);
+                }
                 Err(WriteError::Failed(reason)) => failed.push(reason),
             }
         }
-        // m_ack = m: every shard must be durable.
+        if capacity > 0 {
+            self.cluster
+                .admission
+                .node_capacity_refusals
+                .fetch_add(capacity, std::sync::atomic::Ordering::Relaxed);
+        }
+        // m_ack = m: every shard must be durable. Shards stored before a
+        // member refused belong to a pending generation: its GC (or
+        // reconciliation) removes them.
         if failed.is_empty() {
             Ok(())
+        } else if capacity == failed.len() as u64 {
+            Err(WriteError::Capacity(failed.join("; ")))
         } else {
             Err(WriteError::Failed(failed.join("; ")))
         }
@@ -942,6 +995,8 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
 
 enum WriteError {
     StaleEpoch,
+    /// Every failed member refused for capacity (Phase 3.6).
+    Capacity(String),
     Failed(String),
 }
 

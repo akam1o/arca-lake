@@ -23,6 +23,41 @@ message PutShardHeader {
   // Placement epoch of the stripe group at write time.
   uint64 group_epoch = 3;
   uint64 payload_len = 4;
+  // What the write is for (Phase 3.6 capacity admission): the node keeps a
+  // reserve that client writes may not use and repair may. Older callers
+  // send CLIENT.
+  WriteClass write_class = 5;
+}
+
+enum WriteClass {
+  WRITE_CLASS_CLIENT = 0;
+  WRITE_CLASS_REPAIR = 1;
+  WRITE_CLASS_MIGRATION = 2;
+  WRITE_CLASS_CACHE = 3;
+}
+
+// Capacity of one device of a node (Phase 3.6). Bytes.
+message DeviceCapacity {
+  // File system size and bytes available to the node (statvfs, capped by
+  // the node's configured capacity).
+  uint64 total_bytes = 1;
+  uint64 available_bytes = 2;
+  // Segment files on the device, and the live payload in them; the
+  // difference is reclaimable by compaction.
+  uint64 allocated_bytes = 3;
+  uint64 live_bytes = 4;
+  uint64 reclaimable_bytes = 5;
+  uint64 quarantined_bytes = 6;
+  // Kept free for compaction output, segment rollover, quarantine and
+  // repair: client writes stop above it.
+  uint64 reserved_bytes = 7;
+  // Admitted writes not yet stored.
+  uint64 inflight_bytes = 8;
+  // Free bytes repair may still use (the floor client writes stop at is
+  // reserved_bytes; repair stops at this one).
+  uint64 repair_floor_bytes = 9;
+  // When the node sampled these, unix ms.
+  uint64 sampled_unix_ms = 10;
 }
 
 // Client-streaming body: one header followed by data frames.
@@ -241,6 +276,8 @@ message HealthResponse {
   uint64 device_total_bytes = 18;
   // The node honours VerifyShardsRequest.read_only.
   bool verify_read_only = 19;
+  // Phase 3.6: per device capacity (one entry per store device).
+  repeated DeviceCapacity devices = 27;
   // Load of the recent window (ADR-0018, adaptive background work):
   // p99 of GetShard serve and PutShard store time, µs (0 = no request).
   uint64 load_get_p99_us = 20;

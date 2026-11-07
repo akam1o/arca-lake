@@ -47,6 +47,10 @@ pub struct CompactionStats {
     pub compactions: AtomicU64,
     /// Compactions that failed (the store stays consistent).
     pub errors: AtomicU64,
+    /// Segments not compacted because the device lacked room for their
+    /// live bytes (Phase 3.6): compaction writes the copy before it frees
+    /// the source.
+    pub skipped_no_space: AtomicU64,
     /// Live payload bytes copied into new segments.
     pub copied_bytes: AtomicU64,
     /// Segment file bytes released (source size minus copied bytes).
@@ -79,7 +83,19 @@ pub struct CompactionStats {
 }
 
 /// One pass: refresh the gauges, compact the most dead candidates.
-pub(crate) fn pass(store: &Store, policy: &CompactionPolicy, stats: &CompactionStats) {
+/// Room a compaction must leave beyond its output (headers, alignment).
+const OUTPUT_MARGIN: u64 = 1 << 20;
+
+/// One pass. `free` is the device's free space now (`None` = unknown,
+/// compaction proceeds and an out-of-space error leaves the store as it
+/// was).
+#[allow(clippy::too_many_lines)]
+pub(crate) fn pass(
+    store: &Store,
+    policy: &CompactionPolicy,
+    stats: &CompactionStats,
+    free: Option<u64>,
+) {
     let segs = match store.segment_stats() {
         Ok(s) => s,
         Err(e) => {
@@ -111,6 +127,17 @@ pub(crate) fn pass(store: &Store, policy: &CompactionPolicy, stats: &CompactionS
     for (i, s) in candidates.into_iter().take(policy.max_segments).enumerate() {
         if i > 0 && s.live_bytes > budget {
             break;
+        }
+        let need = s.live_bytes + s.live_bytes / 64 + OUTPUT_MARGIN;
+        if free.is_some_and(|f| f < need) {
+            stats.skipped_no_space.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                segment = s.segment_id,
+                live_bytes = s.live_bytes,
+                free = free.unwrap_or(0),
+                "compaction skipped: no room for the segment's live bytes"
+            );
+            continue;
         }
         budget = budget.saturating_sub(s.live_bytes);
         match store.compact(s.segment_id) {
@@ -190,6 +217,7 @@ pub(crate) async fn run(
     store: Arc<Store>,
     policy: CompactionPolicy,
     stats: Arc<CompactionStats>,
+    free: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
     if policy.interval.is_zero() {
@@ -203,7 +231,7 @@ pub(crate) async fn run(
         if *stop.borrow() {
             return;
         }
-        let (store, stats) = (Arc::clone(&store), Arc::clone(&stats));
-        let _ = tokio::task::spawn_blocking(move || pass(&store, &policy, &stats)).await;
+        let (store, stats, free) = (Arc::clone(&store), Arc::clone(&stats), Arc::clone(&free));
+        let _ = tokio::task::spawn_blocking(move || pass(&store, &policy, &stats, free())).await;
     }
 }

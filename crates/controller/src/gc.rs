@@ -31,6 +31,75 @@ use arca_lake_protocol::client::{NodeClients, RecordToken, ShardRef};
 
 use crate::ControlError;
 
+/// Timing and volume of GC work by stage (Phase 3.6, R-64): what a pass
+/// spends where, to tell metadata cost from node I/O. Closed label set.
+#[derive(Debug, Default)]
+pub struct GcStats {
+    /// `expire_pending`: one transaction per expired lease.
+    pub expire: arca_lake_common::timing::Histogram,
+    /// `collectable`: reading the retired queue (candidate discovery).
+    pub discover: arca_lake_common::timing::Histogram,
+    /// One `finish_root_step` transaction of a multipart root.
+    pub root_step: arca_lake_common::timing::Histogram,
+    /// `verify_unreferenced`: the reference check of one generation.
+    pub verify: arca_lake_common::timing::Histogram,
+    /// One DeleteShard RPC.
+    pub delete_rpc: arca_lake_common::timing::Histogram,
+    /// Every shard (and cache copy) delete of one generation.
+    pub delete_generation: arca_lake_common::timing::Histogram,
+    /// `finish`: removing one generation's metadata.
+    pub finish: arca_lake_common::timing::Histogram,
+    /// One generation end to end (`collect_one`).
+    pub collect: arca_lake_common::timing::Histogram,
+    /// One `run_once` batch.
+    pub batch: arca_lake_common::timing::Histogram,
+    /// Generations collected (finished), roots among them.
+    pub collected: std::sync::atomic::AtomicU64,
+    /// See `collected`.
+    pub collected_roots: std::sync::atomic::AtomicU64,
+    /// Part generations a root step retired.
+    pub parts_retired: std::sync::atomic::AtomicU64,
+    /// Physical bytes of the shards GC deleted (or found already gone):
+    /// each chunk's shard size times its shard count.
+    pub reclaimed_bytes: std::sync::atomic::AtomicU64,
+    /// Metadata transactions GC ran, by kind.
+    pub txn_verify: std::sync::atomic::AtomicU64,
+    /// See `txn_verify`.
+    pub txn_finish: std::sync::atomic::AtomicU64,
+    /// See `txn_verify`.
+    pub txn_root_step: std::sync::atomic::AtomicU64,
+}
+
+impl GcStats {
+    /// Histograms by stage label (the `stage` label of
+    /// `arca_controller_gc_stage_seconds`).
+    #[must_use]
+    pub fn stages(&self) -> [(&'static str, &arca_lake_common::timing::Histogram); 9] {
+        [
+            ("expire", &self.expire),
+            ("discover", &self.discover),
+            ("root_step", &self.root_step),
+            ("verify", &self.verify),
+            ("delete_rpc", &self.delete_rpc),
+            ("delete_generation", &self.delete_generation),
+            ("finish", &self.finish),
+            ("collect", &self.collect),
+            ("batch", &self.batch),
+        ]
+    }
+}
+
+fn bump(a: &std::sync::atomic::AtomicU64, n: u64) {
+    a.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Physical bytes of one chunk's shards (each `ceil(len / k)`, `k + m` of
+/// them).
+fn chunk_physical_bytes(c: &ChunkRecord) -> u64 {
+    let k = u64::from(c.data_shards.max(1));
+    u64::from(c.len).div_ceil(k) * (k + u64::from(c.parity_shards))
+}
+
 /// What a GC pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GcReport {
@@ -90,15 +159,34 @@ pub async fn run_once<S: KvStore>(
     grace_ms: u64,
     limit: usize,
 ) -> Result<GcReport, ControlError> {
+    run_once_with(meta, clients, now_ms, grace_ms, limit, &GcStats::default()).await
+}
+
+/// [`run_once`], recording what each stage took into `stats`.
+///
+/// # Errors
+///
+/// As [`run_once`].
+pub async fn run_once_with<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    now_ms: u64,
+    grace_ms: u64,
+    limit: usize,
+    stats: &GcStats,
+) -> Result<GcReport, ControlError> {
+    let started = std::time::Instant::now();
     // An unknown commit outcome on a GC transaction is never retried here:
     // every GC step re-reads the state it changes, so the next pass either
     // sees the change applied or does it again.
     let mut report = GcReport::default();
+    let t = std::time::Instant::now();
     match gc::expire_pending(meta, now_ms, limit).await {
         Ok(expired) => report.expired = expired.len(),
         Err(e) if is_deferrable(&e) => report.deferred += 1,
         Err(e) => return Err(e.into()),
     }
+    stats.expire.observe(t.elapsed());
 
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
@@ -115,10 +203,16 @@ pub async fn run_once<S: KvStore>(
     // then finished, every step re-read and idempotent), so several are
     // collected at once: one at a time, every shard delete waited for a
     // device sync and GC fell behind a sustained write rate (soak test).
+    let t = std::time::Instant::now();
     let gens = gc::collectable(meta, now_ms, grace_ms, limit).await?;
+    stats.discover.observe(t.elapsed());
     let work: Vec<_> = gens
         .iter()
-        .map(|g| Box::pin(collect_one(meta, clients, &nodes, &groups, g, now_ms)))
+        .map(|g| {
+            Box::pin(collect_one(
+                meta, clients, &nodes, &groups, g, now_ms, stats,
+            ))
+        })
         .collect();
     let outcomes: Vec<Result<Outcome, ControlError>> = futures::stream::iter(work)
         .buffer_unordered(GC_CONCURRENCY)
@@ -138,6 +232,7 @@ pub async fn run_once<S: KvStore>(
             Outcome::Referenced => report.skipped_referenced += 1,
         }
     }
+    stats.batch.observe(started.elapsed());
     Ok(report)
 }
 
@@ -165,32 +260,71 @@ async fn collect_one<S: KvStore>(
     groups: &HashMap<u64, GroupRecord>,
     generation: &GenId,
     now_ms: u64,
+    stats: &GcStats,
+) -> Result<Outcome, ControlError> {
+    let started = std::time::Instant::now();
+    let r = collect_one_inner(meta, clients, nodes, groups, generation, now_ms, stats).await;
+    stats.collect.observe(started.elapsed());
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn collect_one_inner<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+    groups: &HashMap<u64, GroupRecord>,
+    generation: &GenId,
+    now_ms: u64,
+    stats: &GcStats,
 ) -> Result<Outcome, ControlError> {
     // A multipart root first retires its parts in bounded steps (I-MP2);
     // its own metadata is finished only once no reference remains.
-    match finish_root_parts(meta, generation, now_ms).await {
-        Ok(()) => {}
+    let root = match finish_root_parts(meta, generation, now_ms, stats).await {
+        Ok(root) => root,
         Err(e) if is_deferrable(&e) => return Ok(Outcome::Deferred),
         Err(e) => return Err(e.into()),
-    }
-    let (chunks, cached) = match verify_unreferenced(meta, generation).await {
+    };
+    let t = std::time::Instant::now();
+    let verified = verify_unreferenced(meta, generation).await;
+    stats.verify.observe(t.elapsed());
+    bump(&stats.txn_verify, 1);
+    let (chunks, cached) = match verified {
         Ok(Some(found)) => found,
         Ok(None) => return Ok(Outcome::Referenced),
         Err(e) if is_deferrable(&e) => return Ok(Outcome::Deferred),
         Err(e) => return Err(e.into()),
     };
-    let deleted = match delete_shards(clients, nodes, groups, &chunks).await {
+    let t = std::time::Instant::now();
+    let deleted = match delete_shards(clients, nodes, groups, &chunks, stats).await {
         Ok(n) => delete_cache_copies(clients, nodes, groups, generation, &cached)
             .await
             .map(|c| n + c),
         Err(e) => Err(e),
     };
+    stats.delete_generation.observe(t.elapsed());
     match deleted {
-        Ok(n) => match gc::finish(meta, generation).await {
-            Ok(()) => Ok(Outcome::Collected(n)),
-            Err(e) if is_deferrable(&e) => Ok(Outcome::Deleted(n)),
-            Err(e) => Err(e.into()),
-        },
+        Ok(n) => {
+            let t = std::time::Instant::now();
+            let finished = gc::finish(meta, generation).await;
+            stats.finish.observe(t.elapsed());
+            bump(&stats.txn_finish, 1);
+            match finished {
+                Ok(()) => {
+                    bump(&stats.collected, 1);
+                    if root {
+                        bump(&stats.collected_roots, 1);
+                    }
+                    bump(
+                        &stats.reclaimed_bytes,
+                        chunks.iter().map(chunk_physical_bytes).sum(),
+                    );
+                    Ok(Outcome::Collected(n))
+                }
+                Err(e) if is_deferrable(&e) => Ok(Outcome::Deleted(n)),
+                Err(e) => Err(e.into()),
+            }
+        }
         Err(ControlError::Node { .. }) => Ok(Outcome::Deferred),
         Err(e) => Err(e),
     }
@@ -203,15 +337,30 @@ pub const ROOT_FINISH_BATCH: usize = 256;
 /// Retire every part of a retiring multipart root, `ROOT_FINISH_BATCH` per
 /// transaction. A non-root or a non-retiring generation is a no-op here
 /// (`verify_unreferenced` decides what happens to it).
+/// Returns whether any step did work (the generation is a multipart root
+/// with parts left).
 async fn finish_root_parts<S: KvStore>(
     meta: &S,
     generation: &GenId,
     now_ms: u64,
-) -> Result<(), MetaError> {
+    stats: &GcStats,
+) -> Result<bool, MetaError> {
+    let mut root = false;
     loop {
-        match multipart::finish_root_step(meta, generation, ROOT_FINISH_BATCH, now_ms).await {
-            Ok(true) => {}
-            Ok(false) | Err(MetaError::WrongGenerationState(..)) => return Ok(()),
+        let t = std::time::Instant::now();
+        let step =
+            multipart::finish_root_step_counted(meta, generation, ROOT_FINISH_BATCH, now_ms).await;
+        stats.root_step.observe(t.elapsed());
+        bump(&stats.txn_root_step, 1);
+        match step {
+            Ok((more, retired)) => {
+                bump(&stats.parts_retired, retired as u64);
+                root |= retired > 0;
+                if !more {
+                    return Ok(root);
+                }
+            }
+            Err(MetaError::WrongGenerationState(..)) => return Ok(root),
             Err(e) => return Err(e),
         }
     }
@@ -415,11 +564,15 @@ async fn delete_gc_shard(
     addr: String,
     shard: ShardRef,
     epoch: u64,
+    stats: &GcStats,
 ) -> Result<(), ControlError> {
-    match clients.delete_shard(&addr, shard, epoch).await {
+    let t = std::time::Instant::now();
+    let r = clients.delete_shard(&addr, shard, epoch).await;
+    stats.delete_rpc.observe(t.elapsed());
+    match r {
         Ok(()) => Ok(()),
         Err(s) if s.code() == tonic::Code::NotFound => Ok(()),
-        Err(status) => Err(ControlError::Node { addr, status }),
+        Err(e) => Err(ControlError::Node { addr, status: e }),
     }
 }
 
@@ -428,6 +581,7 @@ async fn delete_shards(
     nodes: &HashMap<u64, NodeRecord>,
     groups: &HashMap<u64, GroupRecord>,
     chunks: &[ChunkRecord],
+    stats: &GcStats,
 ) -> Result<usize, ControlError> {
     let mut targets = Vec::new();
     for chunk in chunks {
@@ -448,7 +602,7 @@ async fn delete_shards(
     }
     let work: Vec<_> = targets
         .into_iter()
-        .map(|(addr, shard, epoch)| Box::pin(delete_gc_shard(clients, addr, shard, epoch)))
+        .map(|(addr, shard, epoch)| Box::pin(delete_gc_shard(clients, addr, shard, epoch, stats)))
         .collect();
     let results: Vec<Result<(), ControlError>> = futures::stream::iter(work)
         .buffer_unordered(DELETE_CONCURRENCY)

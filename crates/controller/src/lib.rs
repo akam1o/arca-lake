@@ -6,6 +6,8 @@
 //! controller process.
 
 pub mod adaptive;
+pub mod admission;
+pub mod backpressure;
 pub mod backup;
 pub mod capacity;
 pub mod gc;

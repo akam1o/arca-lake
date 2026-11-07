@@ -256,3 +256,44 @@ async fn concurrent_puts_and_deletes_then_gc_leave_exactly_the_visible_shards() 
     );
     c.shutdown().await;
 }
+
+/// R-64 (Phase 3.6): a deleted multipart object's parts are collected in
+/// the pass that collects its root, once the root's grace has passed:
+/// they are retired as of the root, not given a second grace.
+#[tokio::test]
+async fn multipart_parts_are_collected_with_their_root_after_one_grace() {
+    let c = TestCluster::start(ClusterOptions {
+        multipart_min_part_bytes: MIB,
+        ..ClusterOptions::rs(3, 2, 1, MIB, 64 << 10)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let before = c.total_shards().await;
+    let part = payload(usize::try_from(MIB).unwrap(), 7);
+    crate::gc_bench::multipart_upload(&c.backend, BUCKET, "mp", &part, 3).await;
+    assert!(c.total_shards().await > before);
+    s3::delete(&c.backend, BUCKET, "mp").await.unwrap();
+    let grace = 600_000;
+    let due = now_ms() + grace + 1;
+    // Not before the root's grace.
+    let r = gc::run_once(c.meta.as_ref(), &c.clients, now_ms(), grace, 1000)
+        .await
+        .unwrap();
+    assert_eq!(r.collected, 0);
+    // One controller pass at `due`: the root's batch retires the parts,
+    // the next batch of the same pass collects them.
+    let mut collected = 0;
+    for _ in 0..2 {
+        collected += gc::run_once(c.meta.as_ref(), &c.clients, due, grace, 1000)
+            .await
+            .unwrap()
+            .collected;
+    }
+    assert_eq!(collected, 4, "the root and its three parts");
+    assert_eq!(c.total_shards().await, before, "every part shard deleted");
+    let (left, _) = arca_lake_metadata::ops::gc::backlog(c.meta.as_ref(), 10)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+    c.shutdown().await;
+}

@@ -1149,12 +1149,13 @@ async fn repair_one<S: KvStore>(
         let expected = arca_lake_storage::format::crc32c(&shards[i]);
         let slot = budget.slot(&node.address).await;
         let put = clients
-            .put_shard(
+            .put_shard_as(
                 &node.address,
                 shard_ref(&group, chunk_id, i),
                 group.epoch,
                 shards[i].clone(),
                 256 << 10,
+                arca_lake_protocol::storage::v1::WriteClass::Repair,
             )
             .await;
         drop(slot);

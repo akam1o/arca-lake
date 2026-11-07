@@ -103,6 +103,11 @@ pub struct ControllerConfig {
     pub recovery: crate::recovery::RecoveryOptions,
     /// Interval between upgrade finalize passes (RFC-014 §5.5).
     pub upgrade_interval: Duration,
+    /// Write admission thresholds (Phase 3.6).
+    pub admission: crate::backpressure::Policy,
+    /// Largest chunk the gateways write: a group whose fullest member has
+    /// no room for 64 of its shards leaves placement.
+    pub admission_max_chunk_bytes: u64,
 }
 
 impl ControllerConfig {
@@ -142,6 +147,8 @@ impl ControllerConfig {
             recovery_interval: Duration::from_secs(2),
             recovery: crate::recovery::RecoveryOptions::default(),
             upgrade_interval: Duration::from_secs(5),
+            admission: crate::backpressure::Policy::default(),
+            admission_max_chunk_bytes: 8 << 20,
         }
     }
 }
@@ -789,7 +796,16 @@ async fn gc_pass<S: KvStore>(
     // keep up with a sustained overwrite/delete rate (soak test).
     let started = std::time::Instant::now();
     loop {
-        let report = gc::run_once(meta, clients, now_ms(), ms(cfg.gc_grace), GC_BATCH).await?;
+        let parts_before = metrics.gc.parts_retired.load(Ordering::Relaxed);
+        let report = gc::run_once_with(
+            meta,
+            clients,
+            now_ms(),
+            ms(cfg.gc_grace),
+            GC_BATCH,
+            &metrics.gc,
+        )
+        .await?;
         metrics.gc_passes_total.fetch_add(1, Ordering::Relaxed);
         metrics
             .gc_collected_total
@@ -807,18 +823,25 @@ async fn gc_pass<S: KvStore>(
             );
         }
         info!(?report, "gc pass");
-        let full = report.collected >= GC_BATCH || report.expired >= GC_BATCH;
+        // Parts a multipart root retired are due at once (retired as of
+        // the root): another batch collects them in this pass.
+        let parts_due = metrics.gc.parts_retired.load(Ordering::Relaxed) > parts_before;
+        let full = report.collected >= GC_BATCH || report.expired >= GC_BATCH || parts_due;
         if !full || started.elapsed() >= GC_PASS_BUDGET.max(cfg.gc_interval) {
             break;
         }
     }
     // What is left for the next pass (counted up to GC_BACKLOG_CAP).
-    if let Ok((n, oldest)) = arca_lake_metadata::ops::gc::backlog(meta, GC_BACKLOG_CAP).await {
-        metrics.gc_backlog.store(n as u64, Ordering::Relaxed);
+    if let Ok(b) = arca_lake_metadata::ops::gc::backlog_bytes(meta, GC_BACKLOG_CAP).await {
+        metrics
+            .gc_backlog
+            .store(b.entries as u64, Ordering::Relaxed);
         metrics.gc_backlog_oldest_age_seconds.store(
-            oldest.map_or(0, |t| now_ms().saturating_sub(t) / 1000),
+            b.oldest_ms.map_or(0, |t| now_ms().saturating_sub(t) / 1000),
             Ordering::Relaxed,
         );
+        metrics.gc_backlog_bytes.store(b.bytes, Ordering::Relaxed);
+        metrics.admission.note_backlog(b.bytes, now_ms());
     }
     let expire_before = (!cfg.multipart_expiry.is_zero())
         .then(|| now_ms().saturating_sub(ms(cfg.multipart_expiry)));
@@ -891,6 +914,9 @@ async fn health_pass<S: KvStore>(
         clients.note_node_id(&n.address, n.id);
         match clients.health_with(&n.address, req.clone()).await {
             Ok(h) => {
+                metrics
+                    .admission
+                    .note_device(crate::admission::device_of(n.id, &h, now_ms()));
                 cluster::touch_node(meta, n.id, now).await?;
                 let caps = arca_lake_protocol::client::NodeCaps::from_health(&h);
                 arca_lake_metadata::ops::recovery::set_node_caps(
@@ -922,6 +948,20 @@ async fn health_pass<S: KvStore>(
         .nodes_total
         .store(nodes.len() as u64, Ordering::Relaxed);
     metrics.nodes_unhealthy.store(unhealthy, Ordering::Relaxed);
+    // Write admission (Phase 3.6), from what the nodes just reported.
+    let totals = crate::admission::pass(
+        meta,
+        &metrics.admission,
+        &cfg.admission,
+        cfg.admission_max_chunk_bytes,
+        metrics.gc.reclaimed_bytes.load(Ordering::Relaxed),
+        now_ms(),
+    )
+    .await?;
+    *metrics
+        .capacity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = totals;
     Ok(())
 }
 
@@ -1441,6 +1481,11 @@ async fn tiering_pass<S: KvStore>(
     let Some(policy) = cfg.tiering.as_ref() else {
         return Ok(());
     };
+    // Moves need room on their target: none while any tier is throttled or
+    // worse (Phase 3.6 admission).
+    if metrics.admission.worst() >= crate::backpressure::State::Throttled {
+        return Ok(());
+    }
     let r = crate::tiering::run_once(meta, clients, policy, now_ms()).await?;
     metrics
         .chunks_promoted_total

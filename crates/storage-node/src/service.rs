@@ -39,6 +39,10 @@ pub struct NodeConfig {
     /// Capacity this node advertises for placement (`Health` free and
     /// total bytes are capped by it); `None` = the file system's.
     pub capacity_bytes: Option<u64>,
+    /// Bytes kept free for compaction, rollover, quarantine and repair
+    /// (client writes are refused above it, Phase 3.6); `None` = the
+    /// default for the device ([`crate::capacity::Reserve::default_for`]).
+    pub reserve_bytes: Option<u64>,
 }
 
 impl NodeConfig {
@@ -53,6 +57,7 @@ impl NodeConfig {
             tls: None,
             compaction: crate::compactor::CompactionPolicy::default(),
             capacity_bytes: None,
+            reserve_bytes: None,
         }
     }
 }
@@ -81,6 +86,8 @@ pub struct StorageNodeService {
     compaction: Arc<crate::compactor::CompactionStats>,
     /// Advertised capacity cap.
     capacity_bytes: Option<u64>,
+    /// Capacity admission of shard writes (Phase 3.6).
+    admission: crate::capacity::Admission,
     /// Load signals for adaptive background work (ADR-0018).
     load: crate::load::LoadSampler,
 }
@@ -171,6 +178,12 @@ impl StorageNodeService {
                 "sequence.bound was damaged and ignored; the store took a new epoch as at every open"
             );
         }
+        let total = device_space(&cfg.store.dir)
+            .map_or(0, |(_, t)| cfg.capacity_bytes.map_or(t, |cap| t.min(cap)));
+        let reserve = cfg.reserve_bytes.map_or_else(
+            || crate::capacity::Reserve::default_for(total, cfg.store.segment_max_bytes),
+            |r| crate::capacity::Reserve::new(r, cfg.store.segment_max_bytes),
+        );
         let epochs = EpochTable::open(&cfg.store.dir);
         let cluster = crate::cluster::ClusterFacts::open(&cfg.store.dir);
         if cluster.format_write > 0 {
@@ -198,6 +211,7 @@ impl StorageNodeService {
             tls: cfg.tls.clone(),
             compaction: Arc::default(),
             capacity_bytes: cfg.capacity_bytes,
+            admission: crate::capacity::Admission::new(reserve),
             load: crate::load::LoadSampler::new(&cfg.store.dir),
         })
     }
@@ -260,6 +274,43 @@ impl StorageNodeService {
             Some(cap) => (free.min(cap.saturating_sub(segment_bytes)), total.min(cap)),
             None => (free, total),
         })
+    }
+
+    /// Capacity of the node's device (Phase 3.6): space, what the store
+    /// holds of it, the reserve and the writes admitted in flight.
+    ///
+    /// # Errors
+    ///
+    /// Store statistics errors.
+    pub fn device_capacity(&self) -> Result<pb::DeviceCapacity, StorageError> {
+        let stats = self.store.stats()?;
+        Ok(self.device_capacity_with(&stats))
+    }
+
+    fn device_capacity_with(&self, stats: &arca_lake_storage::StoreStats) -> pb::DeviceCapacity {
+        let space = self.device_space_with(stats.segment_bytes);
+        let reserve = self.admission.reserve();
+        pb::DeviceCapacity {
+            total_bytes: space.map_or(0, |s| s.1),
+            available_bytes: space.map_or(0, |s| s.0),
+            allocated_bytes: stats.segment_bytes,
+            live_bytes: stats.live_bytes,
+            reclaimable_bytes: stats.segment_bytes.saturating_sub(stats.live_bytes),
+            quarantined_bytes: self.store.quarantine_stats().1,
+            reserved_bytes: reserve.reserved,
+            inflight_bytes: self.admission.inflight(),
+            repair_floor_bytes: reserve.repair_floor,
+            sampled_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+        }
+    }
+
+    /// Writes admitted and refused by class (client, repair, migration,
+    /// cache).
+    #[must_use]
+    pub fn admission_counts(&self) -> (u64, [u64; 4]) {
+        self.admission.counts()
     }
 
     /// Background compaction counters.
@@ -406,6 +457,16 @@ impl StorageNodeService {
             StorageError::NotFound => tonic::Status::not_found("shard not found"),
             StorageError::Corrupt { .. } => tonic::Status::data_loss(e.to_string()),
             StorageError::InvalidArgument(_) => tonic::Status::invalid_argument(e.to_string()),
+            // The device or a quota is full (Phase 3.6): a capacity refusal,
+            // not an internal error, so that the writer places elsewhere.
+            StorageError::Io(ref io)
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded
+                ) =>
+            {
+                tonic::Status::resource_exhausted(format!("insufficient capacity: {e}"))
+            }
             other => tonic::Status::internal(other.to_string()),
         }
     }
@@ -443,6 +504,17 @@ impl StorageNode for StorageNodeService {
         self.check_epoch(key.group_id, header.group_epoch)?;
         let expected = usize::try_from(header.payload_len)
             .map_err(|_| tonic::Status::invalid_argument("payload too large"))?;
+        // Capacity admission (Phase 3.6): decided before the body is taken,
+        // held until the write ends.
+        let class = pb::WriteClass::try_from(header.write_class).unwrap_or(pb::WriteClass::Client);
+        let _held = self
+            .admission
+            .admit(
+                self.device_space().map(|(free, _)| free),
+                class,
+                header.payload_len,
+            )
+            .map_err(|r| tonic::Status::resource_exhausted(r.to_string()))?;
         let mut payload = Vec::with_capacity(expected);
         loop {
             let next = tokio::time::timeout(self.stream_progress_timeout, stream.next()).await;
@@ -983,6 +1055,7 @@ impl StorageNode for StorageNodeService {
             load_device_queue_depth_milli: load.device.map_or(0, |d| d.queue_depth_milli),
             load_device_read_await_us: load.device.map_or(0, |d| d.read_await_us),
             load_reported: true,
+            devices: vec![self.device_capacity_with(&stats)],
         }))
     }
 }
@@ -1072,10 +1145,17 @@ pub async fn serve(
             .await;
     });
     let (compactor_stop, stop_rx) = tokio::sync::watch::channel(false);
+    let space = Arc::downgrade(&service);
     let compactor = tokio::spawn(crate::compactor::run(
         Arc::clone(service.store()),
         cfg.compaction,
         Arc::clone(service.compaction_stats()),
+        Arc::new(move || {
+            space
+                .upgrade()
+                .and_then(|s| s.device_space())
+                .map(|(free, _)| free)
+        }),
         stop_rx,
     ));
     Ok(NodeHandle {

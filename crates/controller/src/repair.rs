@@ -502,7 +502,14 @@ async fn reconstruct_member<S: KvStore>(
             shard_index: u16::try_from(index).unwrap_or(0),
         };
         match clients
-            .put_shard(&target_addr, shard, group.epoch, bytes, 256 << 10)
+            .put_shard_as(
+                &target_addr,
+                shard,
+                group.epoch,
+                bytes,
+                256 << 10,
+                arca_lake_protocol::storage::v1::WriteClass::Repair,
+            )
             .await
         {
             Ok(resp) if resp.crc32c == expected_crc => {}

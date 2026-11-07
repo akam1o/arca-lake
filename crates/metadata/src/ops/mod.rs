@@ -6,6 +6,7 @@
 //! `now_ms` parameters so that tests control time and so that the recipes
 //! never read the clock themselves.
 
+pub mod admission;
 pub mod bucket;
 pub mod cache;
 pub mod cluster;

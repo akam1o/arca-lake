@@ -10,6 +10,14 @@ use tokio::net::TcpListener;
 /// Counters and gauges of one controller process.
 #[derive(Debug, Default)]
 pub struct Metrics {
+    /// GC work by stage (Phase 3.6).
+    pub gc: crate::gc::GcStats,
+    /// Write admission (Phase 3.6): devices, state machines, decisions.
+    pub admission: crate::admission::Tracker,
+    /// Durable capacity totals of the last admission pass.
+    pub capacity: std::sync::Mutex<crate::admission::Totals>,
+    /// GC backlog, logical bytes, after the last GC pass.
+    pub gc_backlog_bytes: AtomicU64,
     /// Whether this process currently holds leadership.
     pub leader: AtomicBool,
     /// Current fencing token (0 when not leader).
@@ -351,6 +359,73 @@ impl Metrics {
         ] {
             out += &c(name, v.load(Ordering::Relaxed));
         }
+        out += &g(
+            "arca_controller_backpressure_state",
+            self.admission.worst().code(),
+        );
+        let t = *self
+            .capacity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = writeln!(out, "# TYPE arca_controller_capacity_bytes gauge");
+        for (kind, v) in [
+            ("total", t.total),
+            ("usable", t.usable),
+            ("headroom", t.headroom),
+            ("reserved", t.reserved),
+            ("reclaimable", t.reclaimable),
+            ("inflight", t.inflight),
+        ] {
+            let _ = writeln!(out, "arca_controller_capacity_bytes{{kind=\"{kind}\"}} {v}");
+        }
+        out += &g(
+            "arca_controller_gc_backlog_bytes",
+            self.gc_backlog_bytes.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_gc_backlog_physical_bytes",
+            t.gc_backlog_physical,
+        );
+        out += &g(
+            "arca_controller_gc_reclaim_bytes_per_second",
+            t.gc_reclaim_per_s,
+        );
+        out += &g(
+            "arca_controller_admission_excluded_groups",
+            t.excluded_groups,
+        );
+        let _ = writeln!(out, "# TYPE arca_controller_gc_stage_seconds histogram");
+        for (stage, h) in self.gc.stages() {
+            h.snapshot().render_prometheus(
+                &mut out,
+                "arca_controller_gc_stage_seconds",
+                &format!("stage=\"{stage}\""),
+            );
+        }
+        let _ = writeln!(out, "# TYPE arca_controller_gc_transactions_total counter");
+        for (kind, v) in [
+            ("verify", &self.gc.txn_verify),
+            ("finish", &self.gc.txn_finish),
+            ("root_step", &self.gc.txn_root_step),
+        ] {
+            let _ = writeln!(
+                out,
+                "arca_controller_gc_transactions_total{{kind=\"{kind}\"}} {}",
+                v.load(Ordering::Relaxed)
+            );
+        }
+        out += &c(
+            "arca_controller_gc_reclaimed_bytes_total",
+            self.gc.reclaimed_bytes.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_gc_roots_collected_total",
+            self.gc.collected_roots.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_gc_parts_retired_total",
+            self.gc.parts_retired.load(Ordering::Relaxed),
+        );
         out += &arca_lake_protocol::tls::render_metrics(
             "arca_controller",
             self.tls.get().map(|t| &**t),

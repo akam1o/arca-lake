@@ -954,6 +954,34 @@ impl NodeClients {
         data: Bytes,
         frame_bytes: usize,
     ) -> Result<pb::PutShardResponse, tonic::Status> {
+        self.put_shard_as(
+            addr,
+            shard,
+            epoch,
+            data,
+            frame_bytes,
+            pb::WriteClass::Client,
+        )
+        .await
+    }
+
+    /// [`Self::put_shard`] for a write of `class` (Phase 3.6 capacity
+    /// admission: a node keeps a reserve client writes may not use and
+    /// repair may). A node without room answers `RESOURCE_EXHAUSTED`
+    /// ([`Self::is_capacity_refused`]), which is not retried.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::put_shard`].
+    pub async fn put_shard_as(
+        &self,
+        addr: &str,
+        shard: ShardRef,
+        epoch: u64,
+        data: Bytes,
+        frame_bytes: usize,
+        class: pb::WriteClass,
+    ) -> Result<pb::PutShardResponse, tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::PutShard,
@@ -961,11 +989,18 @@ impl NodeClients {
             group_id: Some(shard.group_id),
         };
         self.with_retry(ctx, |fault| {
-            self.put_shard_raw(addr, shard, epoch, data.clone(), frame_bytes, fault)
+            self.put_shard_raw(addr, shard, epoch, data.clone(), frame_bytes, class, fault)
         })
         .await
     }
 
+    /// Whether a node refused a write for lack of capacity.
+    #[must_use]
+    pub fn is_capacity_refused(status: &tonic::Status) -> bool {
+        status.code() == tonic::Code::ResourceExhausted
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn put_shard_raw(
         &self,
         addr: &str,
@@ -973,6 +1008,7 @@ impl NodeClients {
         epoch: u64,
         data: Bytes,
         frame_bytes: usize,
+        class: pb::WriteClass,
         fault: StreamFault,
     ) -> Result<pb::PutShardResponse, tonic::Status> {
         let mut client = self.client(addr)?;
@@ -985,6 +1021,7 @@ impl NodeClients {
                 key: Some(shard.pb()),
                 group_epoch: epoch,
                 payload_len: data.len() as u64,
+                write_class: class.into(),
             })),
         };
         let frame = frame_bytes.max(1);

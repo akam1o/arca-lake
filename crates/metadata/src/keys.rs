@@ -605,6 +605,12 @@ pub fn leader() -> Key {
     pack(&(ROOT, "leader"))
 }
 
+/// The write admission record (Phase 3.6).
+#[must_use]
+pub fn admission() -> Key {
+    pack(&(ROOT, "admission"))
+}
+
 /// Every arca-lake key (for test setup and teardown).
 #[must_use]
 pub fn all_range() -> KeyRange {

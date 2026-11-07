@@ -234,7 +234,14 @@ async fn write_and_verify(
         };
         let expected = arca_lake_storage::format::crc32c(&shards[i]);
         let resp = clients
-            .put_shard(&addr, shard, target.epoch, shards[i].clone(), 256 << 10)
+            .put_shard_as(
+                &addr,
+                shard,
+                target.epoch,
+                shards[i].clone(),
+                256 << 10,
+                arca_lake_protocol::storage::v1::WriteClass::Migration,
+            )
             .await
             .map_err(|status| TierError::Node {
                 addr: addr.clone(),

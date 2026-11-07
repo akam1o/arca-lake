@@ -74,9 +74,12 @@ async fn device_errors_reach_clients_and_the_controller_as_errors_not_corruption
     .await
     .unwrap_err();
     eprintln!("PUT on full disks: {e}");
+    assert_eq!(*e.code(), s3s::S3ErrorCode::SlowDown, "{e:?}");
     assert!(s3::head(&c.backend, BUCKET, "full").await.is_err());
-    // The same failure through the HTTP gateway: an explicit 5xx whose
-    // message carries no node address (they are logged on the gateway).
+    // The same failure through the HTTP gateway: an explicit, retryable
+    // 503 SlowDown (the nodes answer out of space as a capacity refusal,
+    // Phase 3.6) whose message carries no node address (they are logged
+    // on the gateway).
     let sdk = aws_sdk_s3::Client::from_conf(
         aws_sdk_s3::Config::builder()
             .behavior_version_latest()
@@ -105,7 +108,8 @@ async fn device_errors_reach_clients_and_the_controller_as_errors_not_corruption
     let svc = err.into_service_error();
     let msg = svc.meta().message().unwrap_or_default().to_string();
     eprintln!("HTTP PUT on full disks: {:?} {msg}", svc.meta().code());
-    assert_eq!(svc.meta().code(), Some("ServiceUnavailable"));
+    assert_eq!(svc.meta().code(), Some("SlowDown"));
+    assert!(msg.contains("insufficient capacity"), "{msg}");
     assert!(
         msg.contains("<node>") && !msg.contains("127.0.0.1"),
         "{msg}"
