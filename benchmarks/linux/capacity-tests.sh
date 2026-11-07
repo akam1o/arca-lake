@@ -105,7 +105,9 @@ clean() {
 }
 begin() { # test dir
   clean
-  bash "$SOAK" setup > "$1/setup.log" 2>&1 || { say "setup failed"; return 1; }
+  if ! bash "$SOAK" setup > "$1/setup.log" 2>&1; then
+    say "setup failed"; bash "$SOAK" teardown > "$1/teardown.log" 2>&1; return 1
+  fi
   rm -f "$1/stop"; sampler "$1" & SAMPLER=$!
 }
 end() { # test dir
