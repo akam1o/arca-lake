@@ -29,6 +29,8 @@ MON="${MON:?monitor directory}"
 STOP_FREE_GIB="${STOP_FREE_GIB:-8}"
 ALERT_RSS_MIB="${ALERT_RSS_MIB:-2048}"
 DEV="${DEV:-$(basename "$(df --output=source "$RUN" | tail -n 1)")}"
+# A second device to record (FoundationDB on its own disk, soak24.sh FDB_DIR).
+DEV2="${DEV2:-}"
 F="$RUN/fdb"
 mkdir -p "$MON"
 cat > "$MON/meta.py" <<'PY'
@@ -97,7 +99,13 @@ host_sample() {
   local mem; mem="$(awk '/^MemAvailable/{print $2}' /proc/meminfo)"
   local free; free="$(df --output=avail -B1 "$RUN" | tail -n 1)"
   read -r u s w i <<< "$cpu"; read -r rs ws io wt <<< "$disk"; read -r nr nt <<< "$net"
-  echo "{\"t\":$t,\"cpu_user\":$u,\"cpu_sys\":$s,\"cpu_iowait\":$w,\"cpu_idle\":$i,\"rd_sectors\":${rs:-0},\"wr_sectors\":${ws:-0},\"io_ms\":${io:-0},\"weighted_ms\":${wt:-0},\"lo_rx\":${nr:-0},\"lo_tx\":${nt:-0},\"mem_avail_kib\":$mem,\"free_bytes\":$free}" >> "$MON/host.jsonl"
+  local dev2=""
+  if [ -n "$DEV2" ]; then
+    local d2; d2="$(awk -v d="$DEV2" '$3==d {print $10, $13, $14}' /proc/diskstats)"
+    local ws2 io2 wt2; read -r ws2 io2 wt2 <<< "$d2"
+    dev2=",\"dev2_wr_sectors\":${ws2:-0},\"dev2_io_ms\":${io2:-0},\"dev2_weighted_ms\":${wt2:-0}"
+  fi
+  echo "{\"t\":$t,\"cpu_user\":$u,\"cpu_sys\":$s,\"cpu_iowait\":$w,\"cpu_idle\":$i,\"rd_sectors\":${rs:-0},\"wr_sectors\":${ws:-0},\"io_ms\":${io:-0},\"weighted_ms\":${wt:-0},\"lo_rx\":${nr:-0},\"lo_tx\":${nt:-0},\"mem_avail_kib\":$mem,\"free_bytes\":$free$dev2}" >> "$MON/host.jsonl"
   echo "$free $mem"
 }
 
