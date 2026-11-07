@@ -967,7 +967,8 @@ release build; generations collected per second:
 | multipart 2 × 1 MiB | 2 235 | 6 266 | 1 077 | 6 635 | 365 |
 | multipart 2 × 8 MiB | 824 | 1 310 | 1 205 | 219 | 41 |
 | multipart 2 × 64 MiB | 118 | 85 | 125 | 15 | 5 |
-| 100 / 1 000 / 10 000 parts, complete then delete (metadata only) | 1 664 / 1 393 / 1 012 | 5 122 / 4 042 / 2 076 | — | 1 426 / 1 376 / 996 | 212 / — / — |
+| 100 / 1 000 / 10 000 parts, complete then delete (metadata only) | 1 664 / 1 619 / 1 499 | 5 122 / 4 042 / 2 076 | 4 520 / 3 875 / 2 036 | 1 426 / 1 376 / 996 | 212 / — / — |
+| 100 / 1 000 / 10 000 parts, abort (metadata only) | 2 585 / 2 790 / 2 317 | 5 290 / 4 187 / 2 120 | 4 584 / 3 927 / 2 092 | 1 280 / 1 383 / 1 515 | — |
 
 Per generation: ~3 metadata transactions (verify, finish; root step for
 roots), no conflicts. On FoundationDB verify takes 2–4 ms, finish 3–7 ms,
@@ -977,7 +978,8 @@ client PUTs 10–40 ms), about 100 ms on macOS (`F_FULLFSYNC`). Large
 objects are bound by the number of shard deletes (one per chunk shard).
 A 10 000-part upload completes in 2 transactions (189 ms on
 FoundationDB) and an abort plus discard takes 43 transactions (1.5 s);
-GC heap growth stays under 2 MiB.
+GC of the 10 000 part generations takes 30 058–30 145 transactions
+(3.0 per generation, 0 conflicts) and grows the heap by at most 2.1 MiB.
 
 The 14 generations/s of the Phase 3.5 multipart soak was not a
 throughput limit: parts served a second grace after their root (fixed,
