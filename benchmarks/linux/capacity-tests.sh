@@ -136,7 +136,7 @@ test_A() {
   NODE_EXTRA_ARGS="--capacity-bytes $CAP" begin "$d" || return
   say "A: GC saturation"
   gcload --bucket gca --mode overwrite --size $((256 << 10)) --keys 4000 --workers 64 \
-    --rates 100,200,400,800,1600 --step-secs "$STEP_SECS" --get-pct 10 > "$d/load-up.jsonl" 2> "$d/load-up.err"
+    --rates 100,200,400,800,1600 --step-secs "$STEP_SECS" --get-pct 10 --verify > "$d/load-up.jsonl" 2> "$d/load-up.err"
   gcload --bucket gca --mode overwrite --size $((256 << 10)) --keys 4000 --workers 64 \
     --rates 50 --step-secs $((2 * STEP_SECS)) --get-pct 10 --verify > "$d/load-down.jsonl" 2> "$d/load-down.err"
   say "A: verify exit $?"
@@ -149,7 +149,7 @@ test_B() {
   NODE_EXTRA_ARGS="--capacity-bytes $CAP" begin "$d" || return
   say "B: multipart saturation"
   gcload --bucket gcb --mode multipart --size $((1 << 20)) --keys 1000 --workers 64 \
-    --rates 10,20,40,80,160 --step-secs "$STEP_SECS" --get-pct 10 > "$d/load-up.jsonl" 2> "$d/load-up.err"
+    --rates 10,20,40,80,160 --step-secs "$STEP_SECS" --get-pct 10 --verify > "$d/load-up.jsonl" 2> "$d/load-up.err"
   gcload --bucket gcb --mode multipart --size $((1 << 20)) --keys 1000 --workers 32 \
     --rates 10 --step-secs $((2 * STEP_SECS)) --get-pct 10 --verify > "$d/load-down.jsonl" 2> "$d/load-down.err"
   say "B: verify exit $?"

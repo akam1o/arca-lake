@@ -63,8 +63,12 @@ Run 2 (final build) is **not counted**: FoundationDB stopped serving
 (`IoTimeoutError`, 22 recoveries; R-79) 10 minutes in; gateways got
 transaction timeouts (1031), the admission record stopped changing and
 gateways refused new data (fail closed), reads timed out. It shows the
-fail-closed path, not capacity behaviour. Run 3 (FoundationDB on the
-other virtual disk): see the Phase 3.6 report.
+fail-closed path, not capacity behaviour. Run 3, with FoundationDB on
+the other virtual disk, stopped the same way in its first minute
+(`IoTimeoutError`): Test B is **not verified on the final build** in this
+environment. In both runs the uploads acknowledged before the stall were
+not read back (the script verified only the last step; it now verifies
+every step).
 
 ## Test C — capacity exhaustion (isolated file systems)
 
