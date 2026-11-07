@@ -728,6 +728,52 @@ pub struct CachePlacement {
     pub created_ms: u64,
 }
 
+/// The delete token of one shard of a cache copy (R-73): the record
+/// sequence and store epoch the node returned for the write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheShardToken {
+    /// Member (shard) index in the cache group.
+    pub index: u16,
+    /// Node store epoch.
+    pub store_epoch: u64,
+    /// Record sequence (0: the node gave none, an older node).
+    pub sequence: u64,
+}
+
+/// `("al","g",generation,"xt",index)`: the delete tokens of a cache copy
+/// (Phase 3.6, R-73), next to its placement and removed with it, so that
+/// a delete removes only the shards this copy wrote and never a newer
+/// copy under the same key. A placement without tokens (written before)
+/// is deleted unconditionally, as before.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheCopyTokens {
+    /// Group the tokens belong to.
+    pub group_id: u64,
+    /// Per shard written.
+    pub shards: Vec<CacheShardToken>,
+}
+
+impl CacheCopyTokens {
+    /// The token of member `index`, if recorded.
+    #[must_use]
+    pub fn of(&self, index: u16) -> Option<CacheShardToken> {
+        self.shards.iter().find(|t| t.index == index).copied()
+    }
+
+    /// Replace or add the tokens of `updates`.
+    pub fn merge(&mut self, updates: &[CacheShardToken]) {
+        for u in updates {
+            match self.shards.iter_mut().find(|t| t.index == u.index) {
+                Some(t) => *t = *u,
+                None => self.shards.push(*u),
+            }
+        }
+        self.shards.sort_by_key(|t| t.index);
+    }
+}
+
+impl Record for CacheCopyTokens {}
+
 /// A registered storage node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeRecord {

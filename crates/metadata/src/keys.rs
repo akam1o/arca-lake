@@ -472,6 +472,19 @@ pub fn cache_placement(generation: &GenId, index: u32) -> Key {
     ))
 }
 
+/// Delete tokens of the cache copy of chunk `index` (R-73; inside the
+/// generation's subspace, outside the placements' range).
+#[must_use]
+pub fn cache_tokens(generation: &GenId, index: u32) -> Key {
+    pack(&(
+        ROOT,
+        "g",
+        Bytes::from(&generation[..]),
+        "xt",
+        u64::from(index),
+    ))
+}
+
 /// All cache placements of a generation, in index order.
 #[must_use]
 pub fn cache_placements_range(generation: &GenId) -> KeyRange {

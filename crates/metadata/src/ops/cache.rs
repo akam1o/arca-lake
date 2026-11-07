@@ -10,7 +10,7 @@
 use crate::error::Result;
 use crate::kv::{KvStore, Txn};
 use crate::ops::{generation_header, read, write};
-use crate::records::{CachePlacement, GenId, GenState, decode};
+use crate::records::{CacheCopyTokens, CachePlacement, CacheShardToken, GenId, GenState, decode};
 use crate::{MetaError, keys, transact};
 
 /// Outcome of [`insert`].
@@ -57,12 +57,36 @@ pub async fn insert<S: KvStore>(
     placement: &CachePlacement,
     capacity_bytes: u64,
 ) -> Result<InsertOutcome> {
+    insert_with_tokens(
+        store,
+        generation,
+        index,
+        placement,
+        &CacheCopyTokens::default(),
+        capacity_bytes,
+    )
+    .await
+}
+
+/// [`insert`], recording the delete tokens of the copy's shards (R-73).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn insert_with_tokens<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    index: u32,
+    placement: &CachePlacement,
+    tokens: &CacheCopyTokens,
+    capacity_bytes: u64,
+) -> Result<InsertOutcome> {
     transact(
         store,
-        (*generation, index, placement, capacity_bytes),
+        (*generation, index, placement, tokens, capacity_bytes),
         |tx, env| {
             Box::pin(async move {
-                let (generation, index, placement, capacity_bytes) = *env;
+                let (generation, index, placement, tokens, capacity_bytes) = *env;
                 let header = match generation_header(tx, &generation).await {
                     Ok(h) => h,
                     Err(MetaError::NoSuchGeneration) => return Ok(InsertOutcome::GenerationGone),
@@ -86,6 +110,11 @@ pub async fn insert<S: KvStore>(
                     return Ok(InsertOutcome::OverCapacity);
                 }
                 write(tx, &keys::cache_placement(&generation, index), placement)?;
+                if tokens.shards.is_empty() {
+                    tx.clear(&keys::cache_tokens(&generation, index));
+                } else {
+                    write(tx, &keys::cache_tokens(&generation, index), tokens)?;
+                }
                 tx.set(
                     &keys::cache_recency(
                         &placement.tier,
@@ -115,6 +144,22 @@ pub async fn remove<S: KvStore>(
     generation: &GenId,
     index: u32,
 ) -> Result<Option<CachePlacement>> {
+    Ok(remove_with_tokens(store, generation, index)
+        .await?
+        .map(|(p, _)| p))
+}
+
+/// [`remove`], also returning the copy's delete tokens (empty when none
+/// were recorded).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn remove_with_tokens<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    index: u32,
+) -> Result<Option<(CachePlacement, CacheCopyTokens)>> {
     transact(store, (*generation, index), |tx, env| {
         Box::pin(async move {
             let (generation, index) = *env;
@@ -123,7 +168,12 @@ pub async fn remove<S: KvStore>(
             else {
                 return Ok(None);
             };
+            let tokens: CacheCopyTokens = read(tx, &keys::cache_tokens(&generation, index))
+                .await?
+                .filter(|t: &CacheCopyTokens| t.group_id == p.group_id)
+                .unwrap_or_default();
             tx.clear(&keys::cache_placement(&generation, index));
+            tx.clear(&keys::cache_tokens(&generation, index));
             tx.clear(&keys::cache_recency(
                 &p.tier,
                 p.last_access_ms,
@@ -131,7 +181,48 @@ pub async fn remove<S: KvStore>(
                 index,
             ));
             add_usage(tx, &p.tier, -delta_of(p.bytes)).await?;
-            Ok(Some(p))
+            Ok(Some((p, tokens)))
+        })
+    })
+    .await
+}
+
+/// Record the tokens of shards a repair rewrote, if the placement still
+/// names `group_id` (R-73). Returns whether they were recorded; a copy
+/// evicted meanwhile keeps its rewritten shards as orphans for
+/// reconciliation.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn update_tokens<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    index: u32,
+    group_id: u64,
+    updates: &[CacheShardToken],
+) -> Result<bool> {
+    transact(store, (*generation, index, group_id, updates), |tx, env| {
+        Box::pin(async move {
+            let (generation, index, group_id, updates) = *env;
+            let Some(p) =
+                read::<CachePlacement, _>(tx, &keys::cache_placement(&generation, index)).await?
+            else {
+                return Ok(false);
+            };
+            if p.group_id != group_id {
+                return Ok(false);
+            }
+            let mut tokens: CacheCopyTokens = read(tx, &keys::cache_tokens(&generation, index))
+                .await?
+                .filter(|t: &CacheCopyTokens| t.group_id == group_id)
+                .unwrap_or(CacheCopyTokens {
+                    group_id,
+                    shards: Vec::new(),
+                });
+            tokens.merge(updates);
+            write(tx, &keys::cache_tokens(&generation, index), &tokens)?;
+            Ok(true)
         })
     })
     .await

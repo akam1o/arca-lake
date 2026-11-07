@@ -20,6 +20,7 @@ mod cache_ec;
 mod cache_ec_fdb;
 #[cfg(feature = "fdb")]
 mod cache_fdb;
+mod cache_tokens;
 mod capacity;
 mod commit_timeouts;
 mod controller;

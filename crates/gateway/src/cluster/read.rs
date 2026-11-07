@@ -816,6 +816,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         tokio::spawn(async move {
             let _permit = permit;
             let r = tcache::repair_shards(
+                backend.meta.as_ref(),
                 &backend.clients,
                 &backend.coders,
                 &group,

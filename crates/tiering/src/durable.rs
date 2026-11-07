@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use arca_lake_ec::{CodeParams, ErasureCoder, SchemeId, StripeLayout};
 use arca_lake_metadata::records::{ChunkRecord, GroupRecord};
-use arca_lake_protocol::client::{NodeClients, ShardRef, concat_frames, frames_len};
+use arca_lake_protocol::client::{NodeClients, RecordToken, ShardRef, concat_frames, frames_len};
 use bytes::Bytes;
 
 use crate::TierError;
@@ -335,8 +335,10 @@ pub fn encode_chunk(
 /// Write `shards` of `chunk_id` to the members of `group` with the group's
 /// epoch (member `i` receives shard `i`), restricted to `only` when given.
 /// Every write must be acknowledged with the expected CRC; on any failure
-/// the shards written by this call are deleted again and the error is
-/// returned, so that a caller never records a partial copy.
+/// the shards written by this call are deleted again (only the records it
+/// wrote: their tokens) and the error is returned, so that a caller never
+/// records a partial copy. Returns each shard written with its node's
+/// delete token (R-73).
 ///
 /// # Errors
 ///
@@ -348,7 +350,7 @@ pub async fn write_coded(
     chunk_id: [u8; 16],
     shards: &[Bytes],
     only: Option<&[usize]>,
-) -> Result<Vec<(String, ShardRef)>, TierError> {
+) -> Result<Vec<(String, ShardRef, RecordToken)>, TierError> {
     if shards.len() != group.members.len() {
         return Err(TierError::Other(format!(
             "group {} has {} members for {} shards",
@@ -357,7 +359,7 @@ pub async fn write_coded(
             shards.len()
         )));
     }
-    let mut written: Vec<(String, ShardRef)> = Vec::new();
+    let mut written: Vec<(String, ShardRef, RecordToken)> = Vec::new();
     for (i, member) in group.members.iter().enumerate() {
         if only.is_some_and(|o| !o.contains(&i)) {
             continue;
@@ -390,15 +392,16 @@ pub async fn write_coded(
                 return Err(TierError::Node { addr, status });
             }
         };
+        let token = RecordToken::of_put(&resp);
         if resp.crc32c != expected {
-            written.push((addr.clone(), shard));
+            written.push((addr.clone(), shard, token));
             delete_written(clients, &written, group.epoch).await;
             return Err(TierError::Corrupt(format!(
                 "node {addr} stored shard {i} with crc {:08x}, expected {expected:08x}",
                 resp.crc32c
             )));
         }
-        written.push((addr, shard));
+        written.push((addr, shard, token));
     }
     Ok(written)
 }
@@ -434,8 +437,12 @@ pub async fn delete_shards(
     failed
 }
 
-async fn delete_written(clients: &NodeClients, written: &[(String, ShardRef)], epoch: u64) {
-    for (addr, shard) in written {
-        let _ = clients.delete_shard(addr, *shard, epoch).await;
+async fn delete_written(
+    clients: &NodeClients,
+    written: &[(String, ShardRef, RecordToken)],
+    epoch: u64,
+) {
+    for (addr, shard, token) in written {
+        let _ = clients.delete_shard_if(addr, *shard, epoch, *token).await;
     }
 }

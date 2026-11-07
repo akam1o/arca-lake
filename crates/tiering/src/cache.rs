@@ -17,8 +17,10 @@ use arca_lake_common::{chunk_id, split_chunk_id};
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::ops::cache as meta_cache;
 use arca_lake_metadata::ops::gc as meta_gc;
-use arca_lake_metadata::records::{CachePlacement, ChunkRecord, GenId, GroupRecord, GroupState};
-use arca_lake_protocol::client::{NodeClients, ShardRef, frames_len};
+use arca_lake_metadata::records::{
+    CacheCopyTokens, CachePlacement, CacheShardToken, ChunkRecord, GenId, GroupRecord, GroupState,
+};
+use arca_lake_protocol::client::{NodeClients, RecordToken, ShardRef, frames_len};
 use bytes::Bytes;
 
 use crate::TierError;
@@ -154,16 +156,24 @@ pub async fn populate<S: KvStore>(
     now_ms: u64,
 ) -> Result<PopulateOutcome, TierError> {
     let cid = chunk_id(generation, index);
-    let stored = if is_raw(group) {
+    let (stored, written) = if is_raw(group) {
         let len = bytes.len() as u64;
-        write_coded(clients, group, addr_of, cid, &[bytes], None).await?;
-        len
+        (
+            len,
+            write_coded(clients, group, addr_of, cid, &[bytes], None).await?,
+        )
     } else {
         let coder = coders.for_group(group)?;
         let (_, shards) = encode_chunk(coder.as_ref(), usize::from(group.data_shards), &bytes)?;
         let stored = shards.iter().map(|s| s.len() as u64).sum();
-        write_coded(clients, group, addr_of, cid, &shards, None).await?;
-        stored
+        (
+            stored,
+            write_coded(clients, group, addr_of, cid, &shards, None).await?,
+        )
+    };
+    let tokens = CacheCopyTokens {
+        group_id: group.id,
+        shards: tokens_of(&written),
     };
     let placement = CachePlacement {
         tier: cfg.tier.clone(),
@@ -174,18 +184,87 @@ pub async fn populate<S: KvStore>(
         last_access_ms: now_ms,
         created_ms: now_ms,
     };
-    match meta_cache::insert(meta, generation, index, &placement, cfg.capacity_bytes).await? {
+    // A copy that is not recorded is deleted again, by its own tokens: a
+    // concurrent population that rewrote the same keys and recorded its
+    // copy keeps it (R-73, INT-1).
+    match meta_cache::insert_with_tokens(
+        meta,
+        generation,
+        index,
+        &placement,
+        &tokens,
+        cfg.capacity_bytes,
+    )
+    .await?
+    {
         meta_cache::InsertOutcome::Inserted => Ok(PopulateOutcome::Inserted),
         meta_cache::InsertOutcome::AlreadyPresent => Ok(PopulateOutcome::AlreadyPresent),
         meta_cache::InsertOutcome::GenerationGone => {
-            crate::durable::delete_shards(clients, group, addr_of, cid, group.epoch).await;
+            delete_copy(clients, group, addr_of, cid, group.epoch, &tokens).await;
             Ok(PopulateOutcome::Rejected("generation gone"))
         }
         meta_cache::InsertOutcome::OverCapacity => {
-            crate::durable::delete_shards(clients, group, addr_of, cid, group.epoch).await;
+            delete_copy(clients, group, addr_of, cid, group.epoch, &tokens).await;
             Ok(PopulateOutcome::Rejected("over capacity"))
         }
     }
+}
+
+/// The tokens of the shards a write returned (members without one, older
+/// nodes, are left out: their deletes stay unconditional).
+fn tokens_of(written: &[(String, ShardRef, RecordToken)]) -> Vec<CacheShardToken> {
+    written
+        .iter()
+        .filter(|(_, _, t)| t.is_some())
+        .map(|(_, s, t)| CacheShardToken {
+            index: s.shard_index,
+            store_epoch: t.store_epoch,
+            sequence: t.sequence,
+        })
+        .collect()
+}
+
+/// Delete the shards of a cache copy on every member of `group` (R-73). A
+/// member with a token in `tokens` is deleted only if it still holds that
+/// record: a newer copy written under the same key since is kept (a later
+/// eviction or reconciliation removes it when no placement names it). A
+/// member without one (a copy recorded before tokens, or an older node)
+/// is deleted unconditionally, as before. Returns the deletes that failed
+/// (orphans for reconciliation).
+pub async fn delete_copy(
+    clients: &NodeClients,
+    group: &GroupRecord,
+    addr_of: AddrOf<'_>,
+    chunk_id: [u8; 16],
+    epoch: u64,
+    tokens: &CacheCopyTokens,
+) -> usize {
+    let mut failed = 0;
+    for (i, member) in group.members.iter().enumerate() {
+        let Some(addr) = addr_of(member.node_id) else {
+            failed += 1;
+            continue;
+        };
+        let index = u16::try_from(i).unwrap_or(0);
+        let shard = ShardRef {
+            group_id: group.id,
+            chunk_id,
+            shard_index: index,
+        };
+        let token = (tokens.group_id == group.id)
+            .then(|| tokens.of(index))
+            .flatten()
+            .map_or(RecordToken::NONE, |t| RecordToken {
+                store_epoch: t.store_epoch,
+                sequence: t.sequence,
+            });
+        match clients.delete_shard_if(&addr, shard, epoch, token).await {
+            Ok(()) => {}
+            Err(s) if s.code() == tonic::Code::NotFound || NodeClients::is_changed(&s) => {}
+            Err(_) => failed += 1,
+        }
+    }
+    failed
 }
 
 /// A chunk served from the cache.
@@ -271,7 +350,8 @@ pub async fn read_cached(
 /// Encoder or node errors (nothing is recorded; the next degraded hit
 /// retries).
 #[allow(clippy::too_many_arguments)]
-pub async fn repair_shards(
+pub async fn repair_shards<S: KvStore>(
+    meta: &S,
     clients: &NodeClients,
     coders: &Coders,
     group: &GroupRecord,
@@ -292,6 +372,10 @@ pub async fn repair_shards(
         encode_chunk(coder.as_ref(), usize::from(group.data_shards), bytes)?.1
     };
     let written = write_coded(clients, group, addr_of, cid, &shards, Some(missing)).await?;
+    // The rewritten shards' tokens, so that an eviction deletes them too
+    // (best effort: stale tokens only leave orphans for reconciliation).
+    let _ =
+        meta_cache::update_tokens(meta, generation, index, group.id, &tokens_of(&written)).await;
     Ok(written.len())
 }
 
@@ -309,12 +393,19 @@ pub async fn invalidate<S: KvStore>(
     generation: &GenId,
     index: u32,
 ) -> Result<bool, TierError> {
-    let Some(p) = meta_cache::remove(meta, generation, index).await? else {
+    let Some((p, tokens)) = meta_cache::remove_with_tokens(meta, generation, index).await? else {
         return Ok(false);
     };
     if let Some(g) = group.filter(|g| g.id == p.group_id) {
-        crate::durable::delete_shards(clients, g, addr_of, chunk_id(generation, index), p.epoch)
-            .await;
+        delete_copy(
+            clients,
+            g,
+            addr_of,
+            chunk_id(generation, index),
+            p.epoch,
+            &tokens,
+        )
+        .await;
     }
     Ok(true)
 }
@@ -381,17 +472,20 @@ pub async fn evict_tier<S: KvStore>(
                 report.skipped_pinned += 1;
                 continue;
             }
-            if let Some(removed) = meta_cache::remove(meta, generation, *index).await? {
+            if let Some((removed, tokens)) =
+                meta_cache::remove_with_tokens(meta, generation, *index).await?
+            {
                 report.evicted += 1;
                 report.usage_after = report.usage_after.saturating_sub(removed.bytes);
                 match groups.get(&removed.group_id) {
                     Some(g) => {
-                        report.delete_failures += crate::durable::delete_shards(
+                        report.delete_failures += delete_copy(
                             clients,
                             g,
                             addr_of,
                             chunk_id(generation, *index),
                             removed.epoch,
+                            &tokens,
                         )
                         .await;
                     }
