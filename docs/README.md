@@ -10,6 +10,9 @@ docs/
 ├── rfcs/              Numbered design proposals; the unit of design review
 ├── adr/               Architecture Decision Records; short, immutable records of decisions
 ├── roadmap/           Phase plans with scope, tasks, acceptance criteria, risks
+├── guide/             User and operator guides (quick start, configuration, limitations)
+├── release/           Release preparation: audits, CI review, checklist
+├── verification/      Verification reports
 └── CONTRIBUTING-POLICY.md
 ```
 

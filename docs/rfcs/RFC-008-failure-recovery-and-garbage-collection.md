@@ -406,6 +406,56 @@ live bytes do not fit in the free space (`skipped_no_space`); repair
 writes stop at the repair floor (`RESOURCE_EXHAUSTED`), the task is
 retried by the repair scheduler once space returns.
 
+### 6.9 Admission of every write path (Phase 3.7, ADR-0021)
+
+| Operation | Size known up front | Physical bytes written | Admission (node: physical) | Throttle (gateway: bandwidth) | After abort / CommitUnknown | Retry double counting |
+| --- | --- | --- | --- | --- | --- | --- |
+| PutObject (with or without `Content-Length`, `aws-chunked`) | not relied on | shards of each chunk, as placed | every PutShard (client class) | header check (state only), then each chunk as it is formed, before its shards, once per chunk | pending generation expires or is aborted; its shards are GC's; holds end with the RPCs | a chunk retried on another group is not charged again; a client retry is a new request and writes again (charged again, correctly) |
+| UploadPart | not relied on | as PutObject | as PutObject | as PutObject | part generation retired by the next part, abort or sweep | as PutObject |
+| CopyObject, UploadPartCopy | source size, not relied on | destination chunks (the source is read, not charged) | every PutShard | header check, then each destination chunk; the source version is fixed at the manifest read | destination generation as PutObject; the source is untouched | as PutObject |
+| Versioned / conditional PUT, Complete with conditions | — | as PutObject (Complete: none) | as PutObject | as PutObject; Complete writes no data and is never refused | conditions are evaluated at commit; CommitUnknown per RFC-003 §5.8 | — |
+| CompleteMultipartUpload, AbortMultipartUpload, DELETE, DeleteObjects | — | metadata only (tombstones later, by GC) | deletes never refused | never refused | idempotent re-runs (ADR-0019) | — |
+| Tier migration | chunk size | target shards | migration class (stops at the reserve) | none; tiering is skipped while any tier is `throttled` or worse | intent expires; target shards reconciled | per chunk |
+| Cache population | chunk size | cache shards | cache class | none (cache capacity and watermarks) | copy deleted by its tokens or reconciled | per chunk |
+| Member repair, stripe repair, cache shard rebuild | shard size | shards | repair class (stops at the repair floor) | none (repair budgets, RFC-008 §8.5) | task retried | per shard |
+| Compaction | live bytes of the segment | output segment | skipped without room for the output | none | output removed, source kept | — |
+
+The node is the linearization point for physical space in every row;
+the gateway's throttle is the early, soft limit on client bandwidth.
+
+**Leadership terms.** The admission record carries the leader's fencing
+token and a generation; it is written through the fenced store, so a
+former leader's delayed write fails. A new term (failover, or the same
+process leading again) starts the state machines afresh; until every
+member of a tier has reported in the term (or the staleness bound has
+passed) the tier keeps at least the state published before the term
+(`throttled` when there was none), and it then relaxes only through the
+hysteresis starting from that state. Gateways ignore a record with a
+lower token than one they have seen, age a record that stops changing
+(`throttled` after its TTL, `write_rejected` after 5 minutes), and age a
+record already older than its TTL plus 60 s by their own clock when
+they first see it (a gateway started while no leader publishes).
+
+**Shared file systems.** Nodes report a capacity domain (the device
+number of the store's file system scoped to the kernel's boot id,
+flagged uncertain for overlay, FUSE and network file systems), whether
+they have an allotment and the file system's size. Nodes on one domain
+whose allotments are missing or exceed the file system are conflicts:
+their groups leave placement (the tier refuses new data with the
+reason) unless `--allow-shared-filesystem`; uncertain domains without
+an allotment are reported. `admin check-config` prints both.
+
+**Responsiveness.** Worse states follow the long trend (5 min); a better
+one may be entered when the recent trend (1 min) no longer calls for the
+current state. The throttled rate starts at GC's reclaim rate plus
+headroom over the horizon, grows additively while the recent trend keeps
+the tier the horizon from full, halves within half of it, and stays
+between that formula and eight times it.
+
+**Placement.** The record carries each group's room (its fullest
+member's headroom); gateways place new chunks in the groups with the
+most room. Existing data is not moved (no automatic rebalancing).
+
 ## 7. Repair completion and metadata order
 
 1. Fence reachable members (`UpdateGroupEpoch`); the replacement must

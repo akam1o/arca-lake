@@ -987,6 +987,32 @@ ADR-0020), so retired data accumulated for twice the grace, the soak's
 devices filled, and GC then stalled on tombstone appends that failed for
 lack of space. GC parallelism was not changed.
 
+### 6.21 Phase 3.7: backpressure responsiveness (R-83)
+
+`capacity_bench` (`crates/testkit/tests/it/capacity_bench.rs`, ignored):
+three nodes capped at 300 MiB, 2 + 1, a controller with time-scaled
+admission (trend 60 s, recent 10 s, dwell 10 s, horizon 300 s, health
+1 s, GC 1 s with a 30 s grace), compaction every 5 s; 256 KiB overwrites
+of 400 keys at 400 ops/s for 120 s (far past what the nodes hold), then
+30 ops/s (27 PUT/s) for 180 s. Validation VM, release build, 3 runs per
+policy, same build ("phase-3.6" = long-window recovery and fixed rate).
+
+| | Phase 3.6 policy | Phase 3.7 policy |
+| --- | --- | --- |
+| High phase accepted / refused PUT/s | 26.8 / 333 (3 runs) | 26.6–26.8 / 333 |
+| Low phase accepted / refused PUT/s | 18.6–18.7 / 8.3–8.4 | 24.4–24.7 / 2.3–2.6 |
+| Low phase PUT p50 / p95 / p99 ms | 1 939–1 948 / 2 001–2 009 / 2 005–2 038 | 5 / 1 925–1 972 / 1 995–2 000 |
+| Back to `normal` after the drop | 30–31 s | 25–26 s |
+| State transitions (whole run) | 19–20 | 16–20 |
+| Node capacity refusals (high phase) | 1 347–1 401 | 1 293–1 569 |
+
+The high phase fills the nodes within seconds, faster than the
+one-second health interval: both policies reach `recovery_only` and the
+nodes' reserve refuses writes (no node fell below its reserve). The
+difference is in recovery: the long window kept the tier throttled and
+every chunk waited its 2 s share; the recent trend and the adaptive rate
+admit almost the offered load within about half a minute.
+
 ## 7. Interpretation
 
 *Verified on this environment* (one run each; see §4 for the error

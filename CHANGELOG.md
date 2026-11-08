@@ -6,6 +6,38 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Added (Phase 3.7)
+
+- Every client write path (PUT with or without a length, UploadPart,
+  CopyObject, UploadPartCopy) is charged to write admission chunk by
+  chunk as it writes, with a bounded wait (ADR-0021, R-81);
+  `arca_gateway_admission_charged_bytes_total`.
+- Admission leadership terms: records carry the fencing token, a
+  generation and a warm-up flag; a new leader keeps the published state
+  until every member has reported (R-85).
+- Storage nodes report their capacity domain; nodes sharing a file
+  system without fitting `--capacity-bytes` allotments leave placement
+  unless `--allow-shared-filesystem` (R-80);
+  `arca_controller_capacity_domain_conflicts`, `_unverified`.
+- `admin check-config` (capacity configuration, admission record, group
+  rooms and imbalance).
+- Capacity-aware group choice from published group rooms (R-82).
+- Tests: multipart under backpressure (in-memory and FoundationDB),
+  refused writes through the AWS SDK for Rust, AWS CLI v2 and boto3,
+  failover terms, shared file systems; `capacity_bench`.
+- Documentation: README, `docs/guide/` (quick start, platforms, S3
+  compatibility, configuration, operations, security model,
+  backup/restore, troubleshooting, known limitations), `docs/release/`
+  (public repository audit, public CI review, release checklist).
+
+### Changed (Phase 3.7)
+
+- Backpressure leaves a state on the recent trend (1 min) and adapts the
+  throttled rate (R-83); the trend windows and the adaptive rate are
+  policy settings.
+- Test clusters give every node a 2 GiB allotment; `soak24.sh` runs its
+  controllers with `--allow-shared-filesystem`.
+
 ### Added (Phase 3.6)
 
 - Capacity admission on storage nodes (ADR-0020): every shard write is

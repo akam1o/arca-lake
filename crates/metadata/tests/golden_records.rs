@@ -14,6 +14,7 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 
 use arca_lake_common::compat::{Capabilities, Target};
+use arca_lake_metadata::ops::admission::{AdmissionRecord, GroupRoom, TierAdmission};
 use arca_lake_metadata::ops::integrity::{
     Finding, ManifestCursor, RepairState, RepairTask, ScrubCursor, ScrubPhase,
 };
@@ -23,11 +24,12 @@ use arca_lake_metadata::ops::recovery::{
     RestoreCounts, RestoreCursor, RestoreReport,
 };
 use arca_lake_metadata::records::{
-    BucketRecord, CachePlacement, Checksum, ChecksumAlgorithm, ChecksumType, ChunkRecord,
-    ClusterPhase, ClusterStateRecord, CurrentPointer, DurablePlacement, GenKind, GenState,
-    GenerationHeader, GroupMember, GroupRecord, GroupRole, GroupState, MultipartRecord,
-    MultipartState, NodeRecord, PartRecord, PartRef, ProcKind, ProcRecord, RECORD_VERSION, Record,
-    RepairCursor, UpgradeCursor, UpgradeStep, VersionRecord, Versioning, decode, encode,
+    BucketRecord, CacheCopyTokens, CachePlacement, CacheShardToken, Checksum, ChecksumAlgorithm,
+    ChecksumType, ChunkRecord, ClusterPhase, ClusterStateRecord, CurrentPointer, DurablePlacement,
+    GenKind, GenState, GenerationHeader, GroupMember, GroupRecord, GroupRole, GroupState,
+    MultipartRecord, MultipartState, NodeRecord, PartRecord, PartRef, ProcKind, ProcRecord,
+    RECORD_VERSION, Record, RepairCursor, UpgradeCursor, UpgradeStep, VersionRecord, Versioning,
+    decode, encode,
 };
 use serde::Serialize;
 
@@ -512,6 +514,41 @@ fn cases() -> Vec<Case> {
                 object: affected(),
                 accepted_ms: 1,
                 accepted_by: "op".into(),
+            },
+        ),
+        // Phase 3.6/3.7 records (added before any release that writes
+        // them).
+        case(
+            "AdmissionRecord",
+            AdmissionRecord {
+                computed_ms: 1,
+                ttl_ms: 30_000,
+                gateways: 2,
+                tiers: vec![TierAdmission {
+                    tier: "default".into(),
+                    state: 2,
+                    rate_bytes_per_s: 1 << 20,
+                    excluded_groups: vec![3],
+                    free_permille: 87,
+                    reason: "full in 100 s".into(),
+                    group_room: vec![GroupRoom { group: 1, room: 7 }],
+                }],
+                leader_token: 9,
+                generation: 4,
+                warming_up: true,
+                capacity_conflicts: vec![5, 6],
+                capacity_unverified: vec![7],
+            },
+        ),
+        case(
+            "CacheCopyTokens",
+            CacheCopyTokens {
+                group_id: 2,
+                shards: vec![CacheShardToken {
+                    index: 1,
+                    store_epoch: 3,
+                    sequence: 4,
+                }],
             },
         ),
     ]
