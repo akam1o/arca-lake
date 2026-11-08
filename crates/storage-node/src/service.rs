@@ -1087,14 +1087,19 @@ impl StorageNode for StorageNodeService {
         // guard, for every delete past the old one; it is persisted before
         // the response acknowledges it (ADR-0023).
         let caller = <[u8; 16]>::try_from(req.incarnation.as_ref()).ok();
+        // Only the node's own incarnation (after this request adopted the
+        // caller's, if newer) counts: a hold is tied to it, and only a
+        // caller of a later one the node adopted lifts it. A caller of an
+        // older incarnation (a controller started on a backup from before
+        // an earlier restore) can neither set nor lift a hold.
         let fence_args = |c: &crate::cluster::ClusterFacts| {
             (
                 req.delete_fence_generation,
                 req.delete_fence_open,
                 req.delete_fence_hold
-                    .then(|| caller.or(c.incarnation).unwrap_or([0; 16])),
+                    .then(|| c.incarnation.unwrap_or([0; 16])),
                 req.delete_fence_release,
-                caller,
+                caller.filter(|inc| c.incarnation == Some(*inc)),
             )
         };
         let changes = {

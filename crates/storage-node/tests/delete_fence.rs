@@ -475,3 +475,55 @@ async fn the_fence_survives_a_node_restart() {
     c.delete_shard(&addr, shard(1), 0).await.unwrap();
     n.shutdown().await;
 }
+
+/// The operator hold is tied to the node's incarnation when it was set:
+/// a caller of an older incarnation (which the node does not adopt) cannot
+/// lift it; a caller of a later incarnation the node adopts can; a caller
+/// of the held incarnation needs the explicit release.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_a_later_incarnation_or_a_release_lifts_the_hold() {
+    use arca_lake_protocol::client::FencePush;
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (n, addr, c) = node_with_shard(dir.path()).await;
+    let facts = |inc: u8, changed_ms: u64| HealthRequest {
+        incarnation: Bytes::from(vec![inc; 16]),
+        incarnation_changed_ms: changed_ms,
+        ..Default::default()
+    };
+    c.health_with(&addr, facts(2, 20)).await.unwrap();
+    let push = |g, open, hold, release, inc: u8| {
+        let c = c.clone();
+        let addr = addr.clone();
+        async move {
+            c.push_delete_fence_with(
+                &addr,
+                g,
+                open,
+                FencePush {
+                    hold,
+                    release,
+                    incarnation: Some([inc; 16]),
+                },
+            )
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(push(4, false, true, false, 2).await, (4, false, true));
+    // Older incarnation (not adopted): the hold stays.
+    c.health_with(&addr, facts(1, 5)).await.unwrap();
+    assert_eq!(push(5, true, false, false, 1).await, (4, false, true));
+    // The held incarnation: needs the release.
+    assert_eq!(push(5, true, false, false, 2).await, (4, false, true));
+    // A later incarnation the node adopts: lifted.
+    c.health_with(&addr, facts(3, 30)).await.unwrap();
+    assert_eq!(push(5, true, false, false, 3).await, (5, true, false));
+    // Held again in 3; a stale caller of 2 cannot set or lift anything
+    // beyond what 3 decides; the release of 3 lifts it.
+    assert_eq!(push(6, false, true, false, 3).await, (6, false, true));
+    assert_eq!(push(7, true, false, false, 2).await, (6, false, true));
+    assert_eq!(push(0, false, false, true, 3).await, (6, false, false));
+    assert_eq!(push(7, true, false, false, 3).await, (7, true, false));
+    n.shutdown().await;
+}
