@@ -180,6 +180,11 @@ pub struct Policy {
     /// Adapt the throttled rate (additive increase while the recent trend
     /// is safe, halving when it is not) instead of a fixed formula (R-83).
     pub adaptive_rate: bool,
+    /// A worse state on time to full needs the recent trend to agree once
+    /// it covers its window (Phase 3.8): the long trend alone re-entered
+    /// `throttled` right after the recent trend lifted it, while free space
+    /// was growing (flapping). Free-fraction thresholds are unaffected.
+    pub recent_trend_gates_entry: bool,
     /// Keep placing on nodes that share a file system without fitting
     /// allotments (R-80; development and single-disk test clusters only:
     /// their reserves are then not guaranteed).
@@ -203,6 +208,7 @@ impl Default for Policy {
             trend_window_ms: 5 * 60_000,
             recent_window_ms: 60_000,
             adaptive_rate: true,
+            recent_trend_gates_entry: true,
         }
     }
 }
@@ -409,7 +415,10 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
     // throttle); leaving one (the margin evaluation) may follow the recent
     // trend once it is safe (R-83: the long window kept writes throttled
     // for minutes after the load fell).
-    let draining = if margin > 0.0 && policy.recent_window_ms > 0 && inputs.recent_trend_known {
+    let recent_counts = policy.recent_window_ms > 0
+        && inputs.recent_trend_known
+        && (margin > 0.0 || policy.recent_trend_gates_entry);
+    let draining = if recent_counts {
         long_drain.min(recent_drain)
     } else {
         long_drain
@@ -625,9 +634,19 @@ mod tests {
         let mut i = tier(60);
         // 224 GiB headroom, backlog growing 100 MiB/s: full in ~38 min.
         i.gc_backlog_growth_bytes_per_s = 100.0 * f64::from(1u32 << 20);
+        i.gc_backlog_growth_recent_bytes_per_s = i.gc_backlog_growth_bytes_per_s;
         i.gc_reclaim_bytes_per_s = 30.0 * f64::from(1u32 << 20);
         let d = Machine::default().step(&p, &i);
         assert_eq!(d.state, State::Throttled, "{}", d.reason);
+        // Growing over the long window only, not in the last minute (the
+        // load stopped): no new throttle (Phase 3.8).
+        i.gc_backlog_growth_recent_bytes_per_s = 0.0;
+        assert_eq!(Machine::default().step(&p, &i).state, State::Normal);
+        // Until the recent window is covered, the long trend decides.
+        i.recent_trend_known = false;
+        assert_eq!(Machine::default().step(&p, &i).state, State::Throttled);
+        i.recent_trend_known = true;
+        i.gc_backlog_growth_recent_bytes_per_s = i.gc_backlog_growth_bytes_per_s;
         // Plus what the headroom affords over the horizon (224 GiB / 1 h).
         let afforded = 224.0 * f64::from(1u32 << 30) / 3600.0;
         assert!((d.rate_bytes_per_s - 30.0 * f64::from(1u32 << 20) - afforded).abs() < 1.0);
