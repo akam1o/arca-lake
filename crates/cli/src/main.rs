@@ -1059,6 +1059,11 @@ enum RecoveryCommand {
         /// (ADR-0023).
         #[command(flatten)]
         rpc: NodeRpcArgs,
+        /// Node ids whose process the operator declares stopped (they
+        /// cannot acknowledge; recorded in the reason). Never a running
+        /// node: its deletes would go on.
+        #[arg(long = "absent-node")]
+        absent_node: Vec<u64>,
     },
     /// Re-run the verification pass from the start (`ReadOnly` or
     /// `RecoveryRequired` → `VerificationPending`).
@@ -2459,6 +2464,11 @@ enum DeleteFenceCommand {
         /// Confirm (deletes, GC and reconciliation stop until released).
         #[arg(long)]
         yes: bool,
+        /// Node ids whose process the operator declares stopped (they
+        /// cannot acknowledge; recorded in the reason). Never a running
+        /// node: its deletes would go on.
+        #[arg(long = "absent-node")]
+        absent_node: Vec<u64>,
         #[command(flatten)]
         rpc: NodeRpcArgs,
     },
@@ -2503,11 +2513,17 @@ async fn close_fence_everywhere<S: arca_lake_metadata::KvStore>(
     rpc: &NodeRpcArgs,
     reason: &str,
     hold: bool,
+    absent: &[u64],
     now: u64,
 ) -> Result<arca_lake_controller::delete_fence::Closed, String> {
     let clients = admin_node_clients(rpc)?;
+    let reason = if absent.is_empty() {
+        reason.to_string()
+    } else {
+        format!("{reason} (nodes {absent:?} declared stopped by the operator)")
+    };
     let closed =
-        arca_lake_controller::delete_fence::close_and_push(meta, &clients, reason, hold, now)
+        arca_lake_controller::delete_fence::close_and_push(meta, &clients, &reason, hold, now)
             .await
             .map_err(|e| e.to_string())?;
     println!(
@@ -2520,12 +2536,20 @@ async fn close_fence_everywhere<S: arca_lake_metadata::KvStore>(
         }
     );
     print_node_fences(&closed.nodes);
-    let missing = closed.not_acknowledged();
+    let (declared, missing): (Vec<u64>, Vec<u64>) = closed
+        .not_acknowledged()
+        .into_iter()
+        .partition(|id| absent.contains(id));
+    if !declared.is_empty() {
+        eprintln!(
+            "warning: nodes {declared:?} did not acknowledge; declared stopped (--absent-node): keep them stopped until the cluster's leader has pushed them a fence again (their old fence is still open on their disk)"
+        );
+    }
     if missing.is_empty() {
         Ok(closed)
     } else {
         Err(format!(
-            "nodes {missing:?} did not acknowledge the closed fence: deletes may still run there; make them reachable and re-run (a node that never comes back must be removed from the cluster first)"
+            "nodes {missing:?} did not acknowledge the closed fence: deletes may still run there; make them reachable and re-run, or, for a node whose process is stopped and stays stopped, re-run with --absent-node ID"
         ))
     }
 }
@@ -2587,13 +2611,18 @@ async fn delete_fence_command<S: arca_lake_metadata::KvStore>(
                 Err(e) => fail(e),
             }
         }
-        DeleteFenceCommand::Close { reason, yes, rpc } => {
+        DeleteFenceCommand::Close {
+            reason,
+            yes,
+            absent_node,
+            rpc,
+        } => {
             if !yes {
                 return fail(
                     "closing the delete fence stops every delete, GC and reconciliation; re-run with --yes",
                 );
             }
-            match close_fence_everywhere(meta, &rpc, &reason, true, now).await {
+            match close_fence_everywhere(meta, &rpc, &reason, true, &absent_node, now).await {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => fail(e),
             }
@@ -2971,6 +3000,7 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
             yes,
             force,
             rpc,
+            absent_node,
         } => {
             if !yes {
                 return fail(
@@ -2993,7 +3023,16 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
             // on every node, each acknowledging after the deletes past its
             // old fence have finished, before the restored metadata is
             // marked; the hold stays until finalize.
-            match close_fence_everywhere(meta.as_ref(), &rpc, "recovery begin", true, now).await {
+            match close_fence_everywhere(
+                meta.as_ref(),
+                &rpc,
+                "recovery begin",
+                true,
+                &absent_node,
+                now,
+            )
+            .await
+            {
                 Ok(closed) => {
                     if !closed.were_open.is_empty() {
                         eprintln!(
@@ -3286,9 +3325,15 @@ async fn run_admin_cluster<S: arca_lake_metadata::KvStore + 'static>(
             // Not Active: no new deletes are decided (the guard), and the
             // fence closes those already decided (ADR-0023). No hold: the
             // leader opens a new generation once Active again.
-            if let Err(e) =
-                close_fence_everywhere(meta.as_ref(), &rpc, "cluster set-read-only", false, now)
-                    .await
+            if let Err(e) = close_fence_everywhere(
+                meta.as_ref(),
+                &rpc,
+                "cluster set-read-only",
+                false,
+                &[],
+                now,
+            )
+            .await
             {
                 eprintln!("warning: {e}");
             }
