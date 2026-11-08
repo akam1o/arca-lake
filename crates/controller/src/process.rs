@@ -906,7 +906,12 @@ async fn reconcile_pass<S: KvStore>(
             )
             .await
             {
-                Ok(r) => deleted += r.deleted(),
+                Ok(r) => {
+                    deleted += r.deleted();
+                    metrics
+                        .delete_fence_refusals_total
+                        .fetch_add(r.kept_fenced as u64, Ordering::Relaxed);
+                }
                 Err(ControlError::Node { .. }) => unreachable += 1,
                 Err(e) => return Err(e),
             }
@@ -932,6 +937,28 @@ async fn health_pass<S: KvStore>(
     // Cluster facts for the nodes (RFC-014 §5.3, RFC-015 §5.3): the format
     // they may write and the incarnation, with its change time.
     let gate = compat::gate(meta).await?;
+    // The delete fence (ADR-0023): open for this term while Active, closed
+    // otherwise; pushed to every node with the other facts. Deletes of
+    // this process carry the generation only while it is open.
+    let highest = metrics.delete_fence.highest_reported();
+    let fence = arca_lake_metadata::ops::delete_fence::sync_for_term(
+        meta,
+        metrics.leader_token.load(Ordering::Relaxed),
+        incarnation,
+        highest,
+        now,
+    )
+    .await?;
+    if fence.changed {
+        info!(
+            generation = fence.record.generation,
+            open = fence.record.open,
+            reason = %fence.record.reason,
+            "delete fence changed"
+        );
+    }
+    clients.set_delete_fence(fence.record.open.then_some(fence.record.generation));
+    metrics.delete_fence.set_record(&fence.record);
     let req = arca_lake_protocol::storage::v1::HealthRequest {
         format_write: gate.format_write.unwrap_or(0),
         incarnation: gate
@@ -940,11 +967,24 @@ async fn health_pass<S: KvStore>(
             .map(|c| bytes::Bytes::copy_from_slice(&c.incarnation))
             .unwrap_or_default(),
         incarnation_changed_ms: gate.cluster.as_ref().map_or(0, |c| c.changed_ms),
+        delete_fence_generation: fence.record.generation,
+        delete_fence_open: fence.record.open,
+        // A recorded hold reaches nodes that missed the operator's push;
+        // a leader never releases one (only `admin delete-fence release`,
+        // or a new incarnation, does): one started on restored metadata
+        // whose record lost the hold cannot reopen deletes.
+        delete_fence_hold: fence.record.operator_hold && !fence.record.open,
+        delete_fence_release: false,
     };
     for n in &nodes {
         clients.note_node_id(&n.address, n.id);
         match clients.health_with(&n.address, req.clone()).await {
             Ok(h) => {
+                metrics.delete_fence.note_node(
+                    n.id,
+                    h.delete_fence_generation,
+                    h.delete_fence_open,
+                );
                 metrics
                     .admission
                     .note_device(crate::admission::device_of(n.id, &h, now_ms()));

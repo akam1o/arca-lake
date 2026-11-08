@@ -235,6 +235,7 @@ async fn a_stale_incarnation_is_fenced_in_metadata_and_on_the_nodes() {
         format_write: 0,
         incarnation: Bytes::copy_from_slice(&inc),
         incarnation_changed_ms: changed_ms,
+        ..Default::default()
     };
     for n in &c.nodes {
         let h = c
@@ -261,6 +262,8 @@ async fn a_stale_incarnation_is_fenced_in_metadata_and_on_the_nodes() {
     .collect();
     let stale_clients = NodeClients::new(Duration::from_secs(5));
     stale_clients.set_incarnation(Some(old.incarnation));
+    // It still believes in the fence open before the restore (ADR-0023).
+    stale_clients.set_delete_fence(c.clients.delete_fence());
 
     // The restore mark: a fresh incarnation, Restoring.
     let fresh = compat::mark_restoring(
@@ -1103,6 +1106,7 @@ async fn nodes_refuse_old_incarnation_deletes_from_the_first_recovery_pass() {
     let old = state(&c).await;
     let old_clients = NodeClients::new(Duration::from_secs(5));
     old_clients.set_incarnation(Some(old.incarnation));
+    old_clients.set_delete_fence(c.clients.delete_fence());
     let addr = c.nodes[member_node(&c, &group, 0)].addr.to_string();
     // Nodes know the old incarnation (the old controller's health pass).
     c.clients
@@ -1112,6 +1116,7 @@ async fn nodes_refuse_old_incarnation_deletes_from_the_first_recovery_pass() {
                 format_write: 0,
                 incarnation: Bytes::copy_from_slice(&old.incarnation),
                 incarnation_changed_ms: old.changed_ms,
+                ..Default::default()
             },
         )
         .await

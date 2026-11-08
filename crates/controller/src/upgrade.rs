@@ -170,6 +170,7 @@ pub async fn upgrade_pass<S: KvStore>(
                         .map(|s| bytes::Bytes::copy_from_slice(&s.incarnation))
                         .unwrap_or_default(),
                     incarnation_changed_ms: state.as_ref().map_or(0, |s| s.changed_ms),
+                    ..Default::default()
                 };
                 let _ = clients.health_with(&n.address, req).await;
             }

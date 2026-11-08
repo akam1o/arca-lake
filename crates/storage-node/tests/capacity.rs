@@ -11,6 +11,13 @@ use arca_lake_storage_node::compactor::CompactionPolicy;
 use arca_lake_storage_node::{NodeConfig, serve};
 use bytes::Bytes;
 
+/// Open delete fence generation 1 on the node at `addr` and take it for
+/// `c` (what a controller leader does, ADR-0023).
+async fn open_fence(c: &NodeClients, addr: &str) {
+    assert_eq!(c.push_delete_fence(addr, 1, true).await.unwrap(), (1, true));
+    c.set_delete_fence(Some(1));
+}
+
 const MIB: u64 = 1 << 20;
 
 fn shard(i: u32) -> ShardRef {
@@ -69,6 +76,7 @@ async fn client_writes_stop_at_the_reserve_repair_at_its_floor_and_deletes_alway
         .unwrap();
     let addr = node.local_addr.to_string();
     let c = NodeClients::new(Duration::from_secs(5));
+    open_fence(&c, &addr).await;
     let svc = node.service();
     let clients = fill(&c, &addr, 0, pb::WriteClass::Client).await;
     let d = svc.device_capacity().unwrap();
@@ -131,6 +139,7 @@ async fn compaction_waits_for_room_for_its_output_and_loses_nothing() {
     let node = serve(cfg).await.unwrap();
     let addr = node.local_addr.to_string();
     let c = NodeClients::new(Duration::from_secs(5));
+    open_fence(&c, &addr).await;
     let n = fill(&c, &addr, 0, pb::WriteClass::Client).await;
     // Half of every sealed segment dead.
     for i in (0..n).filter(|i| i % 2 == 1) {

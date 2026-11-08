@@ -559,6 +559,7 @@ async fn a_delayed_rpc_of_the_old_incarnation_is_refused_after_finalize() {
     // A controller of the pre-restore incarnation whose delete was delayed.
     let stale = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
     stale.set_incarnation(Some(old));
+    stale.set_delete_fence(c.clients.delete_fence());
     let group = c
         .groups()
         .await

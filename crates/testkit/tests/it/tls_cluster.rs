@@ -109,6 +109,7 @@ async fn controllers_work_over_mtls_and_fencing_still_refuses_stale_callers() {
         c.pki.as_ref().unwrap().ctx(Role::Controller, "ctl-stale"),
     ));
     stale.set_incarnation(Some(old_inc));
+    stale.set_delete_fence(c.clients.delete_fence());
     let fresh = compat::mark_restoring(c.meta.as_ref(), None, None, "admin", now_ms())
         .await
         .unwrap();

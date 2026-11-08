@@ -124,6 +124,11 @@ message DeleteShardRequest {
   // node whose store took another epoch (it lost track of the sequences it
   // handed out) answers ABORTED.
   uint64 if_store_epoch = 6;
+  // Delete fence generation the caller deletes under (Phase 3.8, ADR-0023).
+  // Protocol version 3 and later: the node deletes only while its fence is
+  // open at exactly this generation, checked under the same lock as the
+  // store's delete; 0 (absent) is refused.
+  uint64 delete_fence = 7;
 }
 
 message DeleteShardResponse {}
@@ -254,6 +259,18 @@ message HealthRequest {
   // what it holds.
   bytes incarnation = 2;
   uint64 incarnation_changed_ms = 3;
+  // Delete fence (ADR-0023); generation 0 = not carried. A node adopts a
+  // higher generation (open or closed), or the closing of its own; never
+  // reopens a generation, never goes back to a lower one.
+  uint64 delete_fence_generation = 4;
+  bool delete_fence_open = 5;
+  // A closed fence with an operator hold (before a restore, maintenance):
+  // the node then opens a fence again only on `delete_fence_release`, or
+  // from a caller of another incarnation than the one it was held in (the
+  // restored cluster after `recovery begin`). A controller started on
+  // restored metadata before `recovery begin` cannot reopen deletes.
+  bool delete_fence_hold = 6;
+  bool delete_fence_release = 7;
 }
 
 message GroupEpoch {
@@ -302,6 +319,11 @@ message HealthResponse {
   bool load_device = 22;
   uint32 load_device_util_permille = 23;
   uint32 load_device_queue_depth_milli = 24;
+  // The node's delete fence (ADR-0023): generation (0 = none adopted) and
+  // whether deletes under it are allowed.
+  uint64 delete_fence_generation = 28;
+  bool delete_fence_open = 29;
+  bool delete_fence_hold = 30;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").

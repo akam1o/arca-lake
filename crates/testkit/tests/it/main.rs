@@ -25,6 +25,7 @@ mod capacity;
 mod capacity_bench;
 mod commit_timeouts;
 mod controller;
+mod delete_fence;
 mod e2e;
 #[cfg(feature = "fdb")]
 mod e2e_fdb;

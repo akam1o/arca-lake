@@ -132,6 +132,9 @@ pub struct ReconcileReport {
     /// Shards whose delete the node refused because the record changed
     /// since the listing (written again under the same key: kept).
     pub kept_changed: usize,
+    /// Shards whose delete the delete fence refused (closed, or not yet
+    /// adopted by the node, ADR-0023): kept, retried by a later pass.
+    pub kept_fenced: usize,
     /// Shards left because their node reports no record sequence (an older
     /// node: a delete there could not be made conditional; reclaimed once
     /// the node is upgraded, Phase 3.5 audit CON-12).
@@ -727,6 +730,10 @@ async fn reconcile_shard<S: KvStore>(
             Ok(()) => Ok(true),
             Err(ControlError::Node { status, .. }) if NodeClients::is_changed(&status) => {
                 report.kept_changed += 1;
+                Ok(false)
+            }
+            Err(ControlError::Node { status, .. }) if NodeClients::is_fenced(&status) => {
+                report.kept_fenced += 1;
                 Ok(false)
             }
             Err(e) => Err(e),

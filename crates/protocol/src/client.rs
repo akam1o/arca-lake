@@ -381,6 +381,8 @@ pub struct NodeCaps {
     pub format_write: u64,
     /// Incarnation the node adopted, if any.
     pub incarnation: Option<[u8; 16]>,
+    /// The node's delete fence: generation (0 = none) and whether open.
+    pub delete_fence: (u64, bool),
 }
 
 impl NodeCaps {
@@ -403,6 +405,7 @@ impl NodeCaps {
             software: h.software.clone(),
             format_write: h.format_write,
             incarnation: <[u8; 16]>::try_from(h.incarnation.as_ref()).ok(),
+            delete_fence: (h.delete_fence_generation, h.delete_fence_open),
         }
     }
 
@@ -481,6 +484,9 @@ pub struct NodeClients {
     negotiated: Arc<Mutex<HashMap<String, NodeCaps>>>,
     /// Cluster incarnation stamped on `DeleteShard` (RFC-015 §5.3).
     incarnation: Arc<Mutex<Option<[u8; 16]>>>,
+    /// Delete fence generation stamped on `DeleteShard` (ADR-0023);
+    /// `None`: this process may not delete (deletes fail locally).
+    delete_fence: Arc<Mutex<Option<u64>>>,
     /// Mutual TLS (ADR-0017); `None` = explicitly plaintext.
     tls: Option<Arc<crate::tls::TlsContext>>,
     /// Node id per address: the identity a node must present.
@@ -488,6 +494,17 @@ pub struct NodeClients {
     /// `GetShard` RPCs in flight per node address (durable-read priority
     /// for cache populations).
     reads_in_flight: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
+}
+
+/// How a delete fence is pushed ([`NodeClients::push_delete_fence_with`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FencePush {
+    /// Set the operator hold (with a closed generation).
+    pub hold: bool,
+    /// Release the operator hold.
+    pub release: bool,
+    /// The caller's cluster incarnation (the hold is tied to it).
+    pub incarnation: Option<[u8; 16]>,
 }
 
 impl std::fmt::Debug for NodeClients {
@@ -516,6 +533,7 @@ impl NodeClients {
             reads_in_flight: Arc::default(),
             negotiated: Arc::default(),
             incarnation: Arc::default(),
+            delete_fence: Arc::default(),
             tls: None,
             node_ids: Arc::default(),
         }
@@ -558,6 +576,35 @@ impl NodeClients {
             .incarnation
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = incarnation;
+    }
+
+    /// Allow deletes under fence generation `generation` (ADR-0023), or
+    /// none (`None`: every delete fails locally with `FAILED_PRECONDITION`,
+    /// before any RPC). Nodes enforce the generation; this is what the
+    /// process believes it holds.
+    pub fn set_delete_fence(&self, generation: Option<u64>) {
+        *self
+            .delete_fence
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = generation.filter(|g| *g > 0);
+    }
+
+    /// The delete fence generation stamped on deletes, if any.
+    #[must_use]
+    pub fn delete_fence(&self) -> Option<u64> {
+        *self
+            .delete_fence
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether `status` is a node's (or this client's) delete fence
+    /// refusal: the delete was not applied and is retried once the fence
+    /// is open again.
+    #[must_use]
+    pub fn is_fenced(status: &tonic::Status) -> bool {
+        status.code() == tonic::Code::FailedPrecondition
+            && status.message().starts_with("delete fence")
     }
 
     /// The incarnation stamped on deletes.
@@ -1208,25 +1255,30 @@ impl NodeClients {
             shard: Some(shard),
             group_id: Some(shard.group_id),
         };
+        let Some(fence) = self.delete_fence() else {
+            return Err(tonic::Status::failed_precondition(
+                "delete fence closed in this process: no delete is sent",
+            ));
+        };
         self.with_faults(ctx, |_| {
             self.unary(async {
                 let mut client = self.client(addr)?;
                 let negotiated = self.version_for(addr).await?;
+                // Every delete goes at the fenced version or not at all: a
+                // node that does not enforce the fence (or was rolled back
+                // since the negotiation) refuses the version instead of
+                // deleting unfenced (ADR-0023).
+                if negotiated < pb::FENCED_DELETE_VERSION {
+                    return Err(tonic::Status::failed_precondition(
+                        "delete fence not enforced by the node (protocol version below 3): no delete is sent",
+                    ));
+                }
                 // A conditional delete goes only to a node that enforces it,
                 // and always at a version a node that does not would refuse:
                 // a node rolled back since the negotiation answers
                 // FAILED_PRECONDITION instead of deleting unconditionally
                 // (Phase 3.5 audit CON-22).
-                let protocol_version = if token.is_some() {
-                    if negotiated < pb::CONDITIONAL_DELETE_VERSION {
-                        return Err(tonic::Status::aborted(
-                            "the node does not enforce conditional deletes",
-                        ));
-                    }
-                    negotiated.max(pb::CONDITIONAL_DELETE_VERSION)
-                } else {
-                    negotiated
-                };
+                let protocol_version = negotiated.max(pb::FENCED_DELETE_VERSION);
                 let req = pb::DeleteShardRequest {
                     protocol_version,
                     key: Some(shard.pb()),
@@ -1237,6 +1289,7 @@ impl NodeClients {
                         .unwrap_or_default(),
                     if_sequence: token.sequence,
                     if_store_epoch: token.store_epoch,
+                    delete_fence: fence,
                 };
                 client.delete_shard(req).await?;
                 Ok(())
@@ -1527,6 +1580,61 @@ impl NodeClients {
     /// RPC errors.
     pub async fn health(&self, addr: &str) -> Result<pb::HealthResponse, tonic::Status> {
         self.health_with(addr, pb::HealthRequest::default()).await
+    }
+
+    /// Push delete fence `generation` (open or closed) to the node at
+    /// `addr` (ADR-0023); returns the fence it holds afterwards (a node
+    /// keeps a higher generation it already holds). Needs the controller or
+    /// admin role.
+    ///
+    /// # Errors
+    ///
+    /// RPC errors.
+    pub async fn push_delete_fence(
+        &self,
+        addr: &str,
+        generation: u64,
+        open: bool,
+    ) -> Result<(u64, bool), tonic::Status> {
+        self.push_delete_fence_with(addr, generation, open, FencePush::default())
+            .await
+            .map(|(g, o, _)| (g, o))
+    }
+
+    /// [`Self::push_delete_fence`] with the operator hold or its release
+    /// and the caller's incarnation; returns `(generation, open, held)`.
+    ///
+    /// # Errors
+    ///
+    /// RPC errors.
+    pub async fn push_delete_fence_with(
+        &self,
+        addr: &str,
+        generation: u64,
+        open: bool,
+        how: FencePush,
+    ) -> Result<(u64, bool, bool), tonic::Status> {
+        let h = self
+            .health_with(
+                addr,
+                pb::HealthRequest {
+                    delete_fence_generation: generation,
+                    delete_fence_open: open,
+                    delete_fence_hold: how.hold,
+                    delete_fence_release: how.release,
+                    incarnation: how
+                        .incarnation
+                        .map(|i| Bytes::copy_from_slice(&i))
+                        .unwrap_or_default(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok((
+            h.delete_fence_generation,
+            h.delete_fence_open,
+            h.delete_fence_hold,
+        ))
     }
 
     /// `Health` carrying cluster facts for the node (`format_write`, the

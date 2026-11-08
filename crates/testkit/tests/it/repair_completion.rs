@@ -212,6 +212,7 @@ async fn delete_decided_under_an_old_epoch_is_rejected_after_a_fence() {
     // A reconciler read epoch 1 and decided to delete; meanwhile a
     // membership change fenced the node to epoch 2.
     let clients = NodeClients::new(std::time::Duration::from_secs(5));
+    clients.set_delete_fence(c.clients.delete_fence());
     assert_eq!(clients.update_epoch(&addr, group.id, 2).await.unwrap(), 2);
     let err = clients
         .delete_shard(&addr, shard, group.epoch)

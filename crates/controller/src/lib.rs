@@ -10,6 +10,7 @@ pub mod admission;
 pub mod backpressure;
 pub mod backup;
 pub mod capacity;
+pub mod delete_fence;
 pub mod gc;
 pub mod groups;
 pub mod integrity;

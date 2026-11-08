@@ -721,7 +721,6 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             state.incarnation,
             OpClass::ClientWrite,
         ));
-        Self::spawn_cluster_refresh(Arc::clone(meta.inner()), Arc::downgrade(&cluster));
         let map = ClusterMap::load(meta.as_ref()).await?;
         let permits = cfg
             .cache
@@ -732,6 +731,16 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }))
         .with_tls(cfg.tls.clone());
         clients.set_incarnation(Some(state.incarnation));
+        // The delete fence (ADR-0023): a gateway deletes (its own partial
+        // copies) only under the generation open now; refreshed with the
+        // cluster state.
+        let fence = arca_lake_metadata::ops::delete_fence::current(meta.inner().as_ref()).await?;
+        clients.set_delete_fence(fence.open.then_some(fence.generation));
+        Self::spawn_cluster_refresh(
+            Arc::clone(meta.inner()),
+            Arc::downgrade(&cluster),
+            clients.clone(),
+        );
         note_node_ids(&clients, &map);
         let pop_queue = Arc::new(PopulationQueue::new(
             clients.clone(),
@@ -814,7 +823,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
 
     /// Refresh the cluster state and `schema_write` every
     /// [`CLUSTER_REFRESH`] while the backend lives.
-    fn spawn_cluster_refresh(meta: Arc<S>, watch: std::sync::Weak<ClusterWatch>) {
+    fn spawn_cluster_refresh(
+        meta: Arc<S>,
+        watch: std::sync::Weak<ClusterWatch>,
+        clients: NodeClients,
+    ) {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(CLUSTER_REFRESH).await;
@@ -834,6 +847,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         {
                             w.admission.observe(rec, std::time::Instant::now());
                         }
+                        // A failed read closes it here (fail closed).
+                        let fence =
+                            arca_lake_metadata::ops::delete_fence::current(meta.as_ref()).await;
+                        clients.set_delete_fence(
+                            fence.ok().and_then(|f| f.open.then_some(f.generation)),
+                        );
                     }
                     Err(e) => {
                         // A metadata outage keeps the last known state: the

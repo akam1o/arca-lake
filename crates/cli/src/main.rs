@@ -896,6 +896,13 @@ enum AdminCommand {
     /// out of placement and each group's room (R-82), the record's age.
     /// Exits 1 when a conflict is found or the record is stale or missing.
     CheckConfig,
+    /// The delete fence (ADR-0023): every node's state; close it on every
+    /// node (before a metadata restore or maintenance); release the
+    /// operator hold so that the leader opens a new generation.
+    DeleteFence {
+        #[command(subcommand)]
+        command: DeleteFenceCommand,
+    },
     /// Capacity rebalancing (Phase 3.8): state, pause, resume, dry run.
     Rebalance {
         #[command(subcommand)]
@@ -1047,6 +1054,11 @@ enum RecoveryCommand {
         /// Allow marking a cluster that is not Active or ReadOnly.
         #[arg(long)]
         force: bool,
+        /// Storage node RPCs: `begin` closes the delete fence on every
+        /// registered node first and refuses unless each acknowledges
+        /// (ADR-0023).
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
     },
     /// Re-run the verification pass from the start (`ReadOnly` or
     /// `RecoveryRequired` → `VerificationPending`).
@@ -1108,8 +1120,13 @@ enum BackupCommand {
 
 #[derive(Debug, Subcommand)]
 enum ClusterCommand {
-    /// `Active` → `ReadOnly`: client writes and deletes stop, repair continues.
-    SetReadOnly,
+    /// `Active` → `ReadOnly`: client writes and deletes stop, repair
+    /// continues; the delete fence is closed on every node it reaches
+    /// (the leader closes it on the others at its next pass).
+    SetReadOnly {
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
     /// `ReadOnly` → `Active`.
     Activate,
 }
@@ -2212,6 +2229,9 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
         }
         AdminCommand::CheckConfig => check_config(meta.as_ref()).await,
         AdminCommand::Rebalance { command } => rebalance_command(meta.as_ref(), command).await,
+        AdminCommand::DeleteFence { command } => {
+            delete_fence_command(meta.as_ref(), command, now).await
+        }
         AdminCommand::Status { versions } => {
             if versions {
                 let g = arca_lake_metadata::ops::compat::gate(meta.as_ref()).await;
@@ -2417,6 +2437,191 @@ async fn dry_run_plan(
         ExitCode::from(2)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `admin delete-fence` subcommands.
+#[derive(Debug, Subcommand)]
+enum DeleteFenceCommand {
+    /// The recorded fence and every registered node's.
+    Status {
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
+    /// Close the fence on every node with an operator hold: a new closed
+    /// generation, recorded and pushed; each node acknowledges it after
+    /// the deletes past its old one finished. Exits 1 unless every node
+    /// acknowledged (re-run once they answer).
+    Close {
+        /// Why (recorded).
+        #[arg(long)]
+        reason: String,
+        /// Confirm (deletes, GC and reconciliation stop until released).
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
+    /// Release the operator hold (cluster `Active` only): the leader opens
+    /// a new generation at its next pass and pushes it to the nodes.
+    Release {
+        /// Why (recorded).
+        #[arg(long)]
+        reason: String,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
+}
+
+fn admin_node_clients(
+    rpc: &NodeRpcArgs,
+) -> Result<arca_lake_protocol::client::NodeClients, String> {
+    rpc.tls
+        .context(arca_lake_protocol::tls::Role::Admin)
+        .map(|t| arca_lake_protocol::client::NodeClients::with_policy(rpc.policy()).with_tls(t))
+        .map_err(|e| e.clone())
+}
+
+fn print_node_fences(nodes: &[arca_lake_controller::delete_fence::NodeFence]) {
+    for n in nodes {
+        match &n.fence {
+            Ok((g, open)) => println!(
+                "node {} generation {} {}",
+                n.node_id,
+                g,
+                if *open { "open" } else { "closed" }
+            ),
+            Err(e) => println!("node {} unreachable ({e})", n.node_id),
+        }
+    }
+}
+
+/// Close the fence on every node; `Err` with the message when a node did
+/// not acknowledge.
+async fn close_fence_everywhere<S: arca_lake_metadata::KvStore>(
+    meta: &S,
+    rpc: &NodeRpcArgs,
+    reason: &str,
+    hold: bool,
+    now: u64,
+) -> Result<arca_lake_controller::delete_fence::Closed, String> {
+    let clients = admin_node_clients(rpc)?;
+    let closed =
+        arca_lake_controller::delete_fence::close_and_push(meta, &clients, reason, hold, now)
+            .await
+            .map_err(|e| e.to_string())?;
+    println!(
+        "delete fence closed: generation {}{}",
+        closed.record.generation,
+        if closed.record.operator_hold {
+            " (operator hold)"
+        } else {
+            ""
+        }
+    );
+    print_node_fences(&closed.nodes);
+    let missing = closed.not_acknowledged();
+    if missing.is_empty() {
+        Ok(closed)
+    } else {
+        Err(format!(
+            "nodes {missing:?} did not acknowledge the closed fence: deletes may still run there; make them reachable and re-run (a node that never comes back must be removed from the cluster first)"
+        ))
+    }
+}
+
+async fn delete_fence_command<S: arca_lake_metadata::KvStore>(
+    meta: &S,
+    command: DeleteFenceCommand,
+    now: u64,
+) -> ExitCode {
+    use arca_lake_metadata::ops::delete_fence;
+    match command {
+        DeleteFenceCommand::Status { rpc } => {
+            let rec = match delete_fence::current(meta).await {
+                Ok(r) => r,
+                Err(e) => return fail(e),
+            };
+            println!(
+                "record generation {} {}{} leader_token {} changed_ms {} reason {}",
+                rec.generation,
+                if rec.open { "open" } else { "closed" },
+                if rec.operator_hold {
+                    " operator_hold"
+                } else {
+                    ""
+                },
+                rec.leader_token,
+                rec.changed_ms,
+                rec.reason
+            );
+            let clients = match admin_node_clients(&rpc) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            match arca_lake_controller::delete_fence::node_fences(meta, &clients).await {
+                Ok(nodes) => {
+                    print_node_fences(&nodes);
+                    let behind = nodes
+                        .iter()
+                        .filter(|n| n.fence != Ok((rec.generation, rec.open)))
+                        .count();
+                    println!(
+                        "nodes {} at the record's generation and state {} other {}",
+                        nodes.len(),
+                        nodes.len() - behind,
+                        behind
+                    );
+                    if !rec.open {
+                        println!(
+                            "deletes stopped: {}",
+                            if rec.operator_hold {
+                                "operator hold (admin delete-fence release, or recovery finalize)"
+                            } else {
+                                "the cluster is not Active, or the leader has not opened a generation yet"
+                            }
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        DeleteFenceCommand::Close { reason, yes, rpc } => {
+            if !yes {
+                return fail(
+                    "closing the delete fence stops every delete, GC and reconciliation; re-run with --yes",
+                );
+            }
+            match close_fence_everywhere(meta, &rpc, &reason, true, now).await {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => fail(e),
+            }
+        }
+        DeleteFenceCommand::Release { reason, rpc } => {
+            let clients = match admin_node_clients(&rpc) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            match arca_lake_controller::delete_fence::release_and_push(meta, &clients, &reason, now)
+                .await
+            {
+                Ok((r, held)) => {
+                    println!(
+                        "operator hold released (generation {} closed): the leader opens a new generation at its next health pass",
+                        r.generation
+                    );
+                    if held.is_empty() {
+                        ExitCode::SUCCESS
+                    } else {
+                        fail(format!(
+                            "nodes {held:?} still hold it (unreachable?): they refuse deletes until a release reaches them; re-run"
+                        ))
+                    }
+                }
+                Err(e) => fail(e),
+            }
+        }
     }
 }
 
@@ -2765,6 +2970,7 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
             backup_point_ms,
             yes,
             force,
+            rpc,
         } => {
             if !yes {
                 return fail(
@@ -2781,6 +2987,22 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
                 eprintln!(
                     "warning: no --backup-point-ms; orphans cannot be split into pre- and post-backup in the report"
                 );
+            }
+            // No delete decided on the metadata before the restore may run
+            // on the nodes after it (R-88, ADR-0023): the fence is closed
+            // on every node, each acknowledging after the deletes past its
+            // old fence have finished, before the restored metadata is
+            // marked; the hold stays until finalize.
+            match close_fence_everywhere(meta.as_ref(), &rpc, "recovery begin", true, now).await {
+                Ok(closed) => {
+                    if !closed.were_open.is_empty() {
+                        eprintln!(
+                            "warning: nodes {:?} still had an open delete fence: the fence was not closed before the restore (admin delete-fence close); deletes decided on the previous metadata may have run during it, and verification will report any shard they removed",
+                            closed.were_open
+                        );
+                    }
+                }
+                Err(e) => return fail(format!("recovery begin refused: {e}")),
             }
             match compat::mark_restoring(meta.as_ref(), from, backup_point_ms, "admin", now).await {
                 Ok(s) => {
@@ -3038,8 +3260,8 @@ async fn run_admin_cluster<S: arca_lake_metadata::KvStore + 'static>(
 ) -> ExitCode {
     use arca_lake_metadata::ops::compat;
     use arca_lake_metadata::records::ClusterPhase;
-    let (from, to) = match command {
-        ClusterCommand::SetReadOnly => (ClusterPhase::Active, ClusterPhase::ReadOnly),
+    let (from, to, rpc) = match command {
+        ClusterCommand::SetReadOnly { rpc } => (ClusterPhase::Active, ClusterPhase::ReadOnly, rpc),
         ClusterCommand::Activate => {
             // Not around a restore's finalize (and its audit).
             return match arca_lake_metadata::ops::recovery::activate_read_only(
@@ -3061,6 +3283,15 @@ async fn run_admin_cluster<S: arca_lake_metadata::KvStore + 'static>(
     match compat::transition(meta.as_ref(), from, to, "admin", now).await {
         Ok((rec, true)) => {
             println!("cluster {}", rec.state.name());
+            // Not Active: no new deletes are decided (the guard), and the
+            // fence closes those already decided (ADR-0023). No hold: the
+            // leader opens a new generation once Active again.
+            if let Err(e) =
+                close_fence_everywhere(meta.as_ref(), &rpc, "cluster set-read-only", false, now)
+                    .await
+            {
+                eprintln!("warning: {e}");
+            }
             ExitCode::SUCCESS
         }
         Ok((rec, false)) => fail(format!(

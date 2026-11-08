@@ -649,6 +649,17 @@ pub async fn finalize<S: KvStore>(
             state.changed_ms = req.now_ms;
             state.changed_by.clone_from(&req.operator);
             write(tx, &keys::cluster_state(), &state)?;
+            // Finalizing declares the restored metadata authoritative: the
+            // operator hold on the delete fence (set by `recovery begin`)
+            // goes with it; the leader opens a new generation (ADR-0023).
+            let fence: Option<crate::ops::delete_fence::DeleteFenceRecord> =
+                read(tx, &keys::delete_fence()).await?;
+            if let Some(mut f) = fence.filter(|f| f.operator_hold) {
+                f.operator_hold = false;
+                f.changed_ms = req.now_ms;
+                f.reason = format!("hold released by recovery finalize ({})", req.operator);
+                write(tx, &keys::delete_fence(), &f)?;
+            }
             Ok((verdict, audit))
         })
     })

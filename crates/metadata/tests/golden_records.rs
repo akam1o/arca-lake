@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use arca_lake_common::compat::{Capabilities, Target};
 use arca_lake_metadata::ops::admission::{AdmissionRecord, GroupRoom, TierAdmission};
+use arca_lake_metadata::ops::delete_fence::DeleteFenceRecord;
 use arca_lake_metadata::ops::integrity::{
     Finding, ManifestCursor, RepairState, RepairTask, ScrubCursor, ScrubPhase,
 };
@@ -540,6 +541,18 @@ fn cases() -> Vec<Case> {
                 capacity_conflicts: vec![5, 6],
                 capacity_unverified: vec![7],
                 incarnation: [9; 16],
+            },
+        ),
+        case(
+            "DeleteFenceRecord",
+            DeleteFenceRecord {
+                generation: 12,
+                open: false,
+                leader_token: 3,
+                incarnation: [5; 16],
+                changed_ms: 9,
+                reason: "before restore".into(),
+                operator_hold: true,
             },
         ),
         case(

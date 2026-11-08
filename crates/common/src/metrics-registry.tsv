@@ -29,6 +29,11 @@ arca_controller_chunks_promoted_total	counter	controller	chunks	-	chunks moved t
 arca_controller_chunks_reconstructed_total	counter	controller	chunks	-	durable chunks rebuilt by member replacement
 arca_controller_cluster_phase	gauge	controller	enum	-	cluster phase: 0 Active, 1 ReadOnly, 2 Restoring, 3 VerificationPending, 4 RecoveryRequired
 arca_controller_data_integrity_status	gauge	controller	enum	-	0 clean, 1 repairs pending or failed, 2 unrecoverable stripes
+arca_controller_delete_fence_generation	gauge	controller	generation	-	delete fence generation the leader holds (ADR-0023)
+arca_controller_delete_fence_nodes_current	gauge	controller	nodes	-	nodes whose last report shows the leader's delete fence generation and state
+arca_controller_delete_fence_nodes_stale	gauge	controller	nodes	-	nodes whose last report shows another delete fence generation or state (not yet adopted, or unreachable since)
+arca_controller_delete_fence_open	gauge	controller	bool	-	1 while the leader holds the delete fence open (deletes allowed), 0 while closed
+arca_controller_delete_fence_refusals_total	counter	controller	deletes	-	deletes of this process refused for the delete fence (deferred to a later pass)
 arca_controller_gc_backlog	gauge	controller	generations	-	retired generations waiting for GC after the last pass (leader; counted up to 200000)
 arca_controller_gc_backlog_bytes	gauge	controller	bytes	-	logical bytes of the retired generations waiting for GC (entries written before Phase 3.6 carry no size; leader)
 arca_controller_gc_backlog_oldest_age_seconds	gauge	controller	seconds	-	age of the oldest retired generation waiting for GC after the last pass (leader)

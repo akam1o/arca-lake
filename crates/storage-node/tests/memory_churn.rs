@@ -37,6 +37,13 @@ use arca_lake_storage_node::compactor::CompactionPolicy;
 use arca_lake_storage_node::{NodeConfig, serve};
 use bytes::Bytes;
 
+/// Open delete fence generation 1 on the node at `addr` and take it for
+/// `c` (what a controller leader does, ADR-0023).
+async fn open_fence(c: &NodeClients, addr: &str) {
+    assert_eq!(c.push_delete_fence(addr, 1, true).await.unwrap(), (1, true));
+    c.set_delete_fence(Some(1));
+}
+
 /// Open file descriptors and threads of this process (Linux; 0 elsewhere).
 fn fds_and_threads() -> (usize, usize) {
     let count = |p: &str| std::fs::read_dir(p).map_or(0, Iterator::count);
@@ -97,6 +104,7 @@ async fn rss_under_sustained_churn() {
     let node = serve(cfg).await.unwrap();
     let addr = node.local_addr.to_string();
     let clients = NodeClients::new(Duration::from_secs(30));
+    open_fence(&clients, &addr).await;
     let ops = Arc::new(AtomicU64::new(0));
     let bytes = Arc::new(AtomicU64::new(0));
     let lat_put = Arc::new(Mutex::new(Vec::<f64>::new()));

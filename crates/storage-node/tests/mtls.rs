@@ -98,6 +98,7 @@ fn facts() -> HealthRequest {
         format_write: 1,
         incarnation: Bytes::from_static(&[7; 16]),
         incarnation_changed_ms: 1,
+        ..Default::default()
     }
 }
 
@@ -175,6 +176,7 @@ async fn every_rpc_is_authorised_by_role() {
         Some(1),
     );
     stale.set_incarnation(Some([9; 16]));
+    stale.set_delete_fence(Some(1));
     let e = stale.delete_shard(&addr, shard(2), 6).await.unwrap_err();
     assert!(e.message().starts_with("incarnation rejected"), "{e}");
 

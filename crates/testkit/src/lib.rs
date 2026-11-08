@@ -391,6 +391,36 @@ impl<S: KvStore + 'static> TestCluster<S> {
         let backend = ClusterBackend::new(Arc::clone(&meta), cluster_cfg.clone())
             .await
             .unwrap();
+        // A test cluster runs no controller: the fence a leader would open
+        // (ADR-0023), so that deletes go through (the gateway takes it
+        // now rather than at its next refresh).
+        if let Ok(rec) = arca_lake_metadata::ops::delete_fence::open_without_leader(
+            meta.as_ref(),
+            0,
+            "test cluster",
+            now_ms(),
+        )
+        .await
+        {
+            for n in &nodes {
+                let _ = clients
+                    .health_with(
+                        &n.addr.to_string(),
+                        arca_lake_protocol::storage::v1::HealthRequest {
+                            delete_fence_generation: rec.generation,
+                            delete_fence_open: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+            }
+            clients.set_delete_fence(Some(rec.generation));
+            backend
+                .node_clients()
+                .set_delete_fence(Some(rec.generation));
+        }
+        // As a controller's: deletes carry the cluster incarnation.
+        clients.set_incarnation(Some(backend.cluster().incarnation));
         let credentials = (
             format!("ARCATEST{}", uuid::Uuid::new_v4().simple()),
             uuid::Uuid::new_v4().simple().to_string(),
@@ -444,6 +474,51 @@ impl<S: KvStore + 'static> TestCluster<S> {
             pki,
             tmp,
         }
+    }
+
+    /// Push the delete fence `rec` to every running node and take it for
+    /// this cluster's clients (open: its generation; closed: none).
+    pub async fn push_delete_fence(
+        &self,
+        rec: &arca_lake_metadata::ops::delete_fence::DeleteFenceRecord,
+    ) {
+        // As a controller of the cluster's incarnation pushes it (an
+        // operator hold of that incarnation stays; ADR-0023).
+        let incarnation = arca_lake_metadata::ops::compat::cluster_state(self.meta.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.incarnation);
+        for n in self.nodes.iter().filter(|n| n.handle.is_some()) {
+            let _ = self
+                .clients
+                .push_delete_fence_with(
+                    &n.addr.to_string(),
+                    rec.generation,
+                    rec.open,
+                    arca_lake_protocol::client::FencePush {
+                        hold: rec.operator_hold && !rec.open,
+                        release: false,
+                        incarnation,
+                    },
+                )
+                .await;
+        }
+        self.clients
+            .set_delete_fence(rec.open.then_some(rec.generation));
+    }
+
+    /// Take the delete fence as recorded now (a test's controller may have
+    /// opened or closed another) and push it to the running nodes.
+    ///
+    /// # Panics
+    ///
+    /// On metadata errors.
+    pub async fn sync_delete_fence(&self) {
+        let rec = arca_lake_metadata::ops::delete_fence::current(self.meta.as_ref())
+            .await
+            .unwrap();
+        self.push_delete_fence(&rec).await;
     }
 
     /// Advertise `bytes` as node `i`'s capacity (`None`: the file
@@ -586,6 +661,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             tls,
             capacity: Some(TEST_ALLOTMENT),
         });
+        self.sync_delete_fence().await;
         i
     }
 
@@ -693,6 +769,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
     ///
     /// On errors.
     pub async fn gc(&self, now_ms: u64, grace_ms: u64) -> gc::GcReport {
+        self.sync_delete_fence().await;
         gc::run_once(self.meta.as_ref(), &self.clients, now_ms, grace_ms, 1000)
             .await
             .unwrap()
@@ -704,6 +781,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
     ///
     /// On errors.
     pub async fn reconcile(&self, now_ms: u64, min_age_ms: u64) -> usize {
+        self.sync_delete_fence().await;
         let mut deleted = 0;
         for g in self.groups().await {
             for n in &self.nodes {
@@ -896,6 +974,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
     ///
     /// On errors.
     pub async fn reconcile_cache(&self) -> usize {
+        self.sync_delete_fence().await;
         let mut deleted = 0;
         for g in self.groups().await {
             if !g.is_cache() {

@@ -71,7 +71,13 @@ pub struct StorageNodeService {
     /// the store mutation; raising an epoch or adopting an incarnation holds
     /// it exclusively. Once such an update is acknowledged, no delete that
     /// passed the old fence can still run (Phase 3.5 audit SEC-6).
-    fence: tokio::sync::RwLock<()>,
+    ///
+    /// Owned guards (Phase 3.9): the shared guard moves into the blocking
+    /// store call, so that a cancelled RPC cannot release it while its
+    /// physical delete still runs.
+    fence: Arc<tokio::sync::RwLock<()>>,
+    /// Deletes refused by the delete fence (ADR-0023).
+    fence_refusals: AtomicU64,
     frame_bytes: usize,
     stream_progress_timeout: Duration,
     stats: Arc<NodeStats>,
@@ -209,7 +215,8 @@ impl StorageNodeService {
         Ok(Self {
             store: Arc::new(store),
             epochs: Mutex::new(epochs),
-            fence: tokio::sync::RwLock::new(()),
+            fence: Arc::new(tokio::sync::RwLock::new(())),
+            fence_refusals: AtomicU64::new(0),
             frame_bytes: cfg.frame_bytes,
             stream_progress_timeout: cfg.stream_progress_timeout,
             stats: Arc::default(),
@@ -411,6 +418,41 @@ impl StorageNodeService {
                 pb::PROTOCOL_VERSION
             )))
         }
+    }
+
+    /// Refuse a delete not under this node's open delete fence (ADR-0023):
+    /// the generation must be the one adopted and still open; a request
+    /// below the fenced protocol version, without a generation or with
+    /// another one is refused, and so is every delete before a fence was
+    /// ever adopted (fail closed).
+    fn check_delete_fence(
+        &self,
+        protocol_version: u32,
+        generation: u64,
+    ) -> Result<(), tonic::Status> {
+        let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+        if protocol_version >= pb::FENCED_DELETE_VERSION && c.fence_admits(generation) {
+            return Ok(());
+        }
+        self.fence_refusals.fetch_add(1, Ordering::Relaxed);
+        Err(tonic::Status::failed_precondition(format!(
+            "delete fence: node holds generation {} ({}), request carries {generation} at protocol {protocol_version}",
+            c.fence_generation,
+            if c.fence_open { "open" } else { "closed" }
+        )))
+    }
+
+    /// Deletes refused by the delete fence so far.
+    #[must_use]
+    pub fn fence_refusals(&self) -> u64 {
+        self.fence_refusals.load(Ordering::Relaxed)
+    }
+
+    /// The delete fence held: generation and whether open.
+    #[must_use]
+    pub fn delete_fence(&self) -> (u64, bool) {
+        let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+        (c.fence_generation, c.fence_open)
     }
 
     /// Refuse a delete whose incarnation differs from the one this node
@@ -702,8 +744,12 @@ impl StorageNode for StorageNodeService {
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
         let key = Self::key(req.key)?;
-        let _fence = self.fence.read().await;
+        // Held from the checks to the end of the store's delete, moved into
+        // the blocking task: a fence, incarnation or epoch change waits for
+        // every delete that passed the old one (SEC-6, ADR-0023).
+        let fence = Arc::clone(&self.fence).read_owned().await;
         self.check_incarnation(&req.incarnation)?;
+        self.check_delete_fence(req.protocol_version, req.delete_fence)?;
         self.check_epoch(key.group_id, req.group_epoch)?;
         let store = Arc::clone(&self.store);
         let if_sequence = req.if_sequence;
@@ -715,6 +761,7 @@ impl StorageNode for StorageNodeService {
             ));
         }
         let deleted = tokio::task::spawn_blocking(move || {
+            let _fence = fence;
             if if_sequence == 0 {
                 store.delete(key).map(|()| true)
             } else {
@@ -1005,7 +1052,7 @@ impl StorageNode for StorageNodeService {
         self.authorize(&request, arca_lake_protocol::tls::NodeRpc::UpdateGroupEpoch)?;
         let req = request.into_inner();
         Self::check_version(req.protocol_version)?;
-        let _fence = self.fence.write().await;
+        let _fence = Arc::clone(&self.fence).write_owned().await;
         let epoch = self
             .epochs
             .lock()
@@ -1036,15 +1083,30 @@ impl StorageNode for StorageNodeService {
         // incarnation only when not older than what is held, the format
         // monotonically; both persisted before they take effect. A change
         // of incarnation waits for deletes past the old fence (SEC-6).
-        let new_incarnation = <[u8; 16]>::try_from(req.incarnation.as_ref()).is_ok_and(|inc| {
-            self.cluster
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .incarnation
-                != Some(inc)
-        });
-        let _fence = if new_incarnation {
-            Some(self.fence.write().await)
+        // A new incarnation or a fence change waits, under the exclusive
+        // guard, for every delete past the old one; it is persisted before
+        // the response acknowledges it (ADR-0023).
+        let caller = <[u8; 16]>::try_from(req.incarnation.as_ref()).ok();
+        let fence_args = |c: &crate::cluster::ClusterFacts| {
+            (
+                req.delete_fence_generation,
+                req.delete_fence_open,
+                req.delete_fence_hold
+                    .then(|| caller.or(c.incarnation).unwrap_or([0; 16])),
+                req.delete_fence_release,
+                caller,
+            )
+        };
+        let changes = {
+            let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+            let new_incarnation = caller.is_some_and(|inc| c.incarnation != Some(inc));
+            let (generation, open, hold, release, from) = fence_args(&c);
+            new_incarnation
+                || c.plan_fence(generation, open, hold, release, from)
+                    .is_some()
+        };
+        let _fence = if changes {
+            Some(Arc::clone(&self.fence).write_owned().await)
         } else {
             None
         };
@@ -1059,6 +1121,16 @@ impl StorageNode for StorageNodeService {
                     "adopted cluster incarnation"
                 );
             }
+            let (generation, open, hold, release, from) = fence_args(&c);
+            if c.adopt_fence_held(generation, open, hold, release, from)
+                .map_err(|e| tonic::Status::internal(e.to_string()))?
+            {
+                tracing::info!(
+                    generation = c.fence_generation,
+                    open = c.fence_open,
+                    "adopted delete fence"
+                );
+            }
             if req.format_write > 0
                 && c.adopt_format_write(req.format_write)
                     .map_err(|e| tonic::Status::internal(e.to_string()))?
@@ -1069,6 +1141,7 @@ impl StorageNode for StorageNodeService {
         }
         let stats = self.store.stats().map_err(Self::storage_status)?;
         let (qn, qb) = self.store.quarantine_stats();
+        let (fence_generation, fence_open) = self.delete_fence();
         let (incarnation, group_epochs) = {
             let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
             let e = self.epochs.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1114,6 +1187,14 @@ impl StorageNode for StorageNodeService {
             load_device_queue_depth_milli: load.device.map_or(0, |d| d.queue_depth_milli),
             load_device_read_await_us: load.device.map_or(0, |d| d.read_await_us),
             load_reported: true,
+            delete_fence_generation: fence_generation,
+            delete_fence_open: fence_open,
+            delete_fence_hold: self
+                .cluster
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .fence_hold
+                .is_some(),
             devices: vec![self.device_capacity_with(&stats)],
         }))
     }

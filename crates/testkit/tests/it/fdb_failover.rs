@@ -934,6 +934,7 @@ async fn recovery_scenario() {
                     format_write: 0,
                     incarnation: Bytes::copy_from_slice(&old.incarnation),
                     incarnation_changed_ms: old.changed_ms,
+                    ..Default::default()
                 },
             )
             .await

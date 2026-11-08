@@ -445,10 +445,17 @@ async fn push_cluster_facts<S: KvStore>(
     let Some(state) = gate.cluster.as_ref() else {
         return Ok(());
     };
+    // The delete fence goes along only closed (recovery never opens it;
+    // the leader opens one once the cluster is Active again, ADR-0023).
+    let fence = arca_lake_metadata::ops::delete_fence::current(meta).await?;
     let req = arca_lake_protocol::storage::v1::HealthRequest {
         format_write: gate.format_write.unwrap_or(0),
         incarnation: bytes::Bytes::copy_from_slice(&state.incarnation),
         incarnation_changed_ms: state.changed_ms,
+        delete_fence_generation: if fence.open { 0 } else { fence.generation },
+        delete_fence_open: false,
+        delete_fence_hold: !fence.open && fence.operator_hold,
+        delete_fence_release: false,
     };
     for n in nodes.values() {
         clients.note_node_id(&n.address, n.id);

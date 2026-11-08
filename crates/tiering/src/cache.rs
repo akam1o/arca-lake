@@ -564,6 +564,9 @@ pub async fn reconcile_node<S: KvStore>(
                 Err(s) if s.code() == tonic::Code::NotFound || NodeClients::is_changed(&s) => {
                     report.kept += 1;
                 }
+                // The delete fence is closed (or not yet adopted by the
+                // node): kept, retried by a later pass (ADR-0023).
+                Err(s) if NodeClients::is_fenced(&s) => report.kept += 1,
                 Err(status) => {
                     return Err(TierError::Node {
                         addr: node_addr.to_string(),

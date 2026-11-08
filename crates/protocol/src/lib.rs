@@ -29,8 +29,15 @@ pub mod storage {
         /// enforced; a version-1 node ignores them and deletes
         /// unconditionally, so conditional deletes are sent at version 2
         /// or not at all ([`CONDITIONAL_DELETE_VERSION`]).
+        /// Version 3 (Phase 3.9, ADR-0023): `DeleteShard.delete_fence` is
+        /// enforced; deletes are sent at version 3 or later only, which a
+        /// version-2 node refuses instead of deleting unfenced
+        /// ([`FENCED_DELETE_VERSION`]).
         #[allow(clippy::cast_possible_truncation)]
-        pub const PROTOCOL_VERSION: u32 = 2 + arca_lake_common::compat::BUMP as u32;
+        pub const PROTOCOL_VERSION: u32 = 3 + arca_lake_common::compat::BUMP as u32;
+
+        /// Oldest protocol version whose nodes enforce the delete fence.
+        pub const FENCED_DELETE_VERSION: u32 = 3;
 
         /// Oldest protocol version whose nodes enforce conditional deletes
         /// (record sequence and store epoch).

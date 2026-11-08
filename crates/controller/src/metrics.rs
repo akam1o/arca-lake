@@ -7,6 +7,71 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+/// The delete fence: the record this leader holds and each node's last
+/// reported generation (Phase 3.9).
+#[derive(Debug, Default)]
+pub struct FenceView {
+    inner: std::sync::Mutex<FenceInner>,
+}
+
+#[derive(Debug, Default)]
+struct FenceInner {
+    generation: u64,
+    open: bool,
+    nodes: std::collections::HashMap<u64, (u64, bool)>,
+}
+
+impl FenceView {
+    /// Remember the record held.
+    pub fn set_record(&self, r: &arca_lake_metadata::ops::delete_fence::DeleteFenceRecord) {
+        let mut g = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.generation = r.generation;
+        g.open = r.open;
+    }
+
+    /// Remember what node `id` reported.
+    pub fn note_node(&self, id: u64, generation: u64, open: bool) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .nodes
+            .insert(id, (generation, open));
+    }
+
+    /// The lowest generation every node would open: a node's open
+    /// generation, or one above a closed one (a node never reopens a
+    /// generation it holds closed).
+    #[must_use]
+    pub fn highest_reported(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .nodes
+            .values()
+            .map(|&(g, open)| if open { g } else { g + 1 })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// `(generation, open, nodes reporting it, nodes behind or ahead)`.
+    #[must_use]
+    pub fn summary(&self) -> (u64, bool, u64, u64) {
+        let g = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let at = g
+            .nodes
+            .values()
+            .filter(|n| **n == (g.generation, g.open))
+            .count() as u64;
+        (g.generation, g.open, at, g.nodes.len() as u64 - at)
+    }
+}
+
 /// Counters and gauges of one controller process.
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -14,6 +79,11 @@ pub struct Metrics {
     pub gc: crate::gc::GcStats,
     /// Write admission (Phase 3.6): devices, state machines, decisions.
     pub admission: crate::admission::Tracker,
+    /// The delete fence as this leader holds it and nodes reported it
+    /// (Phase 3.9, ADR-0023).
+    pub delete_fence: FenceView,
+    /// Deletes a node (or this process) refused for the delete fence.
+    pub delete_fence_refusals_total: AtomicU64,
     /// Durable capacity totals of the last admission pass.
     pub capacity: std::sync::Mutex<crate::admission::Totals>,
     /// GC backlog, logical bytes, after the last GC pass.
@@ -169,6 +239,15 @@ impl Metrics {
         out += &g(
             "arca_controller_leader_token",
             self.leader_token.load(Ordering::Relaxed),
+        );
+        let (generation, open, at, off) = self.delete_fence.summary();
+        out += &g("arca_controller_delete_fence_generation", generation);
+        out += &g("arca_controller_delete_fence_open", u64::from(open));
+        out += &g("arca_controller_delete_fence_nodes_current", at);
+        out += &g("arca_controller_delete_fence_nodes_stale", off);
+        out += &c(
+            "arca_controller_delete_fence_refusals_total",
+            self.delete_fence_refusals_total.load(Ordering::Relaxed),
         );
         for (name, v) in [
             (

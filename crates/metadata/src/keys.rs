@@ -624,6 +624,12 @@ pub fn admission() -> Key {
     pack(&(ROOT, "admission"))
 }
 
+/// The delete fence (Phase 3.9, ADR-0023).
+#[must_use]
+pub fn delete_fence() -> Key {
+    pack(&(ROOT, "delete_fence"))
+}
+
 /// The capacity rebalancing state (Phase 3.8).
 #[must_use]
 pub fn rebalance() -> Key {

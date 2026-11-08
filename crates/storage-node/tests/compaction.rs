@@ -10,6 +10,13 @@ use arca_lake_storage_node::compactor::CompactionPolicy;
 use arca_lake_storage_node::{NodeConfig, serve};
 use bytes::Bytes;
 
+/// Open delete fence generation 1 on the node at `addr` and take it for
+/// `c` (what a controller leader does, ADR-0023).
+async fn open_fence(c: &NodeClients, addr: &str) {
+    assert_eq!(c.push_delete_fence(addr, 1, true).await.unwrap(), (1, true));
+    c.set_delete_fence(Some(1));
+}
+
 fn shard(i: u32) -> ShardRef {
     let mut chunk_id = [0u8; 16];
     chunk_id[..4].copy_from_slice(&i.to_le_bytes());
@@ -45,6 +52,7 @@ async fn deleted_space_is_reclaimed_while_serving_and_survivors_read_back() {
         .unwrap();
     let addr = node.local_addr.to_string();
     let c = NodeClients::new(Duration::from_secs(5));
+    open_fence(&c, &addr).await;
     for i in 0..120 {
         c.put_shard(&addr, shard(i), 0, data(i), 16 << 10)
             .await
