@@ -674,7 +674,7 @@ async fn a_new_term_keeps_the_published_state_until_every_member_reported() {
         ..Policy::default()
     };
     let node_ids: Vec<u64> = c.nodes[..3].iter().map(|n| n.id).collect();
-    for (round, published) in [0u8, 2, 3, 4].into_iter().enumerate() {
+    for (round, published) in [0u8, 1, 2, 3, 4].into_iter().enumerate() {
         force_state(&c, published, 4 * MIB).await;
         let tracker = Tracker::default();
         let token = 100 + round as u64;
@@ -1187,5 +1187,157 @@ async fn only_newer_records_of_this_incarnation_lift_a_refusal() {
     assert_eq!(*put("d").await.unwrap_err().code(), S3ErrorCode::SlowDown);
     publish(0, 11, ours, now_ms()).await;
     put("e").await.unwrap();
+    c.shutdown().await;
+}
+
+/// S12 (Phase 3.9): failover while new data is refused for capacity, with
+/// everything around the leader restarting. A gateway restarted then
+/// refuses at once (it reads the record before it serves, not at its
+/// first refresh); a node restarted reports again without lifting
+/// anything; the leader is killed; a delayed record of its own earlier
+/// term (`normal`) reaches a gateway and is ignored; a new leader
+/// rebuilds `write_rejected` or worse from the nodes' reports; no write
+/// crosses a reserve or leaves capacity held; once space is back the new
+/// leader lifts the state and writes resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failover_while_writes_are_refused_with_gateway_and_node_restarts() {
+    use arca_lake_controller::process::spawn;
+    let mut c = capped(160 * MIB).await;
+    let a = spawn(Arc::clone(&c.meta), controller("ctl-a"))
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let early = loop {
+        if let Some(r) = admission::current(c.meta.as_ref()).await.unwrap()
+            && r.leader_token != 0
+        {
+            break r;
+        }
+        assert!(start.elapsed().as_secs() < 20, "no first record");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(early.tier("default").map(|t| t.state), Some(0), "{early:?}");
+    let mut keys = Vec::new();
+    for n in 0.. {
+        assert!(start.elapsed().as_secs() < 60, "never rejected");
+        let key = format!("f{n}");
+        if s3::put(&c.backend, BUCKET, &key, body(&key), &PutOptions::default())
+            .await
+            .is_ok()
+        {
+            keys.push(key);
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if published_state(&c).await.is_some_and(|(_, s)| s >= 3) {
+            break;
+        }
+        let rec = admission::current(c.meta.as_ref()).await.unwrap();
+        c.backend.cluster().admission.observe(rec, Instant::now());
+    }
+    let refused =
+        |r: &Result<_, s3s::S3Error>| matches!(r, Err(e) if *e.code() == S3ErrorCode::SlowDown);
+    // Gateway restart: refused from its first request.
+    c.restart_backend().await.unwrap();
+    let r = s3::put(
+        &c.backend,
+        BUCKET,
+        "after-gw",
+        body("x"),
+        &PutOptions::default(),
+    )
+    .await;
+    assert!(refused(&r), "a restarted gateway admitted new data: {r:?}");
+    assert_eq!(
+        s3::get(&c.backend, BUCKET, &keys[0]).await.unwrap().0,
+        body(&keys[0])
+    );
+    // Node restart: it reports again; nothing is lifted.
+    c.stop_node(1).await;
+    c.start_node(1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(published_state(&c).await.unwrap().1 >= 3);
+    // Leader kill; the gateway receives the leader's own earlier record.
+    let (t0, _) = published_state(&c).await.unwrap();
+    a.shutdown().await;
+    c.backend
+        .cluster()
+        .admission
+        .observe(Some(early.clone()), Instant::now());
+    let r = s3::put(
+        &c.backend,
+        BUCKET,
+        "late-rec",
+        body("y"),
+        &PutOptions::default(),
+    )
+    .await;
+    assert!(
+        refused(&r),
+        "a delayed lower record lifted the refusal: {r:?}"
+    );
+    // A new leader rebuilds from fresh reports.
+    let b = spawn(Arc::clone(&c.meta), controller("ctl-b"))
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let s1 = loop {
+        if let Some((t, s)) = published_state(&c).await
+            && t > t0
+        {
+            break s;
+        }
+        assert!(
+            start.elapsed().as_secs() < 20,
+            "the new leader never published"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert!(s1 >= 3, "a new leader admitted onto full devices ({s1})");
+    let rec = admission::current(c.meta.as_ref()).await.unwrap();
+    c.backend.cluster().admission.observe(rec, Instant::now());
+    let r = s3::put(
+        &c.backend,
+        BUCKET,
+        "new-term",
+        body("z"),
+        &PutOptions::default(),
+    )
+    .await;
+    assert!(refused(&r), "{r:?}");
+    assert_reserves_kept(&c);
+    // Space back: the new leader collects and lifts; writes resume.
+    for k in &keys {
+        s3::delete(&c.backend, BUCKET, k).await.unwrap();
+    }
+    let start = Instant::now();
+    while arca_lake_metadata::ops::gc::backlog(c.meta.as_ref(), 10)
+        .await
+        .unwrap()
+        .0
+        > 0
+    {
+        assert!(start.elapsed().as_secs() < 30, "never collected");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    compact_all(&c);
+    let start = Instant::now();
+    while published_state(&c).await.unwrap().1 != 0 {
+        assert!(start.elapsed().as_secs() < 30, "never back to normal");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let rec = admission::current(c.meta.as_ref()).await.unwrap();
+    c.backend.cluster().admission.observe(rec, Instant::now());
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "resumed",
+        body("r"),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_reserves_kept(&c);
+    b.shutdown().await;
     c.shutdown().await;
 }

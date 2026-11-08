@@ -736,6 +736,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         // cluster state.
         let fence = arca_lake_metadata::ops::delete_fence::current(meta.inner().as_ref()).await?;
         clients.set_delete_fence(fence.open.then_some(fence.generation));
+        // The admission record before the first request, not at the first
+        // refresh: a gateway restarted while new data is refused for
+        // capacity refuses it from its first request (Phase 3.9, S12).
+        cluster.admission.observe(
+            arca_lake_metadata::ops::admission::current(meta.inner().as_ref()).await?,
+            std::time::Instant::now(),
+        );
         Self::spawn_cluster_refresh(
             Arc::clone(meta.inner()),
             Arc::downgrade(&cluster),
