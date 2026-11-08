@@ -144,7 +144,9 @@ pub struct ClusterOptions {
 /// nodes of a test cluster share one file system, which capacity
 /// admission refuses without allotments that fit it (Phase 3.7, R-80).
 /// [`TestCluster::set_node_capacity`] changes it (`None`: none).
-pub const TEST_ALLOTMENT: u64 = 2 << 30;
+/// Small enough that a dozen nodes fit a CI runner's temporary file
+/// system (often a memory file system of a few GiB).
+pub const TEST_ALLOTMENT: u64 = 512 << 20;
 
 /// The cache tier name used by test clusters.
 pub const CACHE_TIER: &str = "fast";

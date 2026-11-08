@@ -941,3 +941,65 @@ async fn new_chunks_prefer_the_group_with_more_room() {
     assert_eq!(in_roomy, 20, "every chunk in the group with more room");
     c.shutdown().await;
 }
+
+/// R-85: during warm-up a new term also keeps the groups the published
+/// record excluded (a member not yet heard may be the full one).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_term_keeps_published_exclusions_until_every_member_reported() {
+    use arca_lake_controller::admission::{Term, pass_in_term};
+    let c = capped(160 * MIB).await;
+    let group = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| !g.is_cache())
+        .unwrap()
+        .id;
+    let rec = arca_lake_metadata::ops::admission::AdmissionRecord {
+        computed_ms: now_ms(),
+        ttl_ms: 30_000,
+        gateways: 1,
+        tiers: vec![arca_lake_metadata::ops::admission::TierAdmission {
+            tier: "default".into(),
+            state: 2,
+            excluded_groups: vec![group],
+            reason: "test".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    admission::publish(c.meta.as_ref(), &rec).await.unwrap();
+    let tracker = Tracker::default();
+    let t0 = now_ms();
+    let h = c
+        .clients
+        .health(&c.nodes[0].addr.to_string())
+        .await
+        .unwrap();
+    tracker.note_device(device_of(c.nodes[0].id, &h, t0));
+    let term = Term {
+        token: 7,
+        pass_started_ms: t0,
+    };
+    pass_in_term(
+        c.meta.as_ref(),
+        &tracker,
+        &Policy::default(),
+        MIB,
+        0,
+        term,
+        t0,
+    )
+    .await
+    .unwrap();
+    let rec = admission::current(c.meta.as_ref()).await.unwrap().unwrap();
+    assert!(rec.warming_up);
+    assert!(
+        rec.tier("default")
+            .unwrap()
+            .excluded_groups
+            .contains(&group),
+        "{rec:?}"
+    );
+    c.shutdown().await;
+}

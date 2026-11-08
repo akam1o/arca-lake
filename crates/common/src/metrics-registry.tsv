@@ -23,7 +23,7 @@ arca_controller_cache_repairs_started_total	counter	controller	repairs	-	cache-g
 arca_controller_cache_usage_bytes	gauge	controller	bytes	-	bytes recorded as cached on the cache tier
 arca_controller_capacity_bytes	gauge	controller	bytes	kind=total|usable|headroom|reserved|reclaimable|inflight	durable tiers: device bytes, bytes minus the reserves, free bytes client writes may still use, the reserves, bytes compaction can reclaim, admitted writes in flight (leader)
 arca_controller_capacity_domain_conflicts	gauge	controller	nodes	-	storage nodes that share a file system without --capacity-bytes allotments that fit it (their groups leave placement unless --allow-shared-filesystem; leader)
-arca_controller_capacity_domain_unverified	gauge	controller	nodes	-	storage nodes whose file system sharing cannot be checked (overlay, FUSE, network, or not reported) and that have no allotment (leader)
+arca_controller_capacity_domain_unverified	gauge	controller	nodes	-	storage nodes whose file system sharing cannot be checked (overlay, FUSE, network, or not reported) and that have no allotment; treated like conflicts (leader)
 arca_controller_chunks_demoted_total	counter	controller	chunks	-	chunks moved to a colder tier by automatic tiering
 arca_controller_chunks_promoted_total	counter	controller	chunks	-	chunks moved to a hotter tier by automatic tiering
 arca_controller_chunks_reconstructed_total	counter	controller	chunks	-	durable chunks rebuilt by member replacement

@@ -2419,9 +2419,10 @@ async fn check_config<S: arca_lake_metadata::KvStore>(meta: &S) -> ExitCode {
     }
     if !rec.capacity_unverified.is_empty() {
         println!(
-            "WARN nodes {:?}: file system sharing cannot be checked (overlay, FUSE, network, or an older node) and they have no allotment",
+            "FAIL nodes {:?}: file system sharing cannot be checked (overlay, FUSE, network, or not reported) and they have no --capacity-bytes allotment: their groups leave placement unless --allow-shared-filesystem",
             rec.capacity_unverified
         );
+        bad = true;
     }
     for t in &rec.tiers {
         println!(

@@ -134,6 +134,10 @@ pub struct Inputs {
     pub free_change_recent_bytes_per_s: f64,
     /// See `free_change_recent_bytes_per_s`.
     pub gc_backlog_growth_recent_bytes_per_s: f64,
+    /// The recent trends cover their window (not yet after a start or a
+    /// new term): without that they neither relax a state nor raise the
+    /// throttled rate.
+    pub recent_trend_known: bool,
     /// Physical bytes a logical byte of client data takes (the coding
     /// overhead; 0 = 1).
     pub overhead: f64,
@@ -273,7 +277,17 @@ impl Machine {
                     f64::INFINITY
                 };
                 let step = (base * 0.25).max(policy.min_rate_bytes_per_s);
-                if tte >= policy.horizon_s {
+                let all_fresh = inputs.devices.iter().all(|d| {
+                    d.sampled_ms > 0
+                        && inputs.now_ms.saturating_sub(d.sampled_ms) <= policy.stale_ms
+                });
+                if !all_fresh {
+                    // A stale report: back to the formula, never more.
+                    base
+                } else if !inputs.recent_trend_known {
+                    // No evidence yet: hold.
+                    self.rate.max(base).min(base * 8.0)
+                } else if tte >= policy.horizon_s {
                     (self.rate + step).min(base * 8.0)
                 } else if tte < policy.horizon_s / 2.0 {
                     (self.rate / 2.0).max(base)
@@ -395,7 +409,7 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
     // throttle); leaving one (the margin evaluation) may follow the recent
     // trend once it is safe (R-83: the long window kept writes throttled
     // for minutes after the load fell).
-    let draining = if margin > 0.0 && policy.recent_window_ms > 0 {
+    let draining = if margin > 0.0 && policy.recent_window_ms > 0 && inputs.recent_trend_known {
         long_drain.min(recent_drain)
     } else {
         long_drain
@@ -424,7 +438,7 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
                     format!("no group has room ({} excluded)", out.excluded_groups.len())
                 } else {
                     format!(
-                        "no group has room ({} excluded; nodes {:?} share a file system without fitting allotments)",
+                        "no group has room ({} excluded; nodes {:?} share a file system, or cannot be checked, without fitting allotments)",
                         out.excluded_groups.len(),
                         inputs.unsafe_nodes
                     )
@@ -534,6 +548,7 @@ mod tests {
             }],
             max_shard_bytes: 512 << 10,
             now_ms: 1_000_000,
+            recent_trend_known: true,
             ..Inputs::default()
         }
     }
@@ -714,5 +729,38 @@ mod tests {
         let r2 = m.step(&p, &k).rate_bytes_per_s;
         assert!(r2 < r1, "{r1} -> {r2}");
         assert!(first > 0.0);
+    }
+
+    #[test]
+    fn without_recent_evidence_nothing_relaxes_or_speeds_up() {
+        let p = Policy {
+            dwell_ms: 0,
+            ..Policy::default()
+        };
+        // Filling over the long window, recent trend not yet covered.
+        let mut i = tier(60);
+        i.free_change_bytes_per_s = -100.0 * f64::from(1u32 << 20);
+        i.free_change_recent_bytes_per_s = 0.0;
+        i.recent_trend_known = false;
+        let mut m = Machine::default();
+        assert_eq!(m.step(&p, &i).state, State::Throttled);
+        i.now_ms += 1;
+        assert_eq!(m.step(&p, &i).state, State::Throttled, "no relaxing");
+        // Throttled with a known safe trend: the rate grows; then a member
+        // goes stale: back to the formula at once.
+        let mut m = Machine::default();
+        let mut k = tier(9);
+        k.gc_reclaim_bytes_per_s = 10.0 * f64::from(1u32 << 20);
+        let r0 = m.step(&p, &k).rate_bytes_per_s;
+        k.now_ms += 1;
+        let r1 = m.step(&p, &k).rate_bytes_per_s;
+        assert!(r1 > r0);
+        k.recent_trend_known = false;
+        k.now_ms += 1;
+        assert_eq!(m.step(&p, &k).rate_bytes_per_s, r1, "held without evidence");
+        k.devices[0].sampled_ms = 1;
+        k.now_ms += 1;
+        let r3 = m.step(&p, &k).rate_bytes_per_s;
+        assert!(r3 <= r0 * 1.01, "{r0} {r3}");
     }
 }

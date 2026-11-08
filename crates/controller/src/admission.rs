@@ -47,6 +47,13 @@ impl Trend {
         self.slope(now_ms)
     }
 
+    /// Whether a sample at least `window_ms` old exists.
+    fn covers(&self, now_ms: u64, window_ms: u64) -> bool {
+        self.samples
+            .front()
+            .is_some_and(|(t, _)| now_ms.saturating_sub(*t) >= window_ms)
+    }
+
     fn slope(&self, now_ms: u64) -> f64 {
         self.slope_over(now_ms, TREND_WINDOW_MS)
     }
@@ -90,7 +97,9 @@ struct Inner {
     // Published states found when the term started, and whether a record
     // existed at all.
     floors: HashMap<String, State>,
-    had_record: bool,
+    // Groups the published record excluded, kept excluded during warm-up
+    // (a member not yet heard may be the full one).
+    floor_excluded: HashMap<String, Vec<u64>>,
     devices: HashMap<u64, Device>,
     machines: HashMap<String, Machine>,
     decisions: BTreeMap<String, Decision>,
@@ -283,7 +292,11 @@ pub async fn pass_in_term<S: KvStore>(
                 .flat_map(|r| r.tiers.iter())
                 .map(|t| (t.tier.clone(), state_of(t.state)))
                 .collect();
-            g.had_record = published.is_some();
+            g.floor_excluded = published
+                .iter()
+                .flat_map(|r| r.tiers.iter())
+                .map(|t| (t.tier.clone(), t.excluded_groups.clone()))
+                .collect();
         }
     }
     let groups = cluster::list_groups(meta).await?;
@@ -401,6 +414,10 @@ pub async fn pass_in_term<S: KvStore>(
             trend.push(now_ms, free as f64);
             let free_change = trend.slope_over(now_ms, policy.trend_window_ms);
             let free_change_recent = trend.slope_over(now_ms, policy.recent_window_ms);
+            // The recent trends count only once they cover their window
+            // (both are sampled every pass, so one check stands for both).
+            let recent_trend_known =
+                policy.recent_window_ms > 0 && trend.covers(now_ms, policy.recent_window_ms);
             let inputs = Inputs {
                 devices: devices.clone(),
                 groups: tier_groups,
@@ -413,11 +430,19 @@ pub async fn pass_in_term<S: KvStore>(
                 unsafe_nodes: if policy.allow_shared_filesystem {
                     Vec::new()
                 } else {
-                    domains.conflicts.clone()
+                    // Unverified domains count as shared (R-80: a file
+                    // system that cannot be checked is not assumed
+                    // unshared).
+                    let mut n = domains.conflicts.clone();
+                    n.extend(&domains.unverified);
+                    n.sort_unstable();
+                    n.dedup();
+                    n
                 },
                 free_change_bytes_per_s: free_change,
                 free_change_recent_bytes_per_s: free_change_recent,
                 gc_backlog_growth_recent_bytes_per_s: growth_recent,
+                recent_trend_known,
                 overhead,
                 now_ms,
             };
@@ -427,15 +452,9 @@ pub async fn pass_in_term<S: KvStore>(
                 .iter()
                 .all(|d| d.sampled_ms >= g.term_started_ms && d.sampled_ms > 0);
             let warming = !heard_all && now_ms.saturating_sub(g.term_started_ms) < policy.stale_ms;
-            let floor = if warming {
-                Some(g.floors.get(&tier).copied().unwrap_or(if g.had_record {
-                    State::Normal
-                } else {
-                    State::Throttled
-                }))
-            } else {
-                None
-            };
+            // A tier the published record does not name (or no record):
+            // `throttled` until every member has reported.
+            let floor = warming.then(|| g.floors.get(&tier).copied().unwrap_or(State::Throttled));
             let start = g.floors.get(&tier).copied().unwrap_or_default();
             let machine = g
                 .machines
@@ -455,6 +474,11 @@ pub async fn pass_in_term<S: KvStore>(
             }
             if warming {
                 record.warming_up = true;
+                if let Some(ex) = g.floor_excluded.get(&tier) {
+                    decision.excluded_groups.extend(ex);
+                    decision.excluded_groups.sort_unstable();
+                    decision.excluded_groups.dedup();
+                }
             }
             if !is_cache {
                 // A device serves several tiers' groups: counted once.

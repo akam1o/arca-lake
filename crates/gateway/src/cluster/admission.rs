@@ -53,10 +53,6 @@ pub const MAX_CHUNK_WAIT: Duration = Duration::from_secs(2);
 /// Seconds of rate the bucket holds at most.
 const BURST_SECS: f64 = 2.0;
 
-/// Seconds of debt the bucket may run up at most (one large request may
-/// not lock the gateway out for longer than a client retries).
-const DEBT_SECS: f64 = 30.0;
-
 /// A record computed longer ago than its TTL plus this (by this gateway's
 /// wall clock) is already aged when first seen: a gateway that starts
 /// while no controller publishes does not trust an old record afresh.
@@ -66,9 +62,10 @@ const SKEW_ALLOWANCE: Duration = Duration::from_secs(60);
 #[derive(Debug, Default)]
 struct Seen {
     record: Option<AdmissionRecord>,
-    /// Highest leader token seen (Phase 3.7): a record of a lower one (a
-    /// former leader's) is not taken.
-    max_token: u64,
+    /// Leader token of the record taken last (Phase 3.7): a record of a
+    /// lower one (a former leader's) is not taken, unless it was computed
+    /// clearly later (metadata restored to an older leader counter).
+    token: u64,
     /// When `record.computed_ms` last changed (this gateway's clock).
     changed: Option<Instant>,
 }
@@ -156,12 +153,15 @@ impl WriteAdmission {
     pub fn observe_at(&self, record: Option<AdmissionRecord>, now: Instant, wall_ms: u64) {
         let mut s = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(r) = &record {
-            if r.leader_token < s.max_token {
+            let last_ms = s.record.as_ref().map_or(0, |l| l.computed_ms);
+            let clearly_later = r.computed_ms
+                > last_ms.saturating_add(u64::try_from(SKEW_ALLOWANCE.as_millis()).unwrap_or(0));
+            if r.leader_token < s.token && !clearly_later {
                 // Metadata fencing makes this impossible for a published
                 // record; kept as defence in depth.
                 return;
             }
-            s.max_token = r.leader_token;
+            s.token = r.leader_token;
         }
         let changed = match (&s.record, &record) {
             (Some(a), Some(b)) => a.computed_ms != b.computed_ms,
@@ -340,7 +340,10 @@ impl WriteAdmission {
         if let Some(bytes) = take
             && wait <= MAX_CHUNK_WAIT
         {
-            b.tokens = (b.tokens - bytes as f64).max(-rate * DEBT_SECS);
+            // The whole chunk is owed (no cap: a chunk is taken only when
+            // the debt is within MAX_CHUNK_WAIT, so the debt stays below
+            // that much rate plus one chunk).
+            b.tokens -= bytes as f64;
         }
         wait
     }
@@ -582,6 +585,13 @@ mod tests {
         old.leader_token = 4;
         seen(&a, old, t0);
         assert_eq!(a.effective(t0).state, WRITE_REJECTED);
+        // A lower token computed clearly later (a restored metadata store
+        // whose leader counter went back): taken, the gateway is not
+        // stranded.
+        let mut restored = record(10 + 61_000, NORMAL, 0, 1);
+        restored.leader_token = 1;
+        seen(&a, restored, t0);
+        assert_eq!(a.effective(t0).state, NORMAL);
     }
 
     #[test]
@@ -591,10 +601,15 @@ mod tests {
         seen(&a, record(1, THROTTLED, 2 * MIB, 1), t0);
         let t1 = t0 + Duration::from_secs(1);
         assert!(
-            a.reserve_chunk_at(100 << 30, t1).is_ok(),
+            a.reserve_chunk_at(64 * MIB, t1).is_ok(),
             "one chunk may go into debt"
         );
-        // At most DEBT_SECS of rate: admitted again within about that.
+        // The whole chunk is owed: 32 s at 2 MiB/s, refused until the
+        // debt is within the bounded wait.
+        assert!(
+            a.reserve_chunk_at(MIB, t1 + Duration::from_secs(20))
+                .is_err()
+        );
         let t2 = t1 + Duration::from_secs(31);
         assert!(a.reserve_chunk_at(MIB, t2).is_ok());
     }

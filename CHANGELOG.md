@@ -35,7 +35,7 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 - Backpressure leaves a state on the recent trend (1 min) and adapts the
   throttled rate (R-83); the trend windows and the adaptive rate are
   policy settings.
-- Test clusters give every node a 2 GiB allotment; `soak24.sh` runs its
+- Test clusters give every node a 512 MiB allotment; `soak24.sh` runs its
   controllers with `--allow-shared-filesystem`.
 
 ### Added (Phase 3.6)

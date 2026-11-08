@@ -19,7 +19,7 @@ The full register is [risks.md](../architecture/risks.md).
 | Capacity admission at the storage node (reserve, write classes) | Verified |
 | Tier backpressure (throttling, refusal, recovery, failover terms) | Experimental: verified by deterministic tests and short runs; thresholds and rates may change |
 | Capacity-aware group choice | Experimental; no automatic rebalancing of existing data |
-| Shared file system detection | Experimental; uncertain on overlay, FUSE and network file systems |
+| Shared file system detection | Experimental; overlay, FUSE and network file systems cannot be checked: nodes on them need `--capacity-bytes` allotments (else refused like shared ones), and their sum is then the operator's responsibility |
 | Rolling upgrades, cluster recovery, backup verification | Verified within one compatibility window (RFC-014, RFC-015) |
 | mTLS for node RPCs, FoundationDB TLS, SigV4, bucket policy subset | Verified |
 
