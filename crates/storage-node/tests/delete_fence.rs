@@ -82,19 +82,22 @@ async fn an_epoch_raise_is_acknowledged_only_after_deletes_past_the_old_fence() 
     c.put_shard(&addr, shard(3), 0, Bytes::from(vec![3u8; 4096]), 1024)
         .await
         .unwrap();
-    // Hold the delete inside the store: its tombstone write sleeps.
+    // Hold the delete inside the store: its tombstone write sleeps, and
+    // notes when it is done (the physical delete, not the response, which
+    // the node sends after releasing its guard).
     let armed = Arc::new(AtomicBool::new(true));
-    let a = Arc::clone(&armed);
+    let written = Arc::new(std::sync::Mutex::new(None::<Instant>));
+    let (a, w) = (Arc::clone(&armed), Arc::clone(&written));
     faults::set_io_hook(Some(Arc::new(move |op: &IoOp| {
         if matches!(op, IoOp::Write { .. }) && a.swap(false, Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(800));
+            *w.lock().unwrap() = Some(Instant::now());
         }
         FaultOutcome::None
     })));
     let (c2, addr2) = (c.clone(), addr.clone());
     let delete = tokio::spawn(async move {
         c2.delete_shard(&addr2, shard(3), 0).await.unwrap();
-        Instant::now()
     });
     // Wait (bounded) for the delete to reach the store: a fixed 200 ms
     // was not enough on a loaded CI runner (R-77).
@@ -108,8 +111,9 @@ async fn an_epoch_raise_is_acknowledged_only_after_deletes_past_the_old_fence() 
     }
     c.update_epoch(&addr, 1, 5).await.unwrap();
     let raised = Instant::now();
-    let deleted = delete.await.unwrap();
+    delete.await.unwrap();
     faults::set_io_hook(None);
+    let deleted = written.lock().unwrap().expect("the tombstone was written");
     assert!(
         deleted <= raised,
         "the epoch raise was acknowledged while a delete past the old fence was still running"
@@ -360,7 +364,12 @@ async fn an_older_protocol_delete_is_refused() {
             })
             .await
             .unwrap_err();
-        assert!(NodeClients::is_fenced(&e), "v{version} g{fence}: {e}");
+        // Refused by the fence, or (an older version than the node
+        // accepts, as in a version-bump build) by the version check.
+        assert!(
+            NodeClients::is_fenced(&e) || e.message().contains("not supported"),
+            "v{version} g{fence}: {e}"
+        );
     }
     raw.delete_shard(pb::DeleteShardRequest {
         protocol_version: pb::FENCED_DELETE_VERSION,

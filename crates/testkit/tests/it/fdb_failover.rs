@@ -942,6 +942,8 @@ async fn recovery_scenario() {
     }
     let stale_clients = NodeClients::new(Duration::from_secs(5));
     stale_clients.set_incarnation(Some(old.incarnation));
+    // It still believes in the fence open before the restore (ADR-0023).
+    stale_clients.set_delete_fence(c.clients.delete_fence());
     let stale: Vec<GuardedKv<FdbKv>> = [OpClass::ClientWrite, OpClass::Delete, OpClass::Repair]
         .into_iter()
         .map(|cls| GuardedKv::new(Arc::clone(&c.meta), old.incarnation, cls))
