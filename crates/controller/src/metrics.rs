@@ -57,6 +57,14 @@ pub struct Metrics {
     pub chunks_promoted_total: AtomicU64,
     /// Chunks demoted to a lower durable tier.
     pub chunks_demoted_total: AtomicU64,
+    /// Chunks moved between groups of a tier by rebalancing (Phase 3.8).
+    pub rebalance_moved_chunks_total: AtomicU64,
+    /// Logical bytes moved by rebalancing.
+    pub rebalance_moved_bytes_total: AtomicU64,
+    /// Chunks rebalancing skipped or failed to move.
+    pub rebalance_skipped_chunks_total: AtomicU64,
+    /// Imbalance of the move in progress, per mille (0: none planned).
+    pub rebalance_imbalance_permille: AtomicU64,
     /// Cache-group repairs started (RFC-006 §5.9).
     pub cache_repairs_started_total: AtomicU64,
     /// Cache-group repairs completed.
@@ -236,6 +244,22 @@ impl Metrics {
         out += &c(
             "arca_controller_chunks_demoted_total",
             self.chunks_demoted_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_rebalance_moved_chunks_total",
+            self.rebalance_moved_chunks_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_rebalance_moved_bytes_total",
+            self.rebalance_moved_bytes_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_rebalance_skipped_chunks_total",
+            self.rebalance_skipped_chunks_total.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_rebalance_imbalance_permille",
+            self.rebalance_imbalance_permille.load(Ordering::Relaxed),
         );
         out += &c(
             "arca_controller_cache_repairs_started_total",

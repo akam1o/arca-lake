@@ -18,6 +18,7 @@ pub mod list;
 pub mod membership;
 pub mod multipart;
 pub mod object;
+pub mod rebalance;
 pub mod recovery;
 
 use crate::error::Result;

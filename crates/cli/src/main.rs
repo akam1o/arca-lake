@@ -744,6 +744,24 @@ struct ControllerArgs {
     /// Tiering pass interval in seconds.
     #[arg(long, default_value_t = 300)]
     tiering_interval_secs: u64,
+    /// Move chunks from the fullest group of a tier to the roomiest one of
+    /// the same shape (Phase 3.8 capacity rebalancing; `admin rebalance`
+    /// pauses, resumes and switches dry run).
+    #[arg(long)]
+    rebalance: bool,
+    /// Rebalancing pass interval in seconds.
+    #[arg(long, default_value_t = 60)]
+    rebalance_interval_secs: u64,
+    /// Logical MiB moved per rebalancing pass at most (the rate limit).
+    #[arg(long, default_value_t = 256)]
+    rebalance_mib_per_pass: u64,
+    /// Start rebalancing a tier when its least roomy group has this
+    /// fraction less room than its roomiest one.
+    #[arg(long, default_value_t = 0.25)]
+    rebalance_start_imbalance: f64,
+    /// Stop once the imbalance is below this fraction.
+    #[arg(long, default_value_t = 0.10)]
+    rebalance_stop_imbalance: f64,
     /// Chunks a cache-group repair may reconstruct per pass (0 = unlimited).
     #[arg(long, default_value_t = 256)]
     cache_repair_chunks_per_pass: usize,
@@ -878,6 +896,11 @@ enum AdminCommand {
     /// out of placement and each group's room (R-82), the record's age.
     /// Exits 1 when a conflict is found or the record is stale or missing.
     CheckConfig,
+    /// Capacity rebalancing (Phase 3.8): state, pause, resume, dry run.
+    Rebalance {
+        #[command(subcommand)]
+        command: RebalanceCommand,
+    },
     /// Print nodes, groups, and the leader record.
     Status {
         /// Also print every process heartbeat and node capability record
@@ -1826,6 +1849,7 @@ fn run_storage_node_command(command: StorageNodeCommand) -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_controller(args: ControllerArgs) -> ExitCode {
     let meta = match open_meta(&args.cluster_file, &args.fdb_tls) {
         Ok(m) => m,
@@ -1867,6 +1891,17 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
         });
     }
     cfg.tiering_interval = Duration::from_secs(args.tiering_interval_secs);
+    if args.rebalance {
+        cfg.rebalance = Some(arca_lake_controller::rebalance::RebalancePolicy {
+            start_imbalance: args.rebalance_start_imbalance.clamp(0.0, 1.0),
+            stop_imbalance: args
+                .rebalance_stop_imbalance
+                .clamp(0.0, args.rebalance_start_imbalance.clamp(0.0, 1.0)),
+            bytes_per_pass: args.rebalance_mib_per_pass << 20,
+            ..Default::default()
+        });
+    }
+    cfg.rebalance_interval = Duration::from_secs(args.rebalance_interval_secs.max(1));
     cfg.cache_repair_chunks_per_pass = args.cache_repair_chunks_per_pass;
     cfg.scrub = arca_lake_controller::integrity::ScrubOptions {
         page: args.scrub_page,
@@ -2176,6 +2211,7 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
             }
         }
         AdminCommand::CheckConfig => check_config(meta.as_ref()).await,
+        AdminCommand::Rebalance { command } => rebalance_command(meta.as_ref(), command).await,
         AdminCommand::Status { versions } => {
             if versions {
                 let g = arca_lake_metadata::ops::compat::gate(meta.as_ref()).await;
@@ -2381,6 +2417,68 @@ async fn dry_run_plan(
         ExitCode::from(2)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `admin rebalance` subcommands.
+#[derive(Debug, Subcommand)]
+enum RebalanceCommand {
+    /// Print the state: switches, the move in progress, totals.
+    Status,
+    /// Stop moving (a pass in progress finishes its current chunk).
+    Pause,
+    /// Move again.
+    Resume,
+    /// Plan and report only (`on`), or move (`off`).
+    DryRun {
+        /// `on` or `off`.
+        #[arg(value_parser = ["on", "off"])]
+        mode: String,
+    },
+}
+
+async fn rebalance_command<S: arca_lake_metadata::KvStore>(
+    meta: &S,
+    command: RebalanceCommand,
+) -> ExitCode {
+    use arca_lake_metadata::ops::rebalance;
+    let r = match command {
+        RebalanceCommand::Status => rebalance::state(meta).await,
+        RebalanceCommand::Pause => rebalance::set_switches(meta, Some(true), None).await,
+        RebalanceCommand::Resume => rebalance::set_switches(meta, Some(false), None).await,
+        RebalanceCommand::DryRun { mode } => {
+            rebalance::set_switches(meta, None, Some(mode == "on")).await
+        }
+    };
+    match r {
+        Ok(s) => {
+            println!(
+                "paused {} dry_run {} moved_chunks {} moved_bytes {} skipped_chunks {} last_pass_ms {} last_reason {}",
+                s.paused,
+                s.dry_run,
+                s.moved_chunks,
+                s.moved_bytes,
+                s.skipped_chunks,
+                s.last_pass_ms,
+                s.last_reason
+            );
+            match &s.plan {
+                Some(p) => println!(
+                    "plan tier {} source {} (room {}) target {} (room {})",
+                    p.tier, p.source, p.source_room, p.target, p.target_room
+                ),
+                None => println!("plan none"),
+            }
+            println!(
+                "cursor {}",
+                s.cursor.map_or_else(
+                    || "start".to_string(),
+                    |c| arca_lake_metadata::ops::compat::hex(&c)
+                )
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
     }
 }
 

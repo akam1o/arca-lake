@@ -57,6 +57,10 @@ arca_controller_manifest_roots_verified_total	counter	controller	roots	-	multipa
 arca_controller_nodes_registered	gauge	controller	nodes	-	registered storage nodes
 arca_controller_nodes_unhealthy	gauge	controller	nodes	-	storage nodes not seen within the unhealthy threshold
 arca_controller_passes_skipped_by_state_total	counter	controller	passes	-	scheduler passes the cluster phase did not admit
+arca_controller_rebalance_imbalance_permille	gauge	controller	permille	-	imbalance of the move in progress (1 - source room / target room), 0 when none is planned (leader)
+arca_controller_rebalance_moved_bytes_total	counter	controller	bytes	-	logical bytes moved by capacity rebalancing (leader)
+arca_controller_rebalance_moved_chunks_total	counter	controller	chunks	-	chunks moved between groups of a tier by capacity rebalancing (leader)
+arca_controller_rebalance_skipped_chunks_total	counter	controller	chunks	-	chunks capacity rebalancing examined and did not move (changed, in flight, target at its reserve, failed)
 arca_controller_recovery_passes_total	counter	controller	passes	-	restore recovery passes that did work
 arca_controller_repair_bytes_total	counter	controller	bytes	-	bytes written by stripe repair
 arca_controller_repair_queue_depth	gauge	controller	tasks	-	open stripe repair tasks

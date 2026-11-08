@@ -624,6 +624,12 @@ pub fn admission() -> Key {
     pack(&(ROOT, "admission"))
 }
 
+/// The capacity rebalancing state (Phase 3.8).
+#[must_use]
+pub fn rebalance() -> Key {
+    pack(&(ROOT, "rebalance"))
+}
+
 /// Every arca-lake key (for test setup and teardown).
 #[must_use]
 pub fn all_range() -> KeyRange {

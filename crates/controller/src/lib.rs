@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod objects;
 pub mod plan;
 pub mod process;
+pub mod rebalance;
 pub mod recovery;
 pub mod repair;
 pub mod tiering;

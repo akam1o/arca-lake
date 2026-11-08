@@ -82,6 +82,11 @@ pub struct ControllerConfig {
     pub tiering: Option<crate::tiering::TieringPolicy>,
     /// Interval between tiering passes.
     pub tiering_interval: Duration,
+    /// Capacity rebalancing between the groups of a tier (Phase 3.8);
+    /// `None` disables it.
+    pub rebalance: Option<crate::rebalance::RebalancePolicy>,
+    /// Interval between rebalancing passes.
+    pub rebalance_interval: Duration,
     /// Chunks a cache-group repair may reconstruct per pass before yielding
     /// (RFC-006 §5.9); 0 = unlimited.
     pub cache_repair_chunks_per_pass: usize,
@@ -138,6 +143,8 @@ impl ControllerConfig {
             evict_interval: Duration::from_secs(10),
             tiering: None,
             tiering_interval: Duration::from_mins(5),
+            rebalance: None,
+            rebalance_interval: Duration::from_mins(1),
             cache_repair_chunks_per_pass: 256,
             scrub: crate::integrity::ScrubOptions::default(),
             scrub_tick: Duration::from_secs(60),
@@ -489,6 +496,27 @@ fn start_leader_tasks<S: KvStore + 'static>(
                     let cfg = cfg.clone();
                     let metrics = Arc::clone(&metrics);
                     async move { evict_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
+                }
+            },
+        )),
+        tokio::spawn(scheduler(
+            "rebalance",
+            cfg.rebalance_interval,
+            stop.clone(),
+            Arc::clone(metrics),
+            OpClass::Delete,
+            Arc::clone(&raw),
+            {
+                let metrics = Arc::clone(metrics);
+                let meta = Arc::clone(&meta_delete);
+                let clients = clients.clone();
+                let cfg = cfg.clone();
+                move || {
+                    let meta = Arc::clone(&meta);
+                    let clients = clients.clone();
+                    let cfg = cfg.clone();
+                    let metrics = Arc::clone(&metrics);
+                    async move { rebalance_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
                 }
             },
         )),
@@ -1477,6 +1505,47 @@ async fn evict_pass<S: KvStore>(
         if r.evicted > 0 || r.over_watermark {
             info!(tier = %tier.tier, ?r, "evict pass");
         }
+    }
+    Ok(())
+}
+
+/// Capacity rebalancing pass (Phase 3.8).
+async fn rebalance_pass<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    cfg: &ControllerConfig,
+    metrics: &Metrics,
+) -> Result<(), ControlError> {
+    let Some(policy) = cfg.rebalance.as_ref() else {
+        return Ok(());
+    };
+    let r = crate::rebalance::run_once(meta, clients, policy, now_ms()).await?;
+    metrics
+        .rebalance_moved_chunks_total
+        .fetch_add(r.moved_chunks, Ordering::Relaxed);
+    metrics
+        .rebalance_moved_bytes_total
+        .fetch_add(r.moved_bytes, Ordering::Relaxed);
+    metrics
+        .rebalance_skipped_chunks_total
+        .fetch_add(r.skipped_chunks, Ordering::Relaxed);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let permille = r.plan.as_ref().map_or(0, |p| {
+        if p.target_room == 0 {
+            0
+        } else {
+            ((1.0 - p.source_room as f64 / p.target_room as f64) * 1000.0) as u64
+        }
+    });
+    metrics
+        .rebalance_imbalance_permille
+        .store(permille, Ordering::Relaxed);
+    if r.moved_chunks + r.planned_chunks > 0 {
+        info!(?r, "rebalance pass");
     }
     Ok(())
 }

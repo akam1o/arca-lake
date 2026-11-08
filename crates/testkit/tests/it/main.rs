@@ -51,6 +51,7 @@ mod parallel_read;
 mod phase31;
 mod placement_balance;
 mod population_queue;
+mod rebalance;
 mod recovery;
 mod recovery_finalize;
 mod refused_bodies;

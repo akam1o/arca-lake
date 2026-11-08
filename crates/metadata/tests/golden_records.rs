@@ -19,6 +19,7 @@ use arca_lake_metadata::ops::integrity::{
     Finding, ManifestCursor, RepairState, RepairTask, ScrubCursor, ScrubPhase,
 };
 use arca_lake_metadata::ops::membership::{NodeLifecycle, NodeStateRecord, ReplaceRequest};
+use arca_lake_metadata::ops::rebalance::{RebalancePlan, RebalanceState};
 use arca_lake_metadata::ops::recovery::{
     Acceptance, AffectedObject, DataLossRecord, FinalizeAudit, NodeCapRecord, RecoveryPhase,
     RestoreCounts, RestoreCursor, RestoreReport,
@@ -539,6 +540,26 @@ fn cases() -> Vec<Case> {
                 capacity_conflicts: vec![5, 6],
                 capacity_unverified: vec![7],
                 incarnation: [9; 16],
+            },
+        ),
+        case(
+            "RebalanceState",
+            RebalanceState {
+                paused: true,
+                dry_run: false,
+                cursor: Some(G),
+                plan: Some(RebalancePlan {
+                    tier: "default".into(),
+                    source: 1,
+                    target: 2,
+                    source_room: 3,
+                    target_room: 4,
+                }),
+                moved_chunks: 5,
+                moved_bytes: 6,
+                skipped_chunks: 7,
+                last_pass_ms: 8,
+                last_reason: "pass budget spent".into(),
             },
         ),
         case(

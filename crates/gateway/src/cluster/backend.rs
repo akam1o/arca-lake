@@ -1037,6 +1037,13 @@ pub(super) fn meta_err(e: MetaError) -> s3s::S3Error {
             "part {n} is smaller than the minimum allowed size"
         ),
         MetaError::TooManyRetries => s3_error!(SlowDown, "metadata transaction conflicts; retry"),
+        // A write whose pending generation was retired under it (its lease
+        // expired, Phase 3.8 finding), or a read racing a collection: no
+        // partial state is visible; retrying is correct.
+        MetaError::NoSuchGeneration => s3_error!(
+            ServiceUnavailable,
+            "the generation is gone (a write's lease expired, or it was collected); nothing partial is visible; retry"
+        ),
         other => s3_error!(InternalError, "metadata: {other}"),
     }
 }
