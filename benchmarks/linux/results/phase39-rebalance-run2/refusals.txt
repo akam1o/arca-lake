@@ -1,0 +1,22 @@
+# Gateway SlowDown refusals per minute and reason (run 2)
+    248 2026-11-08T21:35 new data refused: tier default is write_rejected 
+    146 2026-11-08T21:36 new data refused: tier default is write_rejected 
+     17 2026-11-08T21:36 write rate limited: tier default is throttled 
+     60 2026-11-08T21:37 write rate limited: tier default is throttled 
+    247 2026-11-08T21:40 new data refused: tier default is write_rejected 
+     80 2026-11-08T21:41 new data refused: tier default is write_rejected 
+     17 2026-11-08T21:41 write rate limited: tier default is throttled 
+     15 2026-11-08T21:42 write rate limited: tier default is throttled 
+      5 2026-11-08T21:43 write rate limited: tier default is throttled 
+# First refusal 21:35:04 (before the leader kill at 21:35:22); last 21:43:17
+# Admission state changes and leadership (controller ctl-b)
+2026-11-08T21:35:27.005786Z  INFO arca_lake_controller::process: acquired leadership controller=ctl-b token=2
+2026-11-08T21:35:27.028348Z  INFO arca_lake_controller::process: delete fence changed generation=2 open=true reason=opened by the leader of term 2
+2026-11-08T21:35:27.154039Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="write_rejected" reason=write_rejected (better for 0 ms of 60000; 32.7 % usable free)
+2026-11-08T21:36:28.356413Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="throttled" reason=throttled (recovered; 49.4 % usable free)
+2026-11-08T21:37:34.146510Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="warning" reason=warning (recovered; 47.0 % usable free)
+2026-11-08T21:38:40.587612Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="normal" reason=normal (recovered; 36.8 % usable free)
+2026-11-08T21:40:07.195662Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="write_rejected" reason=no group has room (2 excluded)
+2026-11-08T21:41:13.186022Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="throttled" reason=throttled (recovered; 45.1 % usable free)
+2026-11-08T21:44:45.317339Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="warning" reason=warning (recovered; 34.5 % usable free)
+2026-11-08T21:45:50.807918Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="normal" reason=normal (recovered; 34.5 % usable free)

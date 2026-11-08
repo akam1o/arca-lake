@@ -1,0 +1,1 @@
+failures=0 iterations=596 window_min=12 base=320 cap=3221225472

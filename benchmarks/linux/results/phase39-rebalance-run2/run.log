@@ -1,0 +1,10 @@
+The database is available, but has issues (type 'status' for more information).
+21:18:36 fill: 320 objects of 8388608 bytes
+21:19:18 baseline window: 12 min, rebalancing paused
+21:31:21 rebalance window: 12 min, leader kill and node stop
+21:35:22 fault: kill the controller leader (ctl-a)
+21:39:21 fault: stop node d1 for 20 s
+21:43:24 converge: no load
+21:43:25 rebalancing settled
+21:46:28 verify
+21:46:32 iterations 596, failures 0
