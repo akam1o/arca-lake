@@ -789,8 +789,9 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         self.cluster.admit(false)
     }
 
-    /// Capacity admission of new client data (Phase 3.6): `len` bytes, or
-    /// one maximum chunk when the length is not known up front.
+    /// Header-time capacity check of new client data (Phase 3.6; charged
+    /// per chunk since Phase 3.7): `len` bytes, or one maximum chunk when
+    /// the length is not known up front.
     pub(super) fn admit_data(&self, len: Option<i64>) -> Result<(), s3s::S3Error> {
         let bytes = len
             .and_then(|l| u64::try_from(l).ok())
@@ -1649,7 +1650,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         req: S3Request<CopyObjectInput>,
     ) -> S3Result<S3Response<CopyObjectOutput>> {
         self.admit_write()?;
-        // The source size is not known yet: one chunk is charged.
+        // Checked here, charged per chunk as the copy writes them.
         self.admit_data(None)?;
         let input = req.input;
         let CopySource::Bucket {

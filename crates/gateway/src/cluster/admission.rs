@@ -46,6 +46,10 @@ pub const STALE_REJECT: Duration = Duration::from_mins(5);
 /// enough for clients to make progress until the leader is back.
 const STALE_RATE: f64 = 4.0 * 1024.0 * 1024.0;
 
+/// Longest a chunk waits for its share of a throttled rate; beyond it the
+/// request is refused with `SlowDown` (bounded wait, bounded buffering).
+pub const MAX_CHUNK_WAIT: Duration = Duration::from_secs(2);
+
 /// Seconds of rate the bucket holds at most.
 const BURST_SECS: f64 = 2.0;
 
@@ -62,6 +66,9 @@ const SKEW_ALLOWANCE: Duration = Duration::from_secs(60);
 #[derive(Debug, Default)]
 struct Seen {
     record: Option<AdmissionRecord>,
+    /// Highest leader token seen (Phase 3.7): a record of a lower one (a
+    /// former leader's) is not taken.
+    max_token: u64,
     /// When `record.computed_ms` last changed (this gateway's clock).
     changed: Option<Instant>,
 }
@@ -101,6 +108,8 @@ pub struct AdmissionStatsSnapshot {
     /// Chunks that no group could take for capacity (client saw
     /// `SlowDown`).
     pub placement_capacity_failures: u64,
+    /// Client bytes charged chunk by chunk.
+    pub charged_bytes: u64,
 }
 
 /// Write admission state of a gateway.
@@ -115,6 +124,8 @@ pub struct WriteAdmission {
     pub node_capacity_refusals: AtomicU64,
     /// Chunks no group could take for capacity.
     pub placement_capacity_failures: AtomicU64,
+    /// Client bytes charged chunk by chunk (accepted for placement).
+    pub charged_bytes: AtomicU64,
 }
 
 impl WriteAdmission {
@@ -129,6 +140,7 @@ impl WriteAdmission {
             rejected: AtomicU64::new(0),
             node_capacity_refusals: AtomicU64::new(0),
             placement_capacity_failures: AtomicU64::new(0),
+            charged_bytes: AtomicU64::new(0),
         }
     }
 
@@ -143,6 +155,14 @@ impl WriteAdmission {
     /// [`Self::observe`] with this gateway's wall clock `wall_ms`.
     pub fn observe_at(&self, record: Option<AdmissionRecord>, now: Instant, wall_ms: u64) {
         let mut s = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(r) = &record {
+            if r.leader_token < s.max_token {
+                // Metadata fencing makes this impossible for a published
+                // record; kept as defence in depth.
+                return;
+            }
+            s.max_token = r.leader_token;
+        }
         let changed = match (&s.record, &record) {
             (Some(a), Some(b)) => a.computed_ms != b.computed_ms,
             (None, None) => false,
@@ -206,14 +226,18 @@ impl WriteAdmission {
         self.effective(Instant::now()).excluded_groups
     }
 
-    /// Admit `bytes` of new client data (PUT, UploadPart, copies).
+    /// Header-time check of a request that will write about `hint` bytes
+    /// of new client data (PUT, UploadPart, copies; `hint` is the content
+    /// length or one chunk): refused at once when new data is refused, or
+    /// when throttled so far into debt that its first chunk could not wait
+    /// for its share. Charges nothing: the chunks are charged as they are
+    /// placed ([`Self::reserve_chunk`]).
     ///
     /// # Errors
     ///
-    /// `SlowDown` with `Retry-After` when throttled past the rate or when
-    /// new data is refused.
-    pub fn admit_data(&self, bytes: u64) -> Result<(), S3Error> {
-        self.admit_data_at(bytes, Instant::now())
+    /// `SlowDown` with `Retry-After`.
+    pub fn admit_data(&self, hint: u64) -> Result<(), S3Error> {
+        self.admit_data_at(hint, Instant::now())
     }
 
     /// [`Self::admit_data`] at `now`.
@@ -221,49 +245,16 @@ impl WriteAdmission {
     /// # Errors
     ///
     /// As [`Self::admit_data`].
-    #[allow(clippy::cast_precision_loss)]
-    pub fn admit_data_at(&self, bytes: u64, now: Instant) -> Result<(), S3Error> {
+    pub fn admit_data_at(&self, hint: u64, now: Instant) -> Result<(), S3Error> {
+        let _ = hint;
         let e = self.effective(now);
         match e.state {
-            WRITE_REJECTED | RECOVERY_ONLY => {
-                self.rejected.fetch_add(1, Relaxed);
-                Err(slow_down(
-                    &format!(
-                        "new data refused: tier {} is {} ({})",
-                        self.tier,
-                        name(e.state),
-                        e.reason
-                    ),
-                    if e.state == RECOVERY_ONLY { 60 } else { 30 },
-                ))
-            }
+            WRITE_REJECTED | RECOVERY_ONLY => Err(self.refuse_data(&e)),
             THROTTLED => {
-                // A record without a rate (older controller): the floor.
-                let rate = e.rate_bytes_per_s.max(f64::from(1u32 << 20));
-                let mut g = self.bucket.lock().unwrap_or_else(PoisonError::into_inner);
-                // A throttle starts empty: the first requests after a
-                // recovery do not arrive as one burst.
-                let b = g.get_or_insert(Bucket {
-                    tokens: 0.0,
-                    at: now,
-                });
-                let dt = now.saturating_duration_since(b.at).as_secs_f64();
-                b.tokens = (b.tokens + dt * rate).min(rate * BURST_SECS);
-                b.at = now;
-                if b.tokens <= 0.0 {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let wait = (-b.tokens / rate).ceil().clamp(1.0, 30.0) as u64;
-                    drop(g);
-                    self.throttled.fetch_add(1, Relaxed);
-                    return Err(slow_down(
-                        &format!(
-                            "write rate limited: tier {} is throttled ({})",
-                            self.tier, e.reason
-                        ),
-                        wait,
-                    ));
+                let wait = self.wait_for(&e, now, None);
+                if wait > MAX_CHUNK_WAIT {
+                    return Err(self.refuse_rate(&e, wait));
                 }
-                b.tokens = (b.tokens - bytes as f64).max(-rate * DEBT_SECS);
                 Ok(())
             }
             _ => {
@@ -271,6 +262,100 @@ impl WriteAdmission {
                 Ok(())
             }
         }
+    }
+
+    /// Charge one chunk of `bytes` about to be placed (every client write
+    /// path, whatever its length was known to be: the bytes are counted as
+    /// they arrive, once per chunk, before its shards are written; a
+    /// placement retried on another group is not charged again). Returns
+    /// how long to wait before placing it (at most [`MAX_CHUNK_WAIT`]: a
+    /// bounded wait, never an unbounded buffer).
+    ///
+    /// # Errors
+    ///
+    /// `SlowDown` when new data is refused or the wait would be longer.
+    pub fn reserve_chunk(&self, bytes: u64) -> Result<Duration, S3Error> {
+        self.reserve_chunk_at(bytes, Instant::now())
+    }
+
+    /// [`Self::reserve_chunk`] at `now`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::reserve_chunk`].
+    pub fn reserve_chunk_at(&self, bytes: u64, now: Instant) -> Result<Duration, S3Error> {
+        let e = self.effective(now);
+        match e.state {
+            WRITE_REJECTED | RECOVERY_ONLY => Err(self.refuse_data(&e)),
+            THROTTLED => {
+                let wait = self.wait_for(&e, now, Some(bytes));
+                if wait > MAX_CHUNK_WAIT {
+                    return Err(self.refuse_rate(&e, wait));
+                }
+                self.charged_bytes.fetch_add(bytes, Relaxed);
+                Ok(wait)
+            }
+            _ => {
+                *self.bucket.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                self.charged_bytes.fetch_add(bytes, Relaxed);
+                Ok(Duration::ZERO)
+            }
+        }
+    }
+
+    /// The tier's rate for this gateway.
+    fn rate_of(e: &Effective) -> f64 {
+        // A record without a rate (older controller): the floor.
+        e.rate_bytes_per_s.max(f64::from(1u32 << 20))
+    }
+
+    /// Refill the bucket to `now`; the wait until it is out of debt; with
+    /// `take`, charge those bytes when the wait is acceptable.
+    #[allow(clippy::cast_precision_loss)]
+    fn wait_for(&self, e: &Effective, now: Instant, take: Option<u64>) -> Duration {
+        let rate = Self::rate_of(e);
+        let mut g = self.bucket.lock().unwrap_or_else(PoisonError::into_inner);
+        // A throttle starts empty: the first requests after a recovery do
+        // not arrive as one burst.
+        let b = g.get_or_insert(Bucket {
+            tokens: 0.0,
+            at: now,
+        });
+        let dt = now.saturating_duration_since(b.at).as_secs_f64();
+        b.tokens = (b.tokens + dt * rate).min(rate * BURST_SECS);
+        b.at = now;
+        let wait = Duration::from_secs_f64((-b.tokens / rate).max(0.0));
+        if let Some(bytes) = take
+            && wait <= MAX_CHUNK_WAIT
+        {
+            b.tokens = (b.tokens - bytes as f64).max(-rate * DEBT_SECS);
+        }
+        wait
+    }
+
+    fn refuse_data(&self, e: &Effective) -> S3Error {
+        self.rejected.fetch_add(1, Relaxed);
+        slow_down(
+            &format!(
+                "new data refused: tier {} is {} ({})",
+                self.tier,
+                name(e.state),
+                e.reason
+            ),
+            if e.state == RECOVERY_ONLY { 60 } else { 30 },
+        )
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn refuse_rate(&self, e: &Effective, wait: Duration) -> S3Error {
+        self.throttled.fetch_add(1, Relaxed);
+        slow_down(
+            &format!(
+                "write rate limited: tier {} is throttled ({})",
+                self.tier, e.reason
+            ),
+            wait.as_secs_f64().ceil().clamp(1.0, 30.0) as u64,
+        )
     }
 
     /// Admit an operation that adds no data but starts new data (multipart
@@ -313,6 +398,7 @@ impl WriteAdmission {
             rejected: self.rejected.load(Relaxed),
             node_capacity_refusals: self.node_capacity_refusals.load(Relaxed),
             placement_capacity_failures: self.placement_capacity_failures.load(Relaxed),
+            charged_bytes: self.charged_bytes.load(Relaxed),
         }
     }
 }
@@ -366,6 +452,7 @@ mod tests {
                 free_permille: 100,
                 reason: "test".into(),
             }],
+            ..Default::default()
         }
     }
 
@@ -391,10 +478,11 @@ mod tests {
         seen(&a, record(1, WRITE_REJECTED, 0, 1), t0);
         let e = a.admit_data_at(1, t0).unwrap_err();
         assert_eq!(*e.code(), s3s::S3ErrorCode::SlowDown);
+        assert!(a.reserve_chunk_at(1, t0).is_err(), "nor any chunk");
         assert!(retry_after(&e) >= 30);
         assert!(a.admit_start().is_err());
         assert_eq!(a.excluded_groups(), vec![7]);
-        assert_eq!(a.snapshot().rejected, 2);
+        assert_eq!(a.snapshot().rejected, 3);
     }
 
     #[test]
@@ -403,27 +491,41 @@ mod tests {
         let t0 = Instant::now();
         // 8 MiB/s over 2 gateways: 4 MiB/s here.
         seen(&a, record(1, THROTTLED, 8 * MIB, 2), t0);
-        let mut admitted = 0u64;
-        let mut refused = 0;
-        for ms in (0..10_000u64).step_by(10) {
-            match a.admit_data_at(MIB, t0 + Duration::from_millis(ms)) {
-                Ok(()) => admitted += MIB,
-                Err(e) => {
-                    refused += 1;
-                    assert!(retry_after(&e) >= 1);
-                }
-            }
+        // A writer that waits as told, chunk after chunk, for 10 s.
+        let (mut t, mut admitted) = (t0, 0u64);
+        while t < t0 + Duration::from_secs(10) {
+            let wait = a.reserve_chunk_at(MIB, t).unwrap();
+            assert!(wait <= MAX_CHUNK_WAIT);
+            admitted += MIB;
+            t += wait.max(Duration::from_millis(1));
         }
-        // 10 s at 4 MiB/s, plus at most one request of debt.
+        // 10 s at 4 MiB/s, plus at most one chunk of debt.
         assert!((38 * MIB..=41 * MIB).contains(&admitted), "{admitted}");
-        assert!(refused > 0);
-        // An object larger than the burst still passes, then waits.
+        // An impatient writer (no waiting) is refused once the debt is
+        // longer than the bounded wait.
         let t1 = t0 + Duration::from_secs(20);
-        assert!(a.admit_data_at(64 * MIB, t1).is_ok());
+        assert_eq!(a.reserve_chunk_at(64 * MIB, t1).unwrap(), Duration::ZERO);
         let e = a
-            .admit_data_at(MIB, t1 + Duration::from_secs(1))
+            .reserve_chunk_at(MIB, t1 + Duration::from_secs(1))
             .unwrap_err();
-        assert!(retry_after(&e) >= 10, "debt of ~56 MiB at 4 MiB/s");
+        assert!(retry_after(&e) >= 10, "debt of ~60 MiB at 4 MiB/s");
+        // And so is a new request at its header.
+        assert!(a.admit_data_at(MIB, t1 + Duration::from_secs(1)).is_err());
+        assert_eq!(a.snapshot().throttled, 2);
+    }
+
+    #[test]
+    fn unknown_lengths_are_charged_by_what_arrives() {
+        let a = WriteAdmission::new("durable");
+        let t0 = Instant::now();
+        seen(&a, record(1, NORMAL, 0, 1), t0);
+        // The header check charges nothing, whatever the hint.
+        a.admit_data_at(1, t0).unwrap();
+        assert_eq!(a.snapshot().charged_bytes, 0);
+        for _ in 0..5 {
+            a.reserve_chunk_at(MIB, t0).unwrap();
+        }
+        assert_eq!(a.snapshot().charged_bytes, 5 * MIB);
     }
 
     #[test]
@@ -457,19 +559,31 @@ mod tests {
     }
 
     #[test]
+    fn a_former_leaders_record_is_not_taken() {
+        let a = WriteAdmission::new("durable");
+        let t0 = Instant::now();
+        let mut new = record(10, WRITE_REJECTED, 0, 1);
+        new.leader_token = 5;
+        seen(&a, new, t0);
+        let mut old = record(11, NORMAL, 0, 1);
+        old.leader_token = 4;
+        seen(&a, old, t0);
+        assert_eq!(a.effective(t0).state, WRITE_REJECTED);
+    }
+
+    #[test]
     fn debt_is_bounded() {
         let a = WriteAdmission::new("durable");
         let t0 = Instant::now();
         seen(&a, record(1, THROTTLED, 2 * MIB, 1), t0);
-        let _ = a.admit_data_at(1, t0);
         let t1 = t0 + Duration::from_secs(1);
         assert!(
-            a.admit_data_at(100 << 30, t1).is_ok(),
-            "one request may go into debt"
+            a.reserve_chunk_at(100 << 30, t1).is_ok(),
+            "one chunk may go into debt"
         );
         // At most DEBT_SECS of rate: admitted again within about that.
         let t2 = t1 + Duration::from_secs(31);
-        assert!(a.admit_data_at(MIB, t2).is_ok());
+        assert!(a.reserve_chunk_at(MIB, t2).is_ok());
     }
 
     #[test]

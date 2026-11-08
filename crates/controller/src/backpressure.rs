@@ -193,6 +193,16 @@ pub struct Machine {
 }
 
 impl Machine {
+    /// A machine that starts in `state` (a new leader taking over a
+    /// published state: it can only be left by the usual hysteresis).
+    #[must_use]
+    pub fn starting_at(state: State) -> Self {
+        Self {
+            state,
+            better_since_ms: None,
+        }
+    }
+
     /// Current state.
     #[must_use]
     pub fn state(&self) -> State {

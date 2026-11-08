@@ -5,6 +5,8 @@
 //! rejects writes before the reserve is reached and lifts one step at a
 //! time.
 
+#![allow(clippy::too_many_lines)]
+
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -500,5 +502,315 @@ async fn a_new_leader_rebuilds_the_admission_state_from_fresh_reports() {
     .unwrap();
     assert_reserves_kept(&c);
     b.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Publish `state` (and `rate`) for tier `default` as a leader would and
+/// let the gateway see it.
+async fn force_state(c: &TestCluster, state: u8, rate: u64) {
+    let rec = arca_lake_metadata::ops::admission::AdmissionRecord {
+        computed_ms: now_ms(),
+        ttl_ms: 30_000,
+        gateways: 1,
+        tiers: vec![arca_lake_metadata::ops::admission::TierAdmission {
+            tier: "default".into(),
+            state,
+            rate_bytes_per_s: rate,
+            excluded_groups: Vec::new(),
+            free_permille: 500,
+            reason: "test".into(),
+        }],
+        ..Default::default()
+    };
+    admission::publish(c.meta.as_ref(), &rec).await.unwrap();
+    let rec = admission::current(c.meta.as_ref()).await.unwrap();
+    c.backend.cluster().admission.observe(rec, Instant::now());
+}
+
+fn charged(c: &TestCluster) -> u64 {
+    c.backend.cluster().admission.snapshot().charged_bytes
+}
+
+async fn copy(c: &TestCluster, src: &str, dst: &str) -> s3s::S3Result<s3s::dto::CopyObjectOutput> {
+    let mut b = s3s::dto::CopyObjectInput::builder();
+    b.set_bucket(BUCKET.into());
+    b.set_key(dst.into());
+    b.set_copy_source(s3s::dto::CopySource::Bucket {
+        bucket: BUCKET.into(),
+        key: src.into(),
+        version_id: None,
+    });
+    Ok(c.backend
+        .copy_object(request(b.build().unwrap()))
+        .await?
+        .output)
+}
+
+/// R-81 (Phase 3.7): PUTs without a length and copies are charged by the
+/// chunks they actually write; a throttled writer waits a bounded time per
+/// chunk, a write refused part way is never visible and leaves nothing
+/// once collected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_length_puts_and_copies_are_charged_by_what_they_write() {
+    let c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(3, 2, 1, MIB, 64 << 10)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let big = Bytes::from(random_bytes(usize::try_from(8 * MIB).unwrap(), 70));
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "src",
+        big.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(charged(&c), 8 * MIB, "a PUT without a length: 8 chunks");
+    let baseline = c.total_shards().await;
+
+    // Throttled at 4 MiB/s: the PUT (no length) waits chunk by chunk.
+    force_state(&c, 2, 4 * MIB).await;
+    let t = Instant::now();
+    let before = charged(&c);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "slow",
+        big.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(charged(&c) - before, 8 * MIB);
+    assert!(t.elapsed().as_secs_f64() >= 1.5, "{:?}", t.elapsed());
+    // A copy is charged by the destination bytes it writes.
+    let before = charged(&c);
+    copy(&c, "src", "copied").await.unwrap();
+    assert_eq!(charged(&c) - before, 8 * MIB, "the copy's 8 chunks");
+    assert_eq!(s3::get(&c.backend, BUCKET, "copied").await.unwrap().0, big);
+
+    // The floor rate (1 MiB/s) shared by four concurrent writers: chunks
+    // cannot all wait their turn; some writes fail part way, and nothing
+    // of those becomes visible.
+    force_state(&c, 2, 0).await;
+    let results = futures::future::join_all((0..4).map(|i| {
+        let (b, data) = (c.backend.clone(), big.clone());
+        async move {
+            let key = format!("contended{i}");
+            (
+                key.clone(),
+                s3::put(&b, BUCKET, &key, data, &PutOptions::default()).await,
+            )
+        }
+    }))
+    .await;
+    let mut kept = 0;
+    let mut refused = 0;
+    for (key, r) in &results {
+        match r {
+            Ok(_) => {
+                kept += 1;
+                assert_eq!(s3::get(&c.backend, BUCKET, key).await.unwrap().0, big);
+            }
+            Err(e) => {
+                refused += 1;
+                assert_eq!(*e.code(), S3ErrorCode::SlowDown, "{e:?}");
+                let e = s3::head(&c.backend, BUCKET, key).await.unwrap_err();
+                assert_eq!(*e.code(), S3ErrorCode::NoSuchKey, "{key} visible");
+            }
+        }
+    }
+    assert!(refused > 0, "four writers at 1 MiB/s with a 2 s bound");
+    // Refusing new data refuses copies too, before anything is written.
+    force_state(&c, 3, 0).await;
+    let e = copy(&c, "src", "copied2").await.unwrap_err();
+    assert_eq!(*e.code(), S3ErrorCode::SlowDown);
+    assert_eq!(
+        *s3::head(&c.backend, BUCKET, "copied2")
+            .await
+            .unwrap_err()
+            .code(),
+        S3ErrorCode::NoSuchKey
+    );
+    // Reads go on.
+    assert_eq!(s3::get(&c.backend, BUCKET, "src").await.unwrap().0, big);
+    // Whatever the refused PUT wrote is collected.
+    force_state(&c, 0, 0).await;
+    c.gc(now_ms() + 3_600_000, 0).await;
+    c.gc(now_ms() + 3_600_000, 0).await;
+    c.reconcile(now_ms() + 3_600_000, 0).await;
+    assert_eq!(
+        c.total_shards().await,
+        baseline + (2 + kept) * 8 * 3,
+        "the new objects' shards only"
+    );
+    for i in 0..3 {
+        assert_eq!(
+            c.node_service(i).device_capacity().unwrap().inflight_bytes,
+            0
+        );
+    }
+    c.shutdown().await;
+}
+
+/// R-85 (Phase 3.7): a new leadership term never relaxes on partial
+/// reports. For each state the former leader published, a new term with a
+/// member not yet heard keeps at least that state (until the staleness
+/// bound, after which missing reports count as stale), and once every
+/// member has reported it leaves the state only through the hysteresis,
+/// within a bounded number of passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_term_keeps_the_published_state_until_every_member_reported() {
+    use arca_lake_controller::admission::{Term, pass_in_term};
+    let mut c = capped(160 * MIB).await;
+    let policy = Policy {
+        dwell_ms: 0,
+        ..Policy::default()
+    };
+    let node_ids: Vec<u64> = c.nodes[..3].iter().map(|n| n.id).collect();
+    for (round, published) in [0u8, 2, 3, 4].into_iter().enumerate() {
+        force_state(&c, published, 4 * MIB).await;
+        let tracker = Tracker::default();
+        let token = 100 + round as u64;
+        let t0 = now_ms();
+        // Only two of three members reported in the new term.
+        for n in &c.nodes[..2] {
+            let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+            tracker.note_device(device_of(n.id, &h, t0));
+        }
+        let term = Term {
+            token,
+            pass_started_ms: t0,
+        };
+        pass_in_term(c.meta.as_ref(), &tracker, &policy, MIB, 0, term, t0)
+            .await
+            .unwrap();
+        let rec = admission::current(c.meta.as_ref()).await.unwrap().unwrap();
+        let t = rec.tier("default").unwrap();
+        assert!(rec.warming_up, "round {round}");
+        assert_eq!(rec.leader_token, token);
+        assert!(
+            t.state >= published.max(1),
+            "published {published}, new leader {} ({})",
+            t.state,
+            t.reason
+        );
+        // Past the staleness bound the missing member counts as stale:
+        // the usual rules, no longer the floor, and never `normal`.
+        let late = t0 + policy.stale_ms + 1;
+        for n in &c.nodes[..2] {
+            let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+            tracker.note_device(device_of(n.id, &h, late));
+        }
+        pass_in_term(c.meta.as_ref(), &tracker, &policy, MIB, 0, term, late)
+            .await
+            .unwrap();
+        let rec = admission::current(c.meta.as_ref()).await.unwrap().unwrap();
+        assert!(!rec.warming_up);
+        assert!(rec.tier("default").unwrap().state >= 1, "a member is stale");
+        // Every member reports: the state converges to `normal` one step
+        // per pass (dwell 0 here), however bad the published one was.
+        let mut now = late;
+        let mut path = Vec::new();
+        for _ in 0..8 {
+            now += 1;
+            for id in &node_ids {
+                let n = c.nodes.iter().find(|n| n.id == *id).unwrap();
+                let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+                tracker.note_device(device_of(*id, &h, now));
+            }
+            pass_in_term(c.meta.as_ref(), &tracker, &policy, MIB, 0, term, now)
+                .await
+                .unwrap();
+            let s = admission::current(c.meta.as_ref())
+                .await
+                .unwrap()
+                .unwrap()
+                .tier("default")
+                .unwrap()
+                .state;
+            path.push(s);
+            if s == 0 {
+                break;
+            }
+        }
+        assert_eq!(path.last(), Some(&0), "round {round}: {path:?}");
+        for w in path.windows(2) {
+            assert!(w[1] + 1 >= w[0], "{path:?}");
+        }
+    }
+    // No record at all and a member missing: at least `throttled`.
+    let fresh = c.meta.as_ref();
+    {
+        use arca_lake_metadata::Txn as _;
+        arca_lake_metadata::transact(fresh, (), |tx, ()| {
+            Box::pin(async move {
+                tx.clear(&arca_lake_metadata::keys::admission());
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    }
+    let tracker = Tracker::default();
+    let t0 = now_ms();
+    let h = c
+        .clients
+        .health(&c.nodes[0].addr.to_string())
+        .await
+        .unwrap();
+    tracker.note_device(device_of(c.nodes[0].id, &h, t0));
+    let term = Term {
+        token: 999,
+        pass_started_ms: t0,
+    };
+    pass_in_term(fresh, &tracker, &policy, MIB, 0, term, t0)
+        .await
+        .unwrap();
+    let rec = admission::current(fresh).await.unwrap().unwrap();
+    assert!(rec.tier("default").unwrap().state >= 2);
+    c.stop_node(2).await;
+    c.shutdown().await;
+}
+
+/// R-85: a former leader cannot publish once another holds leadership
+/// (the record is written through the fenced store).
+#[tokio::test]
+async fn a_former_leader_cannot_publish_admission() {
+    use arca_lake_metadata::fence::FencedKv;
+    use arca_lake_metadata::ops::leader;
+    let c = capped(160 * MIB).await;
+    let t = now_ms();
+    let old = leader::try_acquire(c.meta.as_ref(), "old", t, 1000)
+        .await
+        .unwrap()
+        .unwrap();
+    let old_store = FencedKv::new(Arc::clone(&c.meta), old);
+    admission::publish(
+        &old_store,
+        &arca_lake_metadata::ops::admission::AdmissionRecord::default(),
+    )
+    .await
+    .unwrap();
+    // The lease lapses; a new leader takes over.
+    leader::try_acquire(c.meta.as_ref(), "new", t + 5000, 1000)
+        .await
+        .unwrap()
+        .unwrap();
+    let late = admission::publish(
+        &old_store,
+        &arca_lake_metadata::ops::admission::AdmissionRecord {
+            computed_ms: t + 6000,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        late.is_err(),
+        "a delayed write of the former leader was accepted"
+    );
     c.shutdown().await;
 }

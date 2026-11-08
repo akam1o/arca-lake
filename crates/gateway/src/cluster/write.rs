@@ -582,6 +582,25 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 h.update(&chunk);
             }
             let chunk_len = chunk.len();
+            // Capacity admission (Phase 3.7, R-81): every client write path
+            // (PUT of any length, UploadPart, copies) is charged here, chunk
+            // by chunk as the bytes arrive, once per chunk; a throttled
+            // chunk waits for its share (bounded), else the write fails
+            // before its shards exist and stays invisible.
+            let wait = self
+                .cluster
+                .admission
+                .reserve_chunk(chunk_len as u64)
+                .map_err(WriteFailure::from)?;
+            if !wait.is_zero() {
+                self.renewing(
+                    generation,
+                    lease_ms,
+                    &mut last_renewal,
+                    tokio::time::sleep(wait),
+                )
+                .await?;
+            }
             // Chunk placements are pipelined: up to `write_pipeline` chunks
             // have their shards in flight while the next chunk's body is
             // read and encoded, so that one slow group commit on a node

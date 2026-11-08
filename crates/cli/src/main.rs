@@ -3563,6 +3563,11 @@ fn render_admission_stats(
             "counter",
             a.placement_capacity_failures,
         ),
+        (
+            "arca_gateway_admission_charged_bytes_total",
+            "counter",
+            a.charged_bytes,
+        ),
     ] {
         let _ = writeln!(out, "# TYPE {name} {kind}\n{name} {value}");
     }

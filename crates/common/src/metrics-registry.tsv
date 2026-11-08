@@ -82,6 +82,7 @@ arca_controller_tls_reload_failures_total	counter	controller	reloads	-	TLS reloa
 arca_controller_tls_reloads_total	counter	controller	reloads	-	TLS material reloads that changed it
 arca_controller_tls_rpcs_denied_total	counter	controller	rpcs	-	RPCs refused by the role authorization table
 arca_controller_upgrade_step	gauge	controller	enum	-	rolling-upgrade finalize step (0 none … 5)
+arca_gateway_admission_charged_bytes_total	counter	gateway	bytes	-	client bytes charged to write admission chunk by chunk as they were placed (every PUT, UploadPart and copy)
 arca_gateway_admission_record_age_seconds	gauge	gateway	seconds	-	seconds since the admission record last changed (0 = no record)
 arca_gateway_admission_rejected_total	counter	gateway	requests	-	requests refused with SlowDown because the tier refuses new data
 arca_gateway_admission_state	gauge	gateway	state	-	write admission state this gateway applies to its tier (0 normal, 1 warning, 2 throttled, 3 write rejected, 4 recovery only; includes escalation of a stale record)

@@ -949,12 +949,18 @@ async fn health_pass<S: KvStore>(
         .store(nodes.len() as u64, Ordering::Relaxed);
     metrics.nodes_unhealthy.store(unhealthy, Ordering::Relaxed);
     // Write admission (Phase 3.6), from what the nodes just reported.
-    let totals = crate::admission::pass(
+    // The term is the leader's fencing token: a failover (or leading
+    // again) starts the admission state afresh (Phase 3.7, R-85).
+    let totals = crate::admission::pass_in_term(
         meta,
         &metrics.admission,
         &cfg.admission,
         cfg.admission_max_chunk_bytes,
         metrics.gc.reclaimed_bytes.load(Ordering::Relaxed),
+        crate::admission::Term {
+            token: metrics.leader_token.load(Ordering::Relaxed),
+            pass_started_ms: now,
+        },
         now_ms(),
     )
     .await?;

@@ -40,6 +40,14 @@ pub struct AdmissionRecord {
     pub gateways: u32,
     /// Per tier.
     pub tiers: Vec<TierAdmission>,
+    /// Fencing token of the leader that computed it (Phase 3.7): a record
+    /// of a lower token than one already seen is ignored by gateways.
+    pub leader_token: u64,
+    /// Publication count within the leader's term.
+    pub generation: u64,
+    /// The leader had not yet heard every member in its term: the states
+    /// are at least those it found published (warm-up after a failover).
+    pub warming_up: bool,
 }
 
 impl crate::records::Record for AdmissionRecord {}
