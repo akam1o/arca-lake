@@ -994,17 +994,24 @@ three nodes capped at 300 MiB, 2 + 1, a controller with time-scaled
 admission (trend 60 s, recent 10 s, dwell 10 s, horizon 300 s, health
 1 s, GC 1 s with a 30 s grace), compaction every 5 s; 256 KiB overwrites
 of 400 keys at 400 ops/s for 120 s (far past what the nodes hold), then
-30 ops/s (27 PUT/s) for 180 s. Validation VM, release build, 3 runs per
-policy, same build ("phase-3.6" = long-window recovery and fixed rate).
+30 ops/s (27 PUT/s) for 180 s, 10 % of the operations GETs. Validation
+VM, release build of the final Phase 3.7 code, 3 runs per policy, same
+build ("phase-3.6" = long-window recovery and fixed rate; an earlier
+run before the review fixes gave the same picture).
 
 | | Phase 3.6 policy | Phase 3.7 policy |
 | --- | --- | --- |
-| High phase accepted / refused PUT/s | 26.8 / 333 (3 runs) | 26.6–26.8 / 333 |
-| Low phase accepted / refused PUT/s | 18.6–18.7 / 8.3–8.4 | 24.4–24.7 / 2.3–2.6 |
-| Low phase PUT p50 / p95 / p99 ms | 1 939–1 948 / 2 001–2 009 / 2 005–2 038 | 5 / 1 925–1 972 / 1 995–2 000 |
-| Back to `normal` after the drop | 30–31 s | 25–26 s |
-| State transitions (whole run) | 19–20 | 16–20 |
-| Node capacity refusals (high phase) | 1 347–1 401 | 1 293–1 569 |
+| High phase accepted / refused PUT/s | 26.5–33.2 / 327–334 | 26.8 / 333 |
+| Low phase accepted / refused PUT/s (offered 27) | 18.6–24.2 / 2.8–8.4 | 24.6–25.5 / 1.5–2.4 |
+| Low phase PUT p50 / p95 / p99 ms | 14–1 935 / 2 001–2 005 / 2 004–2 075 | 5 / 1 819–1 965 / 1 990–1 998 |
+| GET/s served (offered), p99 ms | 40 (40) and 3 (3), < 0.1 | 40 (40) and 3 (3), < 0.1 |
+| Back to `normal` after the drop | 22–30 s | 25–26 s |
+| State transitions (whole run) | 19 | 16–22 |
+| Node capacity refusals (high phase) | 3–1 419 | 1 524–1 755 |
+
+One Phase 3.6 run (the first) is an outlier: its nodes refused only 3
+writes and its low phase reached 24.2 PUT/s, within the spread of the
+shared virtual storage; the other two are 18.6 and 18.7.
 
 The high phase fills the nodes within seconds, faster than the
 one-second health interval: both policies reach `recovery_only` and the
