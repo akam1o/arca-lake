@@ -2,7 +2,7 @@
 
 Audit of what would become public with the repository. Run on the
 working tree and on every commit reachable from any ref (241 commits,
-one author identity, `akam1o <akam1o@users.noreply.github.com>`).
+one author identity, the maintainer's GitHub no-reply address).
 Nothing was rewritten or deleted.
 
 ## Method
@@ -20,7 +20,7 @@ Nothing was rewritten or deleted.
 | # | Finding | Assessment | Action |
 | --- | --- | --- | --- |
 | 1 | No credential, private key or token in history or tree. Test fixtures carry obviously fake access keys (`AKIAMIXEDVERSION00000`, `AKIATENANTB0000000000`) and a fixed fake secret in the soak scripts | Acceptable (documented test values) | none |
-| 2 | The sanitizer flags 43 lines of the tree: action SHA pins (`uses: …@<sha>`), `user@host` placeholders in script usage text, documentation and loopback addresses in policy and redaction tests (`10.0.0.0/8`, `2001:db8::/32`, `192.168.1.1`), `e2e::` read as IPv6 | False positives: none is a real host, address or user | none |
+| 2 | The sanitizer flags 43 lines of the tree: action SHA pins in the workflow, user-at-host placeholders in script usage text, documentation-range and private example addresses in the policy and redaction tests, and a test module path that reads like an IPv6 address | False positives: none is a real host, address or user | none |
 | 3 | History: no validation host address, no home directory, no MAC, no email other than the noreply address | Clean | none |
 | 4 | 2026-11-01: a commit with validation host names in measurement headers was pushed and replaced within a minute (recorded in `docs/security/public-artifacts.md`) | The replaced commit is unreachable but may remain fetchable by hash on GitHub | Before publishing: ask GitHub support to purge unreachable objects, or accept the residual exposure (maintainer decision) |
 | 5 | Workflow run logs (203 runs) show runner names and runner work paths; one artifact `gitleaks-results.sarif` (2026-10-31, redacted findings) | Public with the repository | Delete runs and the artifact before publishing, or accept (destructive: needs approval) |
