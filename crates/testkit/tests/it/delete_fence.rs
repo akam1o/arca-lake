@@ -549,3 +549,81 @@ async fn the_leader_opens_the_fence_for_its_term_and_closes_it_outside_active() 
     ctl.shutdown().await;
     c.shutdown().await;
 }
+
+/// A leader killed while it pushed its new generation: only node 0 took
+/// it. The deletes decided under the previous generation stay refused on
+/// node 0 and still apply on the others (their fence is unchanged, and the
+/// decision is still valid in the same metadata). The next leader opens
+/// above what any node holds, so every node ends up at one generation and
+/// both earlier generations are refused everywhere. A close interrupted the
+/// same way (record written, one node pushed) is completed by running it
+/// again: a higher generation, acknowledged by all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leader_killed_while_pushing_its_fence_is_superseded_cleanly() {
+    let c = cluster().await;
+    put(&c, "k", 8).await;
+    let first = leader_pass(&c, 20).await;
+    let before = frozen_controller(&c);
+    let deletes = decided_deletes(&c, "k").await;
+    // The killed leader: record written, pushed to node 0 only.
+    let inc = compat::cluster_state(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap()
+        .incarnation;
+    let killed = sync_for_term(c.meta.as_ref(), 21, inc, first.generation, now_ms())
+        .await
+        .unwrap()
+        .record;
+    assert!(killed.open && killed.generation > first.generation);
+    let addr0 = c.nodes[0].addr.to_string();
+    c.clients
+        .push_delete_fence(&addr0, killed.generation, true)
+        .await
+        .unwrap();
+    let on0: Vec<_> = deletes.iter().filter(|d| d.0 == addr0).cloned().collect();
+    assert_ne!(on0.len(), 0);
+    let d = deliver(&before, &on0).await;
+    assert_eq!(d.fenced, on0.len(), "{d:?}");
+    // The next leader: above every node's generation.
+    let next = leader_pass(&c, 22).await;
+    assert!(next.generation > killed.generation, "{next:?}");
+    for n in &c.nodes {
+        let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+        assert_eq!(
+            (h.delete_fence_generation, h.delete_fence_open),
+            (next.generation, true)
+        );
+    }
+    let killed_leader = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
+    killed_leader.set_incarnation(c.clients.incarnation());
+    killed_leader.set_delete_fence(Some(killed.generation));
+    for who in [&before, &killed_leader] {
+        let d = deliver(who, &deletes).await;
+        assert_eq!(d.fenced, deletes.len(), "{d:?}");
+    }
+    assert_eq!(
+        s3::get(&c.backend, BUCKET, "k").await.unwrap().0.len(),
+        2 << 20
+    );
+    // A close interrupted after its record and one push.
+    let rec = delete_fence::close(
+        c.meta.as_ref(),
+        next.generation,
+        "interrupted",
+        true,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    c.clients
+        .push_delete_fence(&addr0, rec.generation, false)
+        .await
+        .unwrap();
+    let again = close_and_push(c.meta.as_ref(), &c.clients, "again", true, now_ms())
+        .await
+        .unwrap();
+    assert!(again.record.generation > rec.generation);
+    assert_eq!(again.not_acknowledged(), Vec::<u64>::new());
+    c.shutdown().await;
+}

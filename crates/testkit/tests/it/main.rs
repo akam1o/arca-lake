@@ -53,6 +53,8 @@ mod phase31;
 mod placement_balance;
 mod population_queue;
 mod rebalance;
+#[cfg(feature = "fdb")]
+mod rebalance_fdb;
 mod recovery;
 mod recovery_finalize;
 mod refused_bodies;

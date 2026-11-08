@@ -13,6 +13,7 @@ pub mod suite;
 pub mod suite_cache;
 pub mod suite_cache_ec;
 pub mod suite_faults;
+pub mod suite_rebalance;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
