@@ -91,7 +91,7 @@ pub struct Tracker {
 struct Inner {
     // Leadership term the state machines belong to (fencing token) and
     // when it started here; generation of the next record.
-    term: Option<u64>,
+    term: Option<([u8; 16], u64)>,
     term_started_ms: u64,
     generation: u64,
     // Published states found when the term started, and whether a record
@@ -219,6 +219,11 @@ pub async fn pass<S: KvStore>(
     reclaimed_total: u64,
     now_ms: u64,
 ) -> Result<Totals, MetaError> {
+    // Term 0 of the cluster's current incarnation (tools and tests; the
+    // leader passes its own term).
+    let incarnation = compat::cluster_state(meta)
+        .await?
+        .map_or([0; 16], |c| c.incarnation);
     pass_in_term(
         meta,
         tracker,
@@ -228,6 +233,7 @@ pub async fn pass<S: KvStore>(
         Term {
             token: 0,
             pass_started_ms: now_ms,
+            incarnation,
         },
         now_ms,
     )
@@ -241,6 +247,8 @@ pub struct Term {
     pub token: u64,
     /// When the health pass that heard the devices started (unix ms).
     pub pass_started_ms: u64,
+    /// The cluster incarnation the leader runs in (stamped on the record).
+    pub incarnation: [u8; 16],
 }
 
 /// [`pass`] in leadership term `term` (Phase 3.7, R-85). A new term (a
@@ -271,7 +279,7 @@ pub async fn pass_in_term<S: KvStore>(
     term: Term,
     now_ms: u64,
 ) -> Result<Totals, MetaError> {
-    let new_term = tracker.lock().term != Some(term.token);
+    let new_term = tracker.lock().term != Some((term.incarnation, term.token));
     // What was published before (by this or another leader): only a floor
     // during warm-up, never a state to relax from without evidence.
     let published = if new_term {
@@ -282,7 +290,7 @@ pub async fn pass_in_term<S: KvStore>(
     {
         let mut g = tracker.lock();
         if new_term {
-            g.term = Some(term.token);
+            g.term = Some((term.incarnation, term.token));
             g.term_started_ms = term.pass_started_ms;
             g.generation = 0;
             g.machines.clear();
@@ -317,6 +325,7 @@ pub async fn pass_in_term<S: KvStore>(
         warming_up: false,
         capacity_conflicts: Vec::new(),
         capacity_unverified: Vec::new(),
+        incarnation: term.incarnation,
     };
     {
         let mut g = tracker.lock();

@@ -14,9 +14,18 @@
 //! acts as if at least `throttled`, after [`STALE_REJECT`] as if
 //! `write_rejected` (fail closed while no leader evaluates capacity).
 //! A record already old by this gateway's clock when first seen (beyond
-//! its TTL and a skew allowance) starts aged. No
-//! record at all (a controller that predates Phase 3.6) admits: the storage
-//! nodes' reserve still refuses writes that would cross it.
+//! its TTL and a skew allowance) starts aged.
+//!
+//! Which record is taken (Phase 3.8, R-85): only one of this gateway's
+//! cluster incarnation (another incarnation's is ignored; a gateway does
+//! not serve across an incarnation change anyway); within it, never one
+//! of a lower leadership term (fencing token) than the record taken last,
+//! nor of the same term and a lower generation. No time rule overrides
+//! that. A record that disappears or is ignored leaves the last one taken
+//! in force, ageing as above. No record since the gateway started: after
+//! [`BOOTSTRAP_GRACE`] the same ageing applies from the start (unknown
+//! state fails closed); the nodes' reserve refuses writes that would cross
+//! it in every case.
 //!
 //! Refusals are `503 SlowDown` with `Retry-After`, the S3 code SDKs retry
 //! with backoff; the message says why.
@@ -42,6 +51,10 @@ pub const RECOVERY_ONLY: u8 = 4;
 /// A record unchanged for this long is treated as `write_rejected`.
 pub const STALE_REJECT: Duration = Duration::from_mins(5);
 
+/// No record since start: admitted this long (a leader's first pass), then
+/// aged like a record unchanged since the start.
+pub const BOOTSTRAP_GRACE: Duration = Duration::from_secs(60);
+
 /// Throttled rate of a stale record, per gateway (bytes/s): slow, but
 /// enough for clients to make progress until the leader is back.
 const STALE_RATE: f64 = 4.0 * 1024.0 * 1024.0;
@@ -59,15 +72,13 @@ const BURST_SECS: f64 = 2.0;
 /// Clock skew beyond it makes a fresh record look old (fail closed).
 const SKEW_ALLOWANCE: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Seen {
     record: Option<AdmissionRecord>,
-    /// Leader token of the record taken last (Phase 3.7): a record of a
-    /// lower one (a former leader's) is not taken, unless it was computed
-    /// clearly later (metadata restored to an older leader counter).
-    token: u64,
     /// When `record.computed_ms` last changed (this gateway's clock).
     changed: Option<Instant>,
+    /// Records ignored (another incarnation, an older term or generation).
+    ignored: u64,
 }
 
 #[derive(Debug)]
@@ -113,6 +124,13 @@ pub struct AdmissionStatsSnapshot {
 #[derive(Debug)]
 pub struct WriteAdmission {
     tier: String,
+    /// The cluster incarnation this gateway serves.
+    incarnation: [u8; 16],
+    /// When this admission started (no record yet: aged from here).
+    started: Instant,
+    /// Without any record, admit indefinitely (test clusters without a
+    /// controller only).
+    bootstrap_normal: std::sync::atomic::AtomicBool,
     seen: Mutex<Seen>,
     bucket: Mutex<Option<Bucket>>,
     throttled: AtomicU64,
@@ -126,12 +144,27 @@ pub struct WriteAdmission {
 }
 
 impl WriteAdmission {
-    /// Admission for client writes into `tier`.
+    /// Admission for client writes into `tier`, in the zero incarnation
+    /// (unit tests).
     #[must_use]
     pub fn new(tier: impl Into<String>) -> Self {
+        Self::for_incarnation(tier, [0; 16])
+    }
+
+    /// Admission for client writes into `tier` of cluster incarnation
+    /// `incarnation`.
+    #[must_use]
+    pub fn for_incarnation(tier: impl Into<String>, incarnation: [u8; 16]) -> Self {
         Self {
             tier: tier.into(),
-            seen: Mutex::new(Seen::default()),
+            incarnation,
+            started: Instant::now(),
+            bootstrap_normal: std::sync::atomic::AtomicBool::new(false),
+            seen: Mutex::new(Seen {
+                record: None,
+                changed: None,
+                ignored: 0,
+            }),
             bucket: Mutex::new(None),
             throttled: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
@@ -149,34 +182,53 @@ impl WriteAdmission {
         self.observe_at(record, now, wall_ms);
     }
 
+    /// Keep admitting while no record was ever seen (test clusters that
+    /// run no controller; never in a deployment).
+    pub fn assume_normal_without_record(&self, on: bool) {
+        self.bootstrap_normal.store(on, Relaxed);
+    }
+
     /// [`Self::observe`] with this gateway's wall clock `wall_ms`.
     pub fn observe_at(&self, record: Option<AdmissionRecord>, now: Instant, wall_ms: u64) {
         let mut s = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(r) = &record {
-            let last_ms = s.record.as_ref().map_or(0, |l| l.computed_ms);
-            let clearly_later = r.computed_ms
-                > last_ms.saturating_add(u64::try_from(SKEW_ALLOWANCE.as_millis()).unwrap_or(0));
-            if r.leader_token < s.token && !clearly_later {
-                // Metadata fencing makes this impossible for a published
-                // record; kept as defence in depth.
-                return;
-            }
-            s.token = r.leader_token;
-        }
-        let changed = match (&s.record, &record) {
-            (Some(a), Some(b)) => a.computed_ms != b.computed_ms,
-            (None, None) => false,
-            _ => true,
+        // Absent: the last record taken stays in force and ages.
+        let Some(r) = record else {
+            return;
         };
-        if changed {
-            s.changed = record.as_ref().map(|r| {
-                // Age already accrued before this gateway saw it.
-                let age = Duration::from_millis(wall_ms.saturating_sub(r.computed_ms));
-                let trusted = Duration::from_millis(r.ttl_ms) + SKEW_ALLOWANCE;
-                now.checked_sub(age.saturating_sub(trusted)).unwrap_or(now)
-            });
+        if r.incarnation != self.incarnation {
+            s.ignored += 1;
+            return;
         }
-        s.record = record;
+        if let Some(last) = &s.record
+            && (r.leader_token, r.generation) < (last.leader_token, last.generation)
+        {
+            // An older term, or an older publication of the same term:
+            // metadata fencing makes this impossible for a published
+            // record; kept as defence in depth.
+            s.ignored += 1;
+            return;
+        }
+        let changed = s.record.as_ref().is_none_or(|a| {
+            (a.leader_token, a.generation, a.computed_ms)
+                != (r.leader_token, r.generation, r.computed_ms)
+        });
+        if changed {
+            // Age already accrued before this gateway saw it.
+            let age = Duration::from_millis(wall_ms.saturating_sub(r.computed_ms));
+            let trusted = Duration::from_millis(r.ttl_ms) + SKEW_ALLOWANCE;
+            s.changed = Some(now.checked_sub(age.saturating_sub(trusted)).unwrap_or(now));
+        }
+        s.record = Some(r);
+    }
+
+    /// Records ignored so far (another incarnation, an older term or
+    /// generation).
+    #[must_use]
+    pub fn ignored_records(&self) -> u64 {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .ignored
     }
 
     /// What applies now.
@@ -185,11 +237,32 @@ impl WriteAdmission {
     pub fn effective(&self, now: Instant) -> Effective {
         let s = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(rec) = s.record.as_ref() else {
+            let since = now.saturating_duration_since(self.started);
+            let (state, rate, reason) = if self.bootstrap_normal.load(Relaxed)
+                || since < BOOTSTRAP_GRACE
+            {
+                (NORMAL, 0.0, "no admission record yet".to_string())
+            } else if since < STALE_REJECT {
+                (
+                    THROTTLED,
+                    STALE_RATE,
+                    format!("no admission record for {} s", since.as_secs()),
+                )
+            } else {
+                (
+                    WRITE_REJECTED,
+                    0.0,
+                    format!(
+                        "no admission record for {} s (no controller leader evaluates capacity)",
+                        since.as_secs()
+                    ),
+                )
+            };
             return Effective {
-                state: NORMAL,
-                rate_bytes_per_s: 0.0,
+                state,
+                rate_bytes_per_s: rate,
                 excluded_groups: Vec::new(),
-                reason: "no admission record".into(),
+                reason,
             };
         };
         let age = s
@@ -197,12 +270,16 @@ impl WriteAdmission {
             .map_or(Duration::ZERO, |t| now.saturating_duration_since(t));
         let tier = rec.tier(&self.tier);
         let mut e = Effective {
-            state: tier.map_or(NORMAL, |t| t.state),
-            rate_bytes_per_s: tier.map_or(0.0, |t| {
+            // A tier the leader did not evaluate: not known to have room.
+            state: tier.map_or(THROTTLED, |t| t.state),
+            rate_bytes_per_s: tier.map_or(STALE_RATE, |t| {
                 t.rate_bytes_per_s as f64 / f64::from(rec.gateways.max(1))
             }),
             excluded_groups: tier.map(|t| t.excluded_groups.clone()).unwrap_or_default(),
-            reason: tier.map_or_else(String::new, |t| t.reason.clone()),
+            reason: tier.map_or_else(
+                || format!("tier {} not in the admission record", self.tier),
+                |t| t.reason.clone(),
+            ),
         };
         if age >= STALE_REJECT {
             if e.state < WRITE_REJECTED {
@@ -585,13 +662,66 @@ mod tests {
         old.leader_token = 4;
         seen(&a, old, t0);
         assert_eq!(a.effective(t0).state, WRITE_REJECTED);
-        // A lower token computed clearly later (a restored metadata store
-        // whose leader counter went back): taken, the gateway is not
-        // stranded.
-        let mut restored = record(10 + 61_000, NORMAL, 0, 1);
-        restored.leader_token = 1;
-        seen(&a, restored, t0);
+        // However much later it was computed (no time rule, Phase 3.8).
+        let mut late = record(10 + 3_600_000, NORMAL, 0, 1);
+        late.leader_token = 4;
+        seen(&a, late, t0);
+        assert_eq!(a.effective(t0).state, WRITE_REJECTED);
+        // An older publication of the same term: ignored too.
+        let mut g2 = record(20, WRITE_REJECTED, 0, 1);
+        (g2.leader_token, g2.generation) = (5, 2);
+        seen(&a, g2, t0);
+        let mut g1 = record(21, NORMAL, 0, 1);
+        (g1.leader_token, g1.generation) = (5, 1);
+        seen(&a, g1, t0);
+        assert_eq!(a.effective(t0).state, WRITE_REJECTED);
+        assert_eq!(a.ignored_records(), 3);
+    }
+
+    #[test]
+    fn another_incarnations_record_is_never_taken() {
+        let a = WriteAdmission::for_incarnation("durable", [1; 16]);
+        let t0 = Instant::now();
+        let mut ours = record(10, WRITE_REJECTED, 0, 1);
+        ours.incarnation = [1; 16];
+        ours.leader_token = 9;
+        seen(&a, ours, t0);
+        // A record of another incarnation (a restored store's leader, with
+        // a lower or a higher token): ignored; ours stays and ages.
+        for token in [1, 99] {
+            let mut other = record(11, NORMAL, 0, 1);
+            other.incarnation = [2; 16];
+            other.leader_token = token;
+            seen(&a, other, t0);
+        }
+        assert_eq!(a.effective(t0).state, WRITE_REJECTED);
+        assert_eq!(a.ignored_records(), 2);
+    }
+
+    #[test]
+    fn a_vanished_or_missing_record_fails_closed() {
+        let a = WriteAdmission::new("durable");
+        let t0 = a.started;
+        // Never a record: admitted for the bootstrap grace, then throttled,
+        // then refused.
         assert_eq!(a.effective(t0).state, NORMAL);
+        assert_eq!(a.effective(t0 + BOOTSTRAP_GRACE).state, THROTTLED);
+        assert_eq!(a.effective(t0 + STALE_REJECT).state, WRITE_REJECTED);
+        // Unless explicitly assumed (test clusters without a controller).
+        a.assume_normal_without_record(true);
+        assert_eq!(a.effective(t0 + STALE_REJECT).state, NORMAL);
+        // A record taken, then gone: the last one stays and ages.
+        let b = WriteAdmission::new("durable");
+        let t1 = Instant::now();
+        seen(&b, record(1, NORMAL, 0, 1), t1);
+        b.observe_at(None, t1 + Duration::from_secs(1), 1);
+        assert_eq!(b.effective(t1 + Duration::from_secs(1)).state, NORMAL);
+        assert_eq!(b.effective(t1 + Duration::from_secs(31)).state, THROTTLED);
+        assert_eq!(b.effective(t1 + STALE_REJECT).state, WRITE_REJECTED);
+        // A tier the record does not name: throttled, not normal.
+        let c = WriteAdmission::new("archive");
+        seen(&c, record(1, NORMAL, 0, 1), t1);
+        assert_eq!(c.effective(t1).state, THROTTLED);
     }
 
     #[test]

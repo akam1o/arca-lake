@@ -64,6 +64,9 @@ pub struct AdmissionRecord {
     pub capacity_conflicts: Vec<u64>,
     /// Nodes whose file system sharing cannot be checked (no allotment).
     pub capacity_unverified: Vec<u64>,
+    /// Cluster incarnation the leader runs in (Phase 3.8): gateways take
+    /// only records of their own incarnation.
+    pub incarnation: [u8; 16],
 }
 
 impl crate::records::Record for AdmissionRecord {}

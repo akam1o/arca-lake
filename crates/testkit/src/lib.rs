@@ -385,6 +385,8 @@ impl<S: KvStore + 'static> TestCluster<S> {
             multipart_min_part_bytes: opts.multipart_min_part_bytes,
             process_id: format!("gateway-test-{}", uuid::Uuid::new_v4().simple()),
             heartbeat: opts.heartbeat,
+            // Test clusters run no controller unless a test spawns one.
+            admission_without_controller: true,
         };
         let backend = ClusterBackend::new(Arc::clone(&meta), cluster_cfg.clone())
             .await
@@ -485,6 +487,13 @@ impl<S: KvStore + 'static> TestCluster<S> {
         self.backend =
             ClusterBackend::new(Arc::clone(&self.meta), self.cluster_cfg.clone()).await?;
         Ok(())
+    }
+
+    /// The cluster incarnation the gateway serves (admission records a
+    /// test publishes carry it).
+    #[must_use]
+    pub fn incarnation(&self) -> [u8; 16] {
+        self.backend.cluster().incarnation
     }
 
     /// Another gateway backend on the same metadata and nodes (concurrent

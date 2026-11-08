@@ -37,6 +37,7 @@ async fn force(c: &TestCluster, state: u8) {
             ..Default::default()
         }],
         leader_token: u64::MAX,
+        incarnation: c.incarnation(),
         ..Default::default()
     };
     admission::publish(c.meta.as_ref(), &rec).await.unwrap();

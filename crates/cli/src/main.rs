@@ -1483,6 +1483,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 multipart_min_part_bytes: args.multipart_min_part_bytes,
                 process_id: format!("gateway@{}", args.listen),
                 heartbeat: Some(Duration::from_secs(30)),
+                admission_without_controller: false,
             },
         )
         .await

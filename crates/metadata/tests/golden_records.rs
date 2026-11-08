@@ -538,6 +538,7 @@ fn cases() -> Vec<Case> {
                 warming_up: true,
                 capacity_conflicts: vec![5, 6],
                 capacity_unverified: vec![7],
+                incarnation: [9; 16],
             },
         ),
         case(

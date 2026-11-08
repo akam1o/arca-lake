@@ -91,6 +91,10 @@ pub struct ClusterConfig {
     pub process_id: String,
     /// Heartbeat interval; `None` disables the heartbeat (unit tests).
     pub heartbeat: Option<Duration>,
+    /// Admit indefinitely while no admission record was ever published
+    /// (test clusters that run no controller). Off in deployments: without
+    /// a record, writes are throttled and then refused (Phase 3.8).
+    pub admission_without_controller: bool,
 }
 
 /// Fault-injection points in the write path (tests only).
@@ -690,12 +694,15 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             incarnation = %compat::hex(&state.incarnation),
             "gateway startup gate passed"
         );
+        let watch_admission =
+            super::admission::WriteAdmission::for_incarnation(cfg.tier.clone(), state.incarnation);
+        watch_admission.assume_normal_without_record(cfg.admission_without_controller);
         let cluster = Arc::new(ClusterWatch {
             incarnation: state.incarnation,
             state: RwLock::new(Some(state.clone())),
             refused: std::sync::atomic::AtomicU64::new(0),
             refresh_failures: std::sync::atomic::AtomicU64::new(0),
-            admission: super::admission::WriteAdmission::new(cfg.tier.clone()),
+            admission: watch_admission,
         });
         let base = Arc::clone(&meta);
         let meta_repair = Arc::new(GuardedKv::new(

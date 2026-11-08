@@ -465,7 +465,9 @@ fn start_leader_tasks<S: KvStore + 'static>(
                     let clients = clients.clone();
                     let cfg = cfg.clone();
                     let metrics = Arc::clone(&metrics);
-                    async move { health_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
+                    async move {
+                        health_pass(meta.as_ref(), &clients, &cfg, &metrics, incarnation).await
+                    }
                 }
             },
         )),
@@ -894,6 +896,7 @@ async fn health_pass<S: KvStore>(
     clients: &NodeClients,
     cfg: &ControllerConfig,
     metrics: &Metrics,
+    incarnation: [u8; 16],
 ) -> Result<(), ControlError> {
     let nodes = cluster::list_nodes(meta).await?;
     let now = now_ms();
@@ -960,6 +963,7 @@ async fn health_pass<S: KvStore>(
         crate::admission::Term {
             token: metrics.leader_token.load(Ordering::Relaxed),
             pass_started_ms: now,
+            incarnation,
         },
         now_ms(),
     )

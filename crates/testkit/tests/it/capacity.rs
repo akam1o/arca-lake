@@ -522,6 +522,7 @@ async fn force_state(c: &TestCluster, state: u8, rate: u64) {
             group_room: Vec::new(),
         }],
         leader_token: u64::MAX,
+        incarnation: c.incarnation(),
         ..Default::default()
     };
     admission::publish(c.meta.as_ref(), &rec).await.unwrap();
@@ -686,6 +687,7 @@ async fn a_new_term_keeps_the_published_state_until_every_member_reported() {
         let term = Term {
             token,
             pass_started_ms: t0,
+            incarnation: c.incarnation(),
         };
         pass_in_term(c.meta.as_ref(), &tracker, &policy, MIB, 0, term, t0)
             .await
@@ -768,6 +770,7 @@ async fn a_new_term_keeps_the_published_state_until_every_member_reported() {
     let term = Term {
         token: 999,
         pass_started_ms: t0,
+        incarnation: c.incarnation(),
     };
     pass_in_term(fresh, &tracker, &policy, MIB, 0, term, t0)
         .await
@@ -980,6 +983,7 @@ async fn a_new_term_keeps_published_exclusions_until_every_member_reported() {
     let term = Term {
         token: 7,
         pass_started_ms: t0,
+        incarnation: c.incarnation(),
     };
     pass_in_term(
         c.meta.as_ref(),
@@ -1115,5 +1119,73 @@ async fn deleting_everything_on_a_full_node_stays_within_the_delete_reserve() {
     .await
     .unwrap();
     assert_reserves_kept(&c);
+    c.shutdown().await;
+}
+
+/// Phase 3.8 (H3/H4): which admission record a gateway takes. `write_
+/// rejected` published in this incarnation; then a `normal` record of
+/// another incarnation (a restored store's leader), and a `normal` record
+/// of an older term computed an hour later: neither lifts the refusal.
+/// The record removed: the last one stays in force. A newer term of this
+/// incarnation lifts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_newer_records_of_this_incarnation_lift_a_refusal() {
+    use arca_lake_metadata::ops::admission::{AdmissionRecord, TierAdmission};
+    let c = capped(160 * MIB).await;
+    let publish = |state: u8, token: u64, incarnation: [u8; 16], computed_ms: u64| {
+        let meta = Arc::clone(&c.meta);
+        let backend = c.backend.clone();
+        async move {
+            let rec = AdmissionRecord {
+                computed_ms,
+                ttl_ms: 3_600_000,
+                gateways: 1,
+                tiers: vec![TierAdmission {
+                    tier: "default".into(),
+                    state,
+                    reason: "test".into(),
+                    ..Default::default()
+                }],
+                leader_token: token,
+                incarnation,
+                ..Default::default()
+            };
+            admission::publish(meta.as_ref(), &rec).await.unwrap();
+            let rec = admission::current(meta.as_ref()).await.unwrap();
+            backend.cluster().admission.observe(rec, Instant::now());
+        }
+    };
+    let put = |k: &'static str| {
+        let b = c.backend.clone();
+        async move { s3::put(&b, BUCKET, k, body(k), &PutOptions::default()).await }
+    };
+    let ours = c.incarnation();
+    let mut other = ours;
+    other[0] ^= 0xff;
+    publish(3, 10, ours, now_ms()).await;
+    assert_eq!(*put("a").await.unwrap_err().code(), S3ErrorCode::SlowDown);
+    publish(0, 99, other, now_ms()).await;
+    assert_eq!(*put("b").await.unwrap_err().code(), S3ErrorCode::SlowDown);
+    publish(0, 9, ours, now_ms() + 3_600_000).await;
+    assert_eq!(*put("c").await.unwrap_err().code(), S3ErrorCode::SlowDown);
+    assert_eq!(c.backend.cluster().admission.ignored_records(), 2);
+    {
+        use arca_lake_metadata::Txn as _;
+        arca_lake_metadata::transact(c.meta.as_ref(), (), |tx, ()| {
+            Box::pin(async move {
+                tx.clear(&arca_lake_metadata::keys::admission());
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    }
+    c.backend.cluster().admission.observe(
+        admission::current(c.meta.as_ref()).await.unwrap(),
+        Instant::now(),
+    );
+    assert_eq!(*put("d").await.unwrap_err().code(), S3ErrorCode::SlowDown);
+    publish(0, 11, ours, now_ms()).await;
+    put("e").await.unwrap();
     c.shutdown().await;
 }
