@@ -6,7 +6,7 @@
 //!
 //! Three capped nodes (2 + 1), a controller with time-scaled admission
 //! (trend window 60 s, recent window 10 s, dwell 10 s, horizon 300 s,
-//! health every second, GC every second with a 10 s grace) and
+//! health every second, GC every second with a 30 s grace) and
 //! compaction every 5 s. Load: 256 KiB overwrites of 400 keys at
 //! `HIGH` ops/s for 120 s (past what the devices hold), then `LOW` ops/s
 //! for 180 s. One JSON line per run and policy: accepted and refused per
@@ -35,8 +35,10 @@ use bytes::Bytes;
 
 const MIB: u64 = 1 << 20;
 const BUCKET: &str = "capbench";
-const HIGH: u64 = 200;
+const HIGH: u64 = 400;
 const LOW: u64 = 30;
+/// Per node allotment: the high phase retires far more than it holds.
+const NODE_BYTES: u64 = 300 * MIB;
 
 fn runs() -> usize {
     std::env::var("ARCA_CAP_BENCH_RUNS")
@@ -50,7 +52,7 @@ fn controller(policy: Policy) -> ControllerConfig {
     c.lease = Duration::from_secs(2);
     c.health_interval = Duration::from_secs(1);
     c.gc_interval = Duration::from_secs(1);
-    c.gc_grace = Duration::from_secs(10);
+    c.gc_grace = Duration::from_secs(30);
     c.reconcile_interval = Duration::from_secs(3600);
     c.failure_domain = "host".into();
     c.admission = policy;
@@ -120,7 +122,7 @@ async fn drive(c: &TestCluster, rate: u64, secs: u64, phase: &Phase, data: &Byte
             }
         }
     };
-    futures::future::join_all((0..48).map(|_| worker())).await;
+    futures::future::join_all((0..64).map(|_| worker())).await;
 }
 
 async fn run(label: &str, policy: Policy, iteration: usize) {
@@ -130,7 +132,7 @@ async fn run(label: &str, policy: Policy, iteration: usize) {
     })
     .await;
     for i in 0..3 {
-        c.set_node_capacity(i, Some(600 * MIB)).await;
+        c.set_node_capacity(i, Some(NODE_BYTES)).await;
     }
     s3::create_bucket(&c.backend, BUCKET).await.unwrap();
     let ctl = spawn(Arc::clone(&c.meta), controller(policy))

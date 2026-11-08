@@ -44,6 +44,7 @@ mod membership;
 mod membership_faults;
 #[cfg(feature = "fdb")]
 mod mixed_version;
+mod multipart_backpressure;
 mod multipart_integrity;
 mod paging;
 mod parallel_read;
