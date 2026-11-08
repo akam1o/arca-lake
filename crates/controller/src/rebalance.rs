@@ -54,6 +54,10 @@ pub struct RebalancePolicy {
     pub bytes_per_pass: u64,
     /// Generations examined per pass at most.
     pub generations_per_pass: usize,
+    /// After a plan moved what it needed, its tier is not planned again
+    /// for this long (ms): the sources' old copies are reconciled and
+    /// compacted away meanwhile, so that the next plan sees their room.
+    pub settle_ms: u64,
 }
 
 impl Default for RebalancePolicy {
@@ -63,6 +67,8 @@ impl Default for RebalancePolicy {
             stop_imbalance: 0.10,
             bytes_per_pass: 256 << 20,
             generations_per_pass: 4096,
+            // Default orphan age (900 s) and two reconcile intervals.
+            settle_ms: 1_500_000,
         }
     }
 }
@@ -236,7 +242,24 @@ pub async fn run_once<S: KvStore>(
         finish(meta, &mut state, &report).await?;
         return Ok(report);
     };
-    let candidates = plans(&groups, &record, policy, state.plan.as_ref());
+    let mut pacing = rebalance::pacing(meta).await?;
+    pacing.settling.retain(|(_, until)| *until > now_ms);
+    let all = plans(&groups, &record, policy, state.plan.as_ref());
+    let settling = !all.is_empty()
+        && all
+            .iter()
+            .all(|p| pacing.settling.iter().any(|(t, _)| *t == p.tier));
+    let candidates: Vec<RebalancePlan> = all
+        .into_iter()
+        .filter(|p| !pacing.settling.iter().any(|(t, _)| *t == p.tier))
+        .collect();
+    if settling {
+        report.reason = "settling: the last plan's sources are reclaiming their space".into();
+        state.cursor = None;
+        finish(meta, &mut state, &report).await?;
+        rebalance::put_pacing(meta, &pacing).await?;
+        return Ok(report);
+    }
     if candidates.is_empty() {
         report.reason = "balanced".into();
         state.cursor = None;
@@ -270,10 +293,15 @@ pub async fn run_once<S: KvStore>(
         }
         report.plan = Some(p.clone());
         // Never move into the target more than it can take while staying
-        // ahead of the source (half the difference of the rooms).
-        let budget = policy
-            .bytes_per_pass
-            .min(p.target_room.saturating_sub(p.source_room) / 2);
+        // ahead of the source: half the difference of the rooms, computed
+        // once when the plan starts (the rooms seen later do not show the
+        // source's space until its old copies are reclaimed).
+        let key = (p.tier.clone(), p.source, p.target);
+        if pacing.plan.as_ref() != Some(&key) {
+            pacing.plan = Some(key);
+            pacing.remaining_bytes = p.target_room.saturating_sub(p.source_room) / 2;
+        }
+        let budget = policy.bytes_per_pass.min(pacing.remaining_bytes);
         let mut spent = 0u64;
         let mut found = 0u64;
         let started_at_start = after.is_none();
@@ -378,6 +406,17 @@ pub async fn run_once<S: KvStore>(
         report.reason = format!("dry run: {}", report.reason);
     } else {
         state.cursor = after;
+        if report.moved_chunks > 0 {
+            pacing.remaining_bytes = pacing.remaining_bytes.saturating_sub(report.moved_bytes);
+            if pacing.remaining_bytes == 0
+                && let Some((tier, ..)) = pacing.plan.take()
+            {
+                pacing.settling.push((tier, now_ms + policy.settle_ms));
+                state.cursor = None;
+                report.reason = format!("plan done, settling: {}", report.reason);
+            }
+        }
+        rebalance::put_pacing(meta, &pacing).await?;
     }
     finish(meta, &mut state, &report).await?;
     Ok(report)

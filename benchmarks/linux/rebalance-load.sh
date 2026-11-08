@@ -84,14 +84,14 @@ start sa controller "$BIN controller --id ctl-a --http 127.0.0.1:9901 $CTL_ARGS"
 start sb controller "$BIN controller --id ctl-b --http 127.0.0.1:9901 $CTL_ARGS"
 start sb gateway "$BIN gateway --backend cluster --cluster-file $CF --allow-anonymous --listen $ADDR_B:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $((4 << 20)) --small-threshold 0 --failure-domain node"
 for i in $(seq 1 60); do sb "curl -s -o /dev/null $EP/" && break; sleep 1; done
-sb "$S3LOAD --endpoint $EP --bucket rb --op create-bucket" > /dev/null
+sb "$S3LOAD --endpoint $EP --bucket rebal --op create-bucket" > /dev/null
 sa "$ADMIN rebalance pause" > /dev/null
 
 failures=0
 s3() { # <label> <args...>: one s3load run on B, recorded
   local label="$1"; shift
   local line
-  line=$(sb "$S3LOAD --endpoint $EP --bucket rb --label $label --size $SIZE $*" 2>>"$OUT/s3load-stderr.log" || true)
+  line=$(sb "$S3LOAD --endpoint $EP --bucket rebal --label $label --size $SIZE $*" 2>>"$OUT/s3load-stderr.log" || true)
   [ -n "$line" ] || line="{\"label\":\"$label\",\"errors\":-1}"
   echo "$line" >> "$OUT/s3load.jsonl"
   local m
@@ -150,7 +150,7 @@ window() { # <label> <minutes> [faults]
     s3 "$label-get" --op get --prefix base --objects 64 --first $(( (iter * 64) % (BASE - 64) )) --concurrency 4 --verify > /dev/null
     local d=$((iter - 2))
     if [ "$d" -ge 1 ]; then
-      sb "for i in \$(seq 0 7); do curl -s -o /dev/null -w '%{http_code}\n' -X DELETE \"$EP/rb/l$d/\$(printf '%08d' \$i)\"; done" | sort | uniq -c | sed "s/^/$label-delete l$d /" >> "$OUT/deletes.txt"
+      sb "for i in \$(seq 0 7); do curl -s -o /dev/null -w '%{http_code}\n' -X DELETE \"$EP/rebal/l$d/\$(printf '%08d' \$i)\"; done" | sort | uniq -c | sed "s/^/$label-delete l$d /" >> "$OUT/deletes.txt"
       state[$d]=deleted
     fi
     local now=$(( $(date +%s) - t0 ))

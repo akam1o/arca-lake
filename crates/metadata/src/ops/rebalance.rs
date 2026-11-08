@@ -127,3 +127,52 @@ pub async fn record_progress<S: KvStore>(store: &S, progress: &RebalanceState) -
     })
     .await
 }
+
+/// Pacing of the rebalancer (Phase 3.9), a record of its own so that the
+/// state record keeps its encoding: what the plan in progress still needs,
+/// and the tiers settling after a plan finished. A source's room comes
+/// back only once reconciliation and compaction removed the moved chunks'
+/// old copies, while a target's room shrinks at once: planning again from
+/// the rooms before that would move about twice what is needed, then back
+/// (Phase 3.9 load run on FoundationDB).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RebalancePacing {
+    /// `(tier, source, target)` of the plan the need belongs to.
+    pub plan: Option<(String, u64, u64)>,
+    /// Logical bytes the plan may still move (computed once, from the
+    /// rooms when it was planned).
+    pub remaining_bytes: u64,
+    /// Tiers that finished a plan and are not planned again before the
+    /// given unix ms.
+    pub settling: Vec<(String, u64)>,
+}
+
+impl crate::records::Record for RebalancePacing {}
+
+/// The pacing record (default when none was written).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn pacing<S: KvStore>(store: &S) -> Result<RebalancePacing> {
+    transact(store, (), |tx, ()| {
+        Box::pin(async move {
+            Ok(read::<RebalancePacing, _>(tx, &keys::rebalance_pacing())
+                .await?
+                .unwrap_or_default())
+        })
+    })
+    .await
+}
+
+/// Write the pacing record.
+///
+/// # Errors
+///
+/// Backend errors; `Fenced` for a former leader.
+pub async fn put_pacing<S: KvStore>(store: &S, pacing: &RebalancePacing) -> Result<()> {
+    transact(store, pacing, |tx, pacing| {
+        Box::pin(async move { write(tx, &keys::rebalance_pacing(), *pacing) })
+    })
+    .await
+}

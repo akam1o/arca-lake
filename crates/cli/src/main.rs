@@ -762,6 +762,11 @@ struct ControllerArgs {
     /// Stop once the imbalance is below this fraction.
     #[arg(long, default_value_t = 0.10)]
     rebalance_stop_imbalance: f64,
+    /// After a plan moved what it needed, wait this long before planning
+    /// its tier again, s (default: the minimum orphan age plus two
+    /// reconcile intervals, so that the sources' old copies are gone).
+    #[arg(long)]
+    rebalance_settle_secs: Option<u64>,
     /// Chunks a cache-group repair may reconstruct per pass (0 = unlimited).
     #[arg(long, default_value_t = 256)]
     cache_repair_chunks_per_pass: usize,
@@ -1926,6 +1931,10 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
                 .rebalance_stop_imbalance
                 .clamp(0.0, args.rebalance_start_imbalance.clamp(0.0, 1.0)),
             bytes_per_pass: args.rebalance_mib_per_pass << 20,
+            settle_ms: 1000
+                * args
+                    .rebalance_settle_secs
+                    .unwrap_or(args.min_orphan_age_secs + 2 * args.reconcile_interval_secs),
             ..Default::default()
         });
     }

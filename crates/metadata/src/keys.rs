@@ -636,6 +636,12 @@ pub fn rebalance() -> Key {
     pack(&(ROOT, "rebalance"))
 }
 
+/// The rebalancer's pacing (Phase 3.9).
+#[must_use]
+pub fn rebalance_pacing() -> Key {
+    pack(&(ROOT, "rebalance_pacing"))
+}
+
 /// Every arca-lake key (for test setup and teardown).
 #[must_use]
 pub fn all_range() -> KeyRange {

@@ -649,6 +649,76 @@ pub async fn an_expired_move_never_deletes_its_successors_shards<S: KvStore + 's
     c.shutdown().await;
 }
 
+/// Phase 3.9 (load run on FoundationDB): a plan moves what it needed when
+/// it started, computed once from the rooms then, and its tier settles
+/// afterwards, although the rooms (the source's old copies not yet
+/// reclaimed) still show an imbalance: no overshoot, no move back. After
+/// reclamation and the settle time the next plan, if any, goes the same
+/// way and is smaller.
+pub async fn a_finished_plan_settles_instead_of_overshooting<S: KvStore + 'static>(
+    start: impl Starter<S>,
+) {
+    let (c, a, b) = cluster(&start, 160 * MIB).await;
+    exclude(&c, vec![b.id]).await;
+    let mut live = BTreeMap::new();
+    for i in 0..80 {
+        let k = format!("o{i}");
+        s3::put(&c.backend, BUCKET, &k, data(i), &PutOptions::default())
+            .await
+            .unwrap();
+        live.insert(k, data(i));
+    }
+    evaluate(&c).await;
+    let p = RebalancePolicy {
+        settle_ms: 600_000,
+        ..policy(8 * MIB)
+    };
+    let now = now_ms();
+    let mut need = None;
+    let mut moved = 0u64;
+    let mut done = false;
+    for _ in 0..40 {
+        evaluate(&c).await;
+        let r = run_once(c.meta.as_ref(), &c.clients, &p, now)
+            .await
+            .unwrap();
+        if let Some(plan) = &r.plan {
+            assert_eq!((plan.source, plan.target), (a.id, b.id), "{r:?}");
+            need.get_or_insert((plan.target_room - plan.source_room) / 2);
+        }
+        moved += r.moved_bytes;
+        if r.reason.starts_with("plan done") {
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "the plan never finished");
+    let need = need.unwrap();
+    assert!(moved <= need + MIB, "moved {moved}, needed {need}");
+    // The rooms still show an imbalance (nothing reclaimed yet), the tier
+    // settles.
+    evaluate(&c).await;
+    let r = run_once(c.meta.as_ref(), &c.clients, &p, now + 1)
+        .await
+        .unwrap();
+    assert_eq!(r.moved_chunks, 0, "{r:?}");
+    assert!(r.reason.starts_with("settling"), "{r:?}");
+    check(&c, &live).await;
+    // Reclaimed, settled: the next plan (if any) goes the same way, less.
+    c.reconcile(now_ms() + 3_600_000, 0).await;
+    compact_all(&c);
+    evaluate(&c).await;
+    let r = run_once(c.meta.as_ref(), &c.clients, &p, now + 600_001)
+        .await
+        .unwrap();
+    if let Some(plan) = &r.plan {
+        assert_eq!((plan.source, plan.target), (a.id, b.id), "reversed: {r:?}");
+        assert!((plan.target_room - plan.source_room) / 2 < need, "{r:?}");
+    }
+    check(&c, &live).await;
+    c.shutdown().await;
+}
+
 /// Instantiate the rebalancing cases for a backend: `$start` is an
 /// `Option` of a [`Starter`] (`None`: skipped).
 #[macro_export]
@@ -662,6 +732,7 @@ macro_rules! rebalance_suite {
             a_move_whose_target_changed_epoch_is_abandoned,
             a_chunk_larger_than_the_budget_still_moves,
             an_expired_move_never_deletes_its_successors_shards,
+            a_finished_plan_settles_instead_of_overshooting,
         );
     };
     (@each $start:expr; $($name:ident),* $(,)?) => {
