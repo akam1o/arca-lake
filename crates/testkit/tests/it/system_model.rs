@@ -25,7 +25,10 @@ use std::time::Instant;
 use arca_lake_controller::integrity::{
     RepairWorkerOptions, ScrubOptions, coders, repair_pass, scrub_group_now,
 };
+use arca_lake_metadata::ops::compat;
+use arca_lake_metadata::records::ClusterPhase;
 use arca_lake_metadata::records::GroupRecord;
+use arca_lake_protocol::client::{NodeClients, ShardRef};
 use arca_lake_testkit::s3::{self, PutOptions, request};
 use arca_lake_testkit::{ClusterOptions, TestCluster, now_ms, random_bytes};
 use arca_lake_tiering::durable::Coders;
@@ -69,9 +72,33 @@ enum Op {
     Migrate(Option<MigrateFault>),
     CacheReadAndEvict,
     FormerLeaderGc,
+    /// Take a backup of the metadata (one pending at a time).
+    Snapshot,
+    /// Restore the pending backup through the recovery procedure (close
+    /// the fence everywhere, restore, deliver every held delete, recover,
+    /// a new leader reopens); the model goes back to the backup's.
+    Restore,
+    /// `Active` → `ReadOnly` (fence closed) → held deletes delivered →
+    /// `Active`, a new leader term.
+    PhaseFlip,
+    /// A new leader term (a new fence generation).
+    LeaderChange,
+    /// A storage node stops and starts.
+    NodeRestart,
+    /// Held deletes delivered, in shuffled order.
+    DeliverDelayed,
 }
 
 fn pick(rng: &mut Rng) -> Op {
+    match rng.below(27) {
+        20 => return Op::Snapshot,
+        21 => return Op::Restore,
+        22 => return Op::PhaseFlip,
+        23 => return Op::LeaderChange,
+        24 => return Op::NodeRestart,
+        25..=26 => return Op::DeliverDelayed,
+        _ => {}
+    }
     match rng.below(20) {
         0..=5 => Op::Put,
         6..=7 => Op::Delete,
@@ -208,6 +235,159 @@ async fn object_chunks(
     out
 }
 
+/// A decided shard delete: node address, shard, group epoch.
+type Decided = (String, ShardRef, u64);
+
+/// A backup: the metadata and the model as they were.
+type Snapshot = (Vec<(Vec<u8>, Vec<u8>)>, BTreeMap<String, Bytes>);
+
+/// A controller as it was when it decided (its own incarnation and fence).
+fn frozen(c: &TestCluster) -> NodeClients {
+    let f = NodeClients::new(std::time::Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
+    f.set_incarnation(c.clients.incarnation());
+    f.set_delete_fence(c.clients.delete_fence());
+    f
+}
+
+/// The shard deletes GC would send for `key`'s current version.
+async fn decided_deletes(c: &TestCluster, key: &str) -> Vec<(String, ShardRef, u64)> {
+    let groups = c.groups().await;
+    let mut out = Vec::new();
+    for (_, _, rec) in object_chunks(c, key).await {
+        let Some(g) = groups.iter().find(|g| g.id == rec.placement.group_id) else {
+            continue;
+        };
+        for (i, m) in g.members.iter().enumerate() {
+            if let Some(n) = c.node_index(m) {
+                out.push((
+                    c.nodes[n].addr.to_string(),
+                    ShardRef {
+                        group_id: g.id,
+                        chunk_id: rec.chunk_id,
+                        shard_index: u16::try_from(i).unwrap(),
+                    },
+                    g.epoch,
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// A leader's health pass, the fence part (sync for term `token`, push).
+async fn leader_pass(c: &TestCluster, token: u64) {
+    let inc = compat::cluster_state(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap()
+        .incarnation;
+    let mut required = 0;
+    for n in &c.nodes {
+        if let Ok(h) = c.clients.health(&n.addr.to_string()).await {
+            required = required.max(h.delete_fence_generation + u64::from(!h.delete_fence_open));
+        }
+    }
+    let rec = arca_lake_metadata::ops::delete_fence::sync_for_term(
+        c.meta.as_ref(),
+        token,
+        inc,
+        required,
+        now_ms(),
+    )
+    .await
+    .unwrap()
+    .record;
+    c.push_delete_fence(&rec).await;
+}
+
+async fn metadata_snapshot<S: arca_lake_metadata::KvStore>(meta: &S) -> Vec<(Vec<u8>, Vec<u8>)> {
+    use arca_lake_metadata::Txn as _;
+    arca_lake_metadata::transact(meta, (), |tx, ()| {
+        Box::pin(async move {
+            Ok(tx
+                .get_range(&arca_lake_metadata::keys::all_range(), usize::MAX, false)
+                .await?
+                .into_iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
+        })
+    })
+    .await
+    .unwrap()
+}
+
+/// `fdbrestore`: the key space replaced by `snap`.
+async fn metadata_restore<S: arca_lake_metadata::KvStore>(meta: &S, snap: &[(Vec<u8>, Vec<u8>)]) {
+    use arca_lake_metadata::Txn as _;
+    let snap = snap.to_vec();
+    arca_lake_metadata::transact(meta, snap, |tx, snap| {
+        Box::pin(async move {
+            tx.clear_range(&arca_lake_metadata::keys::all_range());
+            for (k, v) in snap {
+                tx.set(k, v);
+            }
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+}
+
+/// After a restore: `recovery begin` (close with the hold, mark), the
+/// verification passes, finalize. Returns the new incarnation.
+async fn model_recover(c: &TestCluster) -> [u8; 16] {
+    use arca_lake_controller::recovery::{RecoveryOptions, recovery_pass};
+    use arca_lake_metadata::guard::{GuardedKv, OpClass};
+    let closed = arca_lake_controller::delete_fence::close_and_push(
+        c.meta.as_ref(),
+        &c.clients,
+        "recovery begin",
+        true,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed.not_acknowledged(), Vec::<u64>::new());
+    let marked = compat::mark_restoring(c.meta.as_ref(), None, None, "model", now_ms())
+        .await
+        .unwrap();
+    let admin = GuardedKv::new(
+        std::sync::Arc::clone(&c.meta),
+        marked.incarnation,
+        OpClass::Admin,
+    );
+    for _ in 0..30 {
+        if recovery_pass(
+            &admin,
+            &c.clients,
+            &RecoveryOptions::default(),
+            None,
+            "model",
+            now_ms(),
+        )
+        .await
+        .unwrap()
+        .finished
+        {
+            break;
+        }
+    }
+    let (v, _) = arca_lake_metadata::ops::recovery::finalize(
+        c.meta.as_ref(),
+        &arca_lake_metadata::ops::recovery::FinalizeRequest {
+            incarnation: marked.incarnation,
+            operator: "model".into(),
+            reason: "model restore".into(),
+            force: true,
+            now_ms: now_ms(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(v.refusal, None, "{v:?}");
+    marked.incarnation
+}
+
 /// Every key reads what the model says.
 async fn check(c: &TestCluster, model: &BTreeMap<String, Bytes>, seed: u64, step: usize) {
     for i in 0..KEYS {
@@ -228,7 +408,7 @@ async fn check(c: &TestCluster, model: &BTreeMap<String, Bytes>, seed: u64, step
 
 async fn run(seed: u64, steps: usize) -> BTreeMap<String, usize> {
     let mut rng = Rng(seed | 1);
-    let c = TestCluster::start(ClusterOptions {
+    let mut c = TestCluster::start(ClusterOptions {
         groups: 2,
         multipart_min_part_bytes: CHUNK / 4,
         cache_nodes: 2,
@@ -241,8 +421,35 @@ async fn run(seed: u64, steps: usize) -> BTreeMap<String, usize> {
     let nodes: HashMap<u64, String> = c.nodes.iter().map(|n| (n.id, n.addr.to_string())).collect();
     let addr_of = |id: u64| nodes.get(&id).cloned();
     let mut trace = Vec::new();
+    // A pending backup (metadata, model) and the deletes decided but not
+    // yet delivered (by a frozen controller each).
+    let mut backup: Option<Snapshot> = None;
+    let mut delayed: Vec<(NodeClients, Vec<Decided>)> = Vec::new();
+    let mut token = 1000u64;
     for step in 0..steps {
-        let op = pick(&mut rng);
+        let mut op = pick(&mut rng);
+        // A pending backup is restored soon (one step in six).
+        if backup.is_some() && rng.below(6) == 0 {
+            op = Op::Restore;
+        }
+        // While a backup is pending nothing removes data (GC, reconcile,
+        // moves, delayed deletes): what a restore expects back is then
+        // exactly the backup's model; a removal before the fence closes
+        // would be ordinary post-backup loss, not what is tested here.
+        if backup.is_some()
+            && matches!(
+                op,
+                Op::Gc
+                    | Op::Reconcile
+                    | Op::Migrate(_)
+                    | Op::FormerLeaderGc
+                    | Op::DeliverDelayed
+                    | Op::PhaseFlip
+                    | Op::LoseShardAndRepair
+            )
+        {
+            op = Op::Compact;
+        }
         trace.push(op);
         let key = format!("k{}", rng.below(KEYS as u64));
         let size = match rng.below(4) {
@@ -265,8 +472,108 @@ async fn run(seed: u64, steps: usize) -> BTreeMap<String, usize> {
                 model.insert(key, data);
             }
             Op::Delete => {
+                // GC decides on the deleted version's shards; the deletes
+                // are held to be delivered late (or never).
+                // Always within a backup window (what a restore brings back
+                // is what a stale delete could destroy).
+                if model.contains_key(&key) && (backup.is_some() || rng.below(2) == 0) {
+                    delayed.push((frozen(&c), decided_deletes(&c, &key).await));
+                }
                 s3::delete(&c.backend, BUCKET, &key).await.unwrap();
                 model.remove(&key);
+            }
+            Op::Snapshot => {
+                if backup.is_none() {
+                    backup = Some((metadata_snapshot(c.meta.as_ref()).await, model.clone()));
+                }
+            }
+            Op::Restore => {
+                if let Some((snap, before)) = backup.take() {
+                    // Runbook: the fence closed everywhere, then restore.
+                    let closed = arca_lake_controller::delete_fence::close_and_push(
+                        c.meta.as_ref(),
+                        &c.clients,
+                        "model restore",
+                        true,
+                        now_ms(),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(closed.not_acknowledged(), Vec::<u64>::new(), "seed {seed}");
+                    metadata_restore(c.meta.as_ref(), &snap).await;
+                    // The race: every held delete arrives now.
+                    for (who, deletes) in delayed.drain(..) {
+                        for (addr, shard, epoch) in deletes {
+                            let _ = who.delete_shard(&addr, shard, epoch).await;
+                        }
+                    }
+                    let inc = model_recover(&c).await;
+                    c.clients.set_incarnation(Some(inc));
+                    c.restart_backend().await.unwrap();
+                    token += 1;
+                    leader_pass(&c, token).await;
+                    model = before;
+                }
+            }
+            Op::PhaseFlip => {
+                compat::transition(
+                    c.meta.as_ref(),
+                    ClusterPhase::Active,
+                    ClusterPhase::ReadOnly,
+                    "model",
+                    now_ms(),
+                )
+                .await
+                .unwrap();
+                arca_lake_controller::delete_fence::close_and_push(
+                    c.meta.as_ref(),
+                    &c.clients,
+                    "model phase",
+                    false,
+                    now_ms(),
+                )
+                .await
+                .unwrap();
+                for (who, deletes) in delayed.drain(..) {
+                    for (addr, shard, epoch) in deletes {
+                        let _ = who.delete_shard(&addr, shard, epoch).await;
+                    }
+                }
+                let (state, _) = compat::transition(
+                    c.meta.as_ref(),
+                    ClusterPhase::ReadOnly,
+                    ClusterPhase::Active,
+                    "model",
+                    now_ms(),
+                )
+                .await
+                .unwrap();
+                // The gateway sees it now rather than at its next refresh.
+                c.backend.cluster().set(Some(state));
+                token += 1;
+                leader_pass(&c, token).await;
+            }
+            Op::LeaderChange => {
+                token += 1;
+                leader_pass(&c, token).await;
+            }
+            Op::NodeRestart => {
+                let i = rng.below(6) as usize;
+                c.stop_node(i).await;
+                c.start_node(i).await;
+            }
+            Op::DeliverDelayed => {
+                // Reordered: a random batch, in shuffled order.
+                let n = delayed.len();
+                if n > 0 {
+                    let (who, mut deletes) = delayed.swap_remove(rng.below(n as u64) as usize);
+                    for i in (1..deletes.len()).rev() {
+                        deletes.swap(i, rng.below(i as u64 + 1) as usize);
+                    }
+                    for (addr, shard, epoch) in deletes {
+                        let _ = who.delete_shard(&addr, shard, epoch).await;
+                    }
+                }
             }
             Op::MultipartComplete | Op::MultipartAbort => {
                 let parts: Vec<Bytes> = (0..=rng.below(3))
@@ -438,7 +745,9 @@ async fn run(seed: u64, steps: usize) -> BTreeMap<String, usize> {
         }
         check(&c, &model, seed, step).await;
     }
-    // Converge: collect everything collectable.
+    // Converge: collect everything collectable (the fence as recorded).
+    drop(backup);
+    c.sync_delete_fence().await;
     let far = now_ms() + 3_600_000;
     for _ in 0..3 {
         c.gc(far, 0).await;
@@ -483,12 +792,16 @@ async fn run(seed: u64, steps: usize) -> BTreeMap<String, usize> {
         durable, expected,
         "seed {seed}: durable shards left {durable}, live objects need {expected}; trace {trace:?}"
     );
+    // Background writes (cache populations) end; then nothing is held.
     for i in 0..c.nodes.len() {
-        assert_eq!(
-            c.node_service(i).device_capacity().unwrap().inflight_bytes,
-            0,
-            "seed {seed}: node {i} holds capacity"
-        );
+        let t = Instant::now();
+        while c.node_service(i).device_capacity().unwrap().inflight_bytes != 0 {
+            assert!(
+                t.elapsed() < std::time::Duration::from_secs(10),
+                "seed {seed}: node {i} holds capacity"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
     c.shutdown().await;
     let mut counts = BTreeMap::new();
