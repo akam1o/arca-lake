@@ -1003,3 +1003,117 @@ async fn a_new_term_keeps_published_exclusions_until_every_member_reported() {
     );
     c.shutdown().await;
 }
+
+/// Phase 3.8 (H1/H2): the Phase 3.7 finding reproduced. A node filled
+/// with small shards to the client reserve, then everything deleted: each
+/// delete writes a tombstone (one record alignment), which used to take
+/// the bytes out of the reserve (11 MiB in Phase 3.7 Test C). The delete
+/// reserve now keeps them above it: after every tombstone, the node still
+/// has its plain reserve free; the breakdown accounts for the tombstones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_everything_on_a_full_node_stays_within_the_delete_reserve() {
+    let mut c = capped(96 * MIB).await;
+    let data = Bytes::from(random_bytes(32 << 10, 81));
+    let mut keys = Vec::new();
+    'fill: for round in 0.. {
+        let batch: Vec<String> = (0..16).map(|i| format!("s{round}-{i}")).collect();
+        let results = futures::future::join_all(batch.iter().map(|k| {
+            let (b, d) = (c.backend.clone(), data.clone());
+            async move { s3::put(&b, BUCKET, k, d, &PutOptions::default()).await }
+        }))
+        .await;
+        for (k, r) in batch.into_iter().zip(results) {
+            match r {
+                Ok(_) => keys.push(k),
+                Err(e) => {
+                    assert_eq!(*e.code(), S3ErrorCode::SlowDown, "{e:?}");
+                    break 'fill;
+                }
+            }
+        }
+    }
+    assert!(keys.len() > 1000, "{} objects", keys.len());
+    assert_reserves_kept(&c);
+    // A restart while full: nothing held, the same delete reserve (it is
+    // derived from the records on disk), the reserve still kept.
+    let d0 = c.node_service(0).device_capacity().unwrap();
+    c.stop_node(0).await;
+    c.start_node(0).await;
+    let d1 = c.node_service(0).device_capacity().unwrap();
+    assert_eq!(d1.inflight_bytes, 0);
+    assert_eq!(d1.delete_reserve_bytes, d0.delete_reserve_bytes);
+    for i in 0..8 {
+        if s3::put(
+            &c.backend,
+            BUCKET,
+            &format!("more{i}"),
+            data.clone(),
+            &PutOptions::default(),
+        )
+        .await
+        .is_ok()
+        {
+            keys.push(format!("more{i}"));
+        }
+    }
+    assert_reserves_kept(&c);
+    let plain: Vec<u64> = (0..3)
+        .map(|i| {
+            let d = c.node_service(i).device_capacity().unwrap();
+            assert!(
+                d.delete_reserve_bytes >= 2000 * c.node_store(i).tombstone_bytes(),
+                "{d:?}"
+            );
+            d.reserved_bytes - d.delete_reserve_bytes
+        })
+        .collect();
+    let before: Vec<u64> = (0..3)
+        .map(|i| c.node_service(i).capacity_breakdown().written.tombstone)
+        .collect();
+    for k in &keys {
+        s3::delete(&c.backend, BUCKET, k).await.unwrap();
+    }
+    // Collect without compacting: every tombstone is on the devices.
+    for _ in 0..6 {
+        c.gc(now_ms() + 3_600_000, 0).await;
+    }
+    // The refused writes' orphans (placed on some members before the
+    // refusal) are reconciliation's.
+    c.reconcile(now_ms() + 3_600_000, 0).await;
+    // At most the refused batch's pending writes are left (their leases
+    // run on the real clock).
+    assert!(
+        c.total_shards().await <= 16 * 3,
+        "everything else collected"
+    );
+    for i in 0..3 {
+        let s = c.node_service(i);
+        let d = s.device_capacity().unwrap();
+        assert!(
+            d.available_bytes >= plain[i],
+            "node {i}: tombstones went into the plain reserve ({} free, {} kept): {d:?}",
+            d.available_bytes,
+            plain[i]
+        );
+        let b = s.capacity_breakdown();
+        let tombs = b.written.tombstone - before[i];
+        assert!(
+            tombs >= keys.len() as u64 * s.store().tombstone_bytes(),
+            "node {i}: {tombs} tombstone bytes for {} deletes",
+            keys.len()
+        );
+    }
+    // Compaction gives the space back; writes resume.
+    compact_all(&c);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "after",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_reserves_kept(&c);
+    c.shutdown().await;
+}

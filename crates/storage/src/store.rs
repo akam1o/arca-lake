@@ -129,6 +129,7 @@ pub struct Verified {
 #[derive(Debug)]
 struct QuarantineLog {
     file: Mutex<File>,
+    written: std::sync::atomic::AtomicU64,
 }
 
 impl QuarantineLog {
@@ -142,6 +143,7 @@ impl QuarantineLog {
             .open(dir.join(Self::NAME))?;
         Ok(Self {
             file: Mutex::new(file),
+            written: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -152,6 +154,8 @@ impl QuarantineLog {
         faults::write_all(&mut f, &buf, &faults::IoOp::QuarantineLog)?;
         faults::guard(&faults::IoOp::QuarantineLog)?;
         f.sync_data()?;
+        self.written
+            .fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -388,6 +392,36 @@ pub struct Store {
     quarantine_log: QuarantineLog,
     /// Format stamped on the next new segment (RFC-014 §5.3).
     format_write: std::sync::atomic::AtomicU16,
+    /// Bytes written to the device by kind (Phase 3.8 capacity breakdown).
+    written: Written,
+}
+
+/// Bytes the store wrote since it was opened, by kind.
+#[derive(Debug, Default)]
+struct Written {
+    data: std::sync::atomic::AtomicU64,
+    tombstone: std::sync::atomic::AtomicU64,
+    rollover: std::sync::atomic::AtomicU64,
+    compaction: std::sync::atomic::AtomicU64,
+    sidecar: std::sync::atomic::AtomicU64,
+}
+
+/// Bytes the store wrote to its device since it was opened, by kind
+/// (record padding included: what the file system allocates for them).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WrittenBytes {
+    /// Data records (shard writes of every class).
+    pub data: u64,
+    /// Tombstone records (deletes).
+    pub tombstone: u64,
+    /// New segment headers written by rollovers.
+    pub rollover: u64,
+    /// Compaction output (records copied and the output's header).
+    pub compaction: u64,
+    /// Quarantine log lines.
+    pub quarantine_log: u64,
+    /// Side files (the sequence bound).
+    pub sidecar: u64,
 }
 
 /// Where a write spends its time (R-48 PUT profiling).
@@ -560,6 +594,7 @@ impl Store {
             format_write: std::sync::atomic::AtomicU16::new(clamp_format_write(u64::from(
                 cfg_format_write,
             ))),
+            written: Written::default(),
         };
         Ok((store, rec.report))
     }
@@ -754,6 +789,48 @@ impl Store {
         self.append(key, FLAG_TOMBSTONE, &[])
     }
 
+    /// Bytes written to the device since the store was opened, by kind.
+    #[must_use]
+    pub fn written(&self) -> WrittenBytes {
+        use std::sync::atomic::Ordering::Relaxed;
+        WrittenBytes {
+            data: self.written.data.load(Relaxed),
+            tombstone: self.written.tombstone.load(Relaxed),
+            rollover: self.written.rollover.load(Relaxed),
+            compaction: self.written.compaction.load(Relaxed),
+            quarantine_log: self.quarantine_log.written.load(Relaxed),
+            sidecar: self.written.sidecar.load(Relaxed),
+        }
+    }
+
+    /// Bytes one tombstone takes on the device (its padded record).
+    #[must_use]
+    pub fn tombstone_bytes(&self) -> u64 {
+        crate::format::round_up(
+            crate::format::RECORD_FIXED_LEN as u64 + 4,
+            u64::from(self.cfg.record_alignment),
+        )
+    }
+
+    /// Bytes of the store directory's files other than segments
+    /// (quarantine log, sequence bound, temporary files).
+    #[must_use]
+    pub fn side_file_bytes(&self) -> u64 {
+        let Ok(rd) = std::fs::read_dir(&self.cfg.dir) else {
+            return 0;
+        };
+        rd.filter_map(std::result::Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_none_or(|n| segment::parse_segment_name(n).is_none())
+            })
+            .filter_map(|e| e.metadata().ok())
+            .filter(std::fs::Metadata::is_file)
+            .map(|m| m.len())
+            .sum()
+    }
+
     /// Timing of writes since the store was opened.
     #[must_use]
     pub fn timings(&self) -> StoreTimingsSnapshot {
@@ -817,6 +894,7 @@ impl Store {
             return Err(std::io::Error::other("record sequences exhausted").into());
         }
         let header = RecordHeader::for_payload(key, flags, sequence, payload, self.cfg.block_size)?;
+        let before = w.active.end();
         let offset = match w.active.append(&header, payload) {
             Ok(o) => o,
             Err(e) => {
@@ -826,6 +904,12 @@ impl Store {
         };
         let segment_id = w.active.header().segment_id;
         let end = w.active.end();
+        let kind = if flags & FLAG_TOMBSTONE == 0 {
+            &self.written.data
+        } else {
+            &self.written.tombstone
+        };
+        kind.fetch_add(end - before, std::sync::atomic::Ordering::Relaxed);
         w.next_sequence += 1;
         w.active_min_seq.get_or_insert(sequence);
         // Forgets the record in `appending` and `inflight` on every way out,
@@ -918,12 +1002,19 @@ impl Store {
         let id = w.next_segment_id;
         w.next_segment_id = id + 1;
         let new = Self::create_segment(&self.cfg, self.device_id, id, self.format_write())?;
+        self.written
+            .rollover
+            .fetch_add(new.end(), std::sync::atomic::Ordering::Relaxed);
         // Every sequence the new segment can take stays below the bound.
         write_sequence_bound(
             &self.cfg.dir,
             reserve(w.next_sequence, sequences_per_segment(&self.cfg))?,
             self.epoch,
         )?;
+        self.written.sidecar.fetch_add(
+            std::fs::metadata(self.cfg.dir.join(SEQUENCE_BOUND_FILE)).map_or(0, |m| m.len()),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let start = (id, new.end());
         {
             let mut readers = self.readers.write().unwrap_or_else(PoisonError::into_inner);
@@ -1519,7 +1610,7 @@ impl Store {
     /// # Errors
     ///
     /// As [`Store::compact`], plus whatever the hook returns.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
     pub fn compact_with_hooks(
         &self,
         segment_id: u64,
@@ -1660,16 +1751,24 @@ impl Store {
             if !copy {
                 continue;
             }
-            let out = match output.as_mut() {
-                Some(o) => o,
-                None => output.insert(Self::create_segment(
+            if output.is_none() {
+                let o = Self::create_segment(
                     &self.cfg,
                     self.device_id,
                     output_id,
                     self.format_write(),
-                )?),
-            };
+                )?;
+                self.written
+                    .compaction
+                    .fetch_add(o.end(), std::sync::atomic::Ordering::Relaxed);
+                output = Some(o);
+            }
+            let out = output.as_mut().expect("created above");
+            let before = out.end();
             let new_offset = out.append(&r.header, &payload)?;
+            self.written
+                .compaction
+                .fetch_add(out.end() - before, std::sync::atomic::Ordering::Relaxed);
             out_min_seq = Some(out_min_seq.map_or(p.sequence, |m| m.min(p.sequence)));
             if !p.is_tombstone() {
                 let old = Location {

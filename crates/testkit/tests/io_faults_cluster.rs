@@ -183,3 +183,43 @@ async fn device_errors_reach_clients_and_the_controller_as_errors_not_corruption
     assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, data);
     c.shutdown().await;
 }
+
+/// Phase 3.8 failure matrix: GC's tombstone writes fail with ENOSPC on
+/// every node. The generation is deferred, not lost and not half
+/// forgotten: its metadata stays until its shards are gone, live objects
+/// read throughout, and once space returns the next pass collects it.
+#[tokio::test]
+async fn gc_tombstones_hitting_enospc_are_deferred_and_collected_once_space_returns() {
+    let _serial = faults::serial();
+    let c = cluster().await;
+    let data = Bytes::from(random_bytes(usize::try_from(MIB / 2).unwrap(), 2));
+    for k in ["kept", "gone"] {
+        s3::put(&c.backend, BUCKET, k, data.clone(), &PutOptions::default())
+            .await
+            .unwrap();
+    }
+    let before = c.total_shards().await;
+    s3::delete(&c.backend, BUCKET, "gone").await.unwrap();
+    // Tombstones are the only small appends here: fail every write.
+    set_io_hook(Some(Arc::new(|op| {
+        if matches!(op, IoOp::Write { .. } | IoOp::Create { .. }) {
+            FaultOutcome::Error(std::io::Error::new(ErrorKind::StorageFull, "ENOSPC"))
+        } else {
+            FaultOutcome::None
+        }
+    })));
+    let r = c.gc(now_ms() + 3_600_000, 0).await;
+    assert_eq!(r.collected, 0, "{r:?}");
+    assert!(r.deferred > 0, "{r:?}");
+    assert_eq!(c.total_shards().await, before, "nothing deleted");
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, data);
+    set_io_hook(None);
+    let mut collected = 0;
+    for _ in 0..3 {
+        collected += c.gc(now_ms() + 3_600_000, 0).await.collected;
+    }
+    assert!(collected > 0);
+    assert_eq!(c.total_shards().await, before / 2);
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, data);
+    c.shutdown().await;
+}

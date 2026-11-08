@@ -1603,6 +1603,7 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
                 &mut out,
                 service.device_capacity().ok().as_ref(),
                 service.admission_counts(),
+                &service.capacity_breakdown(),
             );
             out += &arca_lake_protocol::tls::render_metrics(
                 "arca_node",
@@ -3584,9 +3585,37 @@ fn render_node_capacity(
     out: &mut String,
     device: Option<&arca_lake_protocol::storage::v1::DeviceCapacity>,
     counts: (u64, [u64; 4]),
+    b: &arca_lake_storage_node::CapacityBreakdown,
 ) {
     use std::fmt::Write as _;
     let d = device.cloned().unwrap_or_default();
+    // Where the device's bytes go (Phase 3.8): written since start by kind
+    // (data records split by class), and on the device now.
+    let _ = writeln!(out, "# TYPE arca_node_written_bytes_total counter");
+    for (kind, v) in [
+        ("client", b.by_class[0]),
+        ("repair", b.by_class[1]),
+        ("migration", b.by_class[2]),
+        ("cache", b.by_class[3]),
+        ("data_records", b.written.data),
+        ("tombstone", b.written.tombstone),
+        ("rollover", b.written.rollover),
+        ("compaction", b.written.compaction),
+        ("quarantine_log", b.written.quarantine_log),
+        ("sidecar", b.written.sidecar),
+    ] {
+        let _ = writeln!(out, "arca_node_written_bytes_total{{kind=\"{kind}\"}} {v}");
+    }
+    let _ = writeln!(out, "# TYPE arca_node_device_usage_bytes gauge");
+    for (kind, v) in [
+        ("segments", b.segment_bytes),
+        ("side_files", b.side_file_bytes),
+        ("fs_used", b.fs_used_bytes),
+        ("fs_overhead", b.fs_overhead_bytes()),
+        ("delete_reserve", b.delete_reserve_bytes),
+    ] {
+        let _ = writeln!(out, "arca_node_device_usage_bytes{{kind=\"{kind}\"}} {v}");
+    }
     let _ = writeln!(out, "# TYPE arca_node_capacity_bytes gauge");
     for (kind, v) in [
         ("total", d.total_bytes),
@@ -3881,7 +3910,7 @@ mod metrics_registry {
         let mut out = render_node_stats(&Default::default(), &Default::default());
         render_compaction_stats(&mut out, &Default::default());
         render_device_space(&mut out, Some((1, 2)));
-        render_node_capacity(&mut out, None, (0, [0; 4]));
+        render_node_capacity(&mut out, None, (0, [0; 4]), &Default::default());
         out += &arca_lake_protocol::tls::render_metrics("arca_node", tls(tls_on).as_ref());
         arca_lake_common::metrics::annotate(&out)
     }

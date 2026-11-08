@@ -168,6 +168,7 @@ arca_node_corrupt_reads_total	counter	node	reads	-	reads that found a corrupt re
 arca_node_dead_records	gauge	node	records	-	non-live data records still on the device (what keeps tombstones needed)
 arca_node_device_free_bytes	gauge	node	bytes	-	bytes free for placement on the device (capped by --capacity-bytes)
 arca_node_device_total_bytes	gauge	node	bytes	-	size of the device for placement (capped by --capacity-bytes)
+arca_node_device_usage_bytes	gauge	node	bytes	kind=segments|side_files|fs_used|fs_overhead|delete_reserve	what is on the device now: segments, side_files (quarantine log, sequence bound, temporary files), fs_used (whole file system), fs_overhead (fs_used minus the store files; meaningful when the store has the file system to itself), delete_reserve (kept for the tombstones of deleting every record)
 arca_node_index_entries	gauge	node	entries	kind=live|tombstone_history|dead_tracked|quarantined	in-memory index entries after the last compaction pass (tombstone history is kept only while the index is rebuilt at open)
 arca_node_live_bytes	gauge	node	bytes	-	bytes of live records at the last compaction pass
 arca_node_phase_max_seconds	gauge	node	seconds	phase=put_recv|put_queue|put_store|get_serve|store_append|store_rollover|store_sync_wait|store_fsync	longest node phase observed
@@ -187,3 +188,4 @@ arca_node_tls_handshake_failures_total	counter	node	handshakes	-	TLS handshakes 
 arca_node_tls_reload_failures_total	counter	node	reloads	-	TLS reloads refused because the new material did not validate
 arca_node_tls_reloads_total	counter	node	reloads	-	TLS material reloads that changed it
 arca_node_tls_rpcs_denied_total	counter	node	rpcs	-	RPCs refused by the role authorization table
+arca_node_written_bytes_total	counter	node	bytes	kind=client|repair|migration|cache|data_records|tombstone|rollover|compaction|quarantine_log|sidecar	bytes the store wrote since start: kind client/repair/migration/cache = payload stored per write class; data_records, tombstone, rollover, compaction, quarantine_log, sidecar = on-device bytes per record kind (padding included)

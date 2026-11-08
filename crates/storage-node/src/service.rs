@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -90,6 +90,11 @@ pub struct StorageNodeService {
     admission: crate::capacity::Admission,
     /// The store's capacity domain (Phase 3.7), read at start.
     domain: Option<crate::domain::Domain>,
+    /// Payload bytes stored by write class (client, repair, migration,
+    /// cache; Phase 3.8 capacity breakdown).
+    class_bytes: [AtomicU64; 4],
+    /// Side file bytes as last measured (health and compaction passes).
+    side_bytes: AtomicU64,
     /// Load signals for adaptive background work (ADR-0018).
     load: crate::load::LoadSampler,
 }
@@ -215,6 +220,8 @@ impl StorageNodeService {
             capacity_bytes: cfg.capacity_bytes,
             admission: crate::capacity::Admission::new(reserve),
             domain: crate::domain::of(&cfg.store.dir),
+            class_bytes: Default::default(),
+            side_bytes: AtomicU64::new(0),
             load: crate::load::LoadSampler::new(&cfg.store.dir),
         })
     }
@@ -273,10 +280,37 @@ impl StorageNodeService {
     }
 
     fn device_space_with(&self, segment_bytes: u64) -> Option<(u64, u64)> {
+        // The allotment covers every file of the store, side files too.
+        let used = segment_bytes.saturating_add(self.side_bytes.load(Ordering::Relaxed));
         device_space(self.store.dir()).map(|(free, total)| match self.capacity_bytes {
-            Some(cap) => (free.min(cap.saturating_sub(segment_bytes)), total.min(cap)),
+            Some(cap) => (free.min(cap.saturating_sub(used)), total.min(cap)),
             None => (free, total),
         })
+    }
+
+    /// The delete reserve now (Phase 3.8): tombstones for every record
+    /// the store holds (live and quarantined).
+    #[must_use]
+    pub fn delete_reserve(&self) -> u64 {
+        let s = self.store.index_sizes();
+        crate::capacity::delete_reserve(s.live + s.quarantined, self.store.tombstone_bytes())
+    }
+
+    /// Where the device's bytes went (Phase 3.8).
+    #[must_use]
+    pub fn capacity_breakdown(&self) -> CapacityBreakdown {
+        let side = self.store.side_file_bytes();
+        self.side_bytes.store(side, Ordering::Relaxed);
+        let fs = device_fs_used(self.store.dir());
+        let segments = self.store.stats().map_or(0, |s| s.segment_bytes);
+        CapacityBreakdown {
+            written: self.store.written(),
+            by_class: std::array::from_fn(|i| self.class_bytes[i].load(Ordering::Relaxed)),
+            segment_bytes: segments,
+            side_file_bytes: side,
+            fs_used_bytes: fs,
+            delete_reserve_bytes: self.delete_reserve(),
+        }
     }
 
     /// Capacity of the node's device (Phase 3.6): space, what the store
@@ -291,8 +325,11 @@ impl StorageNodeService {
     }
 
     fn device_capacity_with(&self, stats: &arca_lake_storage::StoreStats) -> pb::DeviceCapacity {
+        self.side_bytes
+            .store(self.store.side_file_bytes(), Ordering::Relaxed);
         let space = self.device_space_with(stats.segment_bytes);
         let reserve = self.admission.reserve();
+        let delete = self.delete_reserve();
         pb::DeviceCapacity {
             total_bytes: space.map_or(0, |s| s.1),
             available_bytes: space.map_or(0, |s| s.0),
@@ -300,9 +337,11 @@ impl StorageNodeService {
             live_bytes: stats.live_bytes,
             reclaimable_bytes: stats.segment_bytes.saturating_sub(stats.live_bytes),
             quarantined_bytes: self.store.quarantine_stats().1,
-            reserved_bytes: reserve.reserved,
+            reserved_bytes: reserve.reserved.saturating_add(delete),
             inflight_bytes: self.admission.inflight(),
-            repair_floor_bytes: reserve.repair_floor,
+            repair_floor_bytes: reserve.repair_floor.saturating_add(delete),
+            delete_reserve_bytes: delete,
+            side_file_bytes: self.side_bytes.load(Ordering::Relaxed),
             sampled_unix_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
@@ -525,6 +564,7 @@ impl StorageNode for StorageNodeService {
                 || self.device_space().map(|(free, _)| free),
                 class,
                 header.payload_len,
+                self.delete_reserve(),
             )
             .map_err(|r| tonic::Status::resource_exhausted(r.to_string()))?;
         let mut payload = Vec::with_capacity(expected);
@@ -577,6 +617,7 @@ impl StorageNode for StorageNodeService {
         self.stats.put_queue.observe(queue_wait);
         self.stats.put_store.observe(store_time);
         let sequence = result.map_err(Self::storage_status)?;
+        self.class_bytes[class as usize].fetch_add(header.payload_len, Ordering::Relaxed);
         Ok(tonic::Response::new(pb::PutShardResponse {
             crc32c: crc,
             bytes_received: header.payload_len,
@@ -1070,6 +1111,49 @@ impl StorageNode for StorageNodeService {
             devices: vec![self.device_capacity_with(&stats)],
         }))
     }
+}
+
+/// Where a node's device bytes went (Phase 3.8): bytes written by kind
+/// and class since start, and what is on the device now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CapacityBreakdown {
+    /// Bytes the store wrote since it was opened, by kind.
+    pub written: arca_lake_storage::WrittenBytes,
+    /// Payload bytes stored by class (client, repair, migration, cache).
+    pub by_class: [u64; 4],
+    /// Segment files now.
+    pub segment_bytes: u64,
+    /// Other files of the store now.
+    pub side_file_bytes: u64,
+    /// Bytes used on the file system now (by everything on it).
+    pub fs_used_bytes: u64,
+    /// The delete reserve now.
+    pub delete_reserve_bytes: u64,
+}
+
+impl CapacityBreakdown {
+    /// File system bytes not in the store's files (file system metadata,
+    /// journal, other users of the file system): meaningful when the store
+    /// has the file system to itself.
+    #[must_use]
+    pub fn fs_overhead_bytes(&self) -> u64 {
+        self.fs_used_bytes
+            .saturating_sub(self.segment_bytes.saturating_add(self.side_file_bytes))
+    }
+}
+
+/// Bytes used on the file system holding `dir` (blocks in use, including
+/// those reserved for root).
+fn device_fs_used(dir: &std::path::Path) -> u64 {
+    let Ok(s) = rustix::fs::statvfs(dir) else {
+        return 0;
+    };
+    let unit = if s.f_frsize > 0 {
+        s.f_frsize
+    } else {
+        s.f_bsize
+    };
+    s.f_blocks.saturating_sub(s.f_bfree).saturating_mul(unit)
 }
 
 /// `(available, total)` bytes of the file system holding `dir`.

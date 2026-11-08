@@ -68,6 +68,12 @@ message DeviceCapacity {
   bool allotted = 13;
   // The file system's own size (not capped by the allotment).
   uint64 fs_total_bytes = 14;
+  // Delete reserve (Phase 3.8): kept for the tombstones of deleting every
+  // record held; reserved_bytes and repair_floor_bytes include it.
+  uint64 delete_reserve_bytes = 15;
+  // Bytes of the store's files other than segments (quarantine log,
+  // sequence bound, temporary files).
+  uint64 side_file_bytes = 16;
 }
 
 // Client-streaming body: one header followed by data frames.

@@ -9,6 +9,19 @@
 //! Classes: client writes (and tier migration and cache population) stop
 //! at the reserve; repair may use the reserve down to the repair floor,
 //! which stays for compaction output and segment rollover.
+//!
+//! Deletes are never refused (they are how space comes back), but each
+//! writes a tombstone record (one record alignment, 4 KiB by default): a
+//! node full of small shards whose data is all deleted spends that much
+//! per shard before compaction reclaims anything (Phase 3.7 Test C: 11 MiB
+//! below the reserve). Since Phase 3.8 both floors sit on top of a delete
+//! reserve that grows with the records the store holds, so that the
+//! tombstones of deleting everything never reach the repair floor.
+//!
+//! Layers, from the device's end: emergency (quarantine log, sequence
+//! bound: a few KiB) and compaction/rollover (one segment and 16 MiB) form
+//! the repair floor; the delete reserve sits on it; repair may write down
+//! to their sum; client writes stop at the client reserve above it.
 
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -18,6 +31,19 @@ use arca_lake_protocol::storage::v1::WriteClass;
 
 /// Space a record takes beyond its payload, at most (header and alignment).
 pub const RECORD_OVERHEAD: u64 = 8 << 10;
+
+/// Tombstones budgeted beyond one per record held (unconditional deletes of
+/// keys already gone write one too).
+pub const DELETE_SLACK_RECORDS: u64 = 1024;
+
+/// The delete reserve of a store holding `records` records whose
+/// tombstones take `tombstone_bytes` each.
+#[must_use]
+pub fn delete_reserve(records: u64, tombstone_bytes: u64) -> u64 {
+    records
+        .saturating_add(DELETE_SLACK_RECORDS)
+        .saturating_mul(tombstone_bytes)
+}
 
 /// Reserve and floors of one device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +92,7 @@ pub struct Refusal {
     pub needed: u64,
     /// Bytes available to it (free minus writes in flight).
     pub available: u64,
-    /// The floor of its class.
+    /// The floor of its class (delete reserve included).
     pub floor: u64,
     /// Its class.
     pub class: WriteClass,
@@ -159,12 +185,13 @@ impl Admission {
         class: WriteClass,
         payload: u64,
     ) -> Result<Held<'_>, Refusal> {
-        self.admit_with(|| free, class, payload)
+        self.admit_with(|| free, class, payload, 0)
     }
 
     /// [`Self::admit`], sampling the free space with `free` while the
     /// admission lock is held: a sample taken before it could predate
-    /// writes that were stored (and released their holds) meanwhile.
+    /// writes that were stored (and released their holds) meanwhile; the
+    /// class's floor is raised by `delete_reserve` ([`delete_reserve`]).
     ///
     /// # Errors
     ///
@@ -174,12 +201,13 @@ impl Admission {
         free: impl FnOnce() -> Option<u64>,
         class: WriteClass,
         payload: u64,
+        delete_reserve: u64,
     ) -> Result<Held<'_>, Refusal> {
         let needed = payload.saturating_add(RECORD_OVERHEAD);
         let mut g = self.inflight.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(free) = free() {
             let available = free.saturating_sub(*g);
-            let floor = self.reserve.floor(class);
+            let floor = self.reserve.floor(class).saturating_add(delete_reserve);
             if available.saturating_sub(needed) < floor || available < needed {
                 self.refused[class as usize].fetch_add(1, Ordering::Relaxed);
                 return Err(Refusal {
@@ -236,6 +264,31 @@ mod tests {
         let (admitted, refused) = a.counts();
         assert_eq!(admitted, 2);
         assert_eq!(refused, [1, 1, 0, 1]);
+    }
+
+    #[test]
+    fn the_delete_reserve_raises_both_floors() {
+        let a = Admission::new(Reserve::new(100 * MIB, 32 * MIB));
+        let d = delete_reserve(10_000, 4096);
+        assert_eq!(d, (10_000 + DELETE_SLACK_RECORDS) * 4096);
+        let free = 100 * MIB + 2 * MIB;
+        assert!(
+            a.admit_with(|| Some(free), WriteClass::Client, MIB, 0)
+                .is_ok()
+        );
+        let e = a
+            .admit_with(|| Some(free), WriteClass::Client, MIB, d)
+            .unwrap_err();
+        assert_eq!(e.floor, 100 * MIB + d);
+        let free = 48 * MIB + d + 2 * MIB;
+        assert!(
+            a.admit_with(|| Some(free), WriteClass::Repair, MIB, d)
+                .is_ok()
+        );
+        assert!(
+            a.admit_with(|| Some(free - 2 * MIB), WriteClass::Repair, MIB, d)
+                .is_err()
+        );
     }
 
     #[test]
