@@ -307,7 +307,14 @@ pub async fn run_once<S: KvStore>(
                     // would make the target the fuller group (the next
                     // pass would move it back).
                     let difference = p.target_room.saturating_sub(p.source_room);
-                    if (spent > 0 || len >= difference) && spent + len > budget {
+                    if len >= difference {
+                        // Moving it would invert the pair: leave it, and
+                        // keep scanning (stopping here would stop every
+                        // pass at the same chunk).
+                        report.skipped_chunks += 1;
+                        continue;
+                    }
+                    if spent > 0 && spent + len > budget {
                         report.reason = "pass budget spent".into();
                         stopped = true;
                         break 'pages;
