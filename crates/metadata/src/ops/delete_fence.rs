@@ -23,6 +23,21 @@ use crate::ops::{compat, read, write};
 use crate::records::ClusterPhase;
 use crate::{keys, transact};
 
+/// Highest generation recorded (storage nodes ignore higher ones).
+pub const MAX_GENERATION: u64 = u64::MAX >> 1;
+
+/// The generation after `g`; refused beyond [`MAX_GENERATION`] (a node
+/// reported one no cluster reaches).
+fn next_generation(g: u64) -> Result<u64> {
+    g.checked_add(1)
+        .filter(|n| *n <= MAX_GENERATION)
+        .ok_or_else(|| {
+            MetaError::InvalidArgument(format!(
+                "delete fence generation {g} cannot advance (a node reported a generation beyond {MAX_GENERATION})"
+            ))
+        })
+}
+
 /// The delete fence as decided.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DeleteFenceRecord {
@@ -89,7 +104,7 @@ pub async fn close<S: KvStore>(
                     .await?
                     .map_or([0; 16], |s| s.incarnation);
                 let next = DeleteFenceRecord {
-                    generation: rec.generation.max(*at_least) + 1,
+                    generation: next_generation(rec.generation.max(*at_least))?,
                     open: false,
                     leader_token: 0,
                     incarnation,
@@ -190,7 +205,10 @@ pub async fn sync_for_term<S: KvStore>(
                         None
                     } else {
                         Some(DeleteFenceRecord {
-                            generation: (rec.generation + 1).max(highest_reported),
+                            // Above every generation a node reported (an open one
+                            // included: after a restore without the close, a
+                            // node's old generation is never reopened).
+                            generation: next_generation(rec.generation.max(highest_reported))?,
                             open: true,
                             leader_token: token,
                             incarnation,
@@ -201,7 +219,7 @@ pub async fn sync_for_term<S: KvStore>(
                     }
                 } else if rec.open {
                     Some(DeleteFenceRecord {
-                        generation: rec.generation.max(highest_reported) + 1,
+                        generation: next_generation(rec.generation.max(highest_reported))?,
                         open: false,
                         leader_token: 0,
                         incarnation,
@@ -276,7 +294,7 @@ pub async fn open_without_leader<S: KvStore>(
             };
             let rec: DeleteFenceRecord = read(tx, &keys::delete_fence()).await?.unwrap_or_default();
             let next = DeleteFenceRecord {
-                generation: rec.generation.max(*at_least) + 1,
+                generation: next_generation(rec.generation.max(*at_least))?,
                 open: true,
                 leader_token: 0,
                 incarnation: state.incarnation,

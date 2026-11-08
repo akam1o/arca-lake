@@ -155,6 +155,45 @@ async fn every_rpc_is_authorised_by_role() {
         denied(&gw.health_with(&addr, facts()).await.unwrap_err()),
         "a gateway may not push cluster facts"
     );
+    // The delete fence (Phase 3.9 review): any fence field is a fact
+    // change; neither a gateway nor another node may open, close, hold or
+    // release it.
+    for (who, c) in [("gateway", &gw), ("node", &peer)] {
+        for how in [
+            arca_lake_protocol::client::FencePush::default(),
+            arca_lake_protocol::client::FencePush {
+                release: true,
+                ..Default::default()
+            },
+        ] {
+            let e = c
+                .push_delete_fence_with(&addr, 7, !how.release, how)
+                .await
+                .unwrap_err();
+            assert!(denied(&e), "{who} {how:?}: {e}");
+        }
+        let e = c
+            .push_delete_fence_with(
+                &addr,
+                0,
+                false,
+                arca_lake_protocol::client::FencePush {
+                    release: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(denied(&e), "{who} release alone: {e}");
+    }
+    assert_eq!(
+        ctl.push_delete_fence(&addr, 7, true).await.unwrap(),
+        (7, true)
+    );
+    assert_eq!(
+        admin.push_delete_fence(&addr, 8, false).await.unwrap(),
+        (8, false)
+    );
     assert!(denied(&peer.update_epoch(&addr, 1, 5).await.unwrap_err()));
     ctl.update_epoch(&addr, 1, 5).await.unwrap();
     ctl.verify_shards_page(&addr, 1, None, 8).await.unwrap();

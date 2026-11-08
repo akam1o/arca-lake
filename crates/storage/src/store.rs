@@ -1655,6 +1655,31 @@ impl Store {
         segment_id: u64,
         hooks: &mut dyn FnMut(CompactionStep) -> Result<()>,
     ) -> Result<CompactionReport> {
+        let mut output_id = None;
+        let r = self.compact_into(segment_id, hooks, &mut output_id);
+        // An output not yet published (renamed) is nobody's: removed now
+        // rather than at the next open (Phase 3.9 review), so repeated
+        // failures do not pile up temporary files.
+        if r.is_err()
+            && let Some(id) = output_id
+        {
+            let tmp = segment::temp_segment_path(&self.cfg.dir, id);
+            if std::fs::remove_file(&tmp).is_ok()
+                && let Ok(dir) = File::open(&self.cfg.dir)
+            {
+                let _ = faults::sync_all(&dir, "dir");
+            }
+        }
+        r
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compact_into(
+        &self,
+        segment_id: u64,
+        hooks: &mut dyn FnMut(CompactionStep) -> Result<()>,
+        reserved: &mut Option<u64>,
+    ) -> Result<CompactionReport> {
         // Reserve an output ID.
         let output_id = {
             let mut w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1667,6 +1692,7 @@ impl Store {
             w.next_segment_id += 1;
             id
         };
+        *reserved = Some(output_id);
 
         let source = {
             let readers = self.readers.read().unwrap_or_else(PoisonError::into_inner);

@@ -251,6 +251,9 @@ async fn a_delete_decided_before_a_restore_never_removes_what_the_restored_metad
         );
     }
     let _inc = recover(&c).await;
+    // Gateways start again on the restored metadata (runbook): one of the
+    // old incarnation refuses once its refresh sees the new one.
+    c.restart_backend().await.unwrap();
     assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
     // Invariant F: the hold went with finalize; a leader opens a new
     // generation; delete again; GC collects; the old deletes stay refused.
@@ -262,7 +265,6 @@ async fn a_delete_decided_before_a_restore_never_removes_what_the_restored_metad
     // Refused (the old incarnation now as well).
     assert_eq!(deliver(&old, &deletes).await.applied, 0);
     let shards = c.total_shards().await;
-    c.restart_backend().await.unwrap();
     s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
     let far = now_ms() + 3_600_000;
     let r = c.gc(far, 0).await;

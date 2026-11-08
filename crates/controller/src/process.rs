@@ -924,6 +924,7 @@ async fn reconcile_pass<S: KvStore>(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn health_pass<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -973,7 +974,13 @@ async fn health_pass<S: KvStore>(
         // a leader never releases one (only `admin delete-fence release`,
         // or a new incarnation, does): one started on restored metadata
         // whose record lost the hold cannot reopen deletes.
-        delete_fence_hold: fence.record.operator_hold && !fence.record.open,
+        // Only a hold of this incarnation: the one `recovery begin` set
+        // was set before the restore's incarnation, and repeating it now
+        // would tie it on a node that missed the close to this incarnation,
+        // which then could not lift it after finalize.
+        delete_fence_hold: fence.record.operator_hold
+            && !fence.record.open
+            && fence.record.incarnation == incarnation,
         delete_fence_release: false,
     };
     for n in &nodes {

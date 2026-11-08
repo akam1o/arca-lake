@@ -17,6 +17,8 @@ pub struct NodeFence {
     pub node_id: u64,
     /// `(generation, open)` it holds, or the error.
     pub fence: Result<(u64, bool), String>,
+    /// It holds an operator hold (only known when it answered).
+    pub held: bool,
 }
 
 /// What [`close_and_push`] did.
@@ -55,14 +57,15 @@ pub async fn node_fences<S: KvStore>(
     let mut out = Vec::new();
     for n in cluster::list_nodes(meta).await? {
         clients.note_node_id(&n.address, n.id);
-        let fence = clients
-            .health(&n.address)
-            .await
+        let h = clients.health(&n.address).await;
+        let held = h.as_ref().is_ok_and(|h| h.delete_fence_hold);
+        let fence = h
             .map(|h| (h.delete_fence_generation, h.delete_fence_open))
             .map_err(|e| format!("{}: {}", e.code(), e.message()));
         out.push(NodeFence {
             node_id: n.id,
             fence,
+            held,
         });
     }
     Ok(out)
@@ -108,14 +111,17 @@ pub async fn close_and_push<S: KvStore>(
     };
     let mut nodes = Vec::new();
     for n in cluster::list_nodes(meta).await? {
-        let fence = clients
+        let pushed = clients
             .push_delete_fence_with(&n.address, record.generation, false, how)
-            .await
+            .await;
+        let is_held = pushed.as_ref().is_ok_and(|p| p.2);
+        let fence = pushed
             .map(|(g, o, _)| (g, o))
             .map_err(|e| format!("{}: {}", e.code(), e.message()));
         nodes.push(NodeFence {
             node_id: n.id,
             fence,
+            held: is_held,
         });
     }
     Ok(Closed {
@@ -146,10 +152,11 @@ pub async fn release_and_push<S: KvStore>(
     };
     let mut held = Vec::new();
     for n in cluster::list_nodes(meta).await? {
-        // Generation 0: the release alone (the generation the nodes hold
-        // stays; the leader opens a higher one).
+        // The release names the recorded (closed) generation: a node lifts
+        // its hold only at it or above, so a delayed release never lifts a
+        // later close's hold.
         match clients
-            .push_delete_fence_with(&n.address, 0, false, how)
+            .push_delete_fence_with(&n.address, record.generation, false, how)
             .await
         {
             Ok((_, _, false)) => {}

@@ -2511,10 +2511,11 @@ fn print_node_fences(nodes: &[arca_lake_controller::delete_fence::NodeFence]) {
     for n in nodes {
         match &n.fence {
             Ok((g, open)) => println!(
-                "node {} generation {} {}",
+                "node {} generation {} {}{}",
                 n.node_id,
                 g,
-                if *open { "open" } else { "closed" }
+                if *open { "open" } else { "closed" },
+                if n.held { " held" } else { "" }
             ),
             Err(e) => println!("node {} unreachable ({e})", n.node_id),
         }
@@ -3350,7 +3351,11 @@ async fn run_admin_cluster<S: arca_lake_metadata::KvStore + 'static>(
             )
             .await
             {
-                eprintln!("warning: {e}");
+                // The phase changed; deletes already decided may still run
+                // on the nodes that did not acknowledge (Phase 3.9 review).
+                return fail(format!(
+                    "cluster ReadOnly, but the delete fence is not closed everywhere: {e}; re-run `admin delete-fence close`"
+                ));
             }
             ExitCode::SUCCESS
         }

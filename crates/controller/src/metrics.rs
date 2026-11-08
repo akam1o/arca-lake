@@ -51,7 +51,7 @@ impl FenceView {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .nodes
             .values()
-            .map(|&(g, open)| if open { g } else { g + 1 })
+            .map(|&(g, open)| if open { g } else { g.saturating_add(1) })
             .max()
             .unwrap_or(0)
     }

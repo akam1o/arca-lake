@@ -689,6 +689,17 @@ What deletes stop never stops PUT or GET.
    open everywhere, the cause is not the fence: see §10.10. A long hold
    uses capacity: watch §10.11.
 
+9. **A node holds its fence after a restart with "cluster facts damaged
+   or missing"** in its log (`arca_node_delete_fence_hold` 1, generation
+   0). Its `cluster.txt` could not be read, had a damaged line, or is
+   missing while the store holds data: the node no longer knows its
+   generation floor, hold or incarnation, so it refuses every delete
+   until an operator releases it. Check the disk first; then, with the
+   cluster `Active`, run `admin delete-fence release --reason R`. The
+   leader's next pass opens its generation there. A release names the
+   recorded closed generation; a node holding a higher one (it saw a
+   later close) keeps its hold, and the command reports it.
+
 There is deliberately no command that forces deletes open.
 
 ## 11. Alternatives considered

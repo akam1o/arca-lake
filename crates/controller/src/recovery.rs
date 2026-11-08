@@ -454,7 +454,12 @@ async fn push_cluster_facts<S: KvStore>(
         incarnation_changed_ms: state.changed_ms,
         delete_fence_generation: if fence.open { 0 } else { fence.generation },
         delete_fence_open: false,
-        delete_fence_hold: !fence.open && fence.operator_hold,
+        // Never the hold: recovery runs in the restored incarnation, and a
+        // hold tied to it on a node that missed `recovery begin`'s close
+        // could not be lifted after finalize. That node refuses this
+        // incarnation's opens only outside Active, which is all recovery
+        // needs; its old incarnation's deletes are refused by incarnation.
+        delete_fence_hold: false,
         delete_fence_release: false,
     };
     for n in nodes.values() {

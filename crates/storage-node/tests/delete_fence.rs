@@ -197,6 +197,21 @@ async fn quarantined_shards_beyond_one_page_are_listed() {
         .unwrap();
     let addr = n.local_addr.to_string();
     let c = NodeClients::new(Duration::from_secs(5));
+    // A store written without the node has no cluster facts: the node holds
+    // its delete fence until an operator releases it (Phase 3.9 review).
+    assert_eq!(n.service().delete_fence(), (0, false));
+    assert!(n.service().delete_fence_held());
+    c.push_delete_fence_with(
+        &addr,
+        0,
+        false,
+        arca_lake_protocol::client::FencePush {
+            release: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     open_fence(&c, &addr).await;
     let (mut live, mut quarantined, mut after) = (Vec::new(), Vec::new(), None);
     for _ in 0..10 {
@@ -523,7 +538,19 @@ async fn only_a_later_incarnation_or_a_release_lifts_the_hold() {
     // beyond what 3 decides; the release of 3 lifts it.
     assert_eq!(push(6, false, true, false, 3).await, (6, false, true));
     assert_eq!(push(7, true, false, false, 2).await, (6, false, true));
-    assert_eq!(push(0, false, false, true, 3).await, (6, false, false));
+    // A release names the generation it releases: below it, nothing.
+    assert_eq!(push(5, false, false, true, 3).await, (6, false, true));
+    assert_eq!(push(6, false, false, true, 3).await, (6, false, false));
     assert_eq!(push(7, true, false, false, 3).await, (7, true, false));
+    // A release delayed past a later close does not lift that close's hold.
+    assert_eq!(push(8, false, true, false, 3).await, (8, false, true));
+    let delayed_release_of_6 = push(6, false, false, true, 3).await;
+    assert_eq!(delayed_release_of_6, (8, false, true));
+    // A release never opens; a generation no cluster reaches is ignored.
+    assert_eq!(push(9, true, false, true, 3).await, (8, false, true));
+    assert_eq!(
+        push(u64::MAX, false, false, false, 3).await,
+        (8, false, true)
+    );
     n.shutdown().await;
 }

@@ -628,6 +628,13 @@ fn a_compaction_output_torn_before_its_sync_is_never_a_corrupt_segment() {
         })));
         assert!(store.compact(first).is_err());
         set_io_hook(None);
+        // The failed output is removed at once, not left for the next open.
+        let tmp = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(tmp, 0, "a failed compaction left its output");
         // The active segment rolls over past the reserved output id.
         for i in 100..140u8 {
             store.put(key(i), &payload(i, 30_000)).unwrap();

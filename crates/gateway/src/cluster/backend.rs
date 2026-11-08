@@ -868,6 +868,9 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         // store was briefly unreachable (RFC-011 §6).
                         w.refresh_failures
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Deletes are another matter: without the current
+                        // fence this gateway sends none (Phase 3.9 review).
+                        clients.set_delete_fence(None);
                         tracing::warn!(error = %e, "cluster state refresh failed; keeping the last state");
                     }
                 }

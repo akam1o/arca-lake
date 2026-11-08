@@ -263,6 +263,11 @@ pub async fn run_once<S: KvStore>(
     if candidates.is_empty() {
         report.reason = "balanced".into();
         state.cursor = None;
+        // A need computed for a plan that is no longer wanted is not
+        // reused if the same pair comes back later.
+        if pacing.plan.take().is_some() {
+            rebalance::put_pacing(meta, &pacing).await?;
+        }
         finish(meta, &mut state, &report).await?;
         return Ok(report);
     }

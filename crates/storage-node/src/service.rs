@@ -174,6 +174,9 @@ impl StorageNodeService {
     ///
     /// Storage or I/O errors while opening.
     pub fn open(cfg: &NodeConfig) -> Result<Self, StorageError> {
+        // Before the store opens (and creates its first segment): a missing
+        // facts file is a new node only while no segment exists.
+        let cluster = crate::cluster::ClusterFacts::open(&cfg.store.dir);
         let (store, report) = Store::open(cfg.store.clone())?;
         if !report.quarantined.is_empty()
             || !report.holes.is_empty()
@@ -198,7 +201,6 @@ impl StorageNodeService {
             |r| crate::capacity::Reserve::new(r, cfg.store.segment_max_bytes),
         );
         let epochs = EpochTable::open(&cfg.store.dir);
-        let cluster = crate::cluster::ClusterFacts::open(&cfg.store.dir);
         if cluster.format_write > 0 {
             store.set_format_write(cluster.format_write);
         }
@@ -1076,9 +1078,16 @@ impl StorageNode for StorageNodeService {
         &self,
         request: tonic::Request<pb::HealthRequest>,
     ) -> Result<tonic::Response<pb::HealthResponse>, tonic::Status> {
+        // Anything that changes the node's facts, the delete fence
+        // included (Phase 3.9 review), needs the controller or admin role.
         let facts = {
             let r = request.get_ref();
-            r.format_write > 0 || !r.incarnation.is_empty()
+            r.format_write > 0
+                || !r.incarnation.is_empty()
+                || r.delete_fence_generation > 0
+                || r.delete_fence_open
+                || r.delete_fence_hold
+                || r.delete_fence_release
         };
         self.authorize(
             &request,
@@ -1112,21 +1121,31 @@ impl StorageNode for StorageNodeService {
                 caller.filter(|inc| c.incarnation == Some(*inc)),
             )
         };
-        let changes = {
-            let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+        let needs_exclusive = |c: &crate::cluster::ClusterFacts| {
             let new_incarnation = caller.is_some_and(|inc| c.incarnation != Some(inc));
-            let (generation, open, hold, release, from) = fence_args(&c);
+            let (generation, open, hold, release, from) = fence_args(c);
             new_incarnation
                 || c.plan_fence(generation, open, hold, release, from)
                     .is_some()
         };
-        let _fence = if changes {
-            Some(Arc::clone(&self.fence).write_owned().await)
-        } else {
-            None
-        };
-        {
+        // Decided again under the facts' lock: a change made by another
+        // request between the check and the mutation takes the exclusive
+        // guard on a second round instead of mutating without it (Phase 3.9
+        // review).
+        let mut exclusive =
+            needs_exclusive(&self.cluster.lock().unwrap_or_else(PoisonError::into_inner));
+        let _fence = loop {
+            let guard = if exclusive {
+                Some(Arc::clone(&self.fence).write_owned().await)
+            } else {
+                None
+            };
             let mut c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+            if guard.is_none() && needs_exclusive(&c) {
+                drop(c);
+                exclusive = true;
+                continue;
+            }
             if let Ok(inc) = <[u8; 16]>::try_from(req.incarnation.as_ref())
                 && c.adopt_incarnation(inc, req.incarnation_changed_ms)
                     .map_err(|e| tonic::Status::internal(e.to_string()))?
@@ -1153,7 +1172,11 @@ impl StorageNode for StorageNodeService {
                 let v = self.store.set_format_write(req.format_write);
                 tracing::info!(format_write = v, "storage format write gate updated");
             }
-        }
+            break guard;
+        };
+        // Adopted and persisted: deletes may go on while the response is
+        // assembled (Phase 3.9 review).
+        drop(_fence);
         let stats = self.store.stats().map_err(Self::storage_status)?;
         let (qn, qb) = self.store.quarantine_stats();
         let (fence_generation, fence_open) = self.delete_fence();

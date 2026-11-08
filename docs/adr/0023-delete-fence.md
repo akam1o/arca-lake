@@ -49,7 +49,10 @@ change is acknowledged.
 | The incarnation is checked first, then the fence. Both run under the shared guard, which is an owned guard moved into the blocking store call. | A cancelled RPC cannot release the guard while its delete still runs. Before this change the guard lived in the async handler, a latent flaw of the Phase 3.5 incarnation fence as well. |
 | A fence change takes the exclusive guard, and only when it changes something (`plan_fence`). | A change is acknowledged only after every delete past the old fence has finished. |
 | Generations only grow. A closed generation never reopens. A lower generation is ignored. | A delayed or reordered push cannot reopen deletes. |
-| A file that cannot be read keeps the fence closed. An open fence that cannot be persisted is not adopted; a close that cannot be persisted still applies in memory. | Fail closed |
+| A facts file that cannot be read or has a damaged line, or a missing one while the store holds segments, keeps the fence closed under an *unknown* hold that only an explicit release lifts (the generation floor, the hold and the incarnation it knew are gone). An open fence that cannot be persisted is not adopted. A close that cannot be persisted still applies in memory, and no later request is acknowledged until it is on disk. | Fail closed; a lost file cannot reopen a node to a delayed push (review) |
+| Any fence field in a `Health` request makes it a fact push, which only the controller and admin roles may send. | A gateway or node identity cannot open, close, hold or release (review) |
+| A release names the closed generation it releases. It lifts the hold only at that generation or above, adopting it closed, and never opens anything. | A delayed release cannot lift a later close's hold (review) |
+| Generations above 2^63 − 1 are ignored by nodes and never recorded. | Nothing can push the fence where it cannot advance (review) |
 | The operator hold is tied to the node's incarnation when the hold was set, and keeps that incarnation when a later push repeats it. While held, an open generation is adopted only with `delete_fence_release`, or from a caller whose incarnation is a later one that the node adopted. A caller of an incarnation the node does not adopt can neither set nor lift a hold. | A controller started on restored metadata before `recovery begin` (same incarnation), or on a backup from before an earlier restore (older incarnation), cannot reopen deletes. |
 
 ### Who opens and closes it
@@ -60,12 +63,18 @@ change is acknowledged.
     hold is set, it keeps a generation open for its term. The record's
     generation is reused if it is open, of this term and incarnation,
     and at least the required one. Otherwise the leader opens
-    `max(record + 1, required)`, where `required` is the lowest
+    `max(record, required) + 1`, where `required` is the lowest
     generation every node would accept: a node's open generation, or its
-    closed generation plus one.
+    closed generation plus one. So a node's own open generation is never
+    reopened by a new term (after a restore without the close, it may be
+    a generation decided before the restore).
   - Outside `Active` it closes the fence.
   - It pushes the fence with the other cluster facts and repeats a
-    recorded hold to nodes that missed it. It never releases a hold.
+    recorded hold of its own incarnation to nodes that missed it (not
+    the hold `recovery begin` set before a restore's new incarnation:
+    repeated after it, the hold would be tied to the new incarnation and
+    could not be lifted after finalize). It never releases a hold.
+    Recovery's own push never carries the hold.
   - The record is written through the leader's fenced metadata store, so
     a former leader cannot open a generation.
 - **Gateways** delete only their own partial writes. They take the
