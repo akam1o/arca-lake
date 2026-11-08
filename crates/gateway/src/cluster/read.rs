@@ -620,58 +620,57 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// reported as an integrity problem.
     pub(super) async fn read_durable_current(
         &self,
-        map: &ClusterMap,
+        map_in: &ClusterMap,
         generation: GenId,
         index: u32,
         chunk: &ChunkRecord,
     ) -> Result<Vec<Bytes>, S3Error> {
-        let moved = async || match arca_lake_metadata::ops::object::read_chunk_record(
-            self.meta.as_ref(),
-            &generation,
-            index,
-        )
-        .await
-        {
-            Ok(Some(now)) if now.chunk_id == chunk.chunk_id && now.placement != chunk.placement => {
-                Some(now)
-            }
-            _ => None,
-        };
-        match self.read_durable_quiet(map, chunk).await {
-            // Shards missing where a moved chunk used to be are not an
-            // integrity finding (reconciliation is deleting them).
-            Ok(r) if !r.missing.is_empty() && moved().await.is_some() => {
-                self.integrity
-                    .stats
-                    .moved_reads
-                    .fetch_add(1, Ordering::Relaxed);
-                Ok(r.parts)
-            }
-            Ok(r) => Ok(self.note_read(chunk, r)),
-            Err(e) => {
-                if let Some(now) = moved().await {
+        // The record as it is now, if it differs from `tried` (a move;
+        // a chunk can move again while it is followed, so up to a few).
+        let current =
+            async |tried: &ChunkRecord| match arca_lake_metadata::ops::object::read_chunk_record(
+                self.meta.as_ref(),
+                &generation,
+                index,
+            )
+            .await
+            {
+                Ok(Some(now)) if now.chunk_id == tried.chunk_id && now != *tried => Some(now),
+                _ => None,
+            };
+        let mut tried = chunk.clone();
+        let mut map = None::<Arc<ClusterMap>>;
+        for _ in 0..4 {
+            let m: &ClusterMap = map.as_deref().unwrap_or(map_in);
+            match self.read_durable_quiet(m, &tried).await {
+                // Shards missing where a moved chunk used to be are not an
+                // integrity finding (reconciliation is deleting them).
+                Ok(r) if !r.missing.is_empty() && current(&tried).await.is_some() => {
                     self.integrity
                         .stats
                         .moved_reads
                         .fetch_add(1, Ordering::Relaxed);
-                    let map = self.map();
-                    return self.read_durable(&map, &now).await;
+                    return Ok(r.parts);
                 }
-                Err(self.note_failure(chunk, e))
+                Ok(r) => return Ok(self.note_read(&tried, r)),
+                Err(e) => {
+                    let Some(now) = current(&tried).await else {
+                        // Still where it was read: a real failure.
+                        return Err(self.note_failure(&tried, e));
+                    };
+                    self.integrity
+                        .stats
+                        .moved_reads
+                        .fetch_add(1, Ordering::Relaxed);
+                    tried = now;
+                    map = Some(self.map());
+                }
             }
         }
-    }
-
-    /// Durable read of one chunk (RFC-004 §5.6).
-    pub(super) async fn read_durable(
-        &self,
-        map: &ClusterMap,
-        chunk: &ChunkRecord,
-    ) -> Result<Vec<Bytes>, S3Error> {
-        match self.read_durable_quiet(map, chunk).await {
-            Ok(r) => Ok(self.note_read(chunk, r)),
-            Err(e) => Err(self.note_failure(chunk, e)),
-        }
+        Err(s3_error!(
+            ServiceUnavailable,
+            "chunk moved repeatedly while being read; retry"
+        ))
     }
 
     fn note_read(

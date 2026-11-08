@@ -560,15 +560,17 @@ impl StorageNode for StorageNodeService {
         let class = pb::WriteClass::try_from(header.write_class).unwrap_or(pb::WriteClass::Client);
         let _held = self
             .admission
-            .admit_with(
-                || self.device_space().map(|(free, _)| free),
+            .admit_sampled(
+                || {
+                    self.device_space()
+                        .map(|(free, _)| (free, self.delete_reserve()))
+                },
                 class,
                 // The record's own future tombstone is held with it (the
                 // delete reserve counts it once the record is indexed).
                 header
                     .payload_len
                     .saturating_add(self.store.tombstone_bytes()),
-                self.delete_reserve(),
             )
             .map_err(|r| tonic::Status::resource_exhausted(r.to_string()))?;
         let mut payload = Vec::with_capacity(expected);

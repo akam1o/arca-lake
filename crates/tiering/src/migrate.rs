@@ -139,8 +139,13 @@ pub async fn migrate_chunk_with<S: KvStore>(
     // 2–3. Encode with the target's profile, write every shard, read back.
     let written = match write_and_verify(clients, coders, addr_of, target, record, &bytes).await {
         Ok(w) => w,
-        Err(e) => {
-            // Whatever was written is deleted by `write_and_verify`.
+        Err((written, e)) => {
+            // What was written goes, only while this attempt still owns the
+            // intent with a margin (else a successor may have committed
+            // these keys; reconciliation then decides).
+            if owns(meta, &record.chunk_id, &attempt).await {
+                cleanup(clients, &written, target.epoch).await;
+            }
             let _ =
                 arca_lake_metadata::ops::object::end_migration(meta, &record.chunk_id, &attempt)
                     .await;
@@ -177,9 +182,7 @@ pub async fn migrate_chunk_with<S: KvStore>(
         // Delete the target only while this attempt still holds the intent:
         // a migration that lost it (stale) must not delete shards another
         // attempt now owns under the same keys.
-        if arca_lake_metadata::ops::object::holds_migration(meta, &record.chunk_id, &attempt)
-            .await?
-        {
+        if owns(meta, &record.chunk_id, &attempt).await {
             cleanup(clients, &written, target.epoch).await;
             arca_lake_metadata::ops::object::end_migration(meta, &record.chunk_id, &attempt)
                 .await?;
@@ -202,8 +205,12 @@ pub async fn migrate_chunk_with<S: KvStore>(
     })
 }
 
+/// What a target write left behind when it failed, and why.
+type Failed = (Vec<(String, ShardRef, RecordToken)>, TierError);
+
 /// Encode `bytes` for `target`, write every shard with the target epoch,
-/// and read each one back; on any mismatch delete what was written.
+/// and read each one back. On failure, the records written so far are
+/// returned with the error, for the caller to delete.
 async fn write_and_verify(
     clients: &NodeClients,
     coders: &Coders,
@@ -211,27 +218,54 @@ async fn write_and_verify(
     target: &GroupRecord,
     record: &ChunkRecord,
     bytes: &[u8],
-) -> Result<Vec<(String, ShardRef, RecordToken)>, TierError> {
-    let target_coder = coders.get(&target.scheme, target.data_shards, target.parity_shards)?;
-    let k = usize::from(target.data_shards);
-    let (_, shards) = encode_chunk(target_coder.as_ref(), k, bytes)?;
-    if shards.len() != target.members.len() {
-        return Err(TierError::Other(format!(
-            "target group {} has {} members for {} shards",
-            target.id,
-            target.members.len(),
-            shards.len()
-        )));
-    }
+) -> Result<Vec<(String, ShardRef, RecordToken)>, Failed> {
+    let encode = || -> Result<Vec<bytes::Bytes>, TierError> {
+        let target_coder = coders.get(&target.scheme, target.data_shards, target.parity_shards)?;
+        let k = usize::from(target.data_shards);
+        let (_, shards) = encode_chunk(target_coder.as_ref(), k, bytes)?;
+        if shards.len() != target.members.len() {
+            return Err(TierError::Other(format!(
+                "target group {} has {} members for {} shards",
+                target.id,
+                target.members.len(),
+                shards.len()
+            )));
+        }
+        Ok(shards)
+    };
+    let shards = encode().map_err(|e| (Vec::new(), e))?;
     let mut written: Vec<(String, ShardRef, RecordToken)> = Vec::new();
-    // Every way out after the first shard deletes what was written
-    // (Phase 3.8 review: a put or read-back error left them to
-    // reconciliation, using room on a node possibly at its reserve).
-    let r = write_all_and_verify(clients, addr_of, target, record, &shards, &mut written).await;
-    if r.is_err() {
-        cleanup(clients, &written, target.epoch).await;
+    // Every way out after the first shard returns what was written, for
+    // the caller to delete while it owns the intent (Phase 3.8 review: a
+    // put or read-back error left them to reconciliation, using room on a
+    // node possibly at its reserve).
+    match write_all_and_verify(clients, addr_of, target, record, &shards, &mut written).await {
+        Ok(()) => Ok(written),
+        Err(e) => Err((written, e)),
     }
-    r.map(|()| written)
+}
+
+/// Margin before the intent's expiry within which an attempt no longer
+/// deletes its target records.
+const OWNERSHIP_MARGIN_MS: u64 = 10 * 60_000;
+
+async fn owns<S: KvStore>(
+    meta: &S,
+    chunk_id: &[u8; 16],
+    attempt: &arca_lake_metadata::records::GenId,
+) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    arca_lake_metadata::ops::object::holds_migration_fresh(
+        meta,
+        chunk_id,
+        attempt,
+        now,
+        OWNERSHIP_MARGIN_MS,
+    )
+    .await
+    .unwrap_or(false)
 }
 
 async fn write_all_and_verify(

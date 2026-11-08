@@ -551,3 +551,80 @@ async fn a_chunk_larger_than_the_budget_still_moves() {
     assert_eq!(r.moved_chunks, 1, "{r:?}");
     c.shutdown().await;
 }
+
+/// Phase 3.8 re-review (Critical): attempt A copies a chunk and stalls
+/// past its intent's expiry; attempt B takes the intent over, writes the
+/// same target keys and switches. A then fails its switch and must not
+/// delete the target records, which B's committed placement uses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_expired_move_never_deletes_its_successors_shards() {
+    use arca_lake_tiering::migrate::{MigrateOutcome, migrate_chunk, migrate_chunk_with};
+    let (c, a, b) = cluster(400 * MIB).await;
+    exclude(&c, vec![b.id]).await;
+    let d = data(3);
+    s3::put(&c.backend, BUCKET, "o", d.clone(), &PutOptions::default())
+        .await
+        .unwrap();
+    let m = c.manifest(BUCKET, "o").await;
+    let (index, rec) = m.chunks[0].clone();
+    let generation = m.pointer.generation;
+    let nodes: std::collections::HashMap<u64, String> =
+        c.nodes.iter().map(|n| (n.id, n.addr.to_string())).collect();
+    let addr_of = |id: u64| nodes.get(&id).cloned();
+    let coders = arca_lake_tiering::durable::Coders::default();
+    let (meta, clients) = (std::sync::Arc::clone(&c.meta), c.clients.clone());
+    let (ga, gb, rec2) = (a.clone(), b.clone(), rec.clone());
+    let r = migrate_chunk_with(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders,
+        &addr_of,
+        &a,
+        &b,
+        &generation,
+        index,
+        &rec,
+        None,
+        async || {
+            // A stalls: its intent expires, B moves the chunk.
+            arca_lake_metadata::ops::object::expire_migrations(
+                meta.as_ref(),
+                now_ms() + 2 * arca_lake_metadata::ops::object::MIGRATION_INTENT_TTL_MS,
+            )
+            .await
+            .unwrap();
+            let r = migrate_chunk(
+                meta.as_ref(),
+                &clients,
+                &arca_lake_tiering::durable::Coders::default(),
+                &|id| nodes.get(&id).cloned(),
+                &ga,
+                &gb,
+                &generation,
+                index,
+                &rec2,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(r, MigrateOutcome::Switched { .. }), "{r:?}");
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(r, MigrateOutcome::Skipped(_)), "{r:?}");
+    assert_eq!(group_of(&c, "o").await, b.id);
+    // B's placement is whole: every target member holds its shard.
+    for (i, member) in b.members.iter().enumerate() {
+        let n = c.node_index(member).unwrap();
+        assert!(
+            c.shard_keys(n, b.id)
+                .iter()
+                .any(|k| k.chunk_id == rec.chunk_id && usize::from(k.shard_index) == i),
+            "member {i} of the target lost its shard"
+        );
+    }
+    c.reconcile(now_ms() + 7_200_000, 0).await;
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, d);
+    c.shutdown().await;
+}

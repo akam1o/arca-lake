@@ -203,9 +203,26 @@ impl Admission {
         payload: u64,
         delete_reserve: u64,
     ) -> Result<Held<'_>, Refusal> {
+        self.admit_sampled(|| free().map(|f| (f, delete_reserve)), class, payload)
+    }
+
+    /// [`Self::admit_with`], sampling the free space and the delete
+    /// reserve together under the admission lock (Phase 3.8 review: a
+    /// delete reserve sampled before it could miss records stored, and
+    /// their holds released, meanwhile).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::admit`].
+    pub fn admit_sampled(
+        &self,
+        sample: impl FnOnce() -> Option<(u64, u64)>,
+        class: WriteClass,
+        payload: u64,
+    ) -> Result<Held<'_>, Refusal> {
         let needed = payload.saturating_add(RECORD_OVERHEAD);
         let mut g = self.inflight.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(free) = free() {
+        if let Some((free, delete_reserve)) = sample() {
             let available = free.saturating_sub(*g);
             let floor = self.reserve.floor(class).saturating_add(delete_reserve);
             if available.saturating_sub(needed) < floor || available < needed {

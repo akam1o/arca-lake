@@ -1487,6 +1487,37 @@ pub async fn holds_migration<S: KvStore>(
     .await
 }
 
+/// Whether `attempt` holds the migration intent of `chunk_id` with at
+/// least `margin_ms` left before another migration could take it over
+/// (Phase 3.8 review: an attempt whose intent expired must not delete the
+/// target records, which a successor that took the intent over may have
+/// committed; the margin keeps the takeover out of the time between this
+/// check and the deletes).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn holds_migration_fresh<S: KvStore>(
+    store: &S,
+    chunk_id: &[u8; 16],
+    attempt: &GenId,
+    now_ms: u64,
+    margin_ms: u64,
+) -> Result<bool> {
+    transact(store, (*chunk_id, *attempt), |tx, env| {
+        Box::pin(async move {
+            let (chunk_id, attempt) = *env;
+            let held: Option<MigrationIntent> = read(tx, &keys::migration(&chunk_id)).await?;
+            Ok(held.is_some_and(|i| {
+                i.attempt == attempt
+                    && now_ms.saturating_sub(i.since_ms)
+                        < MIGRATION_INTENT_TTL_MS.saturating_sub(margin_ms)
+            }))
+        })
+    })
+    .await
+}
+
 /// Drop the migration intent of `chunk_id` if `attempt` holds it (after
 /// the target was cleaned up).
 ///

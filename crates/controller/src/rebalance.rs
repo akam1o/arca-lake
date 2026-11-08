@@ -301,10 +301,13 @@ pub async fn run_once<S: KvStore>(
                     }
                     found += 1;
                     let len = u64::from(record.len);
-                    // At least one chunk per pass, whatever its size: a
+                    // At least one chunk per pass, whatever its size (a
                     // chunk larger than the budget would otherwise stop
-                    // every pass at the same place.
-                    if spent > 0 && spent + len > budget {
+                    // every pass at the same place), unless moving it
+                    // would make the target the fuller group (the next
+                    // pass would move it back).
+                    let difference = p.target_room.saturating_sub(p.source_room);
+                    if (spent > 0 || len >= difference) && spent + len > budget {
                         report.reason = "pass budget spent".into();
                         stopped = true;
                         break 'pages;

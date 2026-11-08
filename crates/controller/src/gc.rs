@@ -759,7 +759,20 @@ async fn reconcile_shard<S: KvStore>(
     // (RFC-008 §8.4, Unexpected Shard).
     let position = group.members.iter().position(|m| m.node_id == node_id);
     if position.is_some_and(|p| usize::from(shard.shard_index) != p) {
-        if delete(group.epoch).await? {
+        // A metadata read before the delete, as for every other kind (the
+        // guarded store refuses it once the cluster left `Active`; Phase
+        // 3.8 review), and membership as it is now.
+        let current = cluster::get_group(meta, group.id).await?;
+        if current
+            .members
+            .get(usize::from(shard.shard_index))
+            .map(|m| m.node_id)
+            == Some(node_id)
+        {
+            report.kept_referenced += 1;
+            return Ok(());
+        }
+        if delete(current.epoch).await? {
             report.orphans_deleted += 1;
         }
         return Ok(());
