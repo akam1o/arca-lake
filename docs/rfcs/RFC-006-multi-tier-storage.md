@@ -453,6 +453,13 @@ See §5.6 and RFC-008. Additionally:
   switch).
 - Not guaranteed: that a population happens after a miss (admission,
   capacity, or failures may prevent it); any hit ratio.
+- Cache and tiering deletes (eviction, cache reconciliation, the clean-up
+  of a migration attempt's target copies) carry the delete fence like
+  every node delete (Phase 3.9, ADR-0023, RFC-008 §6.11). While it is
+  closed nothing is evicted from the nodes: the record goes and the
+  copy stays an orphan for a later reconciliation, so the cache nodes'
+  space is returned only once the fence opens again. Populations and
+  hits are unaffected.
 
 ## 9. Performance considerations
 

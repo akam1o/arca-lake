@@ -16,3 +16,4 @@ alert names its section.
 | Storage node memory | `arca_node_process_memory_bytes` | §10.9 |
 | One group of a tier much fuller than the others | `admin check-config` (group rooms), `arca_controller_rebalance_*`, `admin rebalance status` | RFC-008 §6.10 |
 | `check-config` reports nodes sharing a file system | give each node its own file system, or `--capacity-bytes` allotments that fit | §6, R-80 |
+| GC or reconciliation deletes nothing; "delete fence" refusals in logs | `admin delete-fence status`, `arca_controller_delete_fence_nodes_stale`, `arca_node_delete_fence_*` | §10.12 |

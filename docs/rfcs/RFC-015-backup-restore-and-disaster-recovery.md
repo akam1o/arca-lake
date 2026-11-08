@@ -144,12 +144,19 @@ incarnation mismatch.
 
 ### 5.3.1 Restore procedure
 
+0. **Close the delete fence** (Phase 3.9, ADR-0023): `admin delete-fence
+   close --reason R --yes` while the current metadata is reachable; every
+   storage node acknowledges a closed generation with an operator hold,
+   after the deletes already past its fence have finished. No delete
+   decided before the restore is applied after this point.
 1. **Freeze**: stop gateways and controllers (or `set-read-only` first,
    then stop).
 2. **Restore** FoundationDB to `T` (`fdbrestore`) or into a fresh
    cluster.
 3. **Mark**: `admin restore mark --at T --from <backup-url>` → state
-   `Restoring`, new incarnation, `restored_at = T`.
+   `Restoring`, new incarnation, `restored_at = T`. (Implemented as
+   `admin recovery begin`, which since Phase 3.9 first closes the delete
+   fence on every node again and refuses unless each acknowledges.)
 4. **Start** controllers (they see `Restoring`, run nothing but the
    recovery tasks) and gateways (they refuse everything with `503`).
 5. **Placement epoch recovery** (§5.4): controller task, metadata-only;
@@ -159,7 +166,10 @@ incarnation mismatch.
    restore to another `T` and repeat from step 2.
 8. **Activate** (`admin cluster activate`): writes open; GC, reconcile,
    eviction, tiering, lifecycle and the multipart sweep resume; orphans
-   are deleted by reconcile only after `min_orphan_age` as usual.
+   are deleted by reconcile only after `min_orphan_age` as usual. Since
+   Phase 3.9 finalize releases the delete fence's hold and the leader
+   opens a new generation, above every generation decided before the
+   restore.
 
 ### 5.3.2 Verification pass
 

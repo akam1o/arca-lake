@@ -185,6 +185,16 @@ needs reconciliation: every leader action is fenced.
 RFC-014 (as amended by ADR-0016). Order: storage nodes, then
 controllers, then gateways; one host at a time; verify after each.
 
+Upgrading to protocol version 3 (Phase 3.9, ADR-0023): deletes need the
+delete fence on both sides. A version-3 node refuses deletes from
+version-2 controllers and gateways, and version-3 clients send none to a
+version-2 node. Deletes, GC and reconciliation therefore pause on each
+node from its upgrade until the controllers (and, for their own partial
+writes, the gateways) speak version 3 and the leader has pushed a fence;
+the backlog converges afterwards. Nothing is deleted unfenced at any
+point. Rolling a node back to version 2 stops deletes on it; rolling
+back nodes and controllers both restores the pre-3.9 behaviour (R-88).
+
 1. `admin status --versions` before and after each restart: every node,
    controller and gateway with its software version and P/M/F windows.
    While mixed, new processes negotiate the older protocol and write the
@@ -212,16 +222,35 @@ backup point are reported unreadable, never recovered, and writes after
 the backup point are lost (RPO = backup point).
 
 Restore runbook (exercised by `fdb_restore.rs`, real
-`fdbbackup`/`fdbrestore`):
+`fdbbackup`/`fdbrestore`; the delete fence steps by
+`it/delete_fence.rs`, ADR-0023):
 
+0. **Close the delete fence** while the current metadata is still
+   reachable: `admin delete-fence close --reason "restore" --yes`. Every
+   registered node acknowledges a new closed generation with an operator
+   hold, after the deletes already past its fence have finished; from
+   then on no delete decided on the current metadata is applied, however
+   late it arrives. The command exits 1 while a node has not
+   acknowledged: bring it back and re-run, or, only if its process is
+   stopped and stays stopped, re-run with `--absent-node ID`. If the
+   current metadata is gone (the reason for the restore), skip to step 1
+   and stop every controller and gateway first: `recovery begin` closes
+   the fence after the restore and warns about every node that was
+   still open (a delete in flight may have landed meanwhile;
+   verification reports what it removed).
 1. Stop every gateway and controller. Restore the metadata into an
    empty, dedicated cluster: `fdbrestore start --dest-cluster-file F -r
    URL -v VERSION -w` (the version of the restore point; without `-v`
-   the restore runs to the end of the mutation log).
-2. `admin recovery begin --from LABEL --backup-point-ms MS --yes`: a new
-   incarnation and `Restoring`. Every process of the previous
-   incarnation is fenced (metadata guard and node `DeleteShard`) even if
-   it is still running.
+   the restore runs to the end of the mutation log). A controller
+   started on the restored metadata now cannot reopen deletes: the nodes
+   hold the fence closed for the incarnation it carries.
+2. `admin recovery begin --from LABEL --backup-point-ms MS --yes`
+   (with the node RPC and TLS options): closes the fence again on every
+   node (refused unless each acknowledges, or is declared
+   `--absent-node`), then a new incarnation and `Restoring`. Every
+   process of the previous incarnation is fenced (metadata guard and
+   node `DeleteShard`) even if it is still running. A failure here, or
+   at any later step, leaves deletes stopped: re-run the step.
 3. Start controllers: the leader raises every group epoch above what any
    member enforces (catch-up), then `VerificationPending`: a resumable
    pass classifies matched, orphan (pre/post backup point), former-member,
@@ -244,7 +273,10 @@ Restore runbook (exercised by `fdb_restore.rs`, real
    losses`), unrecoverable stripes stay repair tasks, and every attempt,
    refused ones included, is audited with operator, reason and result.
    `admin cluster activate` cannot leave a restore around finalize.
-   Reconciliation then reclaims post-restore orphans. Start gateways
+   Finalize also releases the delete fence's operator hold; the leader
+   opens a new generation at its next health pass (`admin delete-fence
+   status` shows every node at it, open). Reconciliation then reclaims
+   post-restore orphans and GC works off its backlog. Start gateways
    (they adopt the new incarnation at start). `admin recovery verify
    --yes` re-runs the pass from the start and `admin recovery resume`
    continues it; both are conditional transactions that never undo a
@@ -595,6 +627,69 @@ out or refused). Reads, deletes and completions keep working.
    reserve is what protects the cluster then. Repair refusals
    (`class="repair"`) mean the device is at its repair floor: free space
    before anything else (`ArcaRepairReserveLow`).
+
+### 10.12 Deletes stopped: the delete fence (Phase 3.9, ADR-0023)
+
+Storage nodes apply a shard delete only under the delete fence
+generation they hold open. `admin delete-fence status` shows the
+recorded fence (generation, open or closed, operator hold, who changed
+it and why) and every registered node's, with the reason deletes are
+stopped. Metrics:
+
+- controller: `arca_controller_delete_fence_generation`, `_open`,
+  `_nodes_current`, `_nodes_stale`, `_refusals_total`
+- node: `arca_node_delete_fence_generation`, `_open`, `_hold`,
+  `_refusals_total`
+- GC and reconciliation: `arca_controller_gc_backlog*`
+
+What deletes stop never stops PUT or GET.
+
+1. **Normal.** Every node is at the leader's generation, open
+   (`nodes_stale` 0). A node's generation rises at every leader change.
+   Refusals happen briefly after a leader change or a node start, then
+   stop.
+2. **Before a restore.** Run `admin delete-fence close --reason R --yes`
+   while the current metadata is reachable, then stop controllers and
+   gateways (§5.9 step 0). Exit 1 means a node did not acknowledge;
+   deletes may still run there.
+3. **During a restore.** The fence stays closed with the hold. Nothing
+   that runs on the restored metadata opens it: a controller of the
+   restored incarnation is refused by the nodes, and `recovery begin`
+   closes it again before marking. `admin delete-fence release` is
+   refused outside `Active`.
+4. **After a restore.** `recovery finalize` releases the hold; the
+   leader opens a new generation within one health pass. If `status`
+   still shows nodes held, a node missed the release: run `admin
+   delete-fence release --reason R`, which pushes it to every node.
+5. **Fence update failed.**
+   - A close that some nodes did not acknowledge leaves deletes possible
+     on those nodes only. Re-run it once they answer.
+   - An open push a node did not take (unreachable, or a persist error,
+     which it logs) leaves that node refusing deletes. The leader
+     repeats the push every pass.
+   - Nothing reopens deletes on its own except a leader of an `Active`
+     cluster.
+6. **A node does not respond.** It keeps the fence it last
+   acknowledged, persisted across restarts. For a close, a node that
+   cannot answer cannot be confirmed: bring it back. Only if its process
+   is stopped and stays stopped, use `--absent-node ID`, and keep it
+   stopped until the leader of the cluster that follows has pushed it a
+   fence (`status` shows it current).
+7. **A stale node rejoins** (restarted, partitioned, restored from an
+   old disk). It refuses every delete until it holds the leader's
+   generation, which happens within one health pass of the leader
+   reaching it. It never goes back to a lower generation and never
+   reopens a closed one, so deletes queued for it before it left are
+   refused (counted in `arca_node_delete_fence_refusals_total`).
+8. **GC backlog grows while deletes are stopped.** This is expected; the
+   space is returned only once deletes resume. GC defers generations and
+   reconciliation keeps orphans (`kept_fenced` in its report). Both
+   resume and work the backlog off after the fence is open again (§10.10
+   for the pace). If the backlog grows while `status` shows the fence
+   open everywhere, the cause is not the fence: see §10.10. A long hold
+   uses capacity: watch §10.11.
+
+There is deliberately no command that forces deletes open.
 
 ## 11. Alternatives considered
 

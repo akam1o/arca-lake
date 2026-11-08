@@ -10,8 +10,11 @@ that the shards it names exist (RFC-015).
 2. Verify backups continuously: `admin backup verify-restored` and
    `admin backup key-range`, or `deploy/backup/verify-backup.sh`, which
    exports metrics (`arca_backup_*`) for the alert rules.
-3. Restore: stop gateways and controllers, `fdbrestore` into an empty
-   database, then follow `admin recovery` (RFC-015 §5): the cluster
+3. Restore: first `admin delete-fence close --reason restore --yes`
+   (every storage node stops applying deletes decided on the current
+   metadata; ADR-0023), then stop gateways and controllers,
+   `fdbrestore` into an empty database, then follow `admin recovery`
+   (RFC-015 §5, RFC-013 §5.9): the cluster
    enters a recovery state, a new incarnation fences every process of
    the old one, verification checks the restored metadata against the
    nodes, and `admin recovery finalize` reopens it. Objects whose data

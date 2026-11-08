@@ -6,6 +6,41 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Added (Phase 3.9)
+
+- Delete fence enforced by storage nodes (ADR-0023, R-88): every
+  `DeleteShard` carries a fence generation; nodes persist the generation,
+  whether it is open, and an operator hold, and apply a delete only under
+  their open generation, checked under the lock their physical delete
+  holds. `admin delete-fence status|close|release`; `--absent-node` for
+  `close` and `recovery begin`; metrics `arca_controller_delete_fence_*`
+  and `arca_node_delete_fence_*`.
+- Tests: delete fence rules on the node (including a delete cancelled
+  while the fence closes), cluster scenarios of deletes delivered after
+  a restore, a phase change and a leader change, and a system model
+  with backups, restores, phase changes, leader terms, node restarts and
+  late, reordered deletes.
+
+### Changed (Phase 3.9)
+
+- Protocol version 3. A version-3 node refuses deletes below version 3;
+  version-3 clients send no delete to an older node. Deletes pause on a
+  node during a rolling upgrade until both sides speak version 3.
+- `admin recovery begin` closes the delete fence on every registered
+  node and refuses unless each acknowledges; `admin cluster
+  set-read-only` closes it; `admin recovery finalize` releases the hold.
+  Both commands now take the node RPC and TLS options.
+- The controller leader opens a fence generation for its term while the
+  cluster is `Active` and closes it otherwise.
+- GC defers, and reconciliation and cache reconciliation keep, shards
+  whose delete the fence refused.
+
+### Fixed (Phase 3.9)
+
+- A node's fence (incarnation, epoch, delete fence) no longer releases
+  its shared guard when a delete's RPC is cancelled while the store is
+  still deleting: the guard lives in the blocking store call.
+
 ### Added (Phase 3.8)
 
 - Delete reserve under both capacity floors (one tombstone per record

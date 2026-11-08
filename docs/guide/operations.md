@@ -16,3 +16,4 @@ design, not a tuning hint; violating one voids a guarantee.
 | Prometheus scraping every process and the alert rules loaded | Capacity, GC, repair and integrity problems are detected by alerts | RFC-013 §7–8 |
 | Metadata backups and their verification | Restores are the only recovery from metadata loss | RFC-015, [Backup and restore](backup-restore.md) |
 | Upgrades in the documented order (storage nodes first) | Mixed versions are supported within one compatibility window only | RFC-014 |
+| The delete fence closed (`admin delete-fence close`) before a metadata restore | Without it a delete decided before the restore can still remove shards the restored metadata needs | ADR-0023, RFC-013 §5.9 |

@@ -1,6 +1,6 @@
 # RFC-008: Failure Recovery and Garbage Collection
 
-- Status: draft (Phase 3.2 adds §8: scrubbing, classification, quarantine, stripe repair)
+- Status: draft (Phase 3.2 adds §8: scrubbing, classification, quarantine, stripe repair; Phase 3.9 adds §6.11: the delete fence)
 - Authors: arca-lake maintainers
 - Created: 2026-11-01
 - Depends on: RFC-003, RFC-004, RFC-005, RFC-007
@@ -521,6 +521,38 @@ cursor, so that a new leader resumes there. Imbalance start 25 %, stop
 10 %. `admin rebalance status|pause|resume|dry-run`. The source's space
 returns once reconciliation deletes the moved shards and compaction
 reclaims their segments.
+
+### 6.11 Deletes across restores and phase changes (Phase 3.9, ADR-0023)
+
+§6.6 holds within one metadata history. A metadata restore breaks its
+first fact: a generation that was `Retiring` (or already finished) when a
+delete was decided is referenced again in the restored metadata. A phase
+change does not break it, but the phase says no delete should run. In
+both cases the delete RPC has already left the controller. So the
+condition is decided where the delete is applied:
+
+- Every `DeleteShard` carries a delete fence generation. A storage node
+  applies it only while it holds that generation open, checked under the
+  shared guard its physical delete holds to the end. A fence change takes
+  the exclusive guard and is persisted before it is acknowledged.
+- The leader opens a generation for its term only while the cluster is
+  `Active` in its incarnation and no operator hold is set. Generations
+  only grow and a closed one never reopens, so a delete decided under an
+  earlier generation (an earlier term, before a phase change, before a
+  restore) is refused by every node that adopted a later one.
+- Before a restore the fence is closed, with a hold, on every node, each
+  acknowledging it. Only a controller of the incarnation `recovery begin`
+  creates, or an explicit release, lifts the hold. A delete decided on
+  the metadata before the restore is therefore never applied after it.
+
+Every path that removes shards on a node goes through this check: GC,
+reconciliation, cache eviction and cache reconciliation, migration and
+rebalancing clean-up, and gateway clean-up of partial writes. Node-local
+removal (compaction of superseded records, discarding a segment
+truncated at creation) involves no external decision and is not fenced.
+The audit of every path is in `docs/verification/phase-3.9-data-safety.md`.
+What the fence refuses is kept and retried: GC defers the generation,
+and reconciliation counts the shard as kept.
 
 ## 7. Repair completion and metadata order
 

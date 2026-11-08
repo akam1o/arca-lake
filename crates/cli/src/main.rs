@@ -1651,6 +1651,12 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
                 service.admission_counts(),
                 &service.capacity_breakdown(),
             );
+            let (generation, open) = service.delete_fence();
+            render_node_fence(
+                &mut out,
+                (generation, open, service.delete_fence_held()),
+                service.fence_refusals(),
+            );
             out += &arca_lake_protocol::tls::render_metrics(
                 "arca_node",
                 service.tls_stats().as_deref(),
@@ -4023,6 +4029,23 @@ fn render_node_capacity(
     }
 }
 
+/// The node's delete fence (ADR-0023): generation, open, operator hold,
+/// and the deletes it refused.
+fn render_node_fence(out: &mut String, fence: (u64, bool, bool), refusals: u64) {
+    use std::fmt::Write as _;
+    for (name, value) in [
+        ("arca_node_delete_fence_generation", fence.0),
+        ("arca_node_delete_fence_open", u64::from(fence.1)),
+        ("arca_node_delete_fence_hold", u64::from(fence.2)),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} gauge\n{name} {value}");
+    }
+    let _ = writeln!(
+        out,
+        "# TYPE arca_node_delete_fence_refusals_total counter\narca_node_delete_fence_refusals_total {refusals}"
+    );
+}
+
 fn render_admission_stats(
     out: &mut String,
     a: &arca_lake_gateway::cluster::admission::AdmissionStatsSnapshot,
@@ -4287,6 +4310,7 @@ mod metrics_registry {
         render_compaction_stats(&mut out, &Default::default());
         render_device_space(&mut out, Some((1, 2)));
         render_node_capacity(&mut out, None, (0, [0; 4]), &Default::default());
+        render_node_fence(&mut out, (0, false, false), 0);
         out += &arca_lake_protocol::tls::render_metrics("arca_node", tls(tls_on).as_ref());
         arca_lake_common::metrics::annotate(&out)
     }

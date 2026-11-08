@@ -448,6 +448,16 @@ impl StorageNodeService {
         self.fence_refusals.load(Ordering::Relaxed)
     }
 
+    /// Whether the delete fence is under an operator hold.
+    #[must_use]
+    pub fn delete_fence_held(&self) -> bool {
+        self.cluster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .fence_hold
+            .is_some()
+    }
+
     /// The delete fence held: generation and whether open.
     #[must_use]
     pub fn delete_fence(&self) -> (u64, bool) {

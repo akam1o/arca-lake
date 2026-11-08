@@ -176,6 +176,10 @@ arca_node_compaction_skipped_no_space_total	counter	node	segments	-	segments not
 arca_node_compactions_total	counter	node	segments	-	sealed segments compacted
 arca_node_corrupt_reads_total	counter	node	reads	-	reads that found a corrupt record
 arca_node_dead_records	gauge	node	records	-	non-live data records still on the device (what keeps tombstones needed)
+arca_node_delete_fence_generation	gauge	node	generation	-	delete fence generation the node holds (0 = none adopted: every delete refused; ADR-0023)
+arca_node_delete_fence_hold	gauge	node	bool	-	1 while the node holds an operator hold on its delete fence (before a restore, maintenance)
+arca_node_delete_fence_open	gauge	node	bool	-	1 while the node admits deletes under its delete fence generation
+arca_node_delete_fence_refusals_total	counter	node	deletes	-	deletes the node refused for its delete fence (stale generation, closed fence, none adopted, older protocol)
 arca_node_device_free_bytes	gauge	node	bytes	-	bytes free for placement on the device (capped by --capacity-bytes)
 arca_node_device_total_bytes	gauge	node	bytes	-	size of the device for placement (capped by --capacity-bytes)
 arca_node_device_usage_bytes	gauge	node	bytes	kind=segments|side_files|fs_used|fs_overhead|delete_reserve	what is on the device now: segments, side_files (quarantine log, sequence bound, temporary files), fs_used (whole file system), fs_overhead (fs_used minus the store files; meaningful when the store has the file system to itself), delete_reserve (kept for the tombstones of deleting every record)
