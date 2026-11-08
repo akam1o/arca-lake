@@ -21,11 +21,14 @@ pub const RECORD_TTL_MS: u64 = 30_000;
 const ALPHA: f64 = 0.3;
 
 /// Trends (free space falling, backlog growing) are measured over at
-/// least this long, so that a burst of a few seconds does not throttle.
+/// least this long by default, so that a burst of a few seconds does not
+/// throttle (`Policy::trend_window_ms`).
 pub const TREND_WINDOW_MS: u64 = 5 * 60_000;
 
-/// Samples of one quantity for a windowed slope: the newest sample at
-/// least [`TREND_WINDOW_MS`] old and everything after it.
+/// Samples kept for trends (longer than any window used).
+const TREND_RETENTION_MS: u64 = 15 * 60_000;
+
+/// Samples of one quantity for windowed slopes.
 #[derive(Debug, Default)]
 struct Trend {
     samples: std::collections::VecDeque<(u64, f64)>,
@@ -33,25 +36,40 @@ struct Trend {
 
 impl Trend {
     /// Add `value` at `now_ms`; returns the change per second over the
-    /// window, 0 until the window is covered.
+    /// default window, 0 until the window is covered.
     fn push(&mut self, now_ms: u64, value: f64) -> f64 {
         self.samples.push_back((now_ms, value));
-        while self.samples.len() > 2 && now_ms.saturating_sub(self.samples[1].0) >= TREND_WINDOW_MS
+        while self.samples.len() > 2
+            && now_ms.saturating_sub(self.samples[1].0) >= TREND_RETENTION_MS
         {
             self.samples.pop_front();
         }
         self.slope(now_ms)
     }
 
-    #[allow(clippy::cast_precision_loss)]
     fn slope(&self, now_ms: u64) -> f64 {
-        match (self.samples.front(), self.samples.back()) {
-            (Some(&(t0, v0)), Some(&(t1, v1)))
-                if now_ms.saturating_sub(t0) >= TREND_WINDOW_MS && t1 > t0 =>
-            {
-                (v1 - v0) / ((t1 - t0) as f64 / 1000.0)
-            }
-            _ => 0.0,
+        self.slope_over(now_ms, TREND_WINDOW_MS)
+    }
+
+    /// Change per second between the newest sample at least `window_ms`
+    /// old and the latest; 0 when no sample is that old.
+    #[allow(clippy::cast_precision_loss)]
+    fn slope_over(&self, now_ms: u64, window_ms: u64) -> f64 {
+        let Some(&(t1, v1)) = self.samples.back() else {
+            return 0.0;
+        };
+        let Some(&(t0, v0)) = self
+            .samples
+            .iter()
+            .rev()
+            .find(|(t, _)| now_ms.saturating_sub(*t) >= window_ms)
+        else {
+            return 0.0;
+        };
+        if t1 > t0 {
+            (v1 - v0) / ((t1 - t0) as f64 / 1000.0)
+        } else {
+            0.0
         }
     }
 }
@@ -335,9 +353,10 @@ pub async fn pass_in_term<S: KvStore>(
     totals.domain_unverified = domains.unverified.len() as u64;
     {
         let mut g = tracker.lock();
-        let (backlog_logical, growth_logical, reclaim) = (
+        let (backlog_logical, growth_logical, growth_recent_logical, reclaim) = (
             g.backlog.map_or(0, |b| b.1),
-            g.backlog_trend.slope(now_ms),
+            g.backlog_trend.slope_over(now_ms, policy.trend_window_ms),
+            g.backlog_trend.slope_over(now_ms, policy.recent_window_ms),
             g.reclaim,
         );
         for (tier, (is_cache, tier_groups, (k_sum, n_sum))) in tiers {
@@ -368,17 +387,20 @@ pub async fn pass_in_term<S: KvStore>(
                 n_sum as f64 / k_sum as f64
             };
             // The backlog is the cluster's; it is charged to the durable tiers.
-            let (backlog_physical, growth) = if is_cache {
-                (0.0, 0.0)
+            let (backlog_physical, growth, growth_recent) = if is_cache {
+                (0.0, 0.0, 0.0)
             } else {
-                (backlog_logical as f64 * overhead, growth_logical * overhead)
+                (
+                    backlog_logical as f64 * overhead,
+                    growth_logical * overhead,
+                    growth_recent_logical * overhead,
+                )
             };
             let free: u64 = devices.iter().map(|d| d.available).sum();
-            let free_change = g
-                .free_trend
-                .entry(tier.clone())
-                .or_default()
-                .push(now_ms, free as f64);
+            let trend = g.free_trend.entry(tier.clone()).or_default();
+            trend.push(now_ms, free as f64);
+            let free_change = trend.slope_over(now_ms, policy.trend_window_ms);
+            let free_change_recent = trend.slope_over(now_ms, policy.recent_window_ms);
             let inputs = Inputs {
                 devices: devices.clone(),
                 groups: tier_groups,
@@ -394,6 +416,8 @@ pub async fn pass_in_term<S: KvStore>(
                     domains.conflicts.clone()
                 },
                 free_change_bytes_per_s: free_change,
+                free_change_recent_bytes_per_s: free_change_recent,
+                gc_backlog_growth_recent_bytes_per_s: growth_recent,
                 overhead,
                 now_ms,
             };
@@ -601,7 +625,20 @@ mod tests {
             r = t.push(s * 1000, 10e9 - 1e6 * s as f64);
         }
         assert!((r + 1e6).abs() < 1.0, "{r}");
-        assert!(t.samples.len() < 200, "samples are pruned");
+        for s in (602..=2000).step_by(2) {
+            t.push(s * 1000, 0.0);
+        }
+        assert!(
+            t.samples.len() <= usize::try_from(TREND_RETENTION_MS / 2000).unwrap() + 2,
+            "samples are pruned"
+        );
+        // A recent window sees a change the long one does not yet.
+        let mut t = Trend::default();
+        for s in (0..=300).step_by(2) {
+            t.push(s * 1000, if s < 250 { 0.0 } else { 6e9 });
+        }
+        assert!(t.slope_over(300_000, 60_000) > 0.0);
+        assert_eq!(t.slope_over(300_000, 600_000), 0.0, "window not covered");
     }
 
     fn dev(node: u64, domain: u64, certain: bool, allot: Option<u64>, fs: u64) -> Device {

@@ -128,6 +128,12 @@ pub struct Inputs {
     /// Change of the tier's free bytes per second recently (negative =
     /// filling).
     pub free_change_bytes_per_s: f64,
+    /// The same two trends over the recent window (Phase 3.7, R-83): a
+    /// better state may be entered when the recent trend no longer calls
+    /// for the current one, without waiting out the long window.
+    pub free_change_recent_bytes_per_s: f64,
+    /// See `free_change_recent_bytes_per_s`.
+    pub gc_backlog_growth_recent_bytes_per_s: f64,
     /// Physical bytes a logical byte of client data takes (the coding
     /// overhead; 0 = 1).
     pub overhead: f64,
@@ -162,6 +168,14 @@ pub struct Policy {
     /// Throttled rate never below this (logical bytes/s, the tier), so that
     /// clients make progress.
     pub min_rate_bytes_per_s: f64,
+    /// Window of the trends that enter `throttled`/`warning` (ms).
+    pub trend_window_ms: u64,
+    /// Window of the recent trends that may leave them (ms; 0 = the long
+    /// window, the Phase 3.6 behaviour).
+    pub recent_window_ms: u64,
+    /// Adapt the throttled rate (additive increase while the recent trend
+    /// is safe, halving when it is not) instead of a fixed formula (R-83).
+    pub adaptive_rate: bool,
     /// Keep placing on nodes that share a file system without fitting
     /// allotments (R-80; development and single-disk test clusters only:
     /// their reserves are then not guaranteed).
@@ -182,6 +196,9 @@ impl Default for Policy {
             group_min_shards: 64,
             min_rate_bytes_per_s: f64::from(1u32 << 20),
             allow_shared_filesystem: false,
+            trend_window_ms: 5 * 60_000,
+            recent_window_ms: 60_000,
+            adaptive_rate: true,
         }
     }
 }
@@ -211,6 +228,8 @@ pub struct Machine {
     state: State,
     /// Since when every condition of a better state has held.
     better_since_ms: Option<u64>,
+    /// Throttled rate in force (adaptive, Phase 3.7); 0 outside it.
+    rate: f64,
 }
 
 impl Machine {
@@ -221,6 +240,7 @@ impl Machine {
         Self {
             state,
             better_since_ms: None,
+            rate: 0.0,
         }
     }
 
@@ -235,18 +255,43 @@ impl Machine {
         let mut d = self.step_inner(policy, inputs);
         // The rate belongs to the state applied, which may be held or
         // stepped to while the inputs alone call for another one.
-        d.rate_bytes_per_s = if d.state == State::Throttled {
-            throttle_rate(policy, inputs)
+        if d.state == State::Throttled {
+            let base = throttle_rate(policy, inputs);
+            self.rate = if !policy.adaptive_rate || self.rate == 0.0 {
+                base
+            } else {
+                // AIMD: more while the recent trend keeps the tier at least
+                // the horizon from full, half when it would be full within
+                // half of it, never below the formula, at most 8 times it.
+                let recent_drain = (-inputs.free_change_recent_bytes_per_s)
+                    .max(inputs.gc_backlog_growth_recent_bytes_per_s);
+                #[allow(clippy::cast_precision_loss)]
+                let headroom = fresh_headroom(policy, inputs) as f64;
+                let tte = if recent_drain > 0.0 {
+                    headroom / recent_drain
+                } else {
+                    f64::INFINITY
+                };
+                let step = (base * 0.25).max(policy.min_rate_bytes_per_s);
+                if tte >= policy.horizon_s {
+                    (self.rate + step).min(base * 8.0)
+                } else if tte < policy.horizon_s / 2.0 {
+                    (self.rate / 2.0).max(base)
+                } else {
+                    self.rate.max(base)
+                }
+            };
         } else {
-            0.0
-        };
+            self.rate = 0.0;
+        }
+        d.rate_bytes_per_s = self.rate;
         d
     }
 
     fn step_inner(&mut self, policy: &Policy, inputs: &Inputs) -> Decision {
         let raw = evaluate(policy, inputs, 0.0);
-        if raw.state >= self.state {
-            // Worse or the same: at once.
+        if raw.state > self.state {
+            // Worse: at once.
             self.state = raw.state;
             self.better_since_ms = None;
             return raw;
@@ -343,7 +388,18 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
     }
     // Seconds until the free bytes run out at the recent rate: the tier's
     // own filling, or the GC backlog growing.
-    let draining = (-inputs.free_change_bytes_per_s).max(inputs.gc_backlog_growth_bytes_per_s);
+    let long_drain = (-inputs.free_change_bytes_per_s).max(inputs.gc_backlog_growth_bytes_per_s);
+    let recent_drain =
+        (-inputs.free_change_recent_bytes_per_s).max(inputs.gc_backlog_growth_recent_bytes_per_s);
+    // Entering a worse state follows the long trend (a burst does not
+    // throttle); leaving one (the margin evaluation) may follow the recent
+    // trend once it is safe (R-83: the long window kept writes throttled
+    // for minutes after the load fell).
+    let draining = if margin > 0.0 && policy.recent_window_ms > 0 {
+        long_drain.min(recent_drain)
+    } else {
+        long_drain
+    };
     let tte = if draining > 0.0 {
         headroom as f64 / draining
     } else {
@@ -419,6 +475,18 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
     out
 }
 
+/// Headroom of the devices heard from recently.
+fn fresh_headroom(policy: &Policy, inputs: &Inputs) -> u64 {
+    inputs
+        .devices
+        .iter()
+        .filter(|d| {
+            d.sampled_ms > 0 && inputs.now_ms.saturating_sub(d.sampled_ms) <= policy.stale_ms
+        })
+        .map(Device::headroom)
+        .sum()
+}
+
 /// Throttled: take in what GC gives back (so that the backlog stops
 /// growing), never less than the floor.
 ///
@@ -428,14 +496,7 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
 /// at least the horizon away from full at a net fill rate.
 #[allow(clippy::cast_precision_loss)]
 fn throttle_rate(policy: &Policy, inputs: &Inputs) -> f64 {
-    let fresh_headroom: u64 = inputs
-        .devices
-        .iter()
-        .filter(|d| {
-            d.sampled_ms > 0 && inputs.now_ms.saturating_sub(d.sampled_ms) <= policy.stale_ms
-        })
-        .map(Device::headroom)
-        .sum();
+    let fresh_headroom = fresh_headroom(policy, inputs);
     let overhead = if inputs.overhead > 0.0 {
         inputs.overhead
     } else {
@@ -600,5 +661,58 @@ mod tests {
         let d = Machine::default().step(&p, &i);
         assert_eq!(d.excluded_groups, vec![1, 2]);
         assert_eq!(d.state, State::WriteRejected, "{}", d.reason);
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn a_throttle_lifts_on_the_recent_trend_and_its_rate_adapts() {
+        let p = Policy {
+            dwell_ms: 0,
+            ..Policy::default()
+        };
+        let mut m = Machine::default();
+        // Filling fast over the long window: throttled.
+        let mut i = tier(60);
+        i.free_change_bytes_per_s = -100.0 * f64::from(1u32 << 20);
+        i.free_change_recent_bytes_per_s = i.free_change_bytes_per_s;
+        let d = m.step(&p, &i);
+        assert_eq!(d.state, State::Throttled);
+        let first = d.rate_bytes_per_s;
+        // The recent trend still safe-ish but filling within the horizon:
+        // the rate holds; within half of it: halves (not below the base).
+        // The recent trend no longer filling: the rate grows...
+        i.now_ms += 1;
+        i.free_change_recent_bytes_per_s = 0.0;
+        let d = m.step(&p, &i);
+        // ...and the state lifts at once (dwell 0) on the recent trend,
+        // although the long trend still says filling.
+        assert_eq!(d.state, State::Warning, "{}", d.reason);
+        // Without the recent window (Phase 3.6), it stays throttled.
+        let old = Policy {
+            recent_window_ms: 0,
+            adaptive_rate: false,
+            ..p
+        };
+        let mut m = Machine::default();
+        let mut j = tier(60);
+        j.free_change_bytes_per_s = -100.0 * f64::from(1u32 << 20);
+        j.free_change_recent_bytes_per_s = 0.0;
+        assert_eq!(m.step(&old, &j).state, State::Throttled);
+        j.now_ms += 1;
+        assert_eq!(m.step(&old, &j).state, State::Throttled);
+        // Adaptive rate: grows while the recent trend is safe.
+        let mut m = Machine::default();
+        let mut k = tier(9);
+        k.gc_reclaim_bytes_per_s = 10.0 * f64::from(1u32 << 20);
+        let r0 = m.step(&p, &k).rate_bytes_per_s;
+        k.now_ms += 1;
+        let r1 = m.step(&p, &k).rate_bytes_per_s;
+        assert!(r1 > r0, "{r0} -> {r1}");
+        // ...and halves (to at least the formula) when it is not.
+        k.now_ms += 1;
+        k.free_change_recent_bytes_per_s = -1000.0 * f64::from(1u32 << 30);
+        let r2 = m.step(&p, &k).rate_bytes_per_s;
+        assert!(r2 < r1, "{r1} -> {r2}");
+        assert!(first > 0.0);
     }
 }
