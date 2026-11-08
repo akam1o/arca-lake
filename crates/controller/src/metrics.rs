@@ -394,6 +394,14 @@ impl Metrics {
             "arca_controller_admission_excluded_groups",
             t.excluded_groups,
         );
+        out += &g(
+            "arca_controller_capacity_domain_conflicts",
+            t.domain_conflicts,
+        );
+        out += &g(
+            "arca_controller_capacity_domain_unverified",
+            t.domain_unverified,
+        );
         let _ = writeln!(out, "# TYPE arca_controller_gc_stage_seconds histogram");
         for (stage, h) in self.gc.stages() {
             h.snapshot().render_prometheus(

@@ -58,6 +58,16 @@ message DeviceCapacity {
   uint64 repair_floor_bytes = 9;
   // When the node sampled these, unix ms.
   uint64 sampled_unix_ms = 10;
+  // Capacity domain (Phase 3.7): the file system the free space comes
+  // from. Nodes with equal ids draw on one file system. Empty = unknown.
+  string domain_id = 11;
+  // Whether sharing would always show as equal ids (false for overlay,
+  // FUSE and network file systems).
+  bool domain_certain = 12;
+  // The node has an allotment (--capacity-bytes): total_bytes is it.
+  bool allotted = 13;
+  // The file system's own size (not capped by the allotment).
+  uint64 fs_total_bytes = 14;
 }
 
 // Client-streaming body: one header followed by data frames.

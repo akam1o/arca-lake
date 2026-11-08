@@ -698,6 +698,12 @@ struct ControllerArgs {
     /// See `--admission-max-chunk-bytes`.
     #[arg(long, default_value_t = 64)]
     admission_group_min_shards: u64,
+    /// Keep placing on storage nodes that share a file system without
+    /// `--capacity-bytes` allotments that fit it (development and
+    /// single-disk test clusters only: their reserves are then not
+    /// guaranteed). Without it their groups leave placement.
+    #[arg(long)]
+    allow_shared_filesystem: bool,
     /// Reconciliation interval in seconds.
     #[arg(long, default_value_t = 300)]
     reconcile_interval_secs: u64,
@@ -866,6 +872,12 @@ enum AdminCommand {
         #[arg(long)]
         tier: String,
     },
+    /// Check the capacity configuration from the leader's admission
+    /// record (Phase 3.7): nodes sharing a file system without allotments
+    /// that fit it (R-80), nodes whose sharing cannot be checked, groups
+    /// out of placement and each group's room (R-82), the record's age.
+    /// Exits 1 when a conflict is found or the record is stale or missing.
+    CheckConfig,
     /// Print nodes, groups, and the leader record.
     Status {
         /// Also print every process heartbeat and node capability record
@@ -1826,6 +1838,7 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.gc_interval = Duration::from_secs(args.gc_interval_secs);
     cfg.admission.dwell_ms = args.admission_dwell_secs.saturating_mul(1000);
     cfg.admission.group_min_shards = args.admission_group_min_shards.max(1);
+    cfg.admission.allow_shared_filesystem = args.allow_shared_filesystem;
     cfg.admission_max_chunk_bytes = args.admission_max_chunk_bytes.max(1);
     cfg.reconcile_interval = Duration::from_secs(args.reconcile_interval_secs);
     cfg.repair_interval = Duration::from_secs(args.repair_interval_secs);
@@ -2160,6 +2173,7 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 Err(e) => fail(e),
             }
         }
+        AdminCommand::CheckConfig => check_config(meta.as_ref()).await,
         AdminCommand::Status { versions } => {
             if versions {
                 let g = arca_lake_metadata::ops::compat::gate(meta.as_ref()).await;
@@ -2364,6 +2378,78 @@ async fn dry_run_plan(
     if p.blocked() {
         ExitCode::from(2)
     } else {
+        ExitCode::SUCCESS
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+async fn check_config<S: arca_lake_metadata::KvStore>(meta: &S) -> ExitCode {
+    let rec = match arca_lake_metadata::ops::admission::current(meta).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            println!("FAIL no admission record: no controller leader has evaluated capacity");
+            return ExitCode::from(1);
+        }
+        Err(e) => return fail(e),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    let age = now.saturating_sub(rec.computed_ms);
+    let mut bad = false;
+    println!(
+        "record leader_token {} generation {} age_ms {} ttl_ms {} gateways {}{}",
+        rec.leader_token,
+        rec.generation,
+        age,
+        rec.ttl_ms,
+        rec.gateways,
+        if rec.warming_up { " warming_up" } else { "" }
+    );
+    if age > rec.ttl_ms {
+        println!("FAIL the record is older than its TTL: no leader is publishing");
+        bad = true;
+    }
+    if !rec.capacity_conflicts.is_empty() {
+        println!(
+            "FAIL nodes {:?} share a file system without --capacity-bytes allotments that fit it: per-node capacity admission cannot keep their reserves (give each node its own file system or device, or allotments summing to at most its size)",
+            rec.capacity_conflicts
+        );
+        bad = true;
+    }
+    if !rec.capacity_unverified.is_empty() {
+        println!(
+            "WARN nodes {:?}: file system sharing cannot be checked (overlay, FUSE, network, or an older node) and they have no allotment",
+            rec.capacity_unverified
+        );
+    }
+    for t in &rec.tiers {
+        println!(
+            "tier {} state {} free_permille {} excluded_groups {:?} reason {}",
+            t.tier, t.state, t.free_permille, t.excluded_groups, t.reason
+        );
+        let rooms: Vec<u64> = t.group_room.iter().map(|g| g.room).collect();
+        if let (Some(min), Some(max)) = (rooms.iter().min(), rooms.iter().max()) {
+            println!(
+                "tier {} group_room min {} max {} (imbalance {:.2})",
+                t.tier,
+                min,
+                max,
+                if *max == 0 {
+                    0.0
+                } else {
+                    1.0 - *min as f64 / *max as f64
+                }
+            );
+        }
+        for g in &t.group_room {
+            println!("  group {} room {}", g.group, g.room);
+        }
+    }
+    if bad {
+        ExitCode::from(1)
+    } else {
+        println!("OK");
         ExitCode::SUCCESS
     }
 }
@@ -3499,7 +3585,7 @@ fn render_node_capacity(
     counts: (u64, [u64; 4]),
 ) {
     use std::fmt::Write as _;
-    let d = device.copied().unwrap_or_default();
+    let d = device.cloned().unwrap_or_default();
     let _ = writeln!(out, "# TYPE arca_node_capacity_bytes gauge");
     for (kind, v) in [
         ("total", d.total_bytes),

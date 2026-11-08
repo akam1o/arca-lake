@@ -152,6 +152,10 @@ pub struct Totals {
     pub gc_reclaim_per_s: u64,
     /// Groups excluded from placement.
     pub excluded_groups: u64,
+    /// Nodes sharing a file system unsafely (R-80).
+    pub domain_conflicts: u64,
+    /// Nodes whose sharing cannot be checked and that have no allotment.
+    pub domain_unverified: u64,
 }
 
 /// A tier's kind (cache or not), writable groups, and the sums of their
@@ -280,6 +284,8 @@ pub async fn pass_in_term<S: KvStore>(
         leader_token: term.token,
         generation: 0,
         warming_up: false,
+        capacity_conflicts: Vec::new(),
+        capacity_unverified: Vec::new(),
     };
     {
         let mut g = tracker.lock();
@@ -310,6 +316,23 @@ pub async fn pass_in_term<S: KvStore>(
         e.2.0 += u64::from(gr.data_shards);
         e.2.1 += u64::from(gr.data_shards) + u64::from(gr.parity_shards);
     }
+    // Capacity domains over every device heard (R-80).
+    let domains = {
+        let g = tracker.lock();
+        let all: Vec<Device> = g.devices.values().copied().collect();
+        check_domains(&all)
+    };
+    if !domains.conflicts.is_empty() {
+        tracing::error!(
+            nodes = ?domains.conflicts,
+            allowed = policy.allow_shared_filesystem,
+            "storage nodes share a file system without allotments that fit it: per-node capacity admission cannot hold their reserves (give each node its own file system, or --capacity-bytes allotments that sum to at most its size)"
+        );
+    }
+    record.capacity_conflicts.clone_from(&domains.conflicts);
+    record.capacity_unverified.clone_from(&domains.unverified);
+    totals.domain_conflicts = domains.conflicts.len() as u64;
+    totals.domain_unverified = domains.unverified.len() as u64;
     {
         let mut g = tracker.lock();
         let (backlog_logical, growth_logical, reclaim) = (
@@ -365,6 +388,11 @@ pub async fn pass_in_term<S: KvStore>(
                 // (logical) bytes.
                 gc_reclaim_bytes_per_s: if is_cache { 0.0 } else { reclaim / overhead },
                 gc_backlog_growth_bytes_per_s: growth,
+                unsafe_nodes: if policy.allow_shared_filesystem {
+                    Vec::new()
+                } else {
+                    domains.conflicts.clone()
+                },
                 free_change_bytes_per_s: free_change,
                 overhead,
                 now_ms,
@@ -425,6 +453,16 @@ pub async fn pass_in_term<S: KvStore>(
                 excluded_groups: decision.excluded_groups.clone(),
                 free_permille: (decision.free_fraction * 1000.0) as u32,
                 reason: decision.reason.clone(),
+                group_room: decision
+                    .group_room
+                    .iter()
+                    .map(
+                        |&(group, room)| arca_lake_metadata::ops::admission::GroupRoom {
+                            group,
+                            room,
+                        },
+                    )
+                    .collect(),
             });
             let changed = g
                 .decisions
@@ -448,6 +486,61 @@ pub async fn pass_in_term<S: KvStore>(
     Ok(totals)
 }
 
+fn domain_hash(id: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    if id.is_empty() {
+        return 0;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut h);
+    h.finish().max(1)
+}
+
+/// Capacity domains checked (Phase 3.7, R-80).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DomainCheck {
+    /// Nodes sharing a file system whose allotments do not prove the
+    /// sharing safe (not every one allotted, or the allotments exceed the
+    /// file system).
+    pub conflicts: Vec<u64>,
+    /// Nodes whose file system identity does not reveal sharing (overlay,
+    /// FUSE, network, or not reported) and that have no allotment.
+    pub unverified: Vec<u64>,
+}
+
+/// Check the capacity domains of `devices`.
+#[must_use]
+pub fn check_domains(devices: &[Device]) -> DomainCheck {
+    let mut by_domain: BTreeMap<u64, Vec<&Device>> = BTreeMap::new();
+    let mut out = DomainCheck::default();
+    for d in devices {
+        if d.domain == 0 || !d.domain_certain {
+            if !d.allotted {
+                out.unverified.push(d.node_id);
+            }
+            if d.domain == 0 {
+                continue;
+            }
+        }
+        by_domain.entry(d.domain).or_default().push(d);
+    }
+    for nodes in by_domain.values() {
+        if nodes.len() < 2 {
+            continue;
+        }
+        let fs_total = nodes.iter().map(|d| d.fs_total).max().unwrap_or(0);
+        let allotted: u64 = nodes.iter().map(|d| d.total).sum();
+        let safe = nodes.iter().all(|d| d.allotted) && fs_total > 0 && allotted <= fs_total;
+        if !safe {
+            out.conflicts.extend(nodes.iter().map(|d| d.node_id));
+        }
+    }
+    out.conflicts.sort_unstable();
+    out.conflicts.dedup();
+    out.unverified.sort_unstable();
+    out
+}
+
 /// The device a health response received at `now_ms` describes (older
 /// nodes report only the file system's free and total bytes: no reserve).
 #[must_use]
@@ -467,6 +560,10 @@ pub fn device_of(
             // Received now: staleness is judged by the controller's clock,
             // not the node's.
             sampled_ms: now_ms,
+            domain: domain_hash(&d.domain_id),
+            domain_certain: d.domain_certain,
+            allotted: d.allotted,
+            fs_total: d.fs_total_bytes,
         },
         None => Device {
             node_id,
@@ -476,6 +573,7 @@ pub fn device_of(
             inflight: 0,
             reclaimable: h.segment_bytes.saturating_sub(h.live_bytes),
             sampled_ms: if h.device_total_bytes > 0 { now_ms } else { 0 },
+            ..Device::default()
         },
     }
 }
@@ -504,5 +602,49 @@ mod tests {
         }
         assert!((r + 1e6).abs() < 1.0, "{r}");
         assert!(t.samples.len() < 200, "samples are pruned");
+    }
+
+    fn dev(node: u64, domain: u64, certain: bool, allot: Option<u64>, fs: u64) -> Device {
+        Device {
+            node_id: node,
+            total: allot.unwrap_or(fs),
+            domain,
+            domain_certain: certain,
+            allotted: allot.is_some(),
+            fs_total: fs,
+            ..Device::default()
+        }
+    }
+
+    #[test]
+    fn shared_file_systems_need_allotments_that_fit() {
+        const G: u64 = 1 << 30;
+        // Separate file systems: nothing to report.
+        let c = check_domains(&[
+            dev(1, 11, true, None, 100 * G),
+            dev(2, 12, true, None, 100 * G),
+        ]);
+        assert_eq!(c, DomainCheck::default());
+        // One file system, no allotments: both in conflict.
+        let c = check_domains(&[
+            dev(1, 11, true, None, 100 * G),
+            dev(2, 11, true, None, 100 * G),
+        ]);
+        assert_eq!(c.conflicts, vec![1, 2]);
+        // Allotments that fit: safe; that do not: conflict.
+        let ok = [
+            dev(1, 11, true, Some(40 * G), 100 * G),
+            dev(2, 11, true, Some(60 * G), 100 * G),
+        ];
+        assert_eq!(check_domains(&ok).conflicts, Vec::<u64>::new());
+        let over = [
+            dev(1, 11, true, Some(60 * G), 100 * G),
+            dev(2, 11, true, Some(60 * G), 100 * G),
+        ];
+        assert_eq!(check_domains(&over).conflicts, vec![1, 2]);
+        // Identities that cannot show sharing (overlay, network, older
+        // nodes) without allotments: unverified, never assumed safe.
+        let c = check_domains(&[dev(1, 11, false, None, G), dev(2, 0, false, None, 0)]);
+        assert_eq!(c.unverified, vec![1, 2]);
     }
 }

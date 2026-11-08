@@ -21,7 +21,9 @@
 # Capacity tests (Phase 3.6): NODE_DATA_DIR puts the storage nodes' directories there (one
 # capacity-limited file system per node: NODE_DATA_DIR/<node> may be a mount point),
 # NODE_EXTRA_ARGS and CONTROLLER_EXTRA_ARGS are appended to the nodes' and controllers' command
-# lines, GC_INTERVAL_SECS (60) and GC_GRACE_SECS (300) set the controllers' GC.
+# lines, GC_INTERVAL_SECS (60) and GC_GRACE_SECS (300) set the controllers' GC. Every node of
+# this layout is on one file system: the controllers run with --allow-shared-filesystem (R-80;
+# set SHARED_FS_ARGS= to drop it, with per-node file systems or fitting --capacity-bytes).
 #
 # Faults (round robin, one every FAULT_GAP_SECS): storage node SIGTERM
 # restart, storage node SIGKILL, gateway kill, controller leader kill,
@@ -135,7 +137,7 @@ start_controller() { # name
     --scrub-interval-secs 3600 --scrub-rate-mib 16 --stripe-repair-interval-secs 30 \
     --tiering-tier cold --tiering-tier default --tiering-promote-reads 3 --tiering-promote-window-secs 900 \
     --tiering-demote-after-secs 3600 --tiering-interval-secs 300 --evict-interval-secs 10 \
-    $CACHE_ARGS ${CONTROLLER_EXTRA_ARGS:-}
+    $CACHE_ARGS ${SHARED_FS_ARGS---allow-shared-filesystem} ${CONTROLLER_EXTRA_ARGS:-}
 }
 start_gateway() { # name
   local n="$1"

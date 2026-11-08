@@ -27,6 +27,18 @@ pub struct TierAdmission {
     pub free_permille: u32,
     /// Why.
     pub reason: String,
+    /// Room of each group (Phase 3.7): its fullest member's bytes above
+    /// the reserve, as last reported. Gateways place where most is left.
+    pub group_room: Vec<GroupRoom>,
+}
+
+/// Room of one group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GroupRoom {
+    /// Group id.
+    pub group: u64,
+    /// The fullest member's headroom, bytes.
+    pub room: u64,
 }
 
 /// The admission record.
@@ -48,6 +60,10 @@ pub struct AdmissionRecord {
     /// The leader had not yet heard every member in its term: the states
     /// are at least those it found published (warm-up after a failover).
     pub warming_up: bool,
+    /// Nodes sharing a file system without allotments that fit it (R-80).
+    pub capacity_conflicts: Vec<u64>,
+    /// Nodes whose file system sharing cannot be checked (no allotment).
+    pub capacity_unverified: Vec<u64>,
 }
 
 impl crate::records::Record for AdmissionRecord {}

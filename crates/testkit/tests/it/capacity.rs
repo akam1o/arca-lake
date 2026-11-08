@@ -519,7 +519,9 @@ async fn force_state(c: &TestCluster, state: u8, rate: u64) {
             excluded_groups: Vec::new(),
             free_permille: 500,
             reason: "test".into(),
+            group_room: Vec::new(),
         }],
+        leader_token: u64::MAX,
         ..Default::default()
     };
     admission::publish(c.meta.as_ref(), &rec).await.unwrap();
@@ -812,5 +814,130 @@ async fn a_former_leader_cannot_publish_admission() {
         late.is_err(),
         "a delayed write of the former leader was accepted"
     );
+    c.shutdown().await;
+}
+
+/// R-80 (Phase 3.7): nodes on one file system without allotments that fit
+/// it are detected; their groups leave placement (the tier refuses new
+/// data, saying why) unless shared file systems are allowed; allotments
+/// that fit make the same layout safe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nodes_sharing_a_file_system_without_allotments_leave_placement() {
+    let mut c = capped(160 * MIB).await;
+    let tracker = Tracker::default();
+    let policy = Policy::default();
+    // Allotted (the test layout): one domain, safe.
+    assert_eq!(evaluate(&c, &tracker, &policy).await, State::Normal);
+    let rec = admission::current(c.meta.as_ref()).await.unwrap().unwrap();
+    assert!(rec.capacity_conflicts.is_empty(), "{rec:?}");
+    // One node loses its allotment: all three share the file system and
+    // nothing proves their reserves hold.
+    c.set_node_capacity(2, None).await;
+    let tracker = Tracker::default();
+    let state = evaluate(&c, &tracker, &policy).await;
+    let rec = admission::current(c.meta.as_ref()).await.unwrap().unwrap();
+    let mut ids: Vec<u64> = c.nodes[..3].iter().map(|n| n.id).collect();
+    ids.sort_unstable();
+    assert_eq!(rec.capacity_conflicts, ids);
+    assert_eq!(state, State::WriteRejected);
+    assert!(
+        rec.tier("default")
+            .unwrap()
+            .reason
+            .contains("share a file system"),
+        "{rec:?}"
+    );
+    let e = s3::put(&c.backend, BUCKET, "x", body("x"), &PutOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(*e.code(), S3ErrorCode::SlowDown);
+    // Explicitly allowed (a development cluster): placed again, still
+    // reported.
+    let allow = Policy {
+        allow_shared_filesystem: true,
+        ..Policy::default()
+    };
+    let allow = Policy {
+        dwell_ms: 0,
+        ..allow
+    };
+    let tracker = Tracker::default();
+    // A new term starts at the published state and steps down.
+    let mut st = State::RecoveryOnly;
+    for _ in 0..5 {
+        st = evaluate(&c, &tracker, &allow).await;
+    }
+    assert!(
+        st < State::WriteRejected,
+        "{:?}",
+        admission::current(c.meta.as_ref()).await.unwrap()
+    );
+    let rec = admission::current(c.meta.as_ref()).await.unwrap().unwrap();
+    assert_eq!(rec.capacity_conflicts, ids);
+    s3::put(&c.backend, BUCKET, "y", body("y"), &PutOptions::default())
+        .await
+        .unwrap();
+    c.shutdown().await;
+}
+
+/// R-82 (Phase 3.7): new chunks go to the groups with the most room.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_chunks_prefer_the_group_with_more_room() {
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 2,
+        ..ClusterOptions::rs(6, 2, 1, MIB, 64 << 10)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let groups: Vec<_> = c
+        .groups()
+        .await
+        .into_iter()
+        .filter(|g| !g.is_cache() && g.scheme == "rs-gf8-v1")
+        .collect();
+    assert_eq!(groups.len(), 2, "{groups:?}");
+    let small_members: Vec<usize> = groups[0]
+        .members
+        .iter()
+        .map(|m| c.node_index(m).unwrap())
+        .collect();
+    let others: Vec<usize> = (0..6).filter(|i| !small_members.contains(i)).collect();
+    for &i in &small_members {
+        c.set_node_capacity(i, Some(300 * MIB)).await;
+    }
+    for &i in &others {
+        c.set_node_capacity(i, Some(1 << 30)).await;
+    }
+    let tracker = Tracker::default();
+    let policy = Policy {
+        group_min_shards: 4,
+        ..Policy::default()
+    };
+    let now = now_ms();
+    for n in &c.nodes {
+        let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+        tracker.note_device(device_of(n.id, &h, now));
+    }
+    pass(c.meta.as_ref(), &tracker, &policy, MIB, 0, now)
+        .await
+        .unwrap();
+    let rec = admission::current(c.meta.as_ref()).await.unwrap();
+    c.backend.cluster().admission.observe(rec, Instant::now());
+    let mut in_roomy = 0;
+    for i in 0..20 {
+        let key = format!("p{i}");
+        s3::put(&c.backend, BUCKET, &key, body(&key), &PutOptions::default())
+            .await
+            .unwrap();
+        if c.manifest(BUCKET, &key).await.chunks[0]
+            .1
+            .placement
+            .group_id
+            == groups[1].id
+        {
+            in_roomy += 1;
+        }
+    }
+    assert_eq!(in_roomy, 20, "every chunk in the group with more room");
     c.shutdown().await;
 }

@@ -67,6 +67,16 @@ pub struct Device {
     pub reclaimable: u64,
     /// When the node sampled them (unix ms); 0 = never heard.
     pub sampled_ms: u64,
+    /// Capacity domain (Phase 3.7): a hash of the file system identity the
+    /// node reported; 0 = not reported (older node).
+    pub domain: u64,
+    /// Whether the identity reveals sharing (see the storage node's
+    /// `domain` module).
+    pub domain_certain: bool,
+    /// The node has an allotment (`total` is it).
+    pub allotted: bool,
+    /// The file system's own size.
+    pub fs_total: u64,
 }
 
 impl Device {
@@ -103,6 +113,9 @@ pub struct Inputs {
     pub devices: Vec<Device>,
     /// The tier's writable groups.
     pub groups: Vec<Group>,
+    /// Nodes that share a file system without fitting allotments (Phase
+    /// 3.7, R-80): their groups are left out of placement.
+    pub unsafe_nodes: Vec<u64>,
     /// Largest shard a client write puts on one member (chunk size / k),
     /// so that a group with less room than a few of them is not used.
     pub max_shard_bytes: u64,
@@ -149,6 +162,10 @@ pub struct Policy {
     /// Throttled rate never below this (logical bytes/s, the tier), so that
     /// clients make progress.
     pub min_rate_bytes_per_s: f64,
+    /// Keep placing on nodes that share a file system without fitting
+    /// allotments (R-80; development and single-disk test clusters only:
+    /// their reserves are then not guaranteed).
+    pub allow_shared_filesystem: bool,
 }
 
 impl Default for Policy {
@@ -164,6 +181,7 @@ impl Default for Policy {
             horizon_s: 3600.0,
             group_min_shards: 64,
             min_rate_bytes_per_s: f64::from(1u32 << 20),
+            allow_shared_filesystem: false,
         }
     }
 }
@@ -178,6 +196,9 @@ pub struct Decision {
     pub rate_bytes_per_s: f64,
     /// Groups not to place new chunks in (a member lacks room).
     pub excluded_groups: Vec<u64>,
+    /// Room of each group: its fullest fresh member's headroom (Phase 3.7
+    /// capacity-aware placement; gateways prefer the groups with most).
+    pub group_room: Vec<(u64, u64)>,
     /// Usable fraction left (0..=1).
     pub free_fraction: f64,
     /// Why (for logs and the record).
@@ -313,7 +334,8 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
             .min()
             // No member heard from at all: nothing known, not used.
             .unwrap_or(0);
-        if room < min_room {
+        out.group_room.push((g.id, room));
+        if room < min_room || g.members.iter().any(|n| inputs.unsafe_nodes.contains(n)) {
             out.excluded_groups.push(g.id);
         } else {
             writable += 1;
@@ -342,7 +364,15 @@ fn evaluate(policy: &Policy, inputs: &Inputs, margin: f64) -> Decision {
         (
             State::WriteRejected,
             if writable == 0 && !inputs.groups.is_empty() {
-                format!("no group has room ({} excluded)", out.excluded_groups.len())
+                if inputs.unsafe_nodes.is_empty() {
+                    format!("no group has room ({} excluded)", out.excluded_groups.len())
+                } else {
+                    format!(
+                        "no group has room ({} excluded; nodes {:?} share a file system without fitting allotments)",
+                        out.excluded_groups.len(),
+                        inputs.unsafe_nodes
+                    )
+                }
             } else {
                 format!(
                     "{:.1} % usable free, below {:.1} %",
@@ -431,6 +461,7 @@ mod tests {
                 inflight: 0,
                 reclaimable: 0,
                 sampled_ms: 1_000_000,
+                ..Device::default()
             })
             .collect();
         Inputs {

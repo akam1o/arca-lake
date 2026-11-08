@@ -226,6 +226,18 @@ impl WriteAdmission {
         self.effective(Instant::now()).excluded_groups
     }
 
+    /// Room of the tier's groups as last published (Phase 3.7
+    /// capacity-aware placement); empty without a record.
+    #[must_use]
+    pub fn group_room(&self) -> std::collections::HashMap<u64, u64> {
+        let s = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        s.record
+            .as_ref()
+            .and_then(|r| r.tier(&self.tier))
+            .map(|t| t.group_room.iter().map(|g| (g.group, g.room)).collect())
+            .unwrap_or_default()
+    }
+
     /// Header-time check of a request that will write about `hint` bytes
     /// of new client data (PUT, UploadPart, copies; `hint` is the content
     /// length or one chunk): refused at once when new data is refused, or
@@ -451,6 +463,7 @@ mod tests {
                 excluded_groups: vec![7],
                 free_permille: 100,
                 reason: "test".into(),
+                group_room: Vec::new(),
             }],
             ..Default::default()
         }

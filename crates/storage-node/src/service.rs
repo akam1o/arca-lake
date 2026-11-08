@@ -88,6 +88,8 @@ pub struct StorageNodeService {
     capacity_bytes: Option<u64>,
     /// Capacity admission of shard writes (Phase 3.6).
     admission: crate::capacity::Admission,
+    /// The store's capacity domain (Phase 3.7), read at start.
+    domain: Option<crate::domain::Domain>,
     /// Load signals for adaptive background work (ADR-0018).
     load: crate::load::LoadSampler,
 }
@@ -212,6 +214,7 @@ impl StorageNodeService {
             compaction: Arc::default(),
             capacity_bytes: cfg.capacity_bytes,
             admission: crate::capacity::Admission::new(reserve),
+            domain: crate::domain::of(&cfg.store.dir),
             load: crate::load::LoadSampler::new(&cfg.store.dir),
         })
     }
@@ -303,6 +306,14 @@ impl StorageNodeService {
             sampled_unix_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            domain_id: self
+                .domain
+                .as_ref()
+                .map(|d| d.id.clone())
+                .unwrap_or_default(),
+            domain_certain: self.domain.as_ref().is_some_and(|d| d.certain),
+            allotted: self.capacity_bytes.is_some(),
+            fs_total_bytes: device_space(self.store.dir()).map_or(0, |(_, t)| t),
         }
     }
 

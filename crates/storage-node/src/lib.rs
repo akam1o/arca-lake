@@ -9,6 +9,7 @@
 pub mod capacity;
 mod cluster;
 pub mod compactor;
+pub mod domain;
 mod epochs;
 #[cfg(feature = "fault-injection")]
 mod fault_control;

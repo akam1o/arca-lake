@@ -140,6 +140,12 @@ pub struct ClusterOptions {
     pub credential_store: Option<Arc<CredentialStore>>,
 }
 
+/// Allotment every test node starts with (`--capacity-bytes`): the
+/// nodes of a test cluster share one file system, which capacity
+/// admission refuses without allotments that fit it (Phase 3.7, R-80).
+/// [`TestCluster::set_node_capacity`] changes it (`None`: none).
+pub const TEST_ALLOTMENT: u64 = 2 << 30;
+
 /// The cache tier name used by test clusters.
 pub const CACHE_TIER: &str = "fast";
 
@@ -269,6 +275,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             std::fs::create_dir_all(&dir).unwrap();
             let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
             cfg.store = node_store_config(&dir);
+            cfg.capacity_bytes = Some(TEST_ALLOTMENT);
             let tls = pki.as_ref().map(|p| p.pending_node(&dir));
             cfg.tls = tls.clone();
             let handle = arca_lake_storage_node::serve(cfg).await.unwrap();
@@ -295,7 +302,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 addr,
                 handle: Some(handle),
                 tls,
-                capacity: None,
+                capacity: Some(TEST_ALLOTMENT),
             });
         }
         groups::create_groups(meta.as_ref(), &opts.profile, "default", opts.groups)
@@ -308,6 +315,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             std::fs::create_dir_all(&dir).unwrap();
             let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
             cfg.store = node_store_config(&dir);
+            cfg.capacity_bytes = Some(TEST_ALLOTMENT);
             let tls = pki.as_ref().map(|p| p.pending_node(&dir));
             cfg.tls = tls.clone();
             let handle = arca_lake_storage_node::serve(cfg).await.unwrap();
@@ -333,7 +341,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 addr,
                 handle: Some(handle),
                 tls,
-                capacity: None,
+                capacity: Some(TEST_ALLOTMENT),
             });
         }
         let cache = if opts.cache_nodes > 0 {
@@ -538,6 +546,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
         cfg.store = node_store_config(&dir);
+        cfg.capacity_bytes = Some(TEST_ALLOTMENT);
         let tls = self.pki.as_ref().map(|p| p.pending_node(&dir));
         cfg.tls = tls.clone();
         let handle = arca_lake_storage_node::serve(cfg).await.unwrap();
@@ -564,7 +573,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             addr,
             handle: Some(handle),
             tls,
-            capacity: None,
+            capacity: Some(TEST_ALLOTMENT),
         });
         i
     }
@@ -800,6 +809,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
         cfg.store = node_store_config(&dir);
+        cfg.capacity_bytes = Some(TEST_ALLOTMENT);
         let tls = self.pki.as_ref().map(|p| p.pending_node(&dir));
         cfg.tls = tls.clone();
         let handle = arca_lake_storage_node::serve(cfg).await.unwrap();
@@ -825,7 +835,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             addr,
             handle: Some(handle),
             tls,
-            capacity: None,
+            capacity: Some(TEST_ALLOTMENT),
         });
         i
     }

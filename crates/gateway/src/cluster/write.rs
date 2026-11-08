@@ -885,6 +885,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let mut groups: Vec<&GroupRecord> = map.groups.values().collect();
         // A stable order: the map's iteration order differs per process.
         groups.sort_by_key(|g| g.id);
+        // Capacity-aware choice (Phase 3.7, R-82): the groups with the most
+        // room left (their fullest member's, as the controller last heard)
+        // take new chunks; unknown room counts as plenty.
+        let room = self.cluster.admission.group_room();
         let candidates: Vec<WritableGroup> = groups
             .into_iter()
             .filter(|g| {
@@ -898,7 +902,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             .filter(|g| g.tier == self.cfg.tier && !exclude.contains(&g.id))
             .map(|g| WritableGroup {
                 id: g.id,
-                min_free_bytes: u64::MAX,
+                min_free_bytes: room.get(&g.id).copied().unwrap_or(u64::MAX),
             })
             .collect();
         let id = arca_lake_placement::pick_group_for_write(&candidates, salt)?;
