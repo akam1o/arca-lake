@@ -37,6 +37,12 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ### Fixed (Phase 3.9)
 
+- A compaction killed while writing its output, after the active
+  segment had rolled over to a higher id, left a torn segment that the
+  next open reported as corrupt (no data was lost: the source still held
+  every record). Outputs are written under a temporary name and renamed
+  once synced; open removes leftovers. Found by the SIGKILL test in CI.
+
 - A node's fence (incarnation, epoch, delete fence) no longer releases
   its shared guard when a delete's RPC is cancelled while the store is
   still deleting: the guard lives in the blocking store call.

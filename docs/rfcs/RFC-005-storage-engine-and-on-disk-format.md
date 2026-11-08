@@ -132,6 +132,13 @@ live bytes (plus 1/64 and 1 MiB) do not fit in the device's free space is
 skipped and counted (`arca_node_compaction_skipped_no_space_total`,
 Phase 3.6); an
 out-of-space error mid-copy leaves the store as it was.
+The output is written as `seg-<id>.arca.tmp` and renamed to its segment
+name only once synced (directory synced after the rename, Phase 3.9):
+the output id is reserved when compaction starts, so the active segment
+may have rolled over to a higher id meanwhile, and a torn output under
+its segment name would then not be the last segment and would read as a
+corrupt one. Open removes every leftover `.tmp` file; no index ever
+referenced one.
 
 **Capacity admission (Phase 3.6, RFC-008 §6.8).** The node admits every
 `PutShard` before taking its body against the device's free space (the
@@ -193,6 +200,7 @@ the old one before any release.
 | Power loss after acknowledgment | Data was `fdatasync`ed before the ack; on reopen it is present | Truncation model; hardware verification pending (R8) |
 | Bit rot in payload | Block CRC mismatch on read or scrub → corrupt, quarantined | Bit-flip test |
 | Bit rot in header | Header CRC mismatch → record invalid; if last, torn tail; else corruption reported | Bit-flip test |
+| Crash during compaction before the output is synced | A temporary file, removed on open; the source holds every record | `io_faults::a_compaction_output_torn_before_its_sync_is_never_a_corrupt_segment` (reported a corrupt segment before Phase 3.9) |
 | Crash during compaction before unlink | Duplicate records; sequence rule yields the same state; re-run finishes | Fault-injection test |
 | Crash during compaction after unlink | Only the output exists; index rebuilt from it | Fault-injection test |
 | Crash during segment creation | Short last file deleted on open | Test in `crash.rs` |

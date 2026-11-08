@@ -16,6 +16,20 @@ pub fn segment_path(dir: &Path, segment_id: u64) -> PathBuf {
     dir.join(format!("seg-{segment_id:016x}.arca"))
 }
 
+/// Where a compaction writes its output until it is synced (then renamed
+/// to [`segment_path`]): a crash before that leaves a file recovery
+/// removes, never a segment with a torn tail that is not the last one.
+#[must_use]
+pub fn temp_segment_path(dir: &Path, segment_id: u64) -> PathBuf {
+    dir.join(format!("seg-{segment_id:016x}.arca.tmp"))
+}
+
+/// Parse a segment ID from a file name produced by [`temp_segment_path`].
+#[must_use]
+pub fn parse_temp_segment_name(name: &str) -> Option<u64> {
+    parse_segment_name(name.strip_suffix(".tmp")?)
+}
+
 /// Parse a segment ID from a file name produced by [`segment_path`].
 #[must_use]
 pub fn parse_segment_name(name: &str) -> Option<u64> {
@@ -38,7 +52,25 @@ pub struct SegmentWriter {
 impl SegmentWriter {
     /// Create a new segment file, write and sync its header, and sync the directory.
     pub fn create(dir: &Path, header: SegmentHeader) -> Result<Self> {
-        let path = segment_path(dir, header.segment_id);
+        Self::create_at(dir, header, &segment_path(dir, header.segment_id))
+    }
+
+    /// [`Self::create`] under [`temp_segment_path`]; [`Self::publish`]
+    /// gives it its segment name once its content is synced.
+    pub fn create_temp(dir: &Path, header: SegmentHeader) -> Result<Self> {
+        Self::create_at(dir, header, &temp_segment_path(dir, header.segment_id))
+    }
+
+    /// Rename a segment made by [`Self::create_temp`] (and synced) to its
+    /// segment name, and sync the directory.
+    pub fn publish(&self, dir: &Path) -> Result<()> {
+        let id = self.header.segment_id;
+        std::fs::rename(temp_segment_path(dir, id), segment_path(dir, id))?;
+        faults::sync_all(&File::open(dir)?, "dir")?;
+        Ok(())
+    }
+
+    fn create_at(dir: &Path, header: SegmentHeader, path: &Path) -> Result<Self> {
         faults::guard(&faults::IoOp::Create {
             segment: header.segment_id,
         })?;
@@ -46,7 +78,7 @@ impl SegmentWriter {
             .read(true)
             .write(true)
             .create_new(true)
-            .open(&path)?;
+            .open(path)?;
         let padded = header.padded_len();
         let mut buf = vec![0u8; usize::try_from(padded).expect("alignment fits usize")];
         buf[..SEGMENT_HEADER_LEN].copy_from_slice(&header.encode());
@@ -59,7 +91,7 @@ impl SegmentWriter {
             // caller never reuses the id either (and open treats a file
             // shorter than its header as a crashed creation).
             drop(file);
-            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path);
             return Err(e.into());
         }
         Ok(Self {

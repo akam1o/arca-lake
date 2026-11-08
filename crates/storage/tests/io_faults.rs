@@ -588,3 +588,67 @@ fn deleting_an_absent_key_writes_nothing() {
     drop(store);
     reopen_and_check(dir.path(), SyncPolicy::Group, &[]);
 }
+
+/// A compaction that dies while writing its output (here: a partial write,
+/// as a SIGKILL or a full device leaves it) while the active segment has
+/// rolled over to a higher id since the output id was reserved. The torn
+/// output is not the last segment, so a recovery that took it for a
+/// segment reported it corrupt (CI, Phase 3.9: `sigkill.rs` iteration 9).
+/// The output is written under a temporary name and becomes a segment only
+/// once synced: a reopen finds no corrupt segment, loses nothing, and the
+/// leftover is removed.
+#[test]
+fn a_compaction_output_torn_before_its_sync_is_never_a_corrupt_segment() {
+    let _s = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let mut expect = Vec::new();
+    {
+        let (store, _) = Store::open(config(dir.path(), SyncPolicy::Always)).unwrap();
+        // Fill a segment and roll over; supersede half of it.
+        for i in 0..40u8 {
+            store.put(key(i), &payload(i, 30_000)).unwrap();
+        }
+        let first = store.locate(&key(0)).unwrap().segment_id;
+        for i in (0..40u8).step_by(2) {
+            store.put(key(i), &payload(i + 1, 30_000)).unwrap();
+        }
+        // The second record copied into the output is torn.
+        let writes = Arc::new(AtomicUsize::new(0));
+        let w = Arc::clone(&writes);
+        let active = store.locate(&key(38)).unwrap().segment_id;
+        set_io_hook(Some(Arc::new(move |op: &IoOp| match op {
+            IoOp::Write { segment, .. } if *segment > active => {
+                if w.fetch_add(1, Ordering::SeqCst) == 1 {
+                    FaultOutcome::PartialWrite(100)
+                } else {
+                    FaultOutcome::None
+                }
+            }
+            _ => FaultOutcome::None,
+        })));
+        assert!(store.compact(first).is_err());
+        set_io_hook(None);
+        // The active segment rolls over past the reserved output id.
+        for i in 100..140u8 {
+            store.put(key(i), &payload(i, 30_000)).unwrap();
+        }
+        for i in 0..40u8 {
+            let v = if i % 2 == 0 {
+                payload(i + 1, 30_000)
+            } else {
+                payload(i, 30_000)
+            };
+            expect.push((key(i), v));
+        }
+        for i in 100..140u8 {
+            expect.push((key(i), payload(i, 30_000)));
+        }
+    }
+    let _store = reopen_and_check(dir.path(), SyncPolicy::Always, &expect);
+    let leftovers = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .count();
+    assert_eq!(leftovers, 0);
+}

@@ -479,6 +479,23 @@ impl Store {
             Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
         }
 
+        // Compaction outputs that never got their segment name: never
+        // referenced by an index (their source still holds every record).
+        let mut removed_temp = false;
+        for e in std::fs::read_dir(&cfg.dir)?.filter_map(std::result::Result::ok) {
+            if let Some(id) = e
+                .file_name()
+                .to_str()
+                .and_then(segment::parse_temp_segment_name)
+            {
+                faults::guard(&faults::IoOp::Remove { segment: id })?;
+                std::fs::remove_file(e.path())?;
+                removed_temp = true;
+            }
+        }
+        if removed_temp {
+            faults::sync_all(&File::open(&cfg.dir)?, "dir")?;
+        }
         let mut ids: Vec<u64> = std::fs::read_dir(&cfg.dir)?
             .filter_map(std::result::Result::ok)
             .filter_map(|e| e.file_name().to_str().and_then(segment::parse_segment_name))
@@ -716,20 +733,31 @@ impl Store {
         id: u64,
         format_version: u16,
     ) -> Result<SegmentWriter> {
+        SegmentWriter::create(
+            &cfg.dir,
+            Self::new_segment_header(cfg, device_id, id, format_version),
+        )
+    }
+
+    fn new_segment_header(
+        cfg: &StoreConfig,
+        device_id: [u8; 16],
+        id: u64,
+        format_version: u16,
+    ) -> SegmentHeader {
         let created_unix_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|d| u64::try_from(d.as_nanos()).ok())
             .unwrap_or(0);
-        let header = SegmentHeader {
+        SegmentHeader {
             format_version,
             record_alignment: cfg.record_alignment,
             block_size: cfg.block_size,
             device_id,
             segment_id: id,
             created_unix_nanos,
-        };
-        SegmentWriter::create(&cfg.dir, header)
+        }
     }
 
     /// Device UUID.
@@ -1763,11 +1791,14 @@ impl Store {
                 continue;
             }
             if output.is_none() {
-                let o = Self::create_segment(
-                    &self.cfg,
-                    self.device_id,
-                    output_id,
-                    self.format_write(),
+                let o = SegmentWriter::create_temp(
+                    &self.cfg.dir,
+                    Self::new_segment_header(
+                        &self.cfg,
+                        self.device_id,
+                        output_id,
+                        self.format_write(),
+                    ),
                 )?;
                 self.written
                     .compaction
@@ -1818,7 +1849,7 @@ impl Store {
         }
         if let Some(out) = &output {
             out.sync()?;
-            faults::sync_all(&File::open(&self.cfg.dir)?, "dir")?;
+            out.publish(&self.cfg.dir)?;
             report.output_segment_id = Some(output_id);
             self.readers
                 .write()
