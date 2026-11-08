@@ -86,11 +86,16 @@ async fn an_epoch_raise_is_acknowledged_only_after_deletes_past_the_old_fence() 
         c2.delete_shard(&addr2, shard(3), 0).await.unwrap();
         Instant::now()
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        !armed.load(Ordering::SeqCst),
-        "the delete reached the store"
-    );
+    // Wait (bounded) for the delete to reach the store: a fixed 200 ms
+    // was not enough on a loaded CI runner (R-77).
+    let waiting = Instant::now();
+    while armed.load(Ordering::SeqCst) {
+        assert!(
+            waiting.elapsed() < Duration::from_secs(10),
+            "the delete never reached the store"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     c.update_epoch(&addr, 1, 5).await.unwrap();
     let raised = Instant::now();
     let deleted = delete.await.unwrap();
