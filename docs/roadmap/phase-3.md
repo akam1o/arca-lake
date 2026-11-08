@@ -1,7 +1,7 @@
 # Phase 3: Production hardening
 
 Status: **3.1–3.6 delivered; 3.7 (admission refinement and experimental
-release preparation) delivered with the limitations in its report and
+release preparation) and 3.8 (pre-publication hardening) delivered with the limitations in its report and
 `risks.md`; the release itself awaits the maintainer's approval**. Priorities: long-running
 operation, failure recovery, S3 compatibility, security, upgradability —
 over further performance work (the Phase 2.3 regression check guards
@@ -19,6 +19,7 @@ what was gained).
 | 3.5 Reliability closure | commit outcomes by phase, fenced deletes, member moves without lost redundancy, storage-node memory, shutdown, GC cadence (ADR-0019) | regression test per finding; long soak | delivered; READY FOR EXPERIMENTAL RELEASE (conditional); R-64, R-73 open |
 | 3.6 Capacity safety and GC backpressure | multipart GC root cause, capacity accounting per device/group/tier, node-side capacity admission with a reserve, tier backpressure states with hysteresis, `SlowDown` + `Retry-After`, repair/compaction reserve, cache conditional delete (R-73), metrics/alerts/runbooks, short dense load tests A–D instead of a 24 h soak (ADR-0020, RFC-008 §6.8) | C1–C18 of the Phase 3.6 plan with evidence | delivered; long-duration operation not re-verified |
 | 3.7 Admission refinement and release preparation | every write path charged chunk by chunk (R-81), admission terms across failovers (R-85), shared file system detection (R-80), recent-trend recovery and adaptive throttle (R-83), capacity-aware placement (R-82), refused-body client matrix (R-84), multipart under backpressure on FoundationDB; public repository audit, public CI review, experimental documentation, release checklist (ADR-0021) | A1–A18 of the Phase 3.7 plan with evidence | delivered; publication not done (needs approval) |
+| 3.8 Pre-publication hardening | delete reserve and capacity breakdown (the Phase 3.7 reserve finding explained), admission records fenced by incarnation/term/generation, recent-trend entry, capacity rebalancing with cursor and resume, system model test, node resource bounds, profiling, two-model review with fixes (ADR-0022) | H1–H16 of the Phase 3.8 plan with evidence | delivered; R-88 open (see report); publication not done |
 
 ## Residual risks going in
 

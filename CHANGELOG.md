@@ -6,6 +6,32 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Added (Phase 3.8)
+
+- Delete reserve under both capacity floors (one tombstone per record
+  held); node capacity breakdown `arca_node_written_bytes_total`,
+  `arca_node_device_usage_bytes`.
+- Capacity rebalancing between the groups of a tier (`--rebalance`,
+  `admin rebalance status|pause|resume|dry-run`,
+  `arca_controller_rebalance_*`).
+- Reads follow chunks moved since their manifest was read
+  (`arca_gateway_moved_reads_total`).
+- Tests: system model over the whole data path, backpressure simulator,
+  rebalancing, the Phase 3.7 reserve finding, fencing of admission
+  records.
+
+### Changed (Phase 3.8)
+
+- Gateways take admission records only of their incarnation and never
+  of a lower term or generation (no time rule); without any record they
+  fail closed after 60 s; unnamed tiers are throttled.
+- A worse backpressure state on time to full needs the recent trend to
+  agree once it is covered.
+- Delete-class reference checks are refused outside `Active`; migration
+  switches check the target group's epoch; deletes of absent keys write
+  no tombstone; a write whose generation was retired under it answers
+  503 instead of 500.
+
 ### Added (Phase 3.7)
 
 - Every client write path (PUT with or without a length, UploadPart,

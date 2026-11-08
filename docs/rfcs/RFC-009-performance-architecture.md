@@ -1020,6 +1020,25 @@ difference is in recovery: the long window kept the tier throttled and
 every chunk waited its 2 s share; the recent trend and the adaptive rate
 admit almost the offered load within about half a minute.
 
+### 6.22 Phase 3.8: regression, A/B, CPU profile
+
+Regression check (`regress.sh lab-2host`, 3 repetitions): within
+tolerance except the cache hit ratio (environment, as since Phase 3.1)
+and multipart PUT (158 against 201 MiB/s); A/B against the Phase 3.7
+binary, alternating: 120–292 (median 201) against 145–287 (median 192)
+MiB/s, the bimodal spread of R-48, no regression. CPU profile of PUT and
+warm GET (`docs/verification/phase-3.8-hardening.md`): the kernel's
+network and file system paths and memcpy dominate on both hosts; on the
+gateway MD5 of single-part ETags is the largest user-space cost of PUT
+(17.5 %), then CRC-32C (8 %) and erasure coding (5 %).
+
+Candidates, none adopted (no measured gain yet; each to be measured
+with the regression check before adoption): an assembly MD5 (the
+`md-5` crate's `asm` feature) for ETags; zero-copy body frames from the
+HTTP layer into the encoder (removes one of the gateway's copies);
+`O_DIRECT` or `io_uring` writes on the nodes (removes the page-cache
+copy, changes the durability path and needs its own verification).
+
 ## 7. Interpretation
 
 *Verified on this environment* (one run each; see §4 for the error

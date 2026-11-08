@@ -338,3 +338,20 @@ both. The default stays reconstruction (each chunk is checked against
 its recorded checksum before the shard is written); `--repair-source
 direct` is the opt-in when the leaving member is healthy and network or
 device reads are the bottleneck. Not measured on the hosts.
+
+## Phase 3.8 run (2026-11-08)
+
+Results: `benchmarks/linux/results/regress-phase38` (the check) and
+`regress-phase38-ab` (multipart PUT, Phase 3.8 against the Phase 3.7
+binary `dc3fbfe`, alternating per repetition). Label `lab-2host`.
+
+| metric | baseline | Phase 3.8 | verdict |
+| --- | --- | --- | --- |
+| PUT MiB/s | 340 | 354 | ok |
+| warm GET MiB/s / p99 ms | 695 / 99.9 | 683 / 106 | ok |
+| CPU-s/GiB gateway / node host | 4.64 / 2.19 | 4.77 / 2.05 | ok |
+| RSS MiB | 110 | 127 | ok (+15.8 %) |
+| hit ratio | 0.932 | 0.802 | environment (as in Phase 3.1, older binaries alike) |
+| multipart PUT MiB/s | 201 | 158 (reps 292 / 141 / 158) | environment: A/B 120–292 (median 201, 7 runs) against the Phase 3.7 binary's 145–287 (median 192, 6 runs) |
+| multipart warm GET MiB/s | 688 | 685 | ok |
+

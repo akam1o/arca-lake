@@ -1,0 +1,55 @@
+condition                     pol  report   admit %  restrict   unneeded to normal  trans   refused
+backlog growing               3.6      1s     67.9%     1500s         0s         -      1        0M
+backlog growing               3.7      1s     69.9%     1500s         0s         -      1        0M
+backlog growing               3.8      1s     69.9%     1500s         0s         -      1        0M
+backlog growing               3.6     10s     67.9%     1500s         0s         -      1        0M
+backlog growing               3.7     10s     69.9%     1500s         0s         -      1        0M
+backlog growing               3.8     10s     69.9%     1500s         0s         -      1        0M
+backlog constant              3.6      1s    100.0%        0s         0s        0s      0        0M
+backlog constant              3.7      1s    100.0%        0s         0s        0s      0        0M
+backlog constant              3.8      1s    100.0%        0s         0s        0s      0        0M
+backlog constant              3.6     10s    100.0%        0s         0s        0s      0        0M
+backlog constant              3.7     10s    100.0%        0s         0s        0s      0        0M
+backlog constant              3.8     10s    100.0%        0s         0s        0s      0        0M
+backlog shrinking             3.6      1s    100.0%        0s         0s        0s      0        0M
+backlog shrinking             3.7      1s    100.0%        0s         0s        0s      0        0M
+backlog shrinking             3.8      1s    100.0%        0s         0s        0s      0        0M
+backlog shrinking             3.6     10s    100.0%        0s         0s        0s      0        0M
+backlog shrinking             3.7     10s    100.0%        0s         0s        0s      0        0M
+backlog shrinking             3.8     10s    100.0%        0s         0s        0s      0        0M
+backlog zero                  3.6      1s    100.0%        0s         0s        0s      0        0M
+backlog zero                  3.7      1s    100.0%        0s         0s        0s      0        0M
+backlog zero                  3.8      1s    100.0%        0s         0s        0s      0        0M
+backlog zero                  3.6     10s    100.0%        0s         0s        0s      0        0M
+backlog zero                  3.7     10s    100.0%        0s         0s        0s      0        0M
+backlog zero                  3.8     10s    100.0%        0s         0s        0s      0        0M
+free growing after a burst    3.6      1s     79.5%      318s       263s      279s      3        0M
+free growing after a burst    3.7      1s     82.7%      317s       204s      351s      7        0M
+free growing after a burst    3.8      1s     82.8%      195s        82s      354s      3        0M
+free growing after a burst    3.6     10s     79.5%      320s       260s      290s      3        0M
+free growing after a burst    3.7     10s     80.8%      260s       200s      250s      7        0M
+free growing after a burst    3.8     10s     81.1%      120s        60s      220s      3        0M
+on/off bursts near full       3.6      1s     20.7%     1984s         0s         -     12        0M
+on/off bursts near full       3.7      1s     19.8%     2230s         0s         -      2        0M
+on/off bursts near full       3.8      1s     19.8%     2230s         0s         -      2        0M
+on/off bursts near full       3.6     10s     20.8%     2050s         0s         -     10        0M
+on/off bursts near full       3.7     10s     20.9%     2190s         0s         -      6        0M
+on/off bursts near full       3.8     10s     20.9%     2190s         0s         -      6        0M
+free shrinking                3.6      1s     17.9%     3300s         0s         -      1        0M
+free shrinking                3.7      1s     19.6%     3300s         0s         -      1        0M
+free shrinking                3.8      1s     19.6%     3300s         0s         -      1        0M
+free shrinking                3.6     10s     17.9%     3300s         0s         -      1        0M
+free shrinking                3.7     10s     19.6%     3300s         0s         -      1        0M
+free shrinking                3.8     10s     19.6%     3300s         0s         -      1        0M
+controller stopped            3.6      1s     29.2%      871s         0s         -      2        0M
+controller stopped            3.7      1s     29.2%      871s         0s         -      2        0M
+controller stopped            3.8      1s     29.2%      871s         0s         -      2        0M
+controller stopped            3.6     10s     28.5%      880s         0s         -      2        0M
+controller stopped            3.7     10s     28.5%      880s         0s         -      2        0M
+controller stopped            3.8     10s     28.5%      880s         0s         -      2        0M
+stale report                  3.6      1s    100.0%        0s         0s         -      1        0M
+stale report                  3.7      1s    100.0%        0s         0s         -      1        0M
+stale report                  3.8      1s    100.0%        0s         0s         -      1        0M
+stale report                  3.6     10s    100.0%        0s         0s         -      1        0M
+stale report                  3.7     10s    100.0%        0s         0s         -      1        0M
+stale report                  3.8     10s    100.0%        0s         0s         -      1        0M

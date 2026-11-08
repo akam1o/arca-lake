@@ -1,0 +1,1 @@
+repeats=1 configs="durable:4:multipart" seed=7 objects=96 size=16777216 passes=3

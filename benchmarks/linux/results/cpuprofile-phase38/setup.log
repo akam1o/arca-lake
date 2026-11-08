@@ -1,0 +1,16 @@
+The database is available, but has issues (type 'status' for more information).
+2026-11-08T13:56:41.999546Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+node 1 registered at <addr>:9100
+2026-11-08T13:56:42.233029Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+node 2 registered at <addr>:9101
+2026-11-08T13:56:42.471543Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+node 3 registered at <addr>:9100
+2026-11-08T13:56:42.697302Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+profile 'default' (rs-gf8-v1 2+1): tolerates the loss of any 1 shards, i.e. any 1 distinct 'node' failure domains
+group 1 tier default rs-gf8-v1 2+1 members [1, 2, 3]
+2026-11-08T13:56:45.343134Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+node 1 <addr>:9100 labels [("node", "a-d0"), ("device_class", "hdd")] last_seen_ms 1794146202959
+node 2 <addr>:9101 labels [("node", "a-d1"), ("device_class", "hdd")] last_seen_ms 1794146202959
+node 3 <addr>:9100 labels [("node", "b-d2"), ("device_class", "hdd")] last_seen_ms 1794146202959
+group 1 tier default rs-gf8-v1 2+1 epoch 1 Active members [1, 2, 3]
+leader <user>@<host> token 1 lease_until_ms 1794146212954
