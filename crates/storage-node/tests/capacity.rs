@@ -72,8 +72,15 @@ async fn client_writes_stop_at_the_reserve_repair_at_its_floor_and_deletes_alway
     let svc = node.service();
     let clients = fill(&c, &addr, 0, pb::WriteClass::Client).await;
     let d = svc.device_capacity().unwrap();
-    assert_eq!(d.reserved_bytes, 24 * MIB);
-    assert_eq!(d.repair_floor_bytes, 18 * MIB, "one segment and 16 MiB");
+    // Both floors sit on the delete reserve (Phase 3.8): a tombstone for
+    // every record held, and some.
+    assert!(d.delete_reserve_bytes >= u64::from(clients) * 4096, "{d:?}");
+    assert_eq!(d.reserved_bytes, 24 * MIB + d.delete_reserve_bytes);
+    assert_eq!(
+        d.repair_floor_bytes,
+        18 * MIB + d.delete_reserve_bytes,
+        "one segment and 16 MiB"
+    );
     assert!(
         d.available_bytes >= d.reserved_bytes,
         "client writes crossed the reserve: {d:?}"
@@ -105,7 +112,10 @@ async fn client_writes_stop_at_the_reserve_repair_at_its_floor_and_deletes_alway
     // The health response carries the device.
     let h = c.health(&addr).await.unwrap();
     assert_eq!(h.devices.len(), 1);
-    assert_eq!(h.devices[0].reserved_bytes, 24 * MIB);
+    assert_eq!(
+        h.devices[0].reserved_bytes,
+        24 * MIB + h.devices[0].delete_reserve_bytes
+    );
     assert_eq!(h.devices[0].inflight_bytes, 0);
     node.shutdown().await;
 }
@@ -113,11 +123,12 @@ async fn client_writes_stop_at_the_reserve_repair_at_its_floor_and_deletes_alway
 #[tokio::test]
 async fn compaction_waits_for_room_for_its_output_and_loses_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    // No reserve: client writes may fill the cap, as a misconfigured node
-    // (or a node whose disk is shared) could.
-    let node = serve(config(dir.path(), 24 * MIB, 0, Duration::from_millis(100)))
-        .await
-        .unwrap();
+    // No reserve: client writes fill the cap down to the delete reserve, as
+    // a misconfigured node (or a node whose disk is shared) could; segments
+    // larger than that, so a compaction's output does not fit.
+    let mut cfg = config(dir.path(), 24 * MIB, 0, Duration::from_millis(100));
+    cfg.store.segment_max_bytes = 8 * MIB;
+    let node = serve(cfg).await.unwrap();
     let addr = node.local_addr.to_string();
     let c = NodeClients::new(Duration::from_secs(5));
     let n = fill(&c, &addr, 0, pb::WriteClass::Client).await;
@@ -141,9 +152,9 @@ async fn compaction_waits_for_room_for_its_output_and_loses_nothing() {
     }
     // With room again (a larger cap), compaction proceeds.
     node.shutdown().await;
-    let node = serve(config(dir.path(), 64 * MIB, 0, Duration::from_millis(100)))
-        .await
-        .unwrap();
+    let mut cfg = config(dir.path(), 64 * MIB, 0, Duration::from_millis(100));
+    cfg.store.segment_max_bytes = 8 * MIB;
+    let node = serve(cfg).await.unwrap();
     let addr = node.local_addr.to_string();
     let stats = std::sync::Arc::clone(node.service().compaction_stats());
     let start = Instant::now();
