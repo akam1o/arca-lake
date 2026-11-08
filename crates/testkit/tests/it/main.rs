@@ -59,6 +59,7 @@ mod repair;
 mod repair_completion;
 mod request_metrics;
 mod s3_compat;
+mod system_model;
 mod tiering;
 mod tls_cluster;
 mod transport;
