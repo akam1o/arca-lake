@@ -40,7 +40,8 @@ gw_metrics() { sb "curl -s http://127.0.0.1:9900/metrics"; }
 strip_addr() { sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g'; }
 log() { echo "$(date -u +%H:%M:%S) $*" | tee -a "$OUT/soak.log"; }
 
-CTL_ARGS="--failure-domain node --evict-interval-secs 2 --gc-interval-secs 10 --gc-grace-secs 10 --scrub-interval-secs 5 --scrub-tick-secs 5 --scrub-rate-mib 32 --scrub-concurrency 4 --stripe-repair-interval-secs 5 --cache-tier fast --cache-capacity-bytes $((256 << 20)) --cache-high-watermark 0.9 --cache-low-watermark 0.8 --cache-max-populations 8"
+# Several nodes per host share one disk here: --allow-shared-filesystem (R-80).
+CTL_ARGS="${SHARED_FS_ARGS---allow-shared-filesystem} --failure-domain node --evict-interval-secs 2 --gc-interval-secs 10 --gc-grace-secs 10 --scrub-interval-secs 5 --scrub-tick-secs 5 --scrub-rate-mib 32 --scrub-concurrency 4 --stripe-repair-interval-secs 5 --cache-tier fast --cache-capacity-bytes $((256 << 20)) --cache-high-watermark 0.9 --cache-low-watermark 0.8 --cache-max-populations 8"
 export CONTROLLER_EXTRA_ARGS="--scrub-interval-secs 5 --scrub-tick-secs 5 --scrub-rate-mib 32 --scrub-concurrency 4 --stripe-repair-interval-secs 5 --gc-grace-secs 10"
 export CACHE_CAPACITY=$((256 << 20))
 bash "$TH" setup ec > "$OUT/setup.log" 2>&1

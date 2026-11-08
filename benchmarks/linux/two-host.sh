@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Nodes of one host share its disk: controllers run with --allow-shared-filesystem (R-80;
+# SHARED_FS_ARGS= drops it).
 # Two-host measurement driver for arca-lake (RFC-009, Phase 2.1).
 #
 # Host A runs FoundationDB (a private fdbserver owned by the test user, not
@@ -138,7 +140,7 @@ cmd_setup() {
   fi
   # CONTROLLER_EXTRA_ARGS: e.g. continuous scrubbing for the Phase 3.2
   # "GET/PUT during scrub" measurement.
-  start sa controller "$BIN controller --cluster-file $CLUSTER_FILE --id ctl-a --http 127.0.0.1:9901 --failure-domain node --evict-interval-secs 2 --gc-interval-secs 10 --gc-grace-secs 30 $cache_args ${CONTROLLER_EXTRA_ARGS:-}"
+  start sa controller "$BIN controller ${SHARED_FS_ARGS---allow-shared-filesystem} --cluster-file $CLUSTER_FILE --id ctl-a --http 127.0.0.1:9901 --failure-domain node --evict-interval-secs 2 --gc-interval-secs 10 --gc-grace-secs 30 $cache_args ${CONTROLLER_EXTRA_ARGS:-}"
   start sg gateway "$BIN gateway --backend cluster --cluster-file $CLUSTER_FILE --allow-anonymous --listen $ADDR_G:9000 --metrics-listen 127.0.0.1:9900 --k 2 --m 1 --chunk-bytes $CHUNK_BYTES --small-threshold 0 --failure-domain node $cache_args ${GW_EXTRA_ARGS:-}"
   # GATEWAYS=2|3: more gateways on the other hosts (multi-gateway runs,
   # Phase 2.3 §7); the load generator on each host drives its own.

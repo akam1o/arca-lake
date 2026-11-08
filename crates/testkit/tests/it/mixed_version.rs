@@ -125,6 +125,11 @@ impl Env {
             dir.display().to_string(),
             "--segment-max-bytes".into(),
             SEGMENT.to_string(),
+            // The nodes share one file system: allotments that fit it
+            // (R-80), else the controller keeps their groups out of
+            // placement.
+            "--capacity-bytes".into(),
+            arca_lake_testkit::TEST_ALLOTMENT.to_string(),
         ]
     }
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Nodes of one host share its disk: controllers run with --allow-shared-filesystem (R-80;
+# SHARED_FS_ARGS= drops it).
 # Namespace-pair fault injection for arca-lake on one Linux host
 # (docs/verification/network-faults.md). Runs ON the test host.
 #
@@ -122,7 +124,7 @@ cmd_setup() {
 }
 
 start_controller() {
-  start 1 controller "$BIN controller --cluster-file $CF --id ctl --http 127.0.0.1:9901 --failure-domain node --lease-secs 4 --auto-repair --unhealthy-after-secs 6 --health-interval-secs 2 --repair-interval-secs 2 --gc-interval-secs 3 --gc-grace-secs 3 --min-orphan-age-secs 40 --reconcile-interval-secs 10 --evict-interval-secs 5 --cache-repair-chunks-per-pass 64 $*"
+  start 1 controller "$BIN controller ${SHARED_FS_ARGS---allow-shared-filesystem} --cluster-file $CF --id ctl --http 127.0.0.1:9901 --failure-domain node --lease-secs 4 --auto-repair --unhealthy-after-secs 6 --health-interval-secs 2 --repair-interval-secs 2 --gc-interval-secs 3 --gc-grace-secs 3 --min-orphan-age-secs 40 --reconcile-interval-secs 10 --evict-interval-secs 5 --cache-repair-chunks-per-pass 64 $*"
 }
 
 # ---- impairments (veth ends inside the namespaces only) ----
