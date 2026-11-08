@@ -12,6 +12,8 @@
 //! refusal within the drain bound is a `SlowDown`, and the connection is
 //! usable again afterwards.
 
+#![allow(clippy::too_many_lines)]
+
 use std::time::Instant;
 
 use arca_lake_metadata::ops::admission::{self, AdmissionRecord, TierAdmission};
