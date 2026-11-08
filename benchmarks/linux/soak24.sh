@@ -233,7 +233,8 @@ cmd__sampler() {
 
 wait_s() { local end=$(( $(date +%s) + $1 )); while [ "$(date +%s)" -lt "$end" ] && [ ! -f "$RUN/stop-faults" ]; do sleep 2; done; }
 fault() { echo "$(ts) $*" >> "$RUN/faults.log"; }
-leader() { admin status 2>/dev/null | sed -nE 's/^leader ([^ ]+) token.*/\1/p'; }
+# The leader record's holder is `<id>@<incarnation>`; the process is `<id>`.
+leader() { admin status 2>/dev/null | sed -nE 's/^leader ([^ @]+)(@[^ ]*)? token.*/\1/p'; }
 
 do_fault() { # index
   local k="$1" i=$(( $1 / 14 ))
