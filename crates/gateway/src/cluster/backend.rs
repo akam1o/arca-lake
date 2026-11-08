@@ -229,6 +229,9 @@ pub struct IntegrityStats {
     pub degraded_reads: std::sync::atomic::AtomicU64,
     /// Durable reads that failed for lack of `k` usable shards.
     pub unreadable_reads: std::sync::atomic::AtomicU64,
+    /// Reads that found the chunk moved since their manifest was read and
+    /// read it at its new placement (Phase 3.8).
+    pub moved_reads: std::sync::atomic::AtomicU64,
     /// Repair tasks reported to the controller's queue.
     pub integrity_reports: std::sync::atomic::AtomicU64,
     /// Reports suppressed by deduplication or the bounded map.
@@ -242,6 +245,8 @@ pub struct IntegrityStatsSnapshot {
     pub degraded_reads: u64,
     /// See [`IntegrityStats::unreadable_reads`].
     pub unreadable_reads: u64,
+    /// See [`IntegrityStats::moved_reads`].
+    pub moved_reads: u64,
     /// See [`IntegrityStats::integrity_reports`].
     pub integrity_reports: u64,
     /// See [`IntegrityStats::integrity_reports_dropped`].
@@ -288,6 +293,7 @@ impl IntegrityState {
         IntegrityStatsSnapshot {
             degraded_reads: self.stats.degraded_reads.load(Relaxed),
             unreadable_reads: self.stats.unreadable_reads.load(Relaxed),
+            moved_reads: self.stats.moved_reads.load(Relaxed),
             integrity_reports: self.stats.integrity_reports.load(Relaxed),
             integrity_reports_dropped: self.stats.integrity_reports_dropped.load(Relaxed),
         }

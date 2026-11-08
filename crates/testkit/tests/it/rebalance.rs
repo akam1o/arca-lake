@@ -409,3 +409,145 @@ async fn rebalancing_waits_for_repair_and_stops_at_the_targets_reserve() {
     assert_eq!(*e.code(), S3ErrorCode::NoSuchKey);
     c.shutdown().await;
 }
+
+/// Phase 3.8 review (H): a GET whose manifest predates a move, with the
+/// source shards already reconciled away, reads the chunk at its new
+/// placement instead of failing or filing a false integrity report.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_started_before_a_move_follows_the_chunk() {
+    use futures::StreamExt;
+    use s3s::S3;
+    let (c, a, b) = cluster(400 * MIB).await;
+    exclude(&c, vec![b.id]).await;
+    let big = Bytes::from(random_bytes(usize::try_from(6 * MIB).unwrap(), 9));
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "big",
+        big.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let out = c
+        .backend
+        .get_object(s3::request(s3s::dto::GetObjectInput {
+            bucket: BUCKET.into(),
+            key: "big".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .output;
+    let mut body = out.body.unwrap();
+    let mut got = Vec::new();
+    got.extend_from_slice(&body.next().await.unwrap().unwrap());
+    // Every chunk moves to B; reconciliation deletes the A copies.
+    let m = c.manifest(BUCKET, "big").await;
+    let nodes: std::collections::HashMap<u64, String> =
+        c.nodes.iter().map(|n| (n.id, n.addr.to_string())).collect();
+    for (index, rec) in &m.chunks {
+        let r = arca_lake_tiering::migrate::migrate_chunk(
+            c.meta.as_ref(),
+            &c.clients,
+            &arca_lake_tiering::durable::Coders::default(),
+            &|id| nodes.get(&id).cloned(),
+            &a,
+            &b,
+            &m.pointer.generation,
+            *index,
+            rec,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            r,
+            arca_lake_tiering::migrate::MigrateOutcome::Switched { .. }
+        ));
+    }
+    c.reconcile(now_ms() + 3_600_000, 0).await;
+    while let Some(frame) = body.next().await {
+        got.extend_from_slice(&frame.unwrap());
+    }
+    assert_eq!(Bytes::from(got), big);
+    let s = c.backend.integrity_stats();
+    assert!(s.moved_reads > 0, "{s:?}");
+    assert_eq!(s.unreadable_reads, 0, "{s:?}");
+    assert_eq!(s.integrity_reports, 0, "no false repair task: {s:?}");
+    c.shutdown().await;
+}
+
+/// Phase 3.8 review (H): the target's membership changes (a repair bumps
+/// its epoch) after the copy and before the switch: the switch is refused,
+/// the copy deleted, the chunk stays where it was and reads back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_move_whose_target_changed_epoch_is_abandoned() {
+    let (c, a, b) = cluster(400 * MIB).await;
+    exclude(&c, vec![b.id]).await;
+    let d = data(1);
+    s3::put(&c.backend, BUCKET, "o", d.clone(), &PutOptions::default())
+        .await
+        .unwrap();
+    let m = c.manifest(BUCKET, "o").await;
+    let (index, rec) = &m.chunks[0];
+    let nodes: std::collections::HashMap<u64, String> =
+        c.nodes.iter().map(|n| (n.id, n.addr.to_string())).collect();
+    let before = c.total_shards().await;
+    let meta = std::sync::Arc::clone(&c.meta);
+    let r = arca_lake_tiering::migrate::migrate_chunk_with(
+        c.meta.as_ref(),
+        &c.clients,
+        &arca_lake_tiering::durable::Coders::default(),
+        &|id| nodes.get(&id).cloned(),
+        &a,
+        &b,
+        &m.pointer.generation,
+        *index,
+        rec,
+        None,
+        async || {
+            arca_lake_metadata::ops::cluster::update_group(meta.as_ref(), b.id, |g| {
+                g.epoch += 1;
+                true
+            })
+            .await
+            .unwrap();
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(r, arca_lake_tiering::migrate::MigrateOutcome::Skipped(_)),
+        "{r:?}"
+    );
+    assert_eq!(group_of(&c, "o").await, a.id);
+    assert_eq!(c.total_shards().await, before, "the copy was deleted");
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, d);
+    c.shutdown().await;
+}
+
+/// Phase 3.8 review (M): a chunk larger than the pass budget still moves
+/// (one per pass), so a pass never stops at the same chunk forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chunk_larger_than_the_budget_still_moves() {
+    let (c, _a, b) = cluster(160 * MIB).await;
+    exclude(&c, vec![b.id]).await;
+    for i in 0..80 {
+        s3::put(
+            &c.backend,
+            BUCKET,
+            &format!("o{i}"),
+            data(i),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+    }
+    evaluate(&c).await;
+    let r = run_once(c.meta.as_ref(), &c.clients, &policy(MIB / 4), now_ms())
+        .await
+        .unwrap();
+    assert_eq!(r.moved_chunks, 1, "{r:?}");
+    c.shutdown().await;
+}

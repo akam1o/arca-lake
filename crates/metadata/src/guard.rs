@@ -7,7 +7,10 @@
 //! that changes the incarnation, or an operator that flips the state,
 //! after the read but before this commit makes the commit conflict and
 //! retry, where the check then fails with [`KvError::ClusterState`] (never
-//! retried). Read-only transactions are not touched. A process keeps the
+//! retried). Read-only transactions are not touched, except those of the
+//! `Delete` class (Phase 3.8): the reference checks that decide a deletion
+//! only read, and must stop once the state or incarnation changed. A
+//! process keeps the
 //! incarnation it started with: after a metadata restore every old process
 //! is fenced out of every write until it is restarted on the restored
 //! store.
@@ -185,7 +188,13 @@ impl<T: Txn> Txn for GuardedTx<T> {
     }
 
     async fn commit(mut self) -> Result<u64, KvError> {
-        if self.dirty {
+        // Delete-class transactions are checked even when they write
+        // nothing (Phase 3.8 review): GC's and reconciliation's reference
+        // checks only read, and the node deletes that follow them check
+        // the incarnation, not the phase; a pass that started while
+        // `Active` must stop deciding deletions once the cluster leaves
+        // it, or once the incarnation changed under it (a restore).
+        if self.dirty || self.expect.class == OpClass::Delete {
             let state = compat::cluster_state_in_tx(&mut self.inner)
                 .await
                 .map_err(|e| KvError::Backend(e.to_string()))?;
@@ -226,6 +235,12 @@ mod tests {
                 .unwrap();
             let mut tx = client.begin().await.unwrap();
             tx.set(b"x", b"2");
+            assert!(matches!(tx.commit().await, Err(KvError::ClusterState(_))));
+            // A read-only Delete-class transaction (a GC or reconcile
+            // reference check) is refused outside `Active` too.
+            let deleter = GuardedKv::new(Arc::clone(&base), st.incarnation, OpClass::Delete);
+            let mut tx = deleter.begin().await.unwrap();
+            let _ = tx.get(b"x").await.unwrap();
             assert!(matches!(tx.commit().await, Err(KvError::ClusterState(_))));
             // A read-only transaction commits regardless of the state.
             let mut tx = client.begin().await.unwrap();

@@ -301,7 +301,10 @@ pub async fn run_once<S: KvStore>(
                     }
                     found += 1;
                     let len = u64::from(record.len);
-                    if spent + len > budget {
+                    // At least one chunk per pass, whatever its size: a
+                    // chunk larger than the budget would otherwise stop
+                    // every pass at the same place.
+                    if spent > 0 && spent + len > budget {
                         report.reason = "pass budget spent".into();
                         stopped = true;
                         break 'pages;

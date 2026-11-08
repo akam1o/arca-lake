@@ -791,6 +791,23 @@ pub async fn read_manifest_version<S: KvStore>(
     .await
 }
 
+/// The chunk record `index` of `generation` as it is now (a reader whose
+/// manifest predates a migration finds the chunk's new placement here).
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn read_chunk_record<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    index: u32,
+) -> Result<Option<ChunkRecord>> {
+    transact(store, (*generation, index), |tx, (generation, index)| {
+        Box::pin(async move { read(tx, &keys::gen_chunk(generation, *index)).await })
+    })
+    .await
+}
+
 /// Chunk records and cache placements of one part generation (immutable
 /// once sealed; RFC-007 §5.3). `None` if the generation is gone.
 ///
@@ -1364,6 +1381,18 @@ pub async fn switch_placement<S: KvStore>(
                     return Ok(false);
                 };
                 if current.placement != expected || current.chunk_id != new_record.chunk_id {
+                    return Ok(false);
+                }
+                // The target as the copy wrote it (Phase 3.8 review): a
+                // membership change since (repair, replacement) bumped its
+                // epoch, and the members that hold the copy may no longer
+                // be the group's; the copy is abandoned and retried.
+                let target: Option<crate::records::GroupRecord> =
+                    read(tx, &keys::group(new_record.placement.group_id)).await?;
+                if target.is_none_or(|g| {
+                    g.epoch != new_record.placement.epoch
+                        || g.state != crate::records::GroupState::Active
+                }) {
                     return Ok(false);
                 }
                 write(tx, &keys::gen_chunk(&generation, index), new_record)?;

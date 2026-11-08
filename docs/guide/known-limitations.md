@@ -18,7 +18,8 @@ The full register is [risks.md](../architecture/risks.md).
 | Automatic tiering between durable tiers | Experimental |
 | Capacity admission at the storage node (reserve, write classes) | Verified |
 | Tier backpressure (throttling, refusal, recovery, failover terms) | Experimental: verified by deterministic tests and short runs; thresholds and rates may change |
-| Capacity-aware group choice | Experimental; no automatic rebalancing of existing data |
+| Capacity-aware group choice | Experimental |
+| Capacity rebalancing between the groups of a tier (`--rebalance`) | Experimental: verified by in-process tests (concurrent reads, writes, deletes and GC; crash and leader-change resume; repair first; target reserve); off by default; not run on the validation hosts under load |
 | Shared file system detection | Experimental; overlay, FUSE and network file systems cannot be checked: nodes on them need `--capacity-bytes` allotments (else refused like shared ones), and their sum is then the operator's responsibility |
 | Rolling upgrades, cluster recovery, backup verification | Verified within one compatibility window (RFC-014, RFC-015) |
 | mTLS for node RPCs, FoundationDB TLS, SigV4, bucket policy subset | Verified |
@@ -46,8 +47,12 @@ The full register is [risks.md](../architecture/risks.md).
 - Under capacity pressure writes are throttled and then refused with
   `503 SlowDown`; small devices fill faster than one evaluation
   interval, and the nodes' reserve is then the stop (R-83).
-- One full member stops its erasure-coded group; uneven members cost
-  usable space until a member is replaced (R-82).
+- One full member stops its erasure-coded group; uneven groups can be
+  evened out with `--rebalance` (moves chunks, frees the source after
+  reconciliation and compaction), uneven members of one group cannot
+  (R-82).
+- Each node keeps a delete reserve of one tombstone (4 KiB) per record:
+  nodes full of small shards stop taking client writes earlier.
 - Large writes under a low throttled rate can be refused part way and
   must be retried (ADR-0021).
 - A refused body larger than 16 MiB from a client that does not use

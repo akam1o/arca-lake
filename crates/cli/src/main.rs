@@ -3592,6 +3592,7 @@ fn render_integrity_stats(
     for (name, value) in [
         ("arca_gateway_degraded_reads_total", s.degraded_reads),
         ("arca_gateway_unreadable_reads_total", s.unreadable_reads),
+        ("arca_gateway_moved_reads_total", s.moved_reads),
         ("arca_gateway_integrity_reports_total", s.integrity_reports),
         (
             "arca_gateway_integrity_reports_dropped_total",

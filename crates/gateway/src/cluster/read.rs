@@ -601,7 +601,9 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         } else if self.cfg.cache.is_some() {
             self.cache_stats.misses.fetch_add(1, Ordering::Relaxed);
         }
-        let parts = self.read_durable(map, chunk).await?;
+        let parts = self
+            .read_durable_current(map, generation, index, chunk)
+            .await?;
         if self.cfg.cache.is_some() && cached.is_none() {
             // Populating needs the contiguous chunk (one copy, off the
             // GET's path once queued).
@@ -610,24 +612,113 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         Ok(parts)
     }
 
+    /// [`Self::read_durable`], following a move (Phase 3.8): a chunk not
+    /// readable where the manifest read placed it may have been migrated
+    /// or rebalanced since, and reconciliation may already have deleted
+    /// its old shards. The record is read again; if it names another
+    /// placement, the chunk is read there (once) before anything is
+    /// reported as an integrity problem.
+    pub(super) async fn read_durable_current(
+        &self,
+        map: &ClusterMap,
+        generation: GenId,
+        index: u32,
+        chunk: &ChunkRecord,
+    ) -> Result<Vec<Bytes>, S3Error> {
+        let moved = async || match arca_lake_metadata::ops::object::read_chunk_record(
+            self.meta.as_ref(),
+            &generation,
+            index,
+        )
+        .await
+        {
+            Ok(Some(now)) if now.chunk_id == chunk.chunk_id && now.placement != chunk.placement => {
+                Some(now)
+            }
+            _ => None,
+        };
+        match self.read_durable_quiet(map, chunk).await {
+            // Shards missing where a moved chunk used to be are not an
+            // integrity finding (reconciliation is deleting them).
+            Ok(r) if !r.missing.is_empty() && moved().await.is_some() => {
+                self.integrity
+                    .stats
+                    .moved_reads
+                    .fetch_add(1, Ordering::Relaxed);
+                Ok(r.parts)
+            }
+            Ok(r) => Ok(self.note_read(chunk, r)),
+            Err(e) => {
+                if let Some(now) = moved().await {
+                    self.integrity
+                        .stats
+                        .moved_reads
+                        .fetch_add(1, Ordering::Relaxed);
+                    let map = self.map();
+                    return self.read_durable(&map, &now).await;
+                }
+                Err(self.note_failure(chunk, e))
+            }
+        }
+    }
+
     /// Durable read of one chunk (RFC-004 §5.6).
     pub(super) async fn read_durable(
         &self,
         map: &ClusterMap,
         chunk: &ChunkRecord,
     ) -> Result<Vec<Bytes>, S3Error> {
+        match self.read_durable_quiet(map, chunk).await {
+            Ok(r) => Ok(self.note_read(chunk, r)),
+            Err(e) => Err(self.note_failure(chunk, e)),
+        }
+    }
+
+    fn note_read(
+        &self,
+        chunk: &ChunkRecord,
+        r: arca_lake_tiering::durable::CodedRead,
+    ) -> Vec<Bytes> {
+        if !r.missing.is_empty() {
+            self.integrity
+                .stats
+                .degraded_reads
+                .fetch_add(1, Ordering::Relaxed);
+            self.report_integrity(chunk, Finding::MissingShard, &r.missing);
+        }
+        r.parts
+    }
+
+    fn note_failure(&self, chunk: &ChunkRecord, e: TierError) -> S3Error {
+        match e {
+            TierError::Unreadable { have, need } => {
+                self.integrity
+                    .stats
+                    .unreadable_reads
+                    .fetch_add(1, Ordering::Relaxed);
+                self.report_integrity(chunk, Finding::UnrecoverableStripe, &[]);
+                s3_error!(
+                    InternalError,
+                    "chunk unreadable: only {have} of {need} required shards available (data integrity error)"
+                )
+            }
+            other => s3_error!(InternalError, "{other}"),
+        }
+    }
+
+    /// The durable read itself, nothing reported.
+    async fn read_durable_quiet(
+        &self,
+        map: &ClusterMap,
+        chunk: &ChunkRecord,
+    ) -> Result<arca_lake_tiering::durable::CodedRead, TierError> {
         let group = map.groups.get(&chunk.placement.group_id).ok_or_else(|| {
-            s3_error!(
-                InternalError,
-                "unknown stripe group {}",
-                chunk.placement.group_id
-            )
+            TierError::Other(format!("unknown stripe group {}", chunk.placement.group_id))
         })?;
         let coder = self
             .coders
-            .get(&chunk.scheme, chunk.data_shards, chunk.parity_shards)
-            .map_err(|e| s3_error!(InternalError, "{e}"))?;
-        let r = arca_lake_tiering::durable::read_chunk_alternates(
+            .get(&chunk.scheme, chunk.data_shards, chunk.parity_shards)?;
+        arca_lake_tiering::durable::read_chunk_alternates(
             &self.clients,
             group,
             &addr_of(map),
@@ -635,31 +726,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             chunk,
             coder.as_ref(),
         )
-        .await;
-        match r {
-            Ok(r) => {
-                if !r.missing.is_empty() {
-                    self.integrity
-                        .stats
-                        .degraded_reads
-                        .fetch_add(1, Ordering::Relaxed);
-                    self.report_integrity(chunk, Finding::MissingShard, &r.missing);
-                }
-                Ok(r.parts)
-            }
-            Err(TierError::Unreadable { have, need }) => {
-                self.integrity
-                    .stats
-                    .unreadable_reads
-                    .fetch_add(1, Ordering::Relaxed);
-                self.report_integrity(chunk, Finding::UnrecoverableStripe, &[]);
-                Err(s3_error!(
-                    InternalError,
-                    "chunk unreadable: only {have} of {need} required shards available (data integrity error)"
-                ))
-            }
-            Err(other) => Err(s3_error!(InternalError, "{other}")),
-        }
+        .await
     }
 
     /// Report a degraded or unreadable chunk to the stripe repair queue
@@ -1053,7 +1120,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 cached += 1;
                 continue;
             }
-            let bytes = concat_frames(self.read_durable(&map, chunk).await?);
+            let bytes = concat_frames(
+                self.read_durable_current(&map, *generation, *index, chunk)
+                    .await?,
+            );
             let cid = arca_lake_common::chunk_id(generation, *index);
             let Some(group) = tcache::choose_group(map.groups.values(), &cfg.tier, &cid) else {
                 return Err(s3_error!(

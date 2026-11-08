@@ -224,6 +224,24 @@ async fn write_and_verify(
         )));
     }
     let mut written: Vec<(String, ShardRef, RecordToken)> = Vec::new();
+    // Every way out after the first shard deletes what was written
+    // (Phase 3.8 review: a put or read-back error left them to
+    // reconciliation, using room on a node possibly at its reserve).
+    let r = write_all_and_verify(clients, addr_of, target, record, &shards, &mut written).await;
+    if r.is_err() {
+        cleanup(clients, &written, target.epoch).await;
+    }
+    r.map(|()| written)
+}
+
+async fn write_all_and_verify(
+    clients: &NodeClients,
+    addr_of: &(dyn Fn(u64) -> Option<String> + Sync),
+    target: &GroupRecord,
+    record: &ChunkRecord,
+    shards: &[bytes::Bytes],
+    written: &mut Vec<(String, ShardRef, RecordToken)>,
+) -> Result<(), TierError> {
     for (i, member) in target.members.iter().enumerate() {
         let addr = addr_of(member.node_id)
             .ok_or_else(|| TierError::Other(format!("unknown node {}", member.node_id)))?;
@@ -248,7 +266,7 @@ async fn write_and_verify(
                 status,
             })?;
         if resp.crc32c != expected {
-            cleanup(clients, &written, target.epoch).await;
+            written.push((addr.clone(), shard, RecordToken::of_put(&resp)));
             return Err(TierError::Corrupt(format!(
                 "target {addr} stored shard {i} with a different checksum"
             )));
@@ -264,13 +282,12 @@ async fn write_and_verify(
                 status,
             })?;
         if back != shards[i] {
-            cleanup(clients, &written, target.epoch).await;
             return Err(TierError::Corrupt(format!(
                 "target {addr} returned different bytes for shard {i}"
             )));
         }
     }
-    Ok(written)
+    Ok(())
 }
 
 /// Delete the target shards this attempt wrote, each only while the node

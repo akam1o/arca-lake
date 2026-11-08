@@ -879,6 +879,17 @@ impl Store {
         {
             return Ok(None);
         }
+        // A delete of a key with no record (never written, or deleted
+        // already): nothing to cover, so no tombstone (Phase 3.8 review:
+        // repeated deletes of absent keys spent the delete reserve).
+        // Non-live records of the key on disk are covered by the tombstone
+        // that made them non-live, which compaction keeps while they exist.
+        if flags & FLAG_TOMBSTONE != 0
+            && if_newest.is_none()
+            && self.newest_sequence(&key).is_none()
+        {
+            return Ok(Some(0));
+        }
         let append_started = Instant::now();
         if w.active.end() >= self.cfg.segment_max_bytes || w.poisoned {
             let t = Instant::now();

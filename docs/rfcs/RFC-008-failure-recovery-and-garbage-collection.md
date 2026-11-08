@@ -431,12 +431,10 @@ member of a tier has reported in the term (or the staleness bound has
 passed) the tier keeps at least the state published before the term
 (`throttled` when there was none) and keeps the groups it excluded, and
 it then relaxes only through the hysteresis starting from that state.
-Gateways ignore a record with a lower token than the one they took last
-unless it was computed more than 60 s later (a metadata restore that
-set the leader counter back), age a record that stops changing
-(`throttled` after its TTL, `write_rejected` after 5 minutes), and age a
-record already older than its TTL plus 60 s by their own clock when
-they first see it (a gateway started while no leader publishes).
+Gateways age a record that stops changing (`throttled` after its TTL,
+`write_rejected` after 5 minutes), and age a record already older than
+its TTL plus 60 s by their own clock when they first see it (a gateway
+started while no leader publishes). Which record they take is §6.10.
 
 **Shared file systems.** Nodes report a capacity domain (the device
 number of the store's file system scoped to the kernel's boot id,
@@ -465,6 +463,64 @@ plus one chunk.
 **Placement.** The record carries each group's room (its fullest
 member's headroom); gateways place new chunks in the groups with the
 most room. Existing data is not moved (no automatic rebalancing).
+
+### 6.10 Reserve layers, record fencing and rebalancing (Phase 3.8, ADR-0022)
+
+**Reserve layers.** From the device's end: the emergency space (quarantine
+log, sequence bound: KiB) and one segment plus 16 MiB for compaction
+output and rollover form the repair floor; the delete reserve sits on
+it, one tombstone record (one record alignment, 4 KiB by default) per
+record the store holds plus 1 024; repair may write down to their sum;
+client writes, migrations and cache population stop at the client
+reserve above it. Deletes are never refused: their tombstones use the
+delete reserve, so deleting every record of a full node never reaches
+the repair floor (Phase 3.7 Test C: without it, the drain took a node
+11 MiB below its reserve). DeviceCapacity reports the delete reserve and
+includes it in both floors. The node also reports where its bytes went:
+written bytes by record kind and write class, side files, the file
+system's use and the overhead beyond the store's files.
+
+| Write | Floor (free bytes it must leave) |
+| --- | --- |
+| client, migration, cache population | client reserve + delete reserve |
+| repair | repair floor + delete reserve |
+| compaction | its output's live bytes + 1/64 + 1 MiB of free space, else skipped |
+| tombstone (delete) | none (budgeted by the delete reserve) |
+| rollover header, quarantine log, sequence bound | none (inside the repair floor) |
+
+**Record fencing.** The admission record carries the cluster
+incarnation, the leader's fencing token (its term) and the term's
+publication generation. A gateway takes a record only of its own
+incarnation, and never one of a lower (term, generation) than the record
+it took last, however late it was computed (Phase 3.7 also took a lower
+token computed more than 60 s later, meant for a restore that set the
+leader counter back; a restore changes the incarnation instead, and
+gateways do not serve across an incarnation change). A record that
+disappears, or that is ignored, leaves the last one in force, ageing. A
+gateway that has seen no record since it started admits for 60 s (a
+leader's first pass), then ages from its start: an unknown state fails
+closed. A tier the record does not name is `throttled`. A new
+incarnation is a new term for the leader's state machines.
+
+**Entering on the recent trend.** Once the recent window is covered, a
+worse state on time to full needs the recent trend to agree with the
+long one; free-fraction thresholds always apply (`backpressure_sim`:
+after a burst with free space growing, needless throttling 200 → 60-82 s
+and 7 → 3 transitions, other conditions unchanged).
+
+**Rebalancing.** With `--rebalance`, the leader moves chunks from the
+least roomy group of a tier to the roomiest group of the same tier,
+scheme and shape, through the tier migration path (intent, copy, read
+back, switch conditioned on the placement read; source shards to
+reconciliation). A pass does nothing while paused, while a group is not
+`Active` or a repair task is open, or in a `recovery_only` tier; writes
+its targets as migration class (the node refuses them at the client
+reserve and the pass stops); moves at most its per-pass budget and half
+the rooms' difference; expires crashed migration intents; persists its
+cursor, so that a new leader resumes there. Imbalance start 25 %, stop
+10 %. `admin rebalance status|pause|resume|dry-run`. The source's space
+returns once reconciliation deletes the moved shards and compaction
+reclaims their segments.
 
 ## 7. Repair completion and metadata order
 

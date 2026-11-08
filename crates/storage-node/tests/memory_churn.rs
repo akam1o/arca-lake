@@ -15,7 +15,9 @@
 //!
 //! `ARCA_CHURN_COMPACTION=0` turns compaction off. Every minute one JSON
 //! line: anonymous RSS, the allocator's bytes in use and free (glibc), the
-//! index entry counts, CPU seconds, throughput and put/get p95/p99. A leak
+//! index entry counts, segments (files and bytes), quarantine entries, open
+//! file descriptors and threads (Phase 3.8), CPU seconds, throughput and
+//! put/get p95/p99. A leak
 //! grows with the work done; allocator retention levels off (compare with
 //! `MALLOC_ARENA_MAX=2`).
 
@@ -34,6 +36,12 @@ use arca_lake_protocol::client::{NodeClients, ShardRef};
 use arca_lake_storage_node::compactor::CompactionPolicy;
 use arca_lake_storage_node::{NodeConfig, serve};
 use bytes::Bytes;
+
+/// Open file descriptors and threads of this process (Linux; 0 elsewhere).
+fn fds_and_threads() -> (usize, usize) {
+    let count = |p: &str| std::fs::read_dir(p).map_or(0, Iterator::count);
+    (count("/proc/self/fd"), count("/proc/self/task"))
+}
 
 fn cpu_seconds() -> f64 {
     std::fs::read_to_string("/proc/self/stat")
@@ -181,6 +189,9 @@ async fn rss_under_sustained_churn() {
             loop {
                 let m = arca_lake_common::process::memory();
                 let sizes = store.index_sizes();
+                let (fds, threads) = fds_and_threads();
+                let st = store.stats().unwrap_or_default();
+                let (quarantined, _) = store.quarantine_stats();
                 let (mut p, mut g) = (
                     std::mem::take(&mut *lp.lock().unwrap()),
                     std::mem::take(&mut *lg.lock().unwrap()),
@@ -194,6 +205,9 @@ async fn rss_under_sustained_churn() {
                         "heap_free_mib": m.heap_free as f64 / 1_048_576.0,
                         "index_live": sizes.live, "index_tombstone_history": sizes.tombstone_history,
                         "index_dead_tracked": sizes.dead_tracked,
+                        "index_segments_tracked": sizes.segments_tracked,
+                        "segments": st.segments, "segment_mib": st.segment_bytes >> 20,
+                        "quarantined": quarantined, "fds": fds, "threads": threads,
                         "cpu_s": cpu_seconds(), "ops": ops.load(Ordering::Relaxed),
                         "put_gib": bytes.load(Ordering::Relaxed) as f64 / f64::from(1u32 << 30),
                         "compactions": stats.compactions.load(Ordering::Relaxed),

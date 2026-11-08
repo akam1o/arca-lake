@@ -14,4 +14,5 @@ alert names its section.
 | Node refuses writes: epoch rejected | group epochs | §10.7 |
 | Certificate errors | TLS metrics, reload logs | §10.8 |
 | Storage node memory | `arca_node_process_memory_bytes` | §10.9 |
+| One group of a tier much fuller than the others | `admin check-config` (group rooms), `arca_controller_rebalance_*`, `admin rebalance status` | RFC-008 §6.10 |
 | `check-config` reports nodes sharing a file system | give each node its own file system, or `--capacity-bytes` allotments that fit | §6, R-80 |

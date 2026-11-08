@@ -567,3 +567,24 @@ fn a_panicking_sync_leader_does_not_stall_later_writers() {
         "a later write stalled behind the panicked leader: {done:?}"
     );
 }
+
+/// Phase 3.8 review: deleting a key the store does not hold writes no
+/// tombstone (repeated deletes of absent keys spent the delete reserve);
+/// a deleted key stays deleted across a reopen.
+#[test]
+fn deleting_an_absent_key_writes_nothing() {
+    let _s = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = Store::open(config(dir.path(), SyncPolicy::Group)).unwrap();
+    store.put(key(1), &payload(1, 2000)).unwrap();
+    store.delete(key(1)).unwrap();
+    let after_first = store.written().tombstone;
+    assert!(after_first > 0);
+    for _ in 0..100 {
+        store.delete(key(1)).unwrap();
+        store.delete(key(2)).unwrap();
+    }
+    assert_eq!(store.written().tombstone, after_first);
+    drop(store);
+    reopen_and_check(dir.path(), SyncPolicy::Group, &[]);
+}

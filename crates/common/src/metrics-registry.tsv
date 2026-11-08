@@ -127,6 +127,7 @@ arca_gateway_meta_txn_attempts_total	counter	gateway	transactions	-	metadata tra
 arca_gateway_meta_txn_conflicts_total	counter	gateway	transactions	-	metadata transaction conflicts (retried)
 arca_gateway_meta_txn_exhausted_total	counter	gateway	transactions	-	metadata transactions that ran out of retries
 arca_gateway_meta_txn_unknown_retries_total	counter	gateway	transactions	-	commits with an unknown outcome that were resolved
+arca_gateway_moved_reads_total	counter	gateway	reads	-	chunk reads that found the chunk moved (tier migration, rebalancing) since the manifest was read and read it at its new placement
 arca_gateway_node_capacity_refusals_total	counter	gateway	shards	-	shard writes storage nodes refused for capacity
 arca_gateway_node_rpc_deadline_exceeded_total	counter	gateway	rpcs	-	shard streams that missed their deadline
 arca_gateway_node_rpc_exhausted_total	counter	gateway	rpcs	-	node RPCs that ran out of retries

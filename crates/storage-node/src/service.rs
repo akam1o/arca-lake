@@ -563,7 +563,11 @@ impl StorageNode for StorageNodeService {
             .admit_with(
                 || self.device_space().map(|(free, _)| free),
                 class,
-                header.payload_len,
+                // The record's own future tombstone is held with it (the
+                // delete reserve counts it once the record is indexed).
+                header
+                    .payload_len
+                    .saturating_add(self.store.tombstone_bytes()),
                 self.delete_reserve(),
             )
             .map_err(|r| tonic::Status::resource_exhausted(r.to_string()))?;

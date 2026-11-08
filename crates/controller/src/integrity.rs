@@ -1109,18 +1109,32 @@ async fn repair_one<S: KvStore>(
             )
             .await;
         }
+        if moved_away(meta, &prefix, index, group_id, &record).await? {
+            integrity::remove_task(meta, group_id, &chunk_id).await?;
+            return Ok(Outcome::Dropped);
+        }
         return unrecoverable(meta, group_id, &chunk_id, task, good.len(), k, now_ms).await;
     }
     // ---- Reconstruct from a verifying k-subset of the good shards (I11).
     let Some((verified_set, shards)) =
         reconstruct_verified(coder.as_ref(), &sources, &good, k, n, &record)
     else {
+        if moved_away(meta, &prefix, index, group_id, &record).await? {
+            integrity::remove_task(meta, group_id, &chunk_id).await?;
+            return Ok(Outcome::Dropped);
+        }
         return unrecoverable(meta, group_id, &chunk_id, task, 0, k, now_ms).await;
     };
     let targets: Vec<usize> = (0..n).filter(|i| !verified_set.contains(i)).collect();
     if targets.is_empty() {
         integrity::remove_task(meta, group_id, &chunk_id).await?;
         return Ok(Outcome::Healthy);
+    }
+    // Moved (migration, rebalancing) while the members were read: nothing
+    // to rebuild here (Phase 3.8 review).
+    if moved_away(meta, &prefix, index, group_id, &record).await? {
+        integrity::remove_task(meta, group_id, &chunk_id).await?;
+        return Ok(Outcome::Dropped);
     }
     task.state = RepairState::Planned {
         targets: targets
@@ -1480,4 +1494,18 @@ pub async fn scrub_group_now_with<S: KvStore>(
 #[must_use]
 pub fn coders() -> Arc<Coders> {
     Arc::new(Coders::default())
+}
+
+/// Whether the chunk's record no longer places it as `record` did in
+/// `group_id` (moved since the repair read it).
+async fn moved_away<S: KvStore>(
+    meta: &S,
+    prefix: &[u8; 12],
+    index: u32,
+    group_id: u64,
+    record: &ChunkRecord,
+) -> Result<bool, ControlError> {
+    Ok(gc::chunk_record_in_group(meta, prefix, index, group_id)
+        .await?
+        .is_none_or(|r| r.placement != record.placement))
 }
