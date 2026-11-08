@@ -166,7 +166,7 @@ async fn abort(s3: &impl S3, key: &str, id: &str) -> S3Result<()> {
 fn data(u: usize, n: i32) -> Bytes {
     Bytes::from(random_bytes(
         usize::try_from(MIB).unwrap(),
-        (u * 10) as u64 + n as u64,
+        (u * 10) as u64 + u64::from(n.unsigned_abs()),
     ))
 }
 
