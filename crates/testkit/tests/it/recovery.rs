@@ -914,6 +914,12 @@ async fn startup_gate_refuses_newer_schemas_and_stamps_legacy_stores() {
     assert_eq!(records::schema_write_version(), records::RECORD_WRITE_MIN);
     records::set_schema_write(99);
     assert_eq!(records::schema_write_version(), records::RECORD_VERSION);
+    // Schema 3 (Phase 3.10) changed no record: it writes version 2, which
+    // the previous release reads; this build's schema writes its newest.
+    records::set_schema_write(3);
+    assert_eq!(records::schema_write_version(), 2);
+    records::set_schema_write(arca_lake_metadata::keys::SCHEMA_VERSION);
+    assert_eq!(records::schema_write_version(), records::RECORD_VERSION);
     records::set_schema_write(2);
     let b = records::encode(&records::NodeRecord {
         id: 1,

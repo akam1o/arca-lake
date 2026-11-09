@@ -39,6 +39,9 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 
 const BUCKET: &str = "mixed";
+/// Metadata schema of the "old" build (the new one's is one more).
+const S_OLD: u64 = arca_lake_metadata::keys::SCHEMA_VERSION;
+const S_NEW: u64 = S_OLD + 1;
 /// The test cluster runs plaintext node RPCs and metadata, explicitly
 /// (ADR-0017).
 const PLAINTEXT: [(&str, &str); 2] = [
@@ -369,7 +372,9 @@ async fn rolling_upgrade_with_two_binaries() {
     }
     let status = env.admin_ok(false, &["status", "--versions"]);
     assert!(
-        status.contains("schema Some(2) schema_write Some(2) format_write Some(1)"),
+        status.contains(&format!(
+            "schema Some({S_OLD}) schema_write Some({S_OLD}) format_write Some(1)"
+        )),
         "{status}"
     );
 
@@ -586,7 +591,9 @@ async fn rolling_upgrade_with_two_binaries() {
     let st = env.admin_ok(true, &["status", "--versions"]);
     let stale_ids: Vec<String> = st
         .lines()
-        .filter(|l| l.starts_with("proc ") && l.contains("schema [1, 2]"))
+        .filter(|l| {
+            l.starts_with("proc ") && l.contains(&format!("schema [{}, {S_OLD}]", S_OLD - 1))
+        })
         .filter_map(|l| l.split_whitespace().nth(2).map(str::to_string))
         .collect();
     env.admin_ok(true, &["upgrade", "cancel"]);
@@ -624,7 +631,9 @@ async fn rolling_upgrade_with_two_binaries() {
     committed.extend(traffic.await.unwrap());
     let st = env.admin_ok(true, &["upgrade", "status"]);
     assert!(
-        st.contains("schema Some(3) schema_write Some(3) format_write Some(2)"),
+        st.contains(&format!(
+            "schema Some({S_NEW}) schema_write Some({S_NEW}) format_write Some(2)"
+        )),
         "{st}"
     );
     assert!(st.contains("finalized"), "{st}");
@@ -658,9 +667,10 @@ async fn rolling_upgrade_with_two_binaries() {
         gw_stale.log()
     );
     assert!(
-        gw_stale
-            .log()
-            .contains("metadata schema M3 requires software with M in [3, 4]"),
+        gw_stale.log().contains(&format!(
+            "metadata schema M{S_NEW} requires software with M in [{S_NEW}, {}]",
+            S_NEW + 1
+        )),
         "{}",
         gw_stale.log()
     );
@@ -675,13 +685,21 @@ async fn rolling_upgrade_with_two_binaries() {
         ctl_stale.log()
     );
     assert!(
-        ctl_stale.log().contains("metadata schema M3"),
+        ctl_stale
+            .log()
+            .contains(&format!("metadata schema M{S_NEW}")),
         "{}",
         ctl_stale.log()
     );
-    let (ok, text) = env.admin(false, &["upgrade", "check-downgrade", "--schema", "2"]);
+    let (ok, text) = env.admin(
+        false,
+        &["upgrade", "check-downgrade", "--schema", &S_OLD.to_string()],
+    );
     assert!(!ok && text.contains("cannot run"), "{text}");
-    let (ok, text) = env.admin(true, &["upgrade", "check-downgrade", "--schema", "3"]);
+    let (ok, text) = env.admin(
+        true,
+        &["upgrade", "check-downgrade", "--schema", &S_NEW.to_string()],
+    );
     assert!(ok, "{text}");
     // A node: stop node 0 and try the old binary on its device.
     nodes[0].kill();

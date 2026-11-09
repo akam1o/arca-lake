@@ -29,12 +29,25 @@ pub const RECORD_WRITE_MIN: u8 = 2;
 static SCHEMA_WRITE: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(RECORD_WRITE_MIN);
 
-/// Tell this process the cluster's `schema_write` (RFC-014 §5.4); the
-/// value is clamped into `[RECORD_WRITE_MIN, RECORD_VERSION]`. Called at
-/// start and on every refresh; a stale value is always the older one.
+/// Record encoding version of metadata schema `schema`: schemas 1 and 2
+/// are record versions 1 and 2; schema 3 (Phase 3.10, ADR-0024) changed
+/// no record and keeps version 2, so from schema 3 on the record version
+/// is one less than the schema.
+#[must_use]
+pub fn record_version_of_schema(schema: u64) -> u64 {
+    if schema >= 3 { schema - 1 } else { schema }
+}
+
+/// Tell this process the cluster's `schema_write` (RFC-014 §5.4); its
+/// record version ([`record_version_of_schema`]) is clamped into
+/// `[RECORD_WRITE_MIN, RECORD_VERSION]`. Called at start and on every
+/// refresh; a stale value is always the older one.
 pub fn set_schema_write(schema: u64) {
-    let v = u8::try_from(schema.clamp(u64::from(RECORD_WRITE_MIN), u64::from(RECORD_VERSION)))
-        .unwrap_or(RECORD_WRITE_MIN);
+    let v = u8::try_from(
+        record_version_of_schema(schema)
+            .clamp(u64::from(RECORD_WRITE_MIN), u64::from(RECORD_VERSION)),
+    )
+    .unwrap_or(RECORD_WRITE_MIN);
     SCHEMA_WRITE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
