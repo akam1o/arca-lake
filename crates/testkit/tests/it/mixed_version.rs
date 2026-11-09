@@ -38,13 +38,13 @@ use aws_sdk_s3::config::Region;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 
-const BUCKET: &str = "mixed";
+pub(super) const BUCKET: &str = "mixed";
 /// Metadata schema of the "old" build (the new one's is one more).
 const S_OLD: u64 = arca_lake_metadata::keys::SCHEMA_VERSION;
 const S_NEW: u64 = S_OLD + 1;
 /// The test cluster runs plaintext node RPCs and metadata, explicitly
 /// (ADR-0017).
-const PLAINTEXT: [(&str, &str); 2] = [
+pub(super) const PLAINTEXT: [(&str, &str); 2] = [
     ("ARCA_INSECURE_PLAINTEXT", "1"),
     ("ARCA_FDB_INSECURE_PLAINTEXT", "1"),
 ];
@@ -53,11 +53,11 @@ const SECRET_KEY: &str = "mixed-version-test-secret-not-a-real-key";
 const CHUNK: u64 = 256 << 10;
 const SEGMENT: u64 = 2 << 20;
 
-struct Env {
-    old: PathBuf,
-    new: PathBuf,
-    cluster_file: PathBuf,
-    tmp: tempfile::TempDir,
+pub(super) struct Env {
+    pub(super) old: PathBuf,
+    pub(super) new: PathBuf,
+    pub(super) cluster_file: PathBuf,
+    pub(super) tmp: tempfile::TempDir,
 }
 
 impl Env {
@@ -74,12 +74,12 @@ impl Env {
         })
     }
 
-    fn bin(&self, new: bool) -> &Path {
+    pub(super) fn bin(&self, new: bool) -> &Path {
         if new { &self.new } else { &self.old }
     }
 
     /// Run an admin command; returns (success, stdout + stderr).
-    fn admin(&self, new: bool, args: &[&str]) -> (bool, String) {
+    pub(super) fn admin(&self, new: bool, args: &[&str]) -> (bool, String) {
         let out = Command::new(self.bin(new))
             .envs(PLAINTEXT)
             .arg("admin")
@@ -96,13 +96,13 @@ impl Env {
         (out.status.success(), text)
     }
 
-    fn admin_ok(&self, new: bool, args: &[&str]) -> String {
+    pub(super) fn admin_ok(&self, new: bool, args: &[&str]) -> String {
         let (ok, text) = self.admin(new, args);
         assert!(ok, "admin {args:?} failed: {text}");
         text
     }
 
-    fn spawn(&self, name: &str, new: bool, args: &[String]) -> Proc {
+    pub(super) fn spawn(&self, name: &str, new: bool, args: &[String]) -> Proc {
         let log = self.tmp.path().join(format!("{name}.log"));
         let f = std::fs::File::create(&log).unwrap();
         let child = Command::new(self.bin(new))
@@ -119,7 +119,7 @@ impl Env {
         }
     }
 
-    fn node_args(dir: &Path, addr: &str) -> Vec<String> {
+    pub(super) fn node_args(dir: &Path, addr: &str) -> Vec<String> {
         vec![
             "storage-node".into(),
             "--listen".into(),
@@ -136,7 +136,7 @@ impl Env {
         ]
     }
 
-    fn controller_args(&self, id: &str) -> Vec<String> {
+    pub(super) fn controller_args(&self, id: &str) -> Vec<String> {
         vec![
             "controller".into(),
             "--cluster-file".into(),
@@ -162,7 +162,7 @@ impl Env {
         ]
     }
 
-    fn gateway_args(&self, addr: &str) -> Vec<String> {
+    pub(super) fn gateway_args(&self, addr: &str) -> Vec<String> {
         vec![
             "gateway".into(),
             "--backend".into(),
@@ -189,26 +189,26 @@ impl Env {
     }
 }
 
-struct Proc {
+pub(super) struct Proc {
     name: String,
     child: Option<Child>,
     log: PathBuf,
 }
 
 impl Proc {
-    fn kill(&mut self) {
+    pub(super) fn kill(&mut self) {
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
         }
     }
 
-    fn log(&self) -> String {
+    pub(super) fn log(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
 
     /// Whether the process exited within `timeout` (a refused start).
-    fn exited_within(&mut self, timeout: Duration) -> Option<i32> {
+    pub(super) fn exited_within(&mut self, timeout: Duration) -> Option<i32> {
         let start = Instant::now();
         while start.elapsed() < timeout {
             if let Some(c) = &mut self.child
@@ -229,12 +229,12 @@ impl Drop for Proc {
     }
 }
 
-fn free_addr() -> String {
+pub(super) fn free_addr() -> String {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     l.local_addr().unwrap().to_string()
 }
 
-async fn wait_until(what: &str, timeout: Duration, mut cond: impl AsyncFnMut() -> bool) {
+pub(super) async fn wait_until(what: &str, timeout: Duration, mut cond: impl AsyncFnMut() -> bool) {
     let start = Instant::now();
     while !cond().await {
         assert!(start.elapsed() < timeout, "timed out waiting for {what}");
@@ -242,14 +242,14 @@ async fn wait_until(what: &str, timeout: Duration, mut cond: impl AsyncFnMut() -
     }
 }
 
-async fn wait_tcp(addr: &str, timeout: Duration) {
+pub(super) async fn wait_tcp(addr: &str, timeout: Duration) {
     wait_until(&format!("{addr} to listen"), timeout, async || {
         tokio::net::TcpStream::connect(addr).await.is_ok()
     })
     .await;
 }
 
-fn client(addr: &str) -> Client {
+pub(super) fn client(addr: &str) -> Client {
     let cfg = aws_sdk_s3::Config::builder()
         .behavior_version_latest()
         .region(Region::new("us-east-1"))
@@ -262,11 +262,11 @@ fn client(addr: &str) -> Client {
     Client::from_conf(cfg)
 }
 
-fn body(len: usize, seed: u64) -> Vec<u8> {
+pub(super) fn body(len: usize, seed: u64) -> Vec<u8> {
     arca_lake_testkit::random_bytes(len, seed)
 }
 
-async fn put(c: &Client, key: &str, data: Vec<u8>) {
+pub(super) async fn put(c: &Client, key: &str, data: Vec<u8>) {
     c.put_object()
         .bucket(BUCKET)
         .key(key)
@@ -276,7 +276,7 @@ async fn put(c: &Client, key: &str, data: Vec<u8>) {
         .unwrap_or_else(|e| panic!("put {key}: {e:?}"));
 }
 
-async fn get(c: &Client, key: &str) -> Vec<u8> {
+pub(super) async fn get(c: &Client, key: &str) -> Vec<u8> {
     c.get_object()
         .bucket(BUCKET)
         .key(key)

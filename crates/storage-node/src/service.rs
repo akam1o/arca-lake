@@ -442,7 +442,15 @@ impl StorageNodeService {
         generation: u64,
     ) -> Result<(), tonic::Status> {
         let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
-        if protocol_version >= pb::FENCED_DELETE_VERSION
+        // Once the cluster finalized a release with the rejoin fence, only
+        // such releases delete (an earlier one may run again on restored
+        // metadata, which its start check alone would admit).
+        let min_version = if c.schema_floor >= pb::REJOIN_FENCE_SCHEMA {
+            pb::REJOIN_FENCE_VERSION
+        } else {
+            pb::FENCED_DELETE_VERSION
+        };
+        if protocol_version >= min_version
             && c.fence_admits(generation)
             && c.lease_live(std::time::Instant::now())
         {

@@ -52,6 +52,8 @@ mod parallel_read;
 mod phase31;
 mod placement_balance;
 mod population_queue;
+#[cfg(feature = "fdb")]
+mod previous_release;
 mod rebalance;
 #[cfg(feature = "fdb")]
 mod rebalance_fdb;

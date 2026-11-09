@@ -241,6 +241,23 @@ jobs:
           ARCA_BIN_OLD="$CARGO_TARGET_DIR/debug/arca-lake" \
           ARCA_BIN_NEW="$CARGO_TARGET_DIR/bump/debug/arca-lake" \
             cargo test -p arca-lake-testkit --features fdb --test it mixed_version:: -- --nocapture --test-threads=1
+      - name: upgrade from and rollback to the previous release (ADR-0024)
+        env:
+          ARCA_FDB_TESTS: "1"
+          ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
+          # The previous release (Phase 3.9: protocol 3, schema 2).
+          PREVIOUS_RELEASE: 9674894109ec7fe813e63da5fefc90208483b1d5
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$PREVIOUS_RELEASE"
+          rm -rf "$RUNNER_TEMP/previous-release"
+          mkdir -p "$RUNNER_TEMP/previous-release"
+          git archive "$PREVIOUS_RELEASE" | tar -x -C "$RUNNER_TEMP/previous-release"
+          (cd "$RUNNER_TEMP/previous-release" && cargo build -p arca-lake --features fdb --target-dir "$CARGO_TARGET_DIR/previous")
+          cargo build -p arca-lake --features fdb
+          ARCA_BIN_PREV="$CARGO_TARGET_DIR/previous/debug/arca-lake" \
+          ARCA_BIN_CUR="$CARGO_TARGET_DIR/debug/arca-lake" \
+            cargo test -p arca-lake-testkit --features fdb --test it previous_release:: -- --nocapture --test-threads=1
       - name: metadata restore drill (fdbbackup/fdbrestore, RFC-015 §5.3.1)
         env:
           ARCA_FDB_TESTS: "1"

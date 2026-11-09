@@ -417,6 +417,79 @@ async fn an_older_protocol_delete_is_refused() {
     n.shutdown().await;
 }
 
+/// Phase 3.10 downgrade gate (ADR-0024): before the cluster finalized a
+/// release with the rejoin fence, the previous release's (protocol 3)
+/// deletes are taken, so that deletes go on during a rolling upgrade. Once
+/// a leader told the node the finalized schema, only protocol-4 deletes
+/// are, also after a restart: a previous release started on metadata
+/// restored from before the finalize deletes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_the_finalize_only_releases_with_the_rejoin_fence_delete() {
+    use arca_lake_protocol::storage::v1 as pb;
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (n, addr, c) = node_with_shard(dir.path()).await;
+    c.push_delete_fence(&addr, 1, true).await.unwrap();
+    let delete = async |addr: &str, version: u32, fence: u64, i: u8| {
+        let mut raw = pb::storage_node_client::StorageNodeClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        raw.delete_shard(pb::DeleteShardRequest {
+            protocol_version: version,
+            key: Some(pb::ShardKey {
+                group_id: 1,
+                chunk_id: Bytes::from(vec![i; 16]),
+                shard_index: 0,
+            }),
+            delete_fence: fence,
+            ..Default::default()
+        })
+        .await
+    };
+    // A version-bump build no longer speaks protocol 3 at all.
+    let speaks_3 = pb::PROTOCOL_VERSION_MIN <= pb::FENCED_DELETE_VERSION;
+    if speaks_3 {
+        delete(&addr, pb::FENCED_DELETE_VERSION, 1, 1)
+            .await
+            .unwrap();
+    }
+    c.health_with(
+        &addr,
+        HealthRequest {
+            schema_floor: pb::REJOIN_FENCE_SCHEMA,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    if speaks_3 {
+        let e = delete(&addr, pb::FENCED_DELETE_VERSION, 1, 2)
+            .await
+            .unwrap_err();
+        assert!(NodeClients::is_fenced(&e), "{e}");
+    }
+    delete(&addr, pb::REJOIN_FENCE_VERSION, 1, 2).await.unwrap();
+    n.shutdown().await;
+    // The floor survives a restart.
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let addr = n.local_addr.to_string();
+    assert_eq!(
+        c.health(&addr).await.unwrap().schema_floor,
+        pb::REJOIN_FENCE_SCHEMA
+    );
+    c.push_delete_fence(&addr, 2, true).await.unwrap();
+    if speaks_3 {
+        let e = delete(&addr, pb::FENCED_DELETE_VERSION, 2, 3)
+            .await
+            .unwrap_err();
+        assert!(NodeClients::is_fenced(&e), "{e}");
+    }
+    delete(&addr, pb::REJOIN_FENCE_VERSION, 2, 3).await.unwrap();
+    n.shutdown().await;
+}
+
 /// A fence change is acknowledged only after every delete that passed the
 /// old fence has finished its physical delete, also when the caller gave
 /// up on that delete (its RPC cancelled while the store was writing the

@@ -110,6 +110,16 @@ schema at start.
   lease to every delete. The previous release's controllers push the
   fence every pass, which renews the lease, so deletes go on during a
   rolling upgrade.
+- **Nodes refuse the previous release's deletes after finalize.** A node
+  whose schema floor is 3 or more (`REJOIN_FENCE_SCHEMA`) accepts only
+  protocol-4 deletes. Without this, metadata restored from before the
+  finalize (schema 2) would admit a previous-release controller started
+  before `recovery begin`. That controller pushes the nodes' own
+  incarnation, which renews their rejoin lease, and it has no rollback
+  gate, so its deletes would apply. The two-binary test
+  `previous_release::upgrade_from_and_rollback_to_the_previous_release`
+  showed exactly that with the node check removed: three shards deleted
+  on every node.
 
 ## Alternatives considered
 

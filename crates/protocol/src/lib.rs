@@ -43,6 +43,14 @@ pub mod storage {
         /// oldest a client sends a delete to.
         pub const REJOIN_FENCE_VERSION: u32 = 4;
 
+        /// Metadata schema from which nodes refuse deletes below
+        /// [`REJOIN_FENCE_VERSION`] (Phase 3.10, ADR-0024): a node told this
+        /// schema (by a leader after `upgrade finalize`, kept across
+        /// restores) takes deletes only from releases that keep the rejoin
+        /// fence, so an earlier release started on restored metadata deletes
+        /// nothing.
+        pub const REJOIN_FENCE_SCHEMA: u64 = 3;
+
         /// Oldest protocol version whose nodes enforce the delete fence.
         pub const FENCED_DELETE_VERSION: u32 = 3;
 
