@@ -331,7 +331,7 @@ pub async fn open_without_leader<S: KvStore>(
             };
             let rec: DeleteFenceRecord = read(tx, &keys::delete_fence()).await?.unwrap_or_default();
             let next = DeleteFenceRecord {
-                generation: next_generation(rec.generation.max(*at_least))?,
+                generation: next_open_generation(rec.generation.max(*at_least))?,
                 open: true,
                 leader_token: 0,
                 incarnation: state.incarnation,

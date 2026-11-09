@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 
 const FILE_NAME: &str = "cluster.txt";
 
+/// Created (and synced) before the first version-2 facts file: with it, a
+/// file without the version line is damaged, not an earlier release's.
+const MARKER: &str = "cluster.v2";
+
 const KNOWN: [&str; 5] = [
     "incarnation",
     "changed_ms",
@@ -105,8 +109,9 @@ impl ClusterFacts {
             unpersisted: false,
             unknown_token: 0,
         };
+        let migrated = dir.join(MARKER).exists();
         let damaged = match std::fs::read_to_string(&facts.path) {
-            Ok(text) => !facts.parse(&text),
+            Ok(text) => !facts.parse(&text, migrated),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let data = has_segments(dir);
                 if !data {
@@ -128,6 +133,10 @@ impl ClusterFacts {
             );
             facts.fence_open = false;
             facts.fence_hold = Some(UNKNOWN_HOLD);
+        }
+        // Also for an unknown hold persisted by an earlier start: each
+        // start draws its own token (review).
+        if facts.fence_hold == Some(UNKNOWN_HOLD) {
             facts.unknown_token = fresh_token();
         }
         facts
@@ -137,7 +146,7 @@ impl ClusterFacts {
     /// unreadable, a generation beyond [`MAX_GENERATION`]; for version 2
     /// a wrong or missing checksum or no fence line; for an earlier
     /// version's file no `changed_ms` line (every release wrote one).
-    fn parse(&mut self, text: &str) -> bool {
+    fn parse(&mut self, text: &str, migrated: bool) -> bool {
         let body = if let Some(rest) = text.strip_prefix("facts 2\n") {
             let Some(at) = rest.trim_end_matches('\n').rfind("crc ") else {
                 return false;
@@ -154,7 +163,7 @@ impl ClusterFacts {
             }
             content
         } else {
-            if !text.lines().any(|l| l.starts_with("changed_ms ")) {
+            if migrated || !text.lines().any(|l| l.starts_with("changed_ms ")) {
                 return false;
             }
             text
@@ -349,6 +358,14 @@ impl ClusterFacts {
 
     fn persist(&mut self) -> std::io::Result<()> {
         use std::fmt::Write as _;
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+            let marker = dir.join(MARKER);
+            if !marker.exists() {
+                File::create(&marker)?.sync_all()?;
+                File::open(dir)?.sync_all()?;
+            }
+        }
         let tmp = self.path.with_extension("tmp");
         let mut body = String::new();
         if let Some(i) = self.incarnation {
@@ -537,6 +554,8 @@ mod tests {
             assert_eq!(g.fence_hold, Some(UNKNOWN_HOLD), "{damaged:?}");
             assert!(!g.fence_open, "{damaged:?}");
         }
+        // An earlier release's file (that release wrote no marker).
+        std::fs::remove_file(dir.path().join(MARKER)).unwrap();
         std::fs::write(
             dir.path().join(FILE_NAME),
             "changed_ms 1\nformat_write 2\nsome_later_key 5\ndelete_fence 4 open\n",
@@ -620,7 +639,8 @@ mod tests {
             Some(UNKNOWN_HOLD),
             "edited"
         );
-        // An earlier release's file.
+        // An earlier release's file (that release wrote no marker).
+        std::fs::remove_file(dir.path().join(MARKER)).unwrap();
         std::fs::write(dir.path().join(FILE_NAME), "changed_ms 3\nformat_write 1\n").unwrap();
         let mut g = ClusterFacts::open(dir.path());
         assert_eq!(
@@ -657,5 +677,39 @@ mod tests {
         let t = u.unknown_token;
         assert!(u.adopt_fence_held(0, false, None, true, None, t).unwrap());
         assert_eq!((u.fence_hold, u.unknown_token), (None, 0));
+    }
+
+    /// Re-review: with the version marker, a file without its version
+    /// line is damaged (not an earlier release's); an unknown hold
+    /// persisted by an earlier start gets a fresh token, so it can still
+    /// be released; a store directory that does not exist yet gets its
+    /// facts.
+    #[test]
+    fn a_header_lost_after_migration_is_damage_and_a_persisted_unknown_hold_stays_releasable() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("store");
+        let mut f = ClusterFacts::open(&dir);
+        assert!(dir.join(FILE_NAME).exists() && dir.join(MARKER).exists());
+        assert!(
+            f.adopt_fence_held(4, false, Some([1; 16]), false, None, 0)
+                .unwrap()
+        );
+        std::fs::write(dir.join("seg-0000000000000001.arca"), b"x").unwrap();
+        std::fs::write(dir.join(FILE_NAME), "changed_ms 3\nformat_write 1\n").unwrap();
+        let mut u = ClusterFacts::open(&dir);
+        assert_eq!(
+            u.fence_hold,
+            Some(UNKNOWN_HOLD),
+            "legacy-looking after migration"
+        );
+        // Persisted under the unknown hold (another fact adopted), then a
+        // restart: a fresh token, and the release with it works.
+        assert!(u.adopt_incarnation([2; 16], 5).unwrap());
+        let mut r = ClusterFacts::open(&dir);
+        assert_eq!(r.fence_hold, Some(UNKNOWN_HOLD));
+        assert_ne!(r.unknown_token, 0);
+        let t = r.unknown_token;
+        assert!(r.adopt_fence_held(0, false, None, true, None, t).unwrap());
+        assert_eq!(r.fence_hold, None);
     }
 }
