@@ -191,7 +191,36 @@ pub async fn upgrade_pass<S: KvStore>(
         }
         UpgradeStep::FormatWriteRaised => {
             // Step 5: the schema itself; the cursor is cleared and the
-            // history kept as an audit record.
+            // history kept as an audit record. First every node holds the
+            // new schema as its floor (Phase 3.10 review): a node that
+            // missed it would take the previous release's deletes on
+            // metadata restored from before the finalize. Nodes the
+            // operator named absent cannot be told; they are told by the
+            // leader's health pass when they return.
+            let mut missing = Vec::new();
+            for n in cluster::list_nodes(meta).await? {
+                let req = arca_lake_protocol::storage::v1::HealthRequest {
+                    schema_floor: target.schema,
+                    ..Default::default()
+                };
+                match clients.health_with(&n.address, req).await {
+                    Ok(h) if h.schema_floor >= target.schema => {}
+                    Ok(h) => missing.push(format!(
+                        "node {} keeps schema floor {} (an earlier release?)",
+                        n.id, h.schema_floor
+                    )),
+                    Err(e) if cur.ignore_absent.contains(&n.id.to_string()) => {
+                        warn!(node = n.id, error = %e, "finalize: absent node not told the schema floor");
+                    }
+                    Err(e) => missing.push(format!("node {} unreachable: {}", n.id, e.code())),
+                }
+            }
+            if !missing.is_empty() {
+                let why = format!("schema floor not held: {}", missing.join("; "));
+                compat::note_upgrade_error(meta, &why, now_ms).await?;
+                report.blocked = Some(why);
+                return Ok(report);
+            }
             let v = compat::raise_version(meta, VersionKey::Schema, target.schema).await?;
             if let Some(done) = compat::clear_upgrade(meta, false).await? {
                 let mut audit = done;

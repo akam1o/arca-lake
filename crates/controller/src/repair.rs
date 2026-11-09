@@ -694,10 +694,7 @@ async fn reconstruct_one<S: KvStore>(
         // this group and was placed in another one (Phase 3.10 audit: a
         // member move stayed `Repairing` on such a leftover, retrying it as
         // unrecoverable, while the object was whole in the other group).
-        if gc::chunk_record_in_group(meta, &prefix, chunk_index, group.id)
-            .await?
-            .is_none()
-        {
+        if !gc::chunk_may_be_in_group(meta, &prefix, chunk_index, group.id).await? {
             return Ok(None);
         }
         return Err(ControlError::Unrecoverable {
@@ -788,8 +785,9 @@ fn joined_matches(
 /// Completeness check: walk every member's listing (same chunk IDs, same
 /// payload lengths), verify the replacement's shards (and every member's
 /// when `verify_all_members`).
-/// Whether a live generation places chunk `cid` in `group` (its durable
-/// chunk record, or for a cache group its cache placement).
+/// Whether a live generation places chunk `cid` in `group`, or may yet
+/// (a pending write whose record is not appended yet): its durable chunk
+/// record, or for a cache group its cache placement.
 async fn placed_here<S: KvStore>(
     meta: &S,
     group: &GroupRecord,
@@ -799,9 +797,7 @@ async fn placed_here<S: KvStore>(
     Ok(if group.is_cache() {
         gc::cache_placement_in_group(meta, &prefix, chunk_index, group.id).await?
     } else {
-        gc::chunk_record_in_group(meta, &prefix, chunk_index, group.id)
-            .await?
-            .is_some()
+        gc::chunk_may_be_in_group(meta, &prefix, chunk_index, group.id).await?
     })
 }
 

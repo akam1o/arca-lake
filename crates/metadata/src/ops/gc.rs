@@ -391,6 +391,53 @@ pub async fn chunk_record_in_group<S: KvStore>(
     .await
 }
 
+/// Whether chunk `index` of a live generation with `prefix` is, or may yet
+/// be, placed in `group_id` (Phase 3.10 review): a chunk record places it
+/// there; or a pending generation has no record of it yet (the gateway
+/// writes shards before it appends their records, so a missing record of a
+/// write in progress is no proof of an orphan). `false` only when every
+/// live generation with the prefix is committed without it here, or has
+/// recorded it in another group.
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn chunk_may_be_in_group<S: KvStore>(
+    store: &S,
+    prefix: &[u8; 12],
+    index: u32,
+    group_id: u64,
+) -> Result<bool> {
+    transact(store, (*prefix, index, group_id), |tx, env| {
+        Box::pin(async move {
+            let (prefix, index, group_id) = *env;
+            for (generation, header) in generations_with_prefix(tx, &prefix).await? {
+                if !is_live(header.as_ref()) {
+                    continue;
+                }
+                match tx.get(&keys::gen_chunk(&generation, index)).await? {
+                    Some(v) => {
+                        let record: ChunkRecord = decode(&v)?;
+                        if record.placement.group_id == group_id {
+                            return Ok(true);
+                        }
+                    }
+                    None => {
+                        if header
+                            .as_ref()
+                            .is_some_and(|h| matches!(h.state, GenState::Pending { .. }))
+                        {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            Ok(false)
+        })
+    })
+    .await
+}
+
 /// Whether a cache placement of a live generation with `prefix` names
 /// chunk `index` in cache group `group_id` (cache reconciliation,
 /// RFC-006 §5.6).

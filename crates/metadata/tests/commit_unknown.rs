@@ -509,3 +509,32 @@ fn a_restored_marker_is_not_the_marker_deleted() {
         );
     });
 }
+
+/// Phase 3.10 review: while a write is in progress its chunk records are
+/// appended after the shards are written, so repair must take a chunk of a
+/// pending generation without a record as possibly in any group; once the
+/// record names a group (or the generation is committed without it) only
+/// that group's.
+#[test]
+fn a_pending_chunk_without_a_record_may_be_in_any_group() {
+    let kv = store();
+    run(async {
+        let p = begin_put(&kv, "b", "k", 1, LEASE).await.unwrap();
+        let prefix: [u8; 12] = p.generation[..12].try_into().unwrap();
+        for g in [1, 2] {
+            assert!(gc::chunk_may_be_in_group(&kv, &prefix, 0, g).await.unwrap());
+        }
+        append_chunks(&kv, &p.generation, &[chunk(0)], 1)
+            .await
+            .unwrap();
+        assert!(gc::chunk_may_be_in_group(&kv, &prefix, 0, 1).await.unwrap());
+        assert!(!gc::chunk_may_be_in_group(&kv, &prefix, 0, 2).await.unwrap());
+        // Chunk 1 not recorded yet: anywhere.
+        assert!(gc::chunk_may_be_in_group(&kv, &prefix, 1, 2).await.unwrap());
+        commit_put(&kv, &p.generation, &info("e"), &Precondition::default(), 2)
+            .await
+            .unwrap();
+        assert!(!gc::chunk_may_be_in_group(&kv, &prefix, 1, 2).await.unwrap());
+        assert!(gc::chunk_may_be_in_group(&kv, &prefix, 0, 1).await.unwrap());
+    });
+}

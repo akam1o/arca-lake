@@ -419,3 +419,56 @@ async fn a_cancelled_upgrade_never_raises_the_schema_write_gate() {
     );
     c.shutdown().await;
 }
+
+/// Phase 3.10 review: the finalize raises the schema only once every node
+/// holds it as its floor. A node unreachable at the last step blocks it
+/// (it would otherwise take the previous release's deletes on metadata
+/// restored from before the finalize); once it answers, the finalize
+/// completes and every node holds the floor.
+#[tokio::test]
+async fn finalize_waits_until_every_node_holds_the_schema_floor() {
+    let mut c = cluster().await;
+    let meta = Arc::clone(&c.meta);
+    let own = arca_lake_controller::capabilities();
+    let target = current_target();
+    compat::request_finalize(meta.as_ref(), target, vec![], "admin", now_ms())
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        let r = upgrade_pass(meta.as_ref(), &c.clients, &own, 7, now_ms())
+            .await
+            .unwrap();
+        assert!(r.blocked.is_none(), "{r:?}");
+        if r.after == Some(UpgradeStep::FormatWriteRaised) {
+            break;
+        }
+    }
+    c.stop_node(2).await;
+    let r = upgrade_pass(meta.as_ref(), &c.clients, &own, 7, now_ms())
+        .await
+        .unwrap();
+    let why = r.blocked.expect("finalized without node 2");
+    assert!(why.contains("schema floor not held"), "{why}");
+    assert!(
+        compat::upgrade_cursor(meta.as_ref())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    c.start_node(2).await;
+    let r = upgrade_pass(meta.as_ref(), &c.clients, &own, 7, now_ms())
+        .await
+        .unwrap();
+    assert!(r.blocked.is_none() && r.after.is_none(), "{r:?}");
+    assert!(
+        compat::upgrade_cursor(meta.as_ref())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for n in &c.nodes {
+        let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+        assert!(h.schema_floor >= target.schema, "{h:?}");
+    }
+    c.shutdown().await;
+}
