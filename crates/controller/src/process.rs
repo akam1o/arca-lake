@@ -942,14 +942,33 @@ async fn health_pass<S: KvStore>(
     // otherwise; pushed to every node with the other facts. Deletes of
     // this process carry the generation only while it is open.
     let highest = metrics.delete_fence.highest_reported();
-    let fence = arca_lake_metadata::ops::delete_fence::sync_for_term(
+    let token = metrics.leader_token.load(Ordering::Relaxed);
+    // Opens only after a whole round of node reports in this term (a fresh
+    // process knows no node's generation yet). A failure does not stop the
+    // pass: the other facts still go out, and this process stops deleting
+    // (Phase 3.9 review).
+    let fence = match arca_lake_metadata::ops::delete_fence::sync_for_term_gated(
         meta,
-        metrics.leader_token.load(Ordering::Relaxed),
+        token,
         incarnation,
         highest,
+        metrics.delete_fence.round_done(token),
         now,
     )
-    .await?;
+    .await
+    {
+        Ok(f) => Some(f),
+        Err(e) if matches!(e, arca_lake_metadata::MetaError::InvalidArgument(_)) => {
+            warn!(error = %e, "delete fence not advanced: deletes stop in this process");
+            None
+        }
+        Err(e) => return Err(e.into()),
+    };
+    // Without a fence: generation 0 (no fence change pushed), none held.
+    let fence = fence.unwrap_or(arca_lake_metadata::ops::delete_fence::TermFence {
+        record: arca_lake_metadata::ops::delete_fence::DeleteFenceRecord::default(),
+        changed: false,
+    });
     if fence.changed {
         info!(
             generation = fence.record.generation,
@@ -958,7 +977,12 @@ async fn health_pass<S: KvStore>(
             "delete fence changed"
         );
     }
-    clients.set_delete_fence(fence.record.open.then_some(fence.record.generation));
+    // Only a generation of this term (a former leader's, kept while the
+    // first round of reports is collected, is not this process's).
+    clients.set_delete_fence(
+        (fence.record.open && fence.record.leader_token == token)
+            .then_some(fence.record.generation),
+    );
     metrics.delete_fence.set_record(&fence.record);
     let req = arca_lake_protocol::storage::v1::HealthRequest {
         format_write: gate.format_write.unwrap_or(0),
@@ -982,6 +1006,7 @@ async fn health_pass<S: KvStore>(
             && !fence.record.open
             && fence.record.incarnation == incarnation,
         delete_fence_release: false,
+        delete_fence_release_token: 0,
     };
     for n in &nodes {
         clients.note_node_id(&n.address, n.id);
@@ -1026,6 +1051,7 @@ async fn health_pass<S: KvStore>(
         .nodes_total
         .store(nodes.len() as u64, Ordering::Relaxed);
     metrics.nodes_unhealthy.store(unhealthy, Ordering::Relaxed);
+    metrics.delete_fence.finish_round(token);
     // Write admission (Phase 3.6), from what the nodes just reported.
     // The term is the leader's fencing token: a failover (or leading
     // again) starts the admission state afresh (Phase 3.7, R-85).

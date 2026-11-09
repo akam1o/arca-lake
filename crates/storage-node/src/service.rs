@@ -1088,6 +1088,7 @@ impl StorageNode for StorageNodeService {
                 || r.delete_fence_open
                 || r.delete_fence_hold
                 || r.delete_fence_release
+                || r.delete_fence_release_token != 0
         };
         self.authorize(
             &request,
@@ -1119,13 +1120,14 @@ impl StorageNode for StorageNodeService {
                     .then(|| c.incarnation.unwrap_or([0; 16])),
                 req.delete_fence_release,
                 caller.filter(|inc| c.incarnation == Some(*inc)),
+                req.delete_fence_release_token,
             )
         };
         let needs_exclusive = |c: &crate::cluster::ClusterFacts| {
             let new_incarnation = caller.is_some_and(|inc| c.incarnation != Some(inc));
-            let (generation, open, hold, release, from) = fence_args(c);
+            let (generation, open, hold, release, from, token) = fence_args(c);
             new_incarnation
-                || c.plan_fence(generation, open, hold, release, from)
+                || c.plan_fence(generation, open, hold, release, from, token)
                     .is_some()
         };
         // Decided again under the facts' lock: a change made by another
@@ -1155,8 +1157,8 @@ impl StorageNode for StorageNodeService {
                     "adopted cluster incarnation"
                 );
             }
-            let (generation, open, hold, release, from) = fence_args(&c);
-            if c.adopt_fence_held(generation, open, hold, release, from)
+            let (generation, open, hold, release, from, token) = fence_args(&c);
+            if c.adopt_fence_held(generation, open, hold, release, from, token)
                 .map_err(|e| tonic::Status::internal(e.to_string()))?
             {
                 tracing::info!(
@@ -1227,12 +1229,12 @@ impl StorageNode for StorageNodeService {
             load_reported: true,
             delete_fence_generation: fence_generation,
             delete_fence_open: fence_open,
-            delete_fence_hold: self
+            delete_fence_hold: self.delete_fence_held(),
+            delete_fence_unknown_token: self
                 .cluster
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .fence_hold
-                .is_some(),
+                .unknown_token,
             devices: vec![self.device_capacity_with(&stats)],
         }))
     }

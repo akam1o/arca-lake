@@ -271,6 +271,10 @@ message HealthRequest {
   // restored metadata before `recovery begin` cannot reopen deletes.
   bool delete_fence_hold = 6;
   bool delete_fence_release = 7;
+  // With a release of a node whose facts were lost (unknown hold): the
+  // token the node reports in `delete_fence_unknown_token`, so that a
+  // release sent before the loss cannot lift it.
+  uint64 delete_fence_release_token = 8;
 }
 
 message GroupEpoch {
@@ -324,6 +328,9 @@ message HealthResponse {
   uint64 delete_fence_generation = 28;
   bool delete_fence_open = 29;
   bool delete_fence_hold = 30;
+  // Non-zero while the node holds its fence because its facts were lost or
+  // damaged: what a release must carry (drawn at each start).
+  uint64 delete_fence_unknown_token = 31;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").

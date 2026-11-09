@@ -18,6 +18,8 @@ pub struct FenceView {
 struct FenceInner {
     generation: u64,
     open: bool,
+    /// Leader token of the last complete round of node reports.
+    round: u64,
     nodes: std::collections::HashMap<u64, (u64, bool)>,
 }
 
@@ -32,8 +34,33 @@ impl FenceView {
         g.open = r.open;
     }
 
-    /// Remember what node `id` reported.
+    /// A round of node reports finished in the term of `token`.
+    pub fn finish_round(&self, token: u64) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .round = token;
+    }
+
+    /// Whether a whole round of node reports was collected in this term.
+    #[must_use]
+    pub fn round_done(&self, token: u64) -> bool {
+        token != 0
+            && self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .round
+                == token
+    }
+
+    /// Remember what node `id` reported (a generation no cluster reaches
+    /// is not taken into account: one buggy or hostile node must not stop
+    /// every close).
     pub fn note_node(&self, id: u64, generation: u64, open: bool) {
+        if generation > arca_lake_metadata::ops::delete_fence::MAX_GENERATION {
+            return;
+        }
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

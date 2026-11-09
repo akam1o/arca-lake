@@ -39,7 +39,12 @@ impl Closed {
     pub fn not_acknowledged(&self) -> Vec<u64> {
         self.nodes
             .iter()
-            .filter(|n| !matches!(n.fence, Ok((g, false)) if g >= self.record.generation))
+            // A close with the hold is acknowledged only by a node that
+            // reports the hold installed (review).
+            .filter(|n| {
+                !matches!(n.fence, Ok((g, false)) if g >= self.record.generation)
+                    || (self.record.operator_hold && !n.held)
+            })
             .map(|n| n.node_id)
             .collect()
     }
@@ -92,6 +97,8 @@ pub async fn close_and_push<S: KvStore>(
     let highest = before
         .iter()
         .filter_map(|n| n.fence.as_ref().ok().map(|f| f.0))
+        // No honest node holds more (nodes ignore it): not a floor.
+        .filter(|g| *g <= delete_fence::MAX_GENERATION)
         .max()
         .unwrap_or(0);
     let were_open = before
@@ -108,6 +115,7 @@ pub async fn close_and_push<S: KvStore>(
         hold: record.operator_hold,
         release: false,
         incarnation: compat::cluster_state(meta).await?.map(|s| s.incarnation),
+        release_token: 0,
     };
     let mut nodes = Vec::new();
     for n in cluster::list_nodes(meta).await? {
@@ -149,14 +157,29 @@ pub async fn release_and_push<S: KvStore>(
         hold: false,
         release: true,
         incarnation: compat::cluster_state(meta).await?.map(|s| s.incarnation),
+        release_token: 0,
     };
     let mut held = Vec::new();
     for n in cluster::list_nodes(meta).await? {
         // The release names the recorded (closed) generation: a node lifts
         // its hold only at it or above, so a delayed release never lifts a
         // later close's hold.
+        // A node whose facts were lost reports the token its release
+        // must carry (drawn at its start, so no earlier release has it).
+        let token = clients
+            .health(&n.address)
+            .await
+            .map_or(0, |h| h.delete_fence_unknown_token);
         match clients
-            .push_delete_fence_with(&n.address, record.generation, false, how)
+            .push_delete_fence_with(
+                &n.address,
+                record.generation,
+                false,
+                FencePush {
+                    release_token: token,
+                    ..how
+                },
+            )
             .await
         {
             Ok((_, _, false)) => {}

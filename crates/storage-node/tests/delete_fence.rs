@@ -201,17 +201,31 @@ async fn quarantined_shards_beyond_one_page_are_listed() {
     // its delete fence until an operator releases it (Phase 3.9 review).
     assert_eq!(n.service().delete_fence(), (0, false));
     assert!(n.service().delete_fence_held());
-    c.push_delete_fence_with(
-        &addr,
-        0,
-        false,
-        arca_lake_protocol::client::FencePush {
-            release: true,
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    let release = |token| arca_lake_protocol::client::FencePush {
+        release: true,
+        release_token: token,
+        ..Default::default()
+    };
+    // A release without the token this start drew (one sent before the
+    // facts were lost) does not lift it; one with it does.
+    let held = c
+        .push_delete_fence_with(&addr, 0, false, release(0))
+        .await
+        .unwrap();
+    assert!(held.2, "{held:?}");
+    let token = c.health(&addr).await.unwrap().delete_fence_unknown_token;
+    assert_ne!(token, 0);
+    let held = c
+        .push_delete_fence_with(&addr, 0, false, release(token ^ 1))
+        .await
+        .unwrap();
+    assert!(held.2, "a wrong token: {held:?}");
+    let held = c
+        .push_delete_fence_with(&addr, 0, false, release(token))
+        .await
+        .unwrap();
+    assert!(!held.2, "{held:?}");
+    assert_eq!(c.health(&addr).await.unwrap().delete_fence_unknown_token, 0);
     open_fence(&c, &addr).await;
     let (mut live, mut quarantined, mut after) = (Vec::new(), Vec::new(), None);
     for _ in 0..10 {
@@ -519,6 +533,7 @@ async fn only_a_later_incarnation_or_a_release_lifts_the_hold() {
                     hold,
                     release,
                     incarnation: Some([inc; 16]),
+                    release_token: 0,
                 },
             )
             .await

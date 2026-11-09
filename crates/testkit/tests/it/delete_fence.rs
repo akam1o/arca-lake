@@ -530,7 +530,7 @@ async fn the_leader_opens_the_fence_for_its_term_and_closes_it_outside_active() 
         f.iter().all(|&(x, o)| !o && x > g)
     })
     .await;
-    compat::transition(
+    let (state, _) = compat::transition(
         c.meta.as_ref(),
         ClusterPhase::ReadOnly,
         ClusterPhase::Active,
@@ -539,6 +539,8 @@ async fn the_leader_opens_the_fence_for_its_term_and_closes_it_outside_active() 
     )
     .await
     .unwrap();
+    // The gateway sees it now rather than at its next refresh.
+    c.backend.cluster().set(Some(state));
     wait("reopened", &|f| f.iter().all(|&(x, o)| o && x > g + 1)).await;
     // GC by the leader collects a deleted object.
     let before = c.total_shards().await;
@@ -627,5 +629,80 @@ async fn a_leader_killed_while_pushing_its_fence_is_superseded_cleanly() {
         .unwrap();
     assert!(again.record.generation > rec.generation);
     assert_eq!(again.not_acknowledged(), Vec::<u64>::new());
+    c.shutdown().await;
+}
+
+/// Phase 3.9 re-review: a restore whose close was skipped leaves the
+/// nodes open at G while the restored record is older. A fresh controller
+/// process on the restored metadata knows no node's generation; it opens
+/// only after a round of reports, above G, so the deletes decided under G
+/// before the restore are refused once the nodes adopt it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_leader_never_reopens_a_nodes_own_generation_after_a_restore() {
+    use arca_lake_controller::process::{ControllerConfig, spawn};
+    let c = cluster().await;
+    put(&c, "r", 9).await;
+    // The backup's record is one generation behind the nodes' G: the
+    // reopening a fresh view would choose is exactly G.
+    leader_pass(&c, 40).await;
+    let backup = snapshot(c.meta.as_ref()).await;
+    let g = leader_pass(&c, 41).await.generation;
+    let old = frozen_controller(&c);
+    let deletes = decided_deletes(&c, "r").await;
+    s3::delete(&c.backend, BUCKET, "r").await.unwrap();
+    // No close: the restore brings back an older record.
+    restore(c.meta.as_ref(), &backup).await;
+    assert!(
+        delete_fence::current(c.meta.as_ref())
+            .await
+            .unwrap()
+            .generation
+            < g
+    );
+    let mut cfg = ControllerConfig::new("ctl-restored");
+    cfg.lease = Duration::from_secs(2);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_secs(3600);
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.failure_domain = "host".into();
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    let t = Instant::now();
+    loop {
+        let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+        // Written by the new controller (not the restored record of the
+        // test's term 40).
+        if rec.open && rec.leader_token != 40 {
+            assert!(rec.generation > g, "reopened the nodes' own {g}: {rec:?}");
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "never opened: {rec:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let t = Instant::now();
+    loop {
+        let mut all = true;
+        for n in &c.nodes {
+            let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+            all &= h.delete_fence_generation > g;
+        }
+        if all {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "nodes never moved on"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let d = deliver(&old, &deletes).await;
+    assert_eq!(d.applied, 0, "{d:?}");
+    assert_eq!(
+        s3::get(&c.backend, BUCKET, "r").await.unwrap().0.len(),
+        2 << 20
+    );
+    ctl.shutdown().await;
     c.shutdown().await;
 }

@@ -38,6 +38,23 @@ fn next_generation(g: u64) -> Result<u64> {
         })
 }
 
+/// Headroom kept above every open generation for closes (nodes open
+/// nothing above `MAX_GENERATION - MAX_STEP`).
+pub const MAX_STEP: u64 = 1 << 32;
+
+/// [`next_generation`] for an open: refused within the closes' headroom.
+fn next_open_generation(g: u64) -> Result<u64> {
+    next_generation(g)?
+        .le(&(MAX_GENERATION - MAX_STEP))
+        .then_some(g + 1)
+        .ok_or_else(|| {
+            MetaError::InvalidArgument(format!(
+                "delete fence generation {g} too high to open another (a node reported a generation beyond {})",
+                MAX_GENERATION - MAX_STEP
+            ))
+        })
+}
+
 /// The delete fence as decided.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DeleteFenceRecord {
@@ -182,12 +199,32 @@ pub async fn sync_for_term<S: KvStore>(
     highest_reported: u64,
     now_ms: u64,
 ) -> Result<TermFence> {
+    sync_for_term_gated(store, token, incarnation, highest_reported, true, now_ms).await
+}
+
+/// [`sync_for_term`], opening a generation only when `may_open`: a leader
+/// passes it once it has heard every node it could reach in this term, so
+/// that `highest_reported` is not the empty view of a fresh process (which
+/// could reopen a node's own generation, Phase 3.9 review). Closing is
+/// never gated.
+///
+/// # Errors
+///
+/// As [`sync_for_term`].
+pub async fn sync_for_term_gated<S: KvStore>(
+    store: &S,
+    token: u64,
+    incarnation: [u8; 16],
+    highest_reported: u64,
+    may_open: bool,
+    now_ms: u64,
+) -> Result<TermFence> {
     transact(
         store,
-        (token, incarnation, highest_reported, now_ms),
+        (token, incarnation, highest_reported, may_open, now_ms),
         |tx, env| {
             Box::pin(async move {
-                let (token, incarnation, highest_reported, now_ms) = *env;
+                let (token, incarnation, highest_reported, may_open, now_ms) = *env;
                 let rec: DeleteFenceRecord =
                     read(tx, &keys::delete_fence()).await?.unwrap_or_default();
                 let state = compat::cluster_state_in_tx(tx).await?;
@@ -201,14 +238,14 @@ pub async fn sync_for_term<S: KvStore>(
                         // A node above it (a close this leader did not
                         // see): reopen above that.
                         && rec.generation >= highest_reported;
-                    if ours {
+                    if ours || !may_open {
                         None
                     } else {
                         Some(DeleteFenceRecord {
                             // Above every generation a node reported (an open one
                             // included: after a restore without the close, a
                             // node's old generation is never reopened).
-                            generation: next_generation(rec.generation.max(highest_reported))?,
+                            generation: next_open_generation(rec.generation.max(highest_reported))?,
                             open: true,
                             leader_token: token,
                             incarnation,

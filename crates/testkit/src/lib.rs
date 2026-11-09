@@ -501,6 +501,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                         hold: rec.operator_hold && !rec.open,
                         release: false,
                         incarnation,
+                        release_token: 0,
                     },
                 )
                 .await;

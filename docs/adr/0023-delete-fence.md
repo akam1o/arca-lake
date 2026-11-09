@@ -49,16 +49,20 @@ change is acknowledged.
 | The incarnation is checked first, then the fence. Both run under the shared guard, which is an owned guard moved into the blocking store call. | A cancelled RPC cannot release the guard while its delete still runs. Before this change the guard lived in the async handler, a latent flaw of the Phase 3.5 incarnation fence as well. |
 | A fence change takes the exclusive guard, and only when it changes something (`plan_fence`). | A change is acknowledged only after every delete past the old fence has finished. |
 | Generations only grow. A closed generation never reopens. A lower generation is ignored. | A delayed or reordered push cannot reopen deletes. |
-| A facts file that cannot be read or has a damaged line, or a missing one while the store holds segments, keeps the fence closed under an *unknown* hold that only an explicit release lifts (the generation floor, the hold and the incarnation it knew are gone). An open fence that cannot be persisted is not adopted. A close that cannot be persisted still applies in memory, and no later request is acknowledged until it is on disk. | Fail closed; a lost file cannot reopen a node to a delayed push (review) |
+| The facts file (`facts 2`, ending in a CRC-32C of its content) is written by a new node at its first start. A file that cannot be read, fails its checksum, is truncated, or has a damaged line, or a missing one while the store holds segments, keeps the fence closed under an *unknown* hold (the generation floor, the hold and the incarnation it knew are gone). Only a release carrying the token the node drew at this start (reported in `Health`) lifts it, so no release sent before the loss can. An open fence that cannot be persisted is not adopted. A close that cannot be persisted still applies in memory, and no later request is acknowledged until it is on disk. | Fail closed; a lost file cannot reopen a node to a delayed push (review) |
 | Any fence field in a `Health` request makes it a fact push, which only the controller and admin roles may send. | A gateway or node identity cannot open, close, hold or release (review) |
 | A release names the closed generation it releases. It lifts the hold only at that generation or above, adopting it closed, and never opens anything. | A delayed release cannot lift a later close's hold (review) |
-| Generations above 2^63 − 1 are ignored by nodes and never recorded. | Nothing can push the fence where it cannot advance (review) |
-| The operator hold is tied to the node's incarnation when the hold was set, and keeps that incarnation when a later push repeats it. While held, an open generation is adopted only with `delete_fence_release`, or from a caller whose incarnation is a later one that the node adopted. A caller of an incarnation the node does not adopt can neither set nor lift a hold. | A controller started on restored metadata before `recovery begin` (same incarnation), or on a backup from before an earlier restore (older incarnation), cannot reopen deletes. |
+| Nodes ignore generations above 2^63 − 1, open nothing above 2^63 − 1 − 2^32, and take no jump of more than 2^32; metadata records the same bounds, and controllers ignore reports beyond them. | A close always has room above any open; nothing can push the fence where it cannot advance (review) |
+| The operator hold is tied to the node's incarnation when the hold was set, and keeps that incarnation when a later push repeats it. While held, an open generation is adopted only from a caller whose incarnation is a later one that the node adopted; a release lifts the hold without opening (the leader opens afterwards). A caller of an incarnation the node does not adopt can neither set nor lift a hold. | A controller started on restored metadata before `recovery begin` (same incarnation), or on a backup from before an earlier restore (older incarnation), cannot reopen deletes. |
 
 ### Who opens and closes it
 
 - **The controller leader**, in each health pass
-  (`delete_fence::sync_for_term`):
+  (`delete_fence::sync_for_term_gated`). It opens a generation only
+  after a whole round of node reports in its term: a fresh process knows
+  no node's generation and could otherwise reopen one (review). A
+  failure to advance the fence stops this process's deletes without
+  stopping the pass.
   - While the cluster is `Active` in its incarnation and no operator
     hold is set, it keeps a generation open for its term. The record's
     generation is reused if it is open, of this term and incarnation,
@@ -84,7 +88,7 @@ change is acknowledged.
   - `admin delete-fence close --reason R --yes` writes a new closed
     generation above every generation a node holds, sets the hold and
     pushes the close to every registered node. It exits 1 unless every
-    node acknowledged; a node may be left out only with an explicit
+    node acknowledged the closed generation *and* the hold; a node may be left out only with an explicit
     `--absent-node ID` (its process stopped).
   - `admin recovery begin` performs the same close (with the hold)
     before it marks the restored metadata. It refuses unless every node
@@ -118,9 +122,11 @@ compatibility. Callers keep what was refused:
 
 - `DeleteShardRequest.delete_fence = 7`
 - `HealthRequest`: `delete_fence_generation = 4`, `delete_fence_open = 5`,
-  `delete_fence_hold = 6`, `delete_fence_release = 7`
+  `delete_fence_hold = 6`, `delete_fence_release = 7`,
+  `delete_fence_release_token = 8`
 - `HealthResponse`: `delete_fence_generation = 28`,
-  `delete_fence_open = 29`, `delete_fence_hold = 30`
+  `delete_fence_open = 29`, `delete_fence_hold = 30`,
+  `delete_fence_unknown_token = 31`
 - `PROTOCOL_VERSION = 3` (`FENCED_DELETE_VERSION = 3`)
 
 The metadata record is `DeleteFenceRecord` (golden-encoded) at

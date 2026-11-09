@@ -461,6 +461,7 @@ async fn push_cluster_facts<S: KvStore>(
         // needs; its old incarnation's deletes are refused by incarnation.
         delete_fence_hold: false,
         delete_fence_release: false,
+        delete_fence_release_token: 0,
     };
     for n in nodes.values() {
         clients.note_node_id(&n.address, n.id);

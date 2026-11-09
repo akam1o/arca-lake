@@ -505,6 +505,9 @@ pub struct FencePush {
     pub release: bool,
     /// The caller's cluster incarnation (the hold is tied to it).
     pub incarnation: Option<[u8; 16]>,
+    /// With `release`: the node's `delete_fence_unknown_token` (needed
+    /// when its facts were lost; 0 otherwise).
+    pub release_token: u64,
 }
 
 impl std::fmt::Debug for NodeClients {
@@ -1622,6 +1625,7 @@ impl NodeClients {
                     delete_fence_open: open,
                     delete_fence_hold: how.hold,
                     delete_fence_release: how.release,
+                    delete_fence_release_token: how.release_token,
                     incarnation: how
                         .incarnation
                         .map(|i| Bytes::copy_from_slice(&i))
