@@ -22,10 +22,28 @@ struct FenceInner {
     open: bool,
     /// Leader token of the last complete round of node reports.
     round: u64,
+    /// The lineage counter this process last wrote (Phase 3.10 review).
+    lineage: u64,
     nodes: std::collections::HashMap<u64, (u64, bool)>,
 }
 
 impl FenceView {
+    /// The lineage counter this process last wrote.
+    pub fn lineage(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lineage
+    }
+
+    /// Remember the lineage counter written.
+    pub fn set_lineage(&self, v: u64) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lineage = v;
+    }
+
     /// Remember the record held.
     pub fn set_record(&self, r: &arca_lake_metadata::ops::delete_fence::DeleteFenceRecord) {
         let mut g = self
@@ -241,6 +259,12 @@ pub struct Metrics {
     pub repair_tasks_unrecoverable: AtomicU64,
     /// Tasks in `Failed`.
     pub repair_tasks_failed: AtomicU64,
+    /// Group repairs that failed in a pass while the others went on
+    /// (Phase 3.10 audit).
+    pub repair_group_errors_total: AtomicU64,
+    /// Health passes that found a node at another incarnation of the
+    /// cluster's sequence or above it (Phase 3.10 review).
+    pub incarnation_conflicts_total: AtomicU64,
     /// Stripe repairs that committed.
     pub stripe_repairs_succeeded_total: AtomicU64,
     /// Stripe repair attempts that failed.
@@ -410,6 +434,14 @@ impl Metrics {
         out += &c(
             "arca_controller_rebalance_skipped_chunks_total",
             self.rebalance_skipped_chunks_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_incarnation_conflicts_total",
+            self.incarnation_conflicts_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_repair_group_errors_total",
+            self.repair_group_errors_total.load(Ordering::Relaxed),
         );
         out += &c(
             "arca_controller_rebalance_capacity_stops_total",

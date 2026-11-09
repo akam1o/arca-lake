@@ -281,9 +281,13 @@ pub async fn restore_floors<S: KvStore>(
         ));
     }
     if f.schema > 0 {
-        compat::raise_version(meta, compat::VersionKey::Schema, f.schema)
-            .await
-            .map_err(|e| e.to_string())?;
+        // Both keys, so that the restored metadata is not before the
+        // finalize's cut-off either (schema_write <= schema).
+        for key in [compat::VersionKey::SchemaWrite, compat::VersionKey::Schema] {
+            compat::raise_version(meta, key, f.schema)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
     }
     Ok(f.incarnation_seq)
 }

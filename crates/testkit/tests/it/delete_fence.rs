@@ -1022,3 +1022,85 @@ async fn a_restored_open_fence_is_never_renewed_by_a_new_controller() {
     assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
     c.shutdown().await;
 }
+
+/// Phase 3.10 review: the metadata is restored under a leader that keeps
+/// running (the backup taken while it led, its fence open and unchanged
+/// since). Every check of its own fence still matched, and its deletes,
+/// decided before the restore, would have applied. Its next pass reads
+/// back a lineage counter below the one it wrote: it closes the fence
+/// with a hold, and those deletes are refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restore_under_a_running_leader_closes_its_fence() {
+    use arca_lake_controller::process::{ControllerConfig, spawn};
+    let c = cluster().await;
+    let kept = put(&c, "kept", 15).await;
+    let mut cfg = ControllerConfig::new("ctl-running");
+    cfg.lease = Duration::from_secs(2);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_secs(3600);
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.failure_domain = "host".into();
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    let t = Instant::now();
+    let opened = loop {
+        let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+        if rec.open && rec.leader_token != 0 && ctl.is_leader() {
+            break rec;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "{rec:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let lineage = async || {
+        transact(c.meta.as_ref(), (), |tx, ()| {
+            Box::pin(async move {
+                Ok(tx
+                    .get(&keys::delete_fence_lineage())
+                    .await?
+                    .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+                    .map_or(0, u64::from_le_bytes))
+            })
+        })
+        .await
+        .unwrap()
+    };
+    let backup = snapshot(c.meta.as_ref()).await;
+    let at_backup = lineage().await;
+    // The leader goes on after the backup point.
+    let t = Instant::now();
+    while lineage().await < at_backup + 2 {
+        assert!(t.elapsed() < Duration::from_secs(20));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Deletes the leader decided (taken with its fence) before the restore.
+    let old = frozen_controller(&c);
+    old.set_delete_fence(Some(opened.generation));
+    let deletes = decided_deletes(&c, "kept").await;
+    restore(c.meta.as_ref(), &backup).await;
+    let t = Instant::now();
+    let held = loop {
+        let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+        if rec.operator_hold && !rec.open {
+            break rec;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "never held: {rec:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(held.reason.contains("lineage"), "{held:?}");
+    let t = Instant::now();
+    loop {
+        let mut closed = true;
+        for n in &c.nodes {
+            let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+            closed &= !h.delete_fence_open || h.delete_fence_generation > opened.generation;
+        }
+        if closed {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(deliver(&old, &deletes).await.applied, 0);
+    ctl.shutdown().await;
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    c.shutdown().await;
+}

@@ -35,6 +35,10 @@ use crate::ControlError;
 /// spends where, to tell metadata cost from node I/O. Closed label set.
 #[derive(Debug, Default)]
 pub struct GcStats {
+    /// Where the next batch reads the retired queue from (Phase 3.10
+    /// audit): batches page through it and wrap at its end, so that
+    /// generations deferred at its head do not hold up the rest.
+    pub cursor: std::sync::Mutex<Option<arca_lake_metadata::kv::Key>>,
     /// `expire_pending`: one transaction per expired lease.
     pub expire: arca_lake_common::timing::Histogram,
     /// `collectable`: reading the retired queue (candidate discovery).
@@ -116,6 +120,8 @@ pub struct GcReport {
     /// Generations skipped because a member was unreachable or a metadata
     /// outcome was unknown (retried next pass).
     pub deferred: usize,
+    /// The batch read a full page of the queue: more follows it.
+    pub more: bool,
 }
 
 /// What reconciling one node did.
@@ -207,7 +213,17 @@ pub async fn run_once_with<S: KvStore>(
     // collected at once: one at a time, every shard delete waited for a
     // device sync and GC fell behind a sustained write rate (soak test).
     let t = std::time::Instant::now();
-    let gens = gc::collectable(meta, now_ms, grace_ms, limit).await?;
+    let after = stats
+        .cursor
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let (gens, next) = gc::collectable_page(meta, now_ms, grace_ms, after.as_ref(), limit).await?;
+    report.more = next.is_some();
+    *stats
+        .cursor
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
     stats.discover.observe(t.elapsed());
     let work: Vec<_> = gens
         .iter()

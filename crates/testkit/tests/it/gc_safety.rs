@@ -297,3 +297,82 @@ async fn multipart_parts_are_collected_with_their_root_after_one_grace() {
     assert_eq!(left, 0);
     c.shutdown().await;
 }
+
+/// Phase 3.10 audit: generations that cannot be collected yet (a member
+/// of their group is down) stay at the head of the retired queue. GC
+/// batches page through the queue past them, so the generations behind
+/// them are collected; they are retried once the queue wraps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generations_deferred_at_the_head_of_the_queue_do_not_block_the_rest() {
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 2,
+        ..ClusterOptions::rs(6, 2, 1, MIB, 64 << 10)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let mut by_group = std::collections::BTreeMap::<u64, Vec<String>>::default();
+    for i in 0..60 {
+        let key = format!("o{i}");
+        s3::put(
+            &c.backend,
+            BUCKET,
+            &key,
+            payload(256 << 10, i),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+        let gid = c.manifest(BUCKET, &key).await.chunks[0]
+            .1
+            .placement
+            .group_id;
+        by_group.entry(gid).or_default().push(key);
+    }
+    let groups: Vec<u64> = by_group.keys().copied().collect();
+    assert_eq!(groups.len(), 2, "{by_group:?}");
+    let (blocked, free) = (groups[0], groups[1]);
+    // The blocked group's objects retire first (the head of the queue).
+    for k in by_group[&blocked].iter().take(8) {
+        s3::delete(&c.backend, BUCKET, k).await.unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    for k in by_group[&free].iter().take(8) {
+        s3::delete(&c.backend, BUCKET, k).await.unwrap();
+    }
+    let g = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| g.id == blocked)
+        .unwrap();
+    let down = c.node_index(&g.members[0]).unwrap();
+    c.stop_node(down).await;
+    c.sync_delete_fence().await;
+    let shards_free = |c: &TestCluster| -> usize {
+        let g = free;
+        (0..c.nodes.len())
+            .filter(|&i| c.node_running(i))
+            .map(|i| c.shard_count(i, g))
+            .sum()
+    };
+    let before = shards_free(&c);
+    let stats = gc::GcStats::default();
+    for _ in 0..6 {
+        gc::run_once_with(
+            c.meta.as_ref(),
+            &c.clients,
+            now_ms() + 3_600_000,
+            0,
+            5,
+            &stats,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        shards_free(&c) <= before - 8 * 3,
+        "the free group's generations were not collected: {} of {before}",
+        shards_free(&c)
+    );
+    c.shutdown().await;
+}

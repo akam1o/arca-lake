@@ -780,6 +780,11 @@ struct ControllerArgs {
     /// Chunks a cache-group repair may reconstruct per pass (0 = unlimited).
     #[arg(long, default_value_t = 256)]
     cache_repair_chunks_per_pass: usize,
+    /// Chunks an operator's member move (drain, replacement off a healthy
+    /// node) rebuilds per pass before failed members' repairs go first
+    /// (0 = unlimited).
+    #[arg(long, default_value_t = 512)]
+    planned_move_chunks_per_pass: usize,
     /// Scrub a group when its last pass finished this many seconds ago
     /// (RFC-008 §8.3); 0 disables background scrubbing.
     #[arg(long, default_value_t = 86_400)]
@@ -1253,7 +1258,7 @@ fn main() -> ExitCode {
             Command::StorageNode(args) => run_storage_node(args).await,
             Command::Tls { command } => run_tls(command),
             Command::Controller(args) => run_controller(args).await,
-            Command::Admin(args) => run_admin(args).await,
+            Command::Admin(args) => Box::pin(run_admin(args)).await,
         }
     });
     // Every task has stopped and every worker thread is joined.
@@ -1952,6 +1957,7 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     }
     cfg.rebalance_interval = Duration::from_secs(args.rebalance_interval_secs.max(1));
     cfg.cache_repair_chunks_per_pass = args.cache_repair_chunks_per_pass;
+    cfg.planned_move_chunks_per_pass = args.planned_move_chunks_per_pass;
     cfg.scrub = arca_lake_controller::integrity::ScrubOptions {
         page: args.scrub_page,
         page_bytes: args.scrub_page_mib << 20,

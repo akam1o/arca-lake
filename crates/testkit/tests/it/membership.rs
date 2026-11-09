@@ -347,3 +347,135 @@ async fn a_move_is_not_held_up_by_a_failed_writes_leftover_in_the_group() {
     ctl.shutdown().await;
     c.shutdown().await;
 }
+
+/// Phase 3.10 audit: one group's repair failing every pass (its
+/// replacement node, named by the operator, is down) no longer stops the
+/// repair of the groups after it. Before, the error ended the pass at that
+/// group, every pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_group_that_cannot_finish_its_repair_does_not_stop_the_others() {
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 2,
+        ..ClusterOptions::rs(9, 2, 1, MIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let mut groups: Vec<GroupRecord> = c
+        .groups()
+        .await
+        .into_iter()
+        .filter(|g| !g.is_cache())
+        .collect();
+    groups.sort_by_key(|g| g.id);
+    let (stuck, other) = (groups[0].clone(), groups[1].clone());
+    for i in 0..20 {
+        let key = format!("o{i}");
+        let data = Bytes::from(random_bytes(usize::try_from(MIB / 2).unwrap(), 40 + i));
+        s3::put(&c.backend, BUCKET, &key, data, &PutOptions::default())
+            .await
+            .unwrap();
+    }
+    // A spare node (in no group) as the first group's named replacement,
+    // then down.
+    let all = c.groups().await;
+    let spare = c
+        .nodes
+        .iter()
+        .map(|n| n.id)
+        .find(|id| {
+            !all.iter()
+                .any(|g| g.members.iter().any(|m| m.node_id == *id))
+        })
+        .expect("a spare node");
+    membership::request_replace(c.meta.as_ref(), stuck.id, 0, Some(spare), "admin", now_ms())
+        .await
+        .unwrap();
+    let ctl = spawn(Arc::clone(&c.meta), fast("ctl-isolated"))
+        .await
+        .unwrap();
+    wait_until(
+        "the first group's move",
+        Duration::from_secs(30),
+        async || group(&c, stuck.id).await.state == GroupState::Repairing,
+    )
+    .await;
+    let i = c.nodes.iter().position(|n| n.id == spare).unwrap();
+    c.stop_node(i).await;
+    membership::request_replace(c.meta.as_ref(), other.id, 0, None, "admin", now_ms())
+        .await
+        .unwrap();
+    wait_until(
+        "the other group's move",
+        Duration::from_secs(30),
+        async || {
+            let g = group(&c, other.id).await;
+            g.state == GroupState::Active && g.members[0] != other.members[0]
+        },
+    )
+    .await;
+    assert_eq!(group(&c, stuck.id).await.state, GroupState::Repairing);
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Phase 3.10 audit: an operator's move off a healthy node no longer holds
+/// up the repair of a failed member in another group. The failed member's
+/// group is repaired first; the move goes on with a per-pass budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_member_is_repaired_before_a_planned_move() {
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 2,
+        ..ClusterOptions::rs(8, 2, 1, MIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let mut groups: Vec<GroupRecord> = c
+        .groups()
+        .await
+        .into_iter()
+        .filter(|g| !g.is_cache())
+        .collect();
+    groups.sort_by_key(|g| g.id);
+    let (planned, failed) = (groups[0].clone(), groups[1].clone());
+    for i in 0..40 {
+        let key = format!("o{i}");
+        let data = Bytes::from(random_bytes(usize::try_from(MIB / 2).unwrap(), 80 + i));
+        s3::put(&c.backend, BUCKET, &key, data, &PutOptions::default())
+            .await
+            .unwrap();
+    }
+    // The planned move first in list order; the failed member second.
+    membership::request_replace(c.meta.as_ref(), planned.id, 0, None, "admin", now_ms())
+        .await
+        .unwrap();
+    let down = c.node_index(&failed.members[0]).unwrap();
+    c.stop_node(down).await;
+    membership::request_replace(c.meta.as_ref(), failed.id, 0, None, "admin", now_ms())
+        .await
+        .unwrap();
+    let mut cfg = fast("ctl-order");
+    cfg.repair_interval = Duration::from_millis(400);
+    cfg.planned_move_chunks_per_pass = 1;
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    wait_until(
+        "the failed member's repair",
+        Duration::from_secs(60),
+        async || {
+            let g = group(&c, failed.id).await;
+            g.state == GroupState::Active && g.members[0] != failed.members[0]
+        },
+    )
+    .await;
+    let p = group(&c, planned.id).await;
+    assert!(
+        p.state == GroupState::Repairing || p.members[0] == planned.members[0],
+        "the planned move finished first: {p:?}"
+    );
+    wait_until("the planned move", Duration::from_secs(120), async || {
+        let g = group(&c, planned.id).await;
+        g.state == GroupState::Active && g.members[0] != planned.members[0]
+    })
+    .await;
+    ctl.shutdown().await;
+    c.shutdown().await;
+}

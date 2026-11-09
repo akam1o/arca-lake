@@ -407,7 +407,12 @@ pub async fn mark_restoring_above<S: KvStore>(
                 let seq = u64_of(tx.get(&keys::incarnation_seq()).await?)
                     .unwrap_or(0)
                     .max(*at_least)
-                    + 1;
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        MetaError::InvalidArgument(
+                            "incarnation sequence exhausted (a node reported u64::MAX)".into(),
+                        )
+                    })?;
                 tx.set(&keys::incarnation_seq(), &seq.to_le_bytes());
                 write(tx, &keys::cluster_state(), &rec)?;
                 Ok(rec)

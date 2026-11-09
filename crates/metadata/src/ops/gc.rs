@@ -103,6 +103,55 @@ pub async fn collectable<S: KvStore>(
         .collect())
 }
 
+/// [`collectable`] from after `after` (a queue key a previous page ended
+/// at; `None`: from the oldest). Returns the generations and, when the page
+/// was full, the key to continue after (Phase 3.10 audit: generations that
+/// cannot be collected yet stay at the head of the queue, and a GC reading
+/// only the head never reached the others).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn collectable_page<S: KvStore>(
+    store: &S,
+    now_ms: u64,
+    grace_ms: u64,
+    after: Option<&crate::kv::Key>,
+    limit: usize,
+) -> Result<(Vec<GenId>, Option<crate::kv::Key>)> {
+    let cutoff = now_ms.saturating_sub(grace_ms);
+    let full = keys::retired_until_range(cutoff);
+    let begin = match after {
+        Some(k) if *k >= full.begin => {
+            let mut b = k.clone();
+            b.push(0);
+            b
+        }
+        _ => full.begin.clone(),
+    };
+    if begin >= full.end {
+        return Ok((Vec::new(), None));
+    }
+    let range = KeyRange::new(begin, full.end);
+    let entries = transact(store, (range, limit), |tx, env| {
+        Box::pin(async move {
+            let (range, limit) = env;
+            tx.get_range(range, *limit, false).await.map_err(Into::into)
+        })
+    })
+    .await?;
+    let next = (entries.len() >= limit.max(1))
+        .then(|| entries.last().map(|(k, _)| k.clone()))
+        .flatten();
+    Ok((
+        entries
+            .iter()
+            .filter_map(|(k, _)| keys::gen_from_index_key(k))
+            .collect(),
+        next,
+    ))
+}
+
 /// The retired queue: entries (counted up to `cap`) and the time the
 /// oldest was retired (R-64: the backlog GC works through).
 ///

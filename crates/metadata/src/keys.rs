@@ -653,6 +653,14 @@ pub fn delete_fence_opener() -> Key {
     pack(&(ROOT, "delete_fence_opener"))
 }
 
+/// A counter every leader health pass advances (Phase 3.10 review): a
+/// leader that reads back less than it last wrote is looking at metadata
+/// that went back (restored under it).
+#[must_use]
+pub fn delete_fence_lineage() -> Key {
+    pack(&(ROOT, "delete_fence_lineage"))
+}
+
 /// The rebalancer's pacing (Phase 3.9).
 #[must_use]
 pub fn rebalance_pacing() -> Key {

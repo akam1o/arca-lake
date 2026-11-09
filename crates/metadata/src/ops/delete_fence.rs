@@ -18,7 +18,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MetaError, Result};
-use crate::kv::KvStore;
+use crate::kv::{KvStore, Txn};
 use crate::ops::{compat, read, write};
 use crate::records::ClusterPhase;
 use crate::{keys, transact};
@@ -232,6 +232,8 @@ pub struct LeaderView {
     pub max_node_generation: u64,
     /// A whole round of node reports was collected in this term.
     pub may_open: bool,
+    /// The lineage counter this process last wrote (0: none yet).
+    pub lineage: u64,
 }
 
 /// What [`sync_leader`] did.
@@ -249,6 +251,14 @@ pub struct LeaderFence {
     /// restored with the metadata) is never pushed open: pushing it would
     /// renew nodes' rejoin lease on it (Phase 3.10 review).
     pub ours: bool,
+    /// The lineage counter written by this call (the leader keeps it for
+    /// its next pass).
+    pub lineage: u64,
+}
+
+fn u64_of_le(v: Option<Vec<u8>>) -> u64 {
+    v.and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+        .map_or(0, u64::from_le_bytes)
 }
 
 /// The recorded opener of the open generation (Phase 3.10; default when
@@ -301,7 +311,14 @@ pub async fn sync_leader<S: KvStore>(
             let active = state.as_ref().is_some_and(|s| {
                 s.state == ClusterPhase::Active && s.incarnation == v.incarnation
             });
-            let behind = v.max_node_generation > rec.generation;
+            // Metadata that went back under this process: below what it
+            // last wrote (a restore while it kept running, Phase 3.10
+            // review), or below what the nodes hold.
+            let stored_lineage = u64_of_le(tx.get(&keys::delete_fence_lineage()).await?);
+            let lineage = stored_lineage.max(v.lineage).saturating_add(1);
+            tx.set(&keys::delete_fence_lineage(), &lineage.to_le_bytes());
+            let lineage_behind = v.lineage > stored_lineage;
+            let behind = v.max_node_generation > rec.generation || lineage_behind;
             let ours_now = rec.open
                 && rec.leader_token == v.token
                 && rec.incarnation == v.incarnation
@@ -316,10 +333,17 @@ pub async fn sync_leader<S: KvStore>(
                     leader_token: 0,
                     incarnation: v.incarnation,
                     changed_ms: now_ms,
-                    reason: format!(
-                        "storage nodes hold generation {} above the metadata's {}: the metadata went back (restored without `admin recovery begin`?); deletes held until `admin recovery begin` or `admin delete-fence release`",
-                        v.max_node_generation, rec.generation
-                    ),
+                    reason: if lineage_behind {
+                        format!(
+                            "the leader wrote lineage {} and reads {stored_lineage}: the metadata went back under it (restored without `admin recovery begin`?); deletes held until `admin recovery begin` or `admin delete-fence release`",
+                            v.lineage
+                        )
+                    } else {
+                        format!(
+                            "storage nodes hold generation {} above the metadata's {}: the metadata went back (restored without `admin recovery begin`?); deletes held until `admin recovery begin` or `admin delete-fence release`",
+                            v.max_node_generation, rec.generation
+                        )
+                    },
                     operator_hold: true,
                 })
             } else if active && !rec.operator_hold {
@@ -375,6 +399,7 @@ pub async fn sync_leader<S: KvStore>(
                         },
                         metadata_behind: behind,
                         ours,
+                        lineage,
                     }
                 }
                 None => LeaderFence {
@@ -384,6 +409,7 @@ pub async fn sync_leader<S: KvStore>(
                     },
                     metadata_behind: false,
                     ours: ours_now && active,
+                    lineage,
                 },
             })
         })

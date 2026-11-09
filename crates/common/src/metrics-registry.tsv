@@ -66,6 +66,8 @@ arca_controller_passes_skipped_by_state_total	counter	controller	passes	-	schedu
 arca_controller_rebalance_imbalance_permille	gauge	controller	permille	-	imbalance of the move in progress (1 - source room / target room), 0 when none is planned (leader)
 arca_controller_rebalance_moved_bytes_total	counter	controller	bytes	-	logical bytes moved by capacity rebalancing (leader)
 arca_controller_rebalance_moved_chunks_total	counter	controller	chunks	-	chunks moved between groups of a tier by capacity rebalancing (leader)
+arca_controller_incarnation_conflicts_total	counter	controller	passes	-	health-pass node reports of another incarnation at or above the cluster's incarnation sequence (such a node refuses the cluster's deletes until a recovery begin)
+arca_controller_repair_group_errors_total	counter	controller	groups	-	group repairs that failed in a pass (an unrecoverable chunk, a node error) while the other groups were repaired
 arca_controller_rebalance_capacity_stops_total	counter	controller	passes	-	rebalance passes stopped before a chunk because a target member would have gone below the placement threshold, needed compaction first or did not report its device
 arca_controller_rebalance_skipped_chunks_total	counter	controller	chunks	-	chunks capacity rebalancing examined and did not move (changed, in flight, target at its reserve, failed)
 arca_controller_recovery_passes_total	counter	controller	passes	-	restore recovery passes that did work

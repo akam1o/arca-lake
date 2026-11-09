@@ -90,6 +90,10 @@ pub struct ControllerConfig {
     /// Chunks a cache-group repair may reconstruct per pass before yielding
     /// (RFC-006 §5.9); 0 = unlimited.
     pub cache_repair_chunks_per_pass: usize,
+    /// Chunks an operator's member move (a drain or replacement off a
+    /// healthy node) may rebuild per pass before the pass yields to the
+    /// repair of failed members (Phase 3.10 audit); 0 = unlimited.
+    pub planned_move_chunks_per_pass: usize,
     /// Background scrubbing (RFC-008 §8.3); `interval_ms = 0` disables it.
     pub scrub: crate::integrity::ScrubOptions,
     /// Interval between scrub scheduler invocations (each resumes or starts
@@ -146,6 +150,7 @@ impl ControllerConfig {
             rebalance: None,
             rebalance_interval: Duration::from_mins(1),
             cache_repair_chunks_per_pass: 256,
+            planned_move_chunks_per_pass: 512,
             scrub: crate::integrity::ScrubOptions::default(),
             scrub_tick: Duration::from_secs(60),
             stripe_repair: crate::integrity::RepairWorkerOptions::default(),
@@ -856,7 +861,10 @@ async fn gc_pass<S: KvStore>(
         // Parts a multipart root retired are due at once (retired as of
         // the root): another batch collects them in this pass.
         let parts_due = metrics.gc.parts_retired.load(Ordering::Relaxed) > parts_before;
-        let full = report.collected >= GC_BATCH || report.expired >= GC_BATCH || parts_due;
+        // A full page of the queue also continues (past generations that
+        // are deferred, Phase 3.10 audit).
+        let full =
+            report.collected >= GC_BATCH || report.expired >= GC_BATCH || parts_due || report.more;
         if !full || started.elapsed() >= GC_PASS_BUDGET.max(cfg.gc_interval) {
             break;
         }
@@ -954,9 +962,11 @@ async fn health_pass<S: KvStore>(
         required: highest,
         max_node_generation: metrics.delete_fence.max_generation(),
         may_open: metrics.delete_fence.round_done(token),
+        lineage: metrics.delete_fence.lineage(),
     };
     let fence = match arca_lake_metadata::ops::delete_fence::sync_leader(meta, view, now).await {
         Ok(f) => {
+            metrics.delete_fence.set_lineage(f.lineage);
             if f.metadata_behind {
                 tracing::error!(
                     generation = f.fence.record.generation,
@@ -1044,6 +1054,25 @@ async fn health_pass<S: KvStore>(
                     h.delete_fence_generation,
                     h.delete_fence_open,
                 );
+                // A node at this incarnation's sequence with another
+                // incarnation, or above it, refuses this cluster's opens
+                // and deletes until a `recovery begin` marks one above it
+                // (Phase 3.10 review).
+                if gate.incarnation_seq > 0
+                    && (h.incarnation_seq > gate.incarnation_seq
+                        || (h.incarnation_seq == gate.incarnation_seq
+                            && h.incarnation.as_ref() != req.incarnation.as_ref()))
+                {
+                    warn!(
+                        node = n.id,
+                        node_seq = h.incarnation_seq,
+                        cluster_seq = gate.incarnation_seq,
+                        "storage node holds another incarnation at or above this one's sequence: it refuses this cluster's deletes; run `admin recovery begin`"
+                    );
+                    metrics
+                        .incarnation_conflicts_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 metrics
                     .admission
                     .note_device(crate::admission::device_of(n.id, &h, now_ms()));
@@ -1106,6 +1135,7 @@ async fn health_pass<S: KvStore>(
 /// Resume interrupted repairs; when `auto_repair` is on, replace members
 /// of `Active` groups whose node is unhealthy with a healthy device in
 /// another failure domain.
+#[allow(clippy::too_many_lines)]
 async fn repair_pass<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -1167,9 +1197,40 @@ async fn repair_pass<S: KvStore>(
         .store(reduced, Ordering::Relaxed);
     // Durable groups first; cache groups only when no durable group needed
     // attention in this pass, and with a per-pass budget (RFC-006 §5.9).
+    // Among durable groups, failed members first; an operator's move off
+    // a healthy node runs with a per-pass budget after them, so that it
+    // never holds up the repair of a failure (Phase 3.10 audit). One
+    // group's error does not stop the others' repair.
+    let planned = |g: &GroupRecord| {
+        let leaving: Vec<u64> = intents
+            .requests
+            .get(&g.id)
+            .map(|r| r.from_node)
+            .into_iter()
+            .chain(intents.draining.iter().copied())
+            .collect();
+        let moving = intents.requests.contains_key(&g.id)
+            || g.members.iter().any(|m| leaving.contains(&m.node_id))
+            || (g.state == GroupState::Repairing
+                && leaving
+                    .iter()
+                    .any(|&n| healthy(n) && !g.members.iter().any(|m| m.node_id == n)));
+        moving
+            && leaving.iter().all(|&n| healthy(n))
+            && g.members
+                .iter()
+                .all(|m| healthy(m.node_id) || leaving.contains(&m.node_id))
+    };
+    let mut durable: Vec<&GroupRecord> = all_groups.iter().filter(|g| !g.is_cache()).collect();
+    durable.sort_by_key(|g| planned(g));
+    let planned_opts = RepairOptions {
+        max_chunks: cfg.planned_move_chunks_per_pass,
+        ..opts.clone()
+    };
     let mut durable_busy = false;
-    for g in all_groups.iter().filter(|g| !g.is_cache()) {
-        if repair_one(
+    for g in durable {
+        let o = if planned(g) { &planned_opts } else { &opts };
+        match repair_one(
             meta,
             clients,
             cfg,
@@ -1177,14 +1238,22 @@ async fn repair_pass<S: KvStore>(
             &nodes,
             &all_groups,
             g,
-            &opts,
+            o,
             &healthy,
             &intents,
             estimates,
         )
-        .await?
+        .await
         {
-            durable_busy = true;
+            Ok(busy) => durable_busy |= busy,
+            Err(e) if is_fenced(&e) => return Err(e),
+            Err(e) => {
+                warn!(group = g.id, error = %e, "repair of the group failed; the others go on");
+                metrics
+                    .repair_group_errors_total
+                    .fetch_add(1, Ordering::Relaxed);
+                durable_busy = true;
+            }
         }
     }
     if durable_busy {
@@ -1195,7 +1264,7 @@ async fn repair_pass<S: KvStore>(
         ..opts
     };
     for g in all_groups.iter().filter(|g| g.is_cache()) {
-        repair_one(
+        match repair_one(
             meta,
             clients,
             cfg,
@@ -1208,7 +1277,17 @@ async fn repair_pass<S: KvStore>(
             &intents,
             estimates,
         )
-        .await?;
+        .await
+        {
+            Ok(_) => {}
+            Err(e) if is_fenced(&e) => return Err(e),
+            Err(e) => {
+                warn!(group = g.id, error = %e, "repair of the cache group failed; the others go on");
+                metrics
+                    .repair_group_errors_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
     Ok(())
 }
@@ -1624,6 +1703,8 @@ async fn rebalance_pass<S: KvStore>(
     let policy = crate::rebalance::RebalancePolicy {
         max_chunk_bytes: cfg.admission_max_chunk_bytes,
         group_min_shards: cfg.admission.group_min_shards,
+        // A record the leader republishes every health pass.
+        report_max_age_ms: policy.report_max_age_ms.max(3 * ms(cfg.health_interval)),
         ..policy.clone()
     };
     let pressure = crate::rebalance::Pressure {
@@ -1684,8 +1765,30 @@ async fn tiering_pass<S: KvStore>(
         return Ok(());
     };
     // Moves need room on their target: none while any tier is throttled or
-    // worse (Phase 3.6 admission).
+    // worse (Phase 3.6 admission). Decided on the published record, not on
+    // this process's tracker, which is empty (normal) at a new leader's
+    // first pass; none without a current record, and none while repair has
+    // work (Phase 3.10 audit).
     if metrics.admission.worst() >= crate::backpressure::State::Throttled {
+        return Ok(());
+    }
+    let now = now_ms();
+    match arca_lake_metadata::ops::admission::current(meta).await? {
+        Some(r)
+            if now.saturating_sub(r.computed_ms) <= 60_000
+                && r.tiers.iter().all(|t| t.state < 2) => {}
+        _ => return Ok(()),
+    }
+    if cluster::list_groups(meta)
+        .await?
+        .iter()
+        .any(|g| g.state != GroupState::Active)
+    {
+        return Ok(());
+    }
+    let (open, unrecoverable, failed) =
+        arca_lake_metadata::ops::integrity::queue_summary(meta).await?;
+    if open > unrecoverable + failed {
         return Ok(());
     }
     metrics.tiering_active.store(true, Ordering::Relaxed);
