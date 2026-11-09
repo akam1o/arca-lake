@@ -1137,15 +1137,40 @@ async fn recovery_scenario() {
     )
     .await;
     c.restart_backend().await.unwrap();
-    s3::put(
-        &c.backend,
-        BUCKET,
-        "after",
-        payload(4096, 2),
-        &PutOptions::default(),
-    )
-    .await
-    .unwrap();
+    // A restarted gateway applies the admission record from its first
+    // request (Phase 3.9): after the failures the leader may still refuse
+    // new data while its state steps back down; the write goes through
+    // once it has.
+    let start = std::time::Instant::now();
+    loop {
+        match s3::put(
+            &c.backend,
+            BUCKET,
+            "after",
+            payload(4096, 2),
+            &PutOptions::default(),
+        )
+        .await
+        {
+            Ok(_) => break,
+            Err(e) if *e.code() == s3s::S3ErrorCode::SlowDown => {
+                assert!(
+                    start.elapsed() < Duration::from_secs(300),
+                    "writes never resumed: {e:?} {:?}",
+                    arca_lake_metadata::ops::admission::current(c.meta.as_ref()).await
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let rec = arca_lake_metadata::ops::admission::current(c.meta.as_ref())
+                    .await
+                    .unwrap();
+                c.backend
+                    .cluster()
+                    .admission
+                    .observe(rec, std::time::Instant::now());
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    }
     for (key, data) in objects.iter().skip(1) {
         assert_eq!(
             &s3::get(&c.backend, BUCKET, key).await.unwrap().0,
