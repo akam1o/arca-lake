@@ -985,6 +985,12 @@ async fn recovery_scenario() {
         cfg.scrub.interval_ms = 0;
         cfg.health_interval = Duration::from_millis(300);
         cfg.recovery_interval = Duration::from_millis(100);
+        // Groups of this test cluster (512 MiB allotments) are smaller than
+        // the default placement threshold (`group_min_shards` chunks of the
+        // largest size): with it, the leader refuses new data whatever the
+        // free space, which a restarted gateway applies from its first
+        // request (Phase 3.9), as the capacity tests configure.
+        cfg.admission.group_min_shards = 4;
         cfg.recovery = RecoveryOptions {
             page: 2,
             page_bytes: 0,
