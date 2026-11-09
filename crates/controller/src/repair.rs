@@ -295,7 +295,7 @@ pub async fn replace_member_with<S: KvStore>(
     }
     hook(RepairStep::Reconstructed).await?;
 
-    let completeness = check_completeness(clients, &nodes, &group, index, opts).await?;
+    let completeness = check_completeness(meta, clients, &nodes, &group, index, opts).await?;
     let complete = completeness.is_complete();
     // Shards missing on the other members (a corrupt one quarantined when
     // the move read it, a member that lost one) are stripe repair's work:
@@ -688,7 +688,16 @@ async fn reconstruct_one<S: KvStore>(
         how = Source::WithFormer;
     }
     if have < k {
-        if !gc::generation_is_live(meta, &prefix).await? {
+        // Only a chunk a live generation places in this group needs this
+        // shard. Anything else is an orphan reconciliation deletes: a
+        // retired generation's, or the leftover of a write that failed in
+        // this group and was placed in another one (Phase 3.10 audit: a
+        // member move stayed `Repairing` on such a leftover, retrying it as
+        // unrecoverable, while the object was whole in the other group).
+        if gc::chunk_record_in_group(meta, &prefix, chunk_index, group.id)
+            .await?
+            .is_none()
+        {
             return Ok(None);
         }
         return Err(ControlError::Unrecoverable {
@@ -779,7 +788,25 @@ fn joined_matches(
 /// Completeness check: walk every member's listing (same chunk IDs, same
 /// payload lengths), verify the replacement's shards (and every member's
 /// when `verify_all_members`).
-async fn check_completeness(
+/// Whether a live generation places chunk `cid` in `group` (its durable
+/// chunk record, or for a cache group its cache placement).
+async fn placed_here<S: KvStore>(
+    meta: &S,
+    group: &GroupRecord,
+    cid: &[u8; 16],
+) -> Result<bool, ControlError> {
+    let (prefix, chunk_index) = split_chunk_id(cid);
+    Ok(if group.is_cache() {
+        gc::cache_placement_in_group(meta, &prefix, chunk_index, group.id).await?
+    } else {
+        gc::chunk_record_in_group(meta, &prefix, chunk_index, group.id)
+            .await?
+            .is_some()
+    })
+}
+
+async fn check_completeness<S: KvStore>(
+    meta: &S,
     clients: &NodeClients,
     nodes: &HashMap<u64, NodeRecord>,
     group: &GroupRecord,
@@ -790,7 +817,14 @@ async fn check_completeness(
     let mut walker = GroupWalker::new(clients, nodes, group, None, opts.page_size);
     while let Some(chunk) = walker.next().await? {
         c.chunks += 1;
-        if chunk.present.iter().any(Option::is_none) {
+        // A chunk that no live generation places in this group is an
+        // orphan (a retired generation's, or the leftover of a write that
+        // failed here and was placed elsewhere): reconciliation's, not a
+        // gap of the move (Phase 3.10 audit: such a leftover held a move
+        // `Repairing` until reconciliation removed it).
+        if chunk.present.iter().any(Option::is_none)
+            && placed_here(meta, group, &chunk.chunk_id).await?
+        {
             c.missing += 1;
             let others: Vec<u16> = chunk
                 .present

@@ -278,3 +278,72 @@ async fn drains_resume_after_a_crash_cover_cache_groups_pause_when_not_active_an
     ctl.shutdown().await;
     c.shutdown().await;
 }
+
+/// Phase 3.10 audit (found under load in `membership_faults`): a write that
+/// failed part-way in one group and was placed in another leaves a shard
+/// of a live generation's chunk in the first group. Repair enumerated it
+/// from the members' listings and, finding fewer than `k` shards, retried
+/// it as unrecoverable forever: a member move of that group never
+/// finished, although the object was whole in the other group. The
+/// leftover is now an orphan to repair (the chunk record places it
+/// elsewhere); the move completes and the object reads back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_move_is_not_held_up_by_a_failed_writes_leftover_in_the_group() {
+    let c = TestCluster::start(ClusterOptions {
+        groups: 2,
+        ..ClusterOptions::rs(7, 2, 1, MIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let data = Bytes::from(random_bytes(usize::try_from(MIB / 2).unwrap(), 31));
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let chunk = c.manifest(BUCKET, "o").await.chunks[0].1.clone();
+    let other = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| !g.is_cache() && g.id != chunk.placement.group_id)
+        .unwrap();
+    // The leftover: shard 2 of the chunk on the other group's member 2.
+    let holder = c.node_index(&other.members[2]).unwrap();
+    c.clients
+        .put_shard(
+            &c.nodes[holder].addr.to_string(),
+            arca_lake_protocol::client::ShardRef {
+                group_id: other.id,
+                chunk_id: chunk.chunk_id,
+                shard_index: 2,
+            },
+            other.epoch,
+            Bytes::from(vec![7u8; 4096]),
+            1024,
+        )
+        .await
+        .unwrap();
+    let ctl = spawn(Arc::clone(&c.meta), fast("ctl-leftover"))
+        .await
+        .unwrap();
+    membership::request_replace(c.meta.as_ref(), other.id, 0, None, "admin", now_ms())
+        .await
+        .unwrap();
+    wait_until("the move", Duration::from_secs(30), async || {
+        membership::replace_requests(c.meta.as_ref())
+            .await
+            .unwrap()
+            .is_empty()
+            && group(&c, other.id).await.state == GroupState::Active
+    })
+    .await;
+    assert_ne!(group(&c, other.id).await.members[0], other.members[0]);
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
