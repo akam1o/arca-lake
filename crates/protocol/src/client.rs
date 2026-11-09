@@ -1271,9 +1271,12 @@ impl NodeClients {
                 // node that does not enforce the fence (or was rolled back
                 // since the negotiation) refuses the version instead of
                 // deleting unfenced (ADR-0023).
-                if negotiated < pb::FENCED_DELETE_VERSION {
+                // Since Phase 3.10 only to a node that also keeps the rejoin
+                // fence (protocol 4): a node rolled back to an earlier
+                // release receives no delete.
+                if negotiated < pb::REJOIN_FENCE_VERSION {
                     return Err(tonic::Status::failed_precondition(
-                        "delete fence not enforced by the node (protocol version below 3): no delete is sent",
+                        "delete fence: the node does not enforce the rejoin fence (protocol version below 4): no delete is sent",
                     ));
                 }
                 // A conditional delete goes only to a node that enforces it,
@@ -1281,7 +1284,7 @@ impl NodeClients {
                 // a node rolled back since the negotiation answers
                 // FAILED_PRECONDITION instead of deleting unconditionally
                 // (Phase 3.5 audit CON-22).
-                let protocol_version = negotiated.max(pb::FENCED_DELETE_VERSION);
+                let protocol_version = negotiated.max(pb::REJOIN_FENCE_VERSION);
                 let req = pb::DeleteShardRequest {
                     protocol_version,
                     key: Some(shard.pb()),

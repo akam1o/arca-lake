@@ -3070,24 +3070,14 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
             // restored counter went back with the restore; R-92): nodes
             // order incarnations by it, never by a clock.
             let at_least = match admin_node_clients(&rpc) {
-                Ok(clients) => match arca_lake_controller::delete_fence::max_incarnation_seq(
+                Ok(clients) => match arca_lake_controller::delete_fence::restore_floors(
                     meta.as_ref(),
                     &clients,
+                    &absent_node,
                 )
                 .await
                 {
-                    Ok((seq, silent)) => {
-                        let missing: Vec<u64> = silent
-                            .into_iter()
-                            .filter(|id| !absent_node.contains(id))
-                            .collect();
-                        if !missing.is_empty() {
-                            return fail(format!(
-                                "recovery begin refused: nodes {missing:?} did not report their incarnation sequence; make them reachable or declare them --absent-node"
-                            ));
-                        }
-                        seq
-                    }
+                    Ok(seq) => seq,
                     Err(e) => return fail(format!("recovery begin refused: {e}")),
                 },
                 Err(e) => return fail(e),

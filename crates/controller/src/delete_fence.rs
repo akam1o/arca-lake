@@ -201,14 +201,87 @@ pub async fn max_incarnation_seq<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
 ) -> Result<(u64, Vec<u64>), ControlError> {
-    let mut max = 0;
-    let mut silent = Vec::new();
+    node_floors(meta, clients)
+        .await
+        .map(|f| (f.incarnation_seq, f.silent))
+}
+
+/// The highest incarnation sequence and metadata schema the registered
+/// nodes report, and the nodes that did not answer (Phase 3.10).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeFloors {
+    /// Highest incarnation sequence.
+    pub incarnation_seq: u64,
+    /// Highest metadata schema a controller told any of them.
+    pub schema: u64,
+    /// Nodes that did not answer.
+    pub silent: Vec<u64>,
+}
+
+/// See [`NodeFloors`].
+///
+/// # Errors
+///
+/// Metadata errors.
+pub async fn node_floors<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+) -> Result<NodeFloors, ControlError> {
+    let mut f = NodeFloors::default();
     for n in cluster::list_nodes(meta).await? {
         clients.note_node_id(&n.address, n.id);
         match clients.health(&n.address).await {
-            Ok(h) => max = max.max(h.incarnation_seq),
-            Err(_) => silent.push(n.id),
+            Ok(h) => {
+                f.incarnation_seq = f.incarnation_seq.max(h.incarnation_seq);
+                f.schema = f.schema.max(h.schema_floor);
+            }
+            Err(_) => f.silent.push(n.id),
         }
     }
-    Ok((max, silent))
+    Ok(f)
+}
+
+/// What `recovery begin` does with the nodes' floors before it marks the
+/// restored metadata (Phase 3.10): refuses while a node neither answers
+/// nor is in `absent`; refuses when the nodes ran at a metadata schema
+/// newer than this build's; raises the restored metadata's schema to the
+/// highest the nodes saw (a restore must not reopen a downgrade that
+/// `upgrade finalize` closed); returns the incarnation sequence to mark
+/// above.
+///
+/// # Errors
+///
+/// The refusal, as a message; metadata errors.
+pub async fn restore_floors<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    absent: &[u64],
+) -> Result<u64, String> {
+    let f = node_floors(meta, clients)
+        .await
+        .map_err(|e| e.to_string())?;
+    let missing: Vec<u64> = f
+        .silent
+        .iter()
+        .copied()
+        .filter(|id| !absent.contains(id))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "nodes {missing:?} did not report their incarnation sequence and schema; make them reachable or declare them --absent-node"
+        ));
+    }
+    if f.schema > arca_lake_metadata::keys::SCHEMA_VERSION {
+        return Err(format!(
+            "the nodes ran at metadata schema {}, newer than this binary's {}; use a newer release",
+            f.schema,
+            arca_lake_metadata::keys::SCHEMA_VERSION
+        ));
+    }
+    if f.schema > 0 {
+        compat::raise_version(meta, compat::VersionKey::Schema, f.schema)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(f.incarnation_seq)
 }

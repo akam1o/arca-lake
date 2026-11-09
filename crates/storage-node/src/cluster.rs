@@ -21,7 +21,8 @@ const FILE_NAME: &str = "cluster.txt";
 /// file without the version line is damaged, not an earlier release's.
 const MARKER: &str = "cluster.v2";
 
-const KNOWN: [&str; 6] = [
+const KNOWN: [&str; 7] = [
+    "schema_floor",
     "incarnation_seq",
     "incarnation",
     "changed_ms",
@@ -40,6 +41,8 @@ pub(crate) struct ClusterFacts {
     pub changed_ms: u64,
     /// Sequence of the incarnation (Phase 3.10, R-92; 0 = none known).
     pub incarnation_seq: u64,
+    /// Highest metadata schema a controller told it (Phase 3.10).
+    pub schema_floor: u64,
     /// Storage format the controller allowed (0 = never told).
     pub format_write: u64,
     /// Delete fence generation adopted (0 = none: no delete is allowed).
@@ -110,6 +113,7 @@ impl ClusterFacts {
             incarnation: None,
             changed_ms: 0,
             incarnation_seq: 0,
+            schema_floor: 0,
             format_write: 0,
             fence_generation: 0,
             fence_open: false,
@@ -185,6 +189,10 @@ impl ClusterFacts {
                     self.incarnation = parse_hex16(v);
                     ok &= self.incarnation.is_some();
                 }
+                (Some("schema_floor"), Some(v)) => match v.parse() {
+                    Ok(x) => self.schema_floor = x,
+                    Err(_) => ok = false,
+                },
                 (Some("incarnation_seq"), Some(v)) => match v.parse() {
                     Ok(x) => self.incarnation_seq = x,
                     Err(_) => ok = false,
@@ -421,6 +429,16 @@ impl ClusterFacts {
         self.fence_open && generation != 0 && generation == self.fence_generation
     }
 
+    /// Remember the metadata schema the cluster runs at (monotonic).
+    pub(crate) fn adopt_schema_floor(&mut self, schema: u64) -> std::io::Result<bool> {
+        if schema <= self.schema_floor {
+            return Ok(false);
+        }
+        self.schema_floor = schema;
+        self.persist()?;
+        Ok(true)
+    }
+
     /// Remember the allowed storage format (monotonic).
     pub(crate) fn adopt_format_write(&mut self, format_write: u64) -> std::io::Result<bool> {
         if format_write == 0 || format_write <= self.format_write {
@@ -449,6 +467,9 @@ impl ClusterFacts {
         let _ = writeln!(body, "changed_ms {}", self.changed_ms);
         if self.incarnation_seq > 0 {
             let _ = writeln!(body, "incarnation_seq {}", self.incarnation_seq);
+        }
+        if self.schema_floor > 0 {
+            let _ = writeln!(body, "schema_floor {}", self.schema_floor);
         }
         let _ = writeln!(body, "format_write {}", self.format_write);
         let _ = writeln!(

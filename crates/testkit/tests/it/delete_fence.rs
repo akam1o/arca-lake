@@ -160,12 +160,11 @@ async fn recover_at(c: &TestCluster, marked_ms: u64) -> [u8; 16] {
     .await
     .unwrap();
     assert_eq!(closed.not_acknowledged(), Vec::<u64>::new());
-    // Above every node's incarnation sequence, as `recovery begin` does.
-    let (seq, silent) =
-        arca_lake_controller::delete_fence::max_incarnation_seq(c.meta.as_ref(), &c.clients)
-            .await
-            .unwrap();
-    assert_eq!(silent, Vec::<u64>::new());
+    // Above every node's incarnation sequence, the schema back up to what
+    // the nodes saw, as `recovery begin` does.
+    let seq = arca_lake_controller::delete_fence::restore_floors(c.meta.as_ref(), &c.clients, &[])
+        .await
+        .unwrap();
     let marked = compat::mark_restoring_above(c.meta.as_ref(), None, None, "admin", marked_ms, seq)
         .await
         .unwrap();
@@ -861,5 +860,100 @@ async fn a_clock_going_back_between_restores_does_not_reorder_incarnations() {
     assert_eq!(d.applied, 0, "{d:?}");
     c.restart_backend().await.unwrap();
     assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    c.shutdown().await;
+}
+
+/// Phase 3.10 downgrade gate. A store a release with the delete fence
+/// (protocol 3) left at schema 2 still admits that release's controllers
+/// and gateways (rollback before finalize). Once `upgrade finalize` raised
+/// the schema to 3 and a leader told the nodes, that release refuses to
+/// start, and so does every release without the fence. A restore of
+/// metadata from before the finalize brings schema 2 back, but `recovery
+/// begin` raises it to what the nodes saw: the release stays refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_finalized_upgrade_is_not_undone_by_a_rollback_or_a_restore() {
+    use arca_lake_common::compat::Capabilities;
+    use arca_lake_controller::process::{ControllerConfig, spawn};
+    let mut c = cluster().await;
+    put(&c, "kept", 13).await;
+    // The store as the previous release left it: schema 2.
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.set(&keys::schema_version(), &2u64.to_le_bytes());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let previous = Capabilities {
+        protocol_min: 2,
+        protocol_max: 3,
+        schema_min: 1,
+        schema_max: 2,
+        format_min: 1,
+        format_max: 1,
+    };
+    let start = async |caps: &Capabilities| {
+        compat::check_startup(
+            c.meta.as_ref(),
+            caps,
+            compat::Stamp::FreshOnly,
+            "previous",
+            now_ms(),
+        )
+        .await
+    };
+    start(&previous).await.expect("rollback before finalize");
+    let before_finalize = snapshot(c.meta.as_ref()).await;
+    // Finalize raises the schema; the leader tells the nodes.
+    compat::raise_version(
+        c.meta.as_ref(),
+        compat::VersionKey::Schema,
+        keys::SCHEMA_VERSION,
+    )
+    .await
+    .unwrap();
+    let mut cfg = ControllerConfig::new("ctl-finalized");
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_secs(3600);
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.failure_domain = "host".into();
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    let t = Instant::now();
+    'told: loop {
+        let mut all = true;
+        for n in &c.nodes {
+            all &= c
+                .clients
+                .health(&n.addr.to_string())
+                .await
+                .unwrap()
+                .schema_floor
+                == keys::SCHEMA_VERSION;
+        }
+        if all {
+            break 'told;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "nodes never told");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    ctl.shutdown().await;
+    let e = start(&previous).await.unwrap_err();
+    assert!(e.to_string().contains("schema"), "{e}");
+    // A restore of metadata from before the finalize: schema 2 again ...
+    restore(c.meta.as_ref(), &before_finalize).await;
+    start(&previous)
+        .await
+        .expect("the restored store alone would admit it");
+    // ... until `recovery begin` brings it back up to the nodes'.
+    recover(&c).await;
+    let e = start(&previous).await.unwrap_err();
+    assert!(e.to_string().contains("schema"), "{e}");
+    start(&arca_lake_controller::capabilities()).await.unwrap();
+    c.restart_backend().await.unwrap();
+    assert_eq!(
+        s3::get(&c.backend, BUCKET, "kept").await.unwrap().0.len(),
+        2 << 20
+    );
     c.shutdown().await;
 }

@@ -453,6 +453,7 @@ async fn push_cluster_facts<S: KvStore>(
         incarnation: bytes::Bytes::copy_from_slice(&state.incarnation),
         incarnation_changed_ms: state.changed_ms,
         incarnation_seq: gate.incarnation_seq,
+        schema_floor: gate.schema.unwrap_or(0),
         delete_fence_generation: if fence.open { 0 } else { fence.generation },
         delete_fence_open: false,
         // Never the hold: recovery runs in the restored incarnation, and a

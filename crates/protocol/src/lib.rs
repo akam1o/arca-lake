@@ -32,9 +32,16 @@ pub mod storage {
         /// Version 3 (Phase 3.9, ADR-0023): `DeleteShard.delete_fence` is
         /// enforced; deletes are sent at version 3 or later only, which a
         /// version-2 node refuses instead of deleting unfenced
-        /// ([`FENCED_DELETE_VERSION`]).
+        /// ([`FENCED_DELETE_VERSION`]). Version 4 (Phase 3.10, ADR-0024):
+        /// nodes keep the rejoin lease of the fence and order incarnations
+        /// by sequence; deletes are sent only to such nodes
+        /// ([`REJOIN_FENCE_VERSION`]), a version-3 node receives none.
         #[allow(clippy::cast_possible_truncation)]
-        pub const PROTOCOL_VERSION: u32 = 3 + arca_lake_common::compat::BUMP as u32;
+        pub const PROTOCOL_VERSION: u32 = 4 + arca_lake_common::compat::BUMP as u32;
+
+        /// Oldest protocol version whose nodes enforce the rejoin fence: the
+        /// oldest a client sends a delete to.
+        pub const REJOIN_FENCE_VERSION: u32 = 4;
 
         /// Oldest protocol version whose nodes enforce the delete fence.
         pub const FENCED_DELETE_VERSION: u32 = 3;

@@ -279,6 +279,11 @@ message HealthRequest {
   // that holds a sequence adopts only an incarnation of a higher one, and
   // never orders incarnations by `incarnation_changed_ms` again.
   uint64 incarnation_seq = 9;
+  // Metadata schema the cluster runs at (Phase 3.10, 0 = not carried): the
+  // node keeps the highest it saw, so that `recovery begin` can bring
+  // restored metadata back up to it (a restore must not reopen a downgrade
+  // that `upgrade finalize` closed).
+  uint64 schema_floor = 10;
 }
 
 message GroupEpoch {
@@ -341,6 +346,8 @@ message HealthResponse {
   uint64 delete_fence_lease_ms = 32;
   // Sequence of the incarnation the node adopted (0 = none known).
   uint64 incarnation_seq = 33;
+  // The highest metadata schema the node was told (0 = none).
+  uint64 schema_floor = 34;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").

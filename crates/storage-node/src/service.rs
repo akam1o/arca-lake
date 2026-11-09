@@ -1095,6 +1095,8 @@ impl StorageNode for StorageNodeService {
         let facts = {
             let r = request.get_ref();
             r.format_write > 0
+                || r.schema_floor > 0
+                || r.incarnation_seq > 0
                 || !r.incarnation.is_empty()
                 || r.delete_fence_generation > 0
                 || r.delete_fence_open
@@ -1185,6 +1187,10 @@ impl StorageNode for StorageNodeService {
             // the leader refuses deletes until the leader reaches it.
             let lease = self.fence_lease;
             c.note_fence_push(generation, open, from, std::time::Instant::now() + lease);
+            if req.schema_floor > 0 {
+                c.adopt_schema_floor(req.schema_floor)
+                    .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            }
             if req.format_write > 0
                 && c.adopt_format_write(req.format_write)
                     .map_err(|e| tonic::Status::internal(e.to_string()))?
@@ -1202,13 +1208,14 @@ impl StorageNode for StorageNodeService {
         let (fence_generation, fence_open) = self.delete_fence();
         // Read once, before the response is built (a second lock of the
         // facts inside one expression would wait on the first).
-        let (unknown_token, lease_ms, incarnation_seq_held) = {
+        let (unknown_token, lease_ms, incarnation_seq_held, schema_floor_held) = {
             let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
             (
                 c.unknown_token,
                 u64::try_from(c.lease_left(std::time::Instant::now()).as_millis())
                     .unwrap_or(u64::MAX),
                 c.incarnation_seq,
+                c.schema_floor,
             )
         };
         let (incarnation, group_epochs) = {
@@ -1262,6 +1269,7 @@ impl StorageNode for StorageNodeService {
             delete_fence_unknown_token: unknown_token,
             delete_fence_lease_ms: lease_ms,
             incarnation_seq: incarnation_seq_held,
+            schema_floor: schema_floor_held,
             devices: vec![self.device_capacity_with(&stats)],
         }))
     }

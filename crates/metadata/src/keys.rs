@@ -42,9 +42,12 @@ const ROOT: &str = "al";
 
 /// Metadata schema version of this build (RFC-014 §5.4): 1 = Phase 0–2
 /// layout (record version 1); 2 = Phase 3.1 (record version 2, multipart
-/// and cluster-state keys); 3 exists only in a `version-bump` build
-/// (ADR-0016) and has the version-2 layout.
-pub const SCHEMA_VERSION: u64 = 2 + arca_lake_common::compat::BUMP;
+/// and cluster-state keys); 3 = Phase 3.10, the version-2 layout in a
+/// cluster whose deletes are fenced (ADR-0023, ADR-0024): once `upgrade
+/// finalize` raised it, no release without the delete fence (protocol
+/// below 3) and no release without the rejoin fence starts a controller or
+/// gateway on the store. 4 exists only in a `version-bump` build.
+pub const SCHEMA_VERSION: u64 = 3 + arca_lake_common::compat::BUMP;
 
 /// Oldest schema version this build serves (`M_cur − 1`, RFC-014 §5.4).
 pub const SCHEMA_VERSION_MIN: u64 = SCHEMA_VERSION - 1;
