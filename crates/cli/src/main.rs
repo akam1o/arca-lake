@@ -585,6 +585,12 @@ struct StorageNodeArgs {
     /// the device, at most a quarter of it).
     #[arg(long)]
     reserve_bytes: Option<u64>,
+    /// Rejoin lease of the delete fence, s (Phase 3.10): an open fence
+    /// admits deletes only this long after the leader's last push of it
+    /// (a start, a partition or a silent leader closes it until then).
+    /// Keep it well above the controllers' `--health-interval-secs`.
+    #[arg(long = "fence-lease-secs", default_value_t = 30)]
+    fence_lease_secs: u64,
     #[command(flatten)]
     tls: TlsArgs,
     #[command(subcommand)]
@@ -1624,6 +1630,7 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
     }
     cfg.capacity_bytes = args.capacity_bytes;
     cfg.reserve_bytes = args.reserve_bytes;
+    cfg.fence_lease = Duration::from_secs(args.fence_lease_secs.max(1));
     cfg.compaction = arca_lake_storage_node::compactor::CompactionPolicy {
         interval: Duration::from_secs(args.compaction_interval_secs),
         min_dead_fraction: args.compaction_min_dead_fraction,
