@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use arca_lake_controller::admission::{Tracker, device_of, pass};
 use arca_lake_controller::backpressure::Policy;
-use arca_lake_controller::rebalance::{RebalancePolicy, run_once};
+use arca_lake_controller::rebalance::{Pressure, RebalancePolicy, run_once, run_once_with};
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::ops::admission::{self, AdmissionRecord, TierAdmission};
 use arca_lake_metadata::ops::rebalance;
@@ -137,6 +137,9 @@ fn policy(bytes_per_pass: u64) -> RebalancePolicy {
         start_imbalance: 0.2,
         stop_imbalance: 0.05,
         bytes_per_pass,
+        // The admission `evaluate` publishes.
+        max_chunk_bytes: MIB,
+        group_min_shards: 4,
         ..RebalancePolicy::default()
     }
 }
@@ -339,7 +342,13 @@ pub async fn a_new_leader_resumes_rebalancing_at_the_cursor<S: KvStore + 'static
     // "Leader change": a pass with nothing in memory continues from the
     // cursor (the intent of the crashed move has expired by then).
     let later = now_ms() + 3_600_000;
-    let r2 = run_once(c.meta.as_ref(), &c.clients, &p, later)
+    // (The admission record is an hour old by then; a leader would have
+    // published a fresh one.)
+    let p_later = RebalancePolicy {
+        report_max_age_ms: u64::MAX,
+        ..p.clone()
+    };
+    let r2 = run_once(c.meta.as_ref(), &c.clients, &p_later, later)
         .await
         .unwrap();
     let s2 = rebalance::state(c.meta.as_ref()).await.unwrap();
@@ -366,7 +375,8 @@ pub async fn a_new_leader_resumes_rebalancing_at_the_cursor<S: KvStore + 'static
     c.shutdown().await;
 }
 
-/// Repair first; a target at its reserve stops the pass; nothing is lost.
+/// Repair first; a target at the placement threshold stops the pass
+/// before its nodes would refuse at their reserve (R-93); nothing is lost.
 pub async fn rebalancing_waits_for_repair_and_stops_at_the_targets_reserve<S: KvStore + 'static>(
     start: impl Starter<S>,
 ) {
@@ -401,7 +411,10 @@ pub async fn rebalancing_waits_for_repair_and_stops_at_the_targets_reserve<S: Kv
     .await
     .unwrap();
     // The target's nodes shrink to just above their reserve: the plan
-    // still sees room (an old report), the nodes refuse; the pass stops.
+    // still sees room (an old report); the device the target's members
+    // report before each chunk does not leave the placement threshold, and
+    // the pass stops there (Phase 3.10, R-93; the nodes' own refusal at
+    // their reserve is the backstop behind it).
     let plan = evaluate(&c).await;
     for m in &b.members {
         let i = c.node_index(m).unwrap();
@@ -414,7 +427,8 @@ pub async fn rebalancing_waits_for_repair_and_stops_at_the_targets_reserve<S: Kv
     let r = run_once(c.meta.as_ref(), &c.clients, &policy(64 * MIB), now_ms())
         .await
         .unwrap();
-    assert!(r.reason.contains("at its reserve"), "{r:?}");
+    assert!(r.reason.contains("placement threshold"), "{r:?}");
+    assert_eq!(r.capacity_stops, 1);
     for i in 0..6 {
         let d = c.node_service(i).device_capacity().unwrap();
         assert!(d.available_bytes >= d.reserved_bytes, "node {i}: {d:?}");
@@ -719,6 +733,108 @@ pub async fn a_finished_plan_settles_instead_of_overshooting<S: KvStore + 'stati
     c.shutdown().await;
 }
 
+/// R-93 (Phase 3.10): rebalancing yields to the work of a higher priority.
+/// Nothing moves while tiering moves chunks, while the GC backlog is above
+/// its pause, or while the tier is throttled, rejects writes or admits
+/// only recovery (client writes first); in `warning` a pass moves half its
+/// budget; a target member that would go below the placement threshold
+/// stops the pass before anything is written to it. Every object reads
+/// back and no node goes below its reserve.
+pub async fn rebalancing_yields_to_client_writes_gc_and_tiering<S: KvStore + 'static>(
+    start: impl Starter<S>,
+) {
+    let (c, a, b) = cluster(&start, 160 * MIB).await;
+    exclude(&c, vec![b.id]).await;
+    let mut live = BTreeMap::new();
+    for i in 0..60 {
+        let k = format!("o{i}");
+        s3::put(&c.backend, BUCKET, &k, data(i), &PutOptions::default())
+            .await
+            .unwrap();
+        live.insert(k, data(i));
+    }
+    let base = evaluate(&c).await;
+    let p = policy(8 * MIB);
+    let pass = async |pressure: Pressure, p: &RebalancePolicy| {
+        run_once_with(c.meta.as_ref(), &c.clients, p, pressure, now_ms())
+            .await
+            .unwrap()
+    };
+    let r = pass(
+        Pressure {
+            tiering_active: true,
+            ..Pressure::default()
+        },
+        &p,
+    )
+    .await;
+    assert_eq!(r.moved_chunks, 0);
+    assert!(r.reason.contains("tiering first"), "{r:?}");
+    let r = pass(
+        Pressure {
+            gc_backlog_bytes: p.gc_backlog_pause_bytes + 1,
+            ..Pressure::default()
+        },
+        &p,
+    )
+    .await;
+    assert_eq!(r.moved_chunks, 0);
+    assert!(r.reason.contains("GC first"), "{r:?}");
+    let with_state = async |state: u8| {
+        let mut rec = base.clone();
+        rec.computed_ms = now_ms();
+        rec.tiers[0].state = state;
+        admission::publish(c.meta.as_ref(), &rec).await.unwrap();
+    };
+    for (state, name) in [
+        (2, "throttled"),
+        (3, "write_rejected"),
+        (4, "recovery_only"),
+    ] {
+        with_state(state).await;
+        let r = pass(Pressure::default(), &p).await;
+        assert_eq!(r.moved_chunks, 0, "{name}");
+        assert!(
+            r.reason.contains(&format!("{name}: client writes first")),
+            "{r:?}"
+        );
+    }
+    // The placement threshold, before anything is written to the target.
+    with_state(0).await;
+    let target_shards: usize = (0..c.nodes.len())
+        .map(|i| c.shard_keys(i, b.id).len())
+        .sum();
+    let r = pass(
+        Pressure::default(),
+        &RebalancePolicy {
+            group_min_shards: 1 << 20,
+            ..p.clone()
+        },
+    )
+    .await;
+    assert_eq!((r.moved_chunks, r.capacity_stops), (0, 1), "{r:?}");
+    assert!(r.reason.contains("placement threshold"), "{r:?}");
+    let after: usize = (0..c.nodes.len())
+        .map(|i| c.shard_keys(i, b.id).len())
+        .sum();
+    assert_eq!(after, target_shards, "nothing written to the target");
+    // Warning: half the budget (one 1 MiB chunk at least).
+    with_state(1).await;
+    let r = pass(Pressure::default(), &p).await;
+    assert!(r.moved_chunks > 0, "{r:?}");
+    assert!(r.moved_bytes <= 4 * MIB, "{r:?}");
+    with_state(0).await;
+    let r = pass(Pressure::default(), &p).await;
+    assert!(r.moved_bytes > 4 * MIB && r.moved_bytes <= 8 * MIB, "{r:?}");
+    check(&c, &live).await;
+    for i in 0..c.nodes.len() {
+        let d = c.node_service(i).device_capacity().unwrap();
+        assert!(d.available_bytes >= d.reserved_bytes, "node {i}: {d:?}");
+    }
+    let _ = a;
+    c.shutdown().await;
+}
+
 /// Instantiate the rebalancing cases for a backend: `$start` is an
 /// `Option` of a [`Starter`] (`None`: skipped).
 #[macro_export]
@@ -733,6 +849,7 @@ macro_rules! rebalance_suite {
             a_chunk_larger_than_the_budget_still_moves,
             an_expired_move_never_deletes_its_successors_shards,
             a_finished_plan_settles_instead_of_overshooting,
+            rebalancing_yields_to_client_writes_gc_and_tiering,
         );
     };
     (@each $start:expr; $($name:ident),* $(,)?) => {

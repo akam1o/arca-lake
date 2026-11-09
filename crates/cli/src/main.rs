@@ -773,6 +773,10 @@ struct ControllerArgs {
     /// reconcile intervals, so that the sources' old copies are gone).
     #[arg(long)]
     rebalance_settle_secs: Option<u64>,
+    /// No rebalancing while the GC backlog is above this, MiB (Phase 3.10:
+    /// GC goes first).
+    #[arg(long, default_value_t = 4096)]
+    rebalance_gc_backlog_pause_mib: u64,
     /// Chunks a cache-group repair may reconstruct per pass (0 = unlimited).
     #[arg(long, default_value_t = 256)]
     cache_repair_chunks_per_pass: usize,
@@ -1942,6 +1946,7 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
                 * args
                     .rebalance_settle_secs
                     .unwrap_or(args.min_orphan_age_secs + 2 * args.reconcile_interval_secs),
+            gc_backlog_pause_bytes: args.rebalance_gc_backlog_pause_mib.saturating_mul(1 << 20),
             ..Default::default()
         });
     }

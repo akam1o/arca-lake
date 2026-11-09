@@ -1605,7 +1605,21 @@ async fn rebalance_pass<S: KvStore>(
     let Some(policy) = cfg.rebalance.as_ref() else {
         return Ok(());
     };
-    let r = crate::rebalance::run_once(meta, clients, policy, now_ms()).await?;
+    // The admission's placement threshold, and what the rest of the
+    // controller is doing: rebalancing yields to them (R-93).
+    let policy = crate::rebalance::RebalancePolicy {
+        max_chunk_bytes: cfg.admission_max_chunk_bytes,
+        group_min_shards: cfg.admission.group_min_shards,
+        ..policy.clone()
+    };
+    let pressure = crate::rebalance::Pressure {
+        gc_backlog_bytes: metrics.gc_backlog_bytes.load(Ordering::Relaxed),
+        tiering_active: metrics.tiering_active.load(Ordering::Relaxed),
+    };
+    let r = crate::rebalance::run_once_with(meta, clients, &policy, pressure, now_ms()).await?;
+    metrics
+        .rebalance_capacity_stops_total
+        .fetch_add(r.capacity_stops, Ordering::Relaxed);
     metrics
         .rebalance_moved_chunks_total
         .fetch_add(r.moved_chunks, Ordering::Relaxed);
@@ -1636,6 +1650,15 @@ async fn rebalance_pass<S: KvStore>(
     Ok(())
 }
 
+/// Clears the tiering-active flag when a tiering pass ends (R-93).
+struct TieringActive<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for TieringActive<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 /// Automatic tiering pass (RFC-006 §5.8).
 async fn tiering_pass<S: KvStore>(
     meta: &S,
@@ -1651,6 +1674,8 @@ async fn tiering_pass<S: KvStore>(
     if metrics.admission.worst() >= crate::backpressure::State::Throttled {
         return Ok(());
     }
+    metrics.tiering_active.store(true, Ordering::Relaxed);
+    let _active = TieringActive(&metrics.tiering_active);
     let r = crate::tiering::run_once(meta, clients, policy, now_ms()).await?;
     metrics
         .chunks_promoted_total

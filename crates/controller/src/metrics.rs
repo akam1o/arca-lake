@@ -200,6 +200,11 @@ pub struct Metrics {
     pub rebalance_skipped_chunks_total: AtomicU64,
     /// Imbalance of the move in progress, per mille (0: none planned).
     pub rebalance_imbalance_permille: AtomicU64,
+    /// Rebalance passes stopped at a target's placement threshold or
+    /// compaction need (Phase 3.10, R-93).
+    pub rebalance_capacity_stops_total: AtomicU64,
+    /// A tiering pass is moving chunks (rebalancing yields to it, R-93).
+    pub tiering_active: std::sync::atomic::AtomicBool,
     /// Cache-group repairs started (RFC-006 §5.9).
     pub cache_repairs_started_total: AtomicU64,
     /// Cache-group repairs completed.
@@ -405,6 +410,10 @@ impl Metrics {
         out += &c(
             "arca_controller_rebalance_skipped_chunks_total",
             self.rebalance_skipped_chunks_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_rebalance_capacity_stops_total",
+            self.rebalance_capacity_stops_total.load(Ordering::Relaxed),
         );
         out += &g(
             "arca_controller_rebalance_imbalance_permille",

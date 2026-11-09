@@ -23,7 +23,19 @@
 //!   a new leader resumes there; a chunk moved twice is harmless (the
 //!   switch is conditioned on the placement read, `AlreadyThere` and
 //!   `Skipped` move nothing);
-//! - dry run plans and reports without moving.
+//! - dry run plans and reports without moving;
+//! - capacity (Phase 3.10, R-93): work of a higher priority goes first
+//!   (repair, client writes, GC and compaction, tiering). No pass while
+//!   tiering moves chunks or the GC backlog is above
+//!   `gc_backlog_pause_bytes`. No move in a tier that is throttled or
+//!   worse (moving data makes no room in a tier; it only evens it out,
+//!   and costs the target room until the source is reclaimed); half the
+//!   budget in `warning`. Before each chunk the target's members are
+//!   asked for their device now, and the chunk moves only if every one
+//!   keeps the placement threshold (`group_min_shards` of the largest
+//!   shards above its reserve and in-flight writes) after its shard, and
+//!   none needs compaction first. A pass stops at the first that does
+//!   not: client writes keep the room they are admitted on.
 //!
 //! The source space comes back once reconciliation deletes the source
 //! shards and compaction reclaims their segments.
@@ -58,6 +70,16 @@ pub struct RebalancePolicy {
     /// for this long (ms): the sources' old copies are reconciled and
     /// compacted away meanwhile, so that the next plan sees their room.
     pub settle_ms: u64,
+    /// Largest chunk clients write (the admission's), bytes: with
+    /// `group_min_shards`, the room a target member keeps (R-93).
+    pub max_chunk_bytes: u64,
+    /// A target member keeps room for this many of the largest shards
+    /// after a move (the admission's placement threshold, R-93).
+    pub group_min_shards: u64,
+    /// No pass while the GC backlog is above this, logical bytes (R-93).
+    pub gc_backlog_pause_bytes: u64,
+    /// An admission record older than this is not planned on, ms (R-93).
+    pub report_max_age_ms: u64,
 }
 
 impl Default for RebalancePolicy {
@@ -69,8 +91,72 @@ impl Default for RebalancePolicy {
             generations_per_pass: 4096,
             // Default orphan age (900 s) and two reconcile intervals.
             settle_ms: 1_500_000,
+            max_chunk_bytes: 8 << 20,
+            group_min_shards: 64,
+            gc_backlog_pause_bytes: 4 << 30,
+            report_max_age_ms: 60_000,
         }
     }
+}
+
+/// What the rest of the controller is doing (R-93): a pass yields to it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pressure {
+    /// GC backlog, logical bytes (the last GC pass's).
+    pub gc_backlog_bytes: u64,
+    /// A tiering pass is moving chunks.
+    pub tiering_active: bool,
+}
+
+/// Room every member of `target` must keep after a shard of a chunk of
+/// `len` bytes (the placement threshold), and that shard's length.
+fn target_floor(policy: &RebalancePolicy, target: &GroupRecord, len: u64) -> (u64, u64) {
+    let k = u64::from(target.data_shards.max(1));
+    let floor = (policy.max_chunk_bytes / k).saturating_mul(policy.group_min_shards);
+    (floor, len.div_ceil(k).next_multiple_of(4096))
+}
+
+/// Whether every member of `target` takes a shard of a `len`-byte chunk
+/// now (R-93): asked for its device, it keeps the placement threshold
+/// above its reserve and in-flight writes after the shard, and does not
+/// need compaction first (most of its little room is dead data). `Err`:
+/// why not.
+async fn target_takes(
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+    policy: &RebalancePolicy,
+    target: &GroupRecord,
+    len: u64,
+    now_ms: u64,
+) -> Result<(), String> {
+    let (floor, shard) = target_floor(policy, target, len);
+    for m in &target.members {
+        let Some(n) = nodes.get(&m.node_id) else {
+            return Err(format!("target node {} unknown", m.node_id));
+        };
+        let h = clients
+            .health(&n.address)
+            .await
+            .map_err(|_| format!("target node {} did not report its device", n.id))?;
+        let d = crate::admission::device_of(n.id, &h, now_ms);
+        if d.total == 0 {
+            return Err(format!("target node {} reports no device", n.id));
+        }
+        let room = d.headroom();
+        if room < floor.saturating_add(shard) {
+            return Err(format!(
+                "target node {} at the placement threshold ({room} bytes of room, {floor} kept for client writes)",
+                n.id
+            ));
+        }
+        if d.reclaimable >= room && room < floor.saturating_mul(4) {
+            return Err(format!(
+                "target node {} needs compaction first ({} bytes reclaimable, {room} of room)",
+                n.id, d.reclaimable
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// What a pass did.
@@ -89,6 +175,9 @@ pub struct RebalanceReport {
     pub planned_chunks: u64,
     /// Why the pass stopped or did nothing.
     pub reason: String,
+    /// Passes stopped because the target would have gone below the
+    /// placement threshold or needed compaction first (R-93).
+    pub capacity_stops: u64,
 }
 
 /// (tier, scheme, data shards, parity shards): groups of one shape.
@@ -192,11 +281,26 @@ pub fn plans(
 ///
 /// Metadata errors (a former leader's state write is fenced). Errors of
 /// individual chunk moves are counted, not returned.
-#[allow(clippy::too_many_lines)]
 pub async fn run_once<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
     policy: &RebalancePolicy,
+    now_ms: u64,
+) -> Result<RebalanceReport, ControlError> {
+    run_once_with(meta, clients, policy, Pressure::default(), now_ms).await
+}
+
+/// [`run_once`] yielding to `pressure` (R-93).
+///
+/// # Errors
+///
+/// As [`run_once`].
+#[allow(clippy::too_many_lines)]
+pub async fn run_once_with<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    policy: &RebalancePolicy,
+    pressure: Pressure,
     now_ms: u64,
 ) -> Result<RebalanceReport, ControlError> {
     let mut state = rebalance::state(meta).await?;
@@ -237,11 +341,32 @@ pub async fn run_once<S: KvStore>(
         finish(meta, &mut state, &report).await?;
         return Ok(report);
     }
+    if pressure.tiering_active {
+        report.reason = "tiering is moving chunks: tiering first".into();
+        finish(meta, &mut state, &report).await?;
+        return Ok(report);
+    }
+    if pressure.gc_backlog_bytes > policy.gc_backlog_pause_bytes {
+        report.reason = format!(
+            "GC backlog of {} bytes: GC first",
+            pressure.gc_backlog_bytes
+        );
+        finish(meta, &mut state, &report).await?;
+        return Ok(report);
+    }
     let Some(record) = arca_lake_metadata::ops::admission::current(meta).await? else {
         report.reason = "no admission record (group rooms unknown)".into();
         finish(meta, &mut state, &report).await?;
         return Ok(report);
     };
+    if now_ms.saturating_sub(record.computed_ms) > policy.report_max_age_ms {
+        report.reason = format!(
+            "admission record {} ms old: group rooms not current",
+            now_ms.saturating_sub(record.computed_ms)
+        );
+        finish(meta, &mut state, &report).await?;
+        return Ok(report);
+    }
     let mut pacing = rebalance::pacing(meta).await?;
     pacing.settling.retain(|(_, until)| *until > now_ms);
     let all = plans(&groups, &record, policy, state.plan.as_ref());
@@ -282,8 +407,27 @@ pub async fn run_once<S: KvStore>(
     let mut after = state.cursor;
     let mut examined = 0usize;
     for p in candidates {
-        if record.tier(&p.tier).is_some_and(|t| t.state >= 4) {
-            report.reason = format!("tier {} is recovery_only", p.tier);
+        let tier_state = record.tier(&p.tier).map_or(0, |t| t.state);
+        if tier_state >= 2 {
+            // Client writes first: moving data makes no room in the tier.
+            report.reason = format!(
+                "tier {} is {}: client writes first",
+                p.tier,
+                [
+                    "normal",
+                    "warning",
+                    "throttled",
+                    "write_rejected",
+                    "recovery_only"
+                ][usize::from(tier_state.min(4))]
+            );
+            continue;
+        }
+        if record
+            .tier(&p.tier)
+            .is_some_and(|t| t.excluded_groups.contains(&p.target))
+        {
+            report.reason = format!("target group {} excluded from placement", p.target);
             continue;
         }
         let (source, target) = (by_id[&p.source], by_id[&p.target]);
@@ -306,7 +450,12 @@ pub async fn run_once<S: KvStore>(
             pacing.plan = Some(key);
             pacing.remaining_bytes = p.target_room.saturating_sub(p.source_room) / 2;
         }
-        let budget = policy.bytes_per_pass.min(pacing.remaining_bytes);
+        let per_pass = if tier_state == 1 {
+            policy.bytes_per_pass / 2
+        } else {
+            policy.bytes_per_pass
+        };
+        let budget = per_pass.min(pacing.remaining_bytes);
         let mut spent = 0u64;
         let mut found = 0u64;
         let started_at_start = after.is_none();
@@ -356,6 +505,14 @@ pub async fn run_once<S: KvStore>(
                         report.planned_chunks += 1;
                         spent += len;
                         continue;
+                    }
+                    if let Err(why) =
+                        target_takes(clients, &nodes, policy, target, len, now_ms).await
+                    {
+                        report.reason = why;
+                        report.capacity_stops += 1;
+                        stopped = true;
+                        break 'pages;
                     }
                     match migrate_chunk(
                         meta, clients, &coders, &addr_of, source, target, generation, *index,
