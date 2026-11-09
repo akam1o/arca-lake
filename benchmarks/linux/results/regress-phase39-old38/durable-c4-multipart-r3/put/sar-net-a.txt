@@ -1,0 +1,33 @@
+Linux 7.0.0-42-generic (<host>) 	11/09/26 	_x86_64_	(4 CPU)
+
+01:20:23        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:20:24           lo     25.00     25.00      7.96      7.96      0.00      0.00      0.00      0.00
+01:20:24         net0   4388.00   1968.00 164450.37    220.65      0.00      0.00      0.00      0.00
+
+01:20:24        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:20:25           lo    287.00    287.00     85.48     85.48      0.00      0.00      0.00      0.00
+01:20:25         net0   8199.00   3342.00 304247.71    395.50      0.00      0.00      0.00      0.00
+
+01:20:25        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:20:26           lo     26.00     26.00      8.01      8.01      0.00      0.00      0.00      0.00
+01:20:26         net0   9062.00   4044.00 313040.62    439.27      0.00      0.00      0.00      0.00
+
+01:20:26        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:20:27           lo     45.00     45.00     12.68     12.68      0.00      0.00      0.00      0.00
+01:20:27         net0   9212.00   3704.00 309679.50    422.17      0.00      0.00      0.00      0.00
+
+01:20:27        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:20:28           lo     35.00     35.00      9.86      9.86      0.00      0.00      0.00      0.00
+01:20:28         net0   3520.00   1371.00 117435.21    155.85      0.00      0.00      0.00      0.00
+
+01:20:28        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:20:29           lo     47.00     47.00     12.78     12.78      0.00      0.00      0.00      0.00
+01:20:29         net0   3410.00   1314.00 131522.71    149.87      0.00      0.00      0.00      0.00
+
+01:20:29        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:20:30           lo    152.00    152.00     41.05     41.05      0.00      0.00      0.00      0.00
+01:20:30         net0   4547.00   1741.00 164484.97    217.04      0.00      0.00      0.00      0.00
+
+01:20:30        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:20:31           lo     45.00     45.00     12.68     12.68      0.00      0.00      0.00      0.00
+01:20:31         net0   2057.00    917.00  74024.50    109.40      0.00      0.00      0.00      0.00

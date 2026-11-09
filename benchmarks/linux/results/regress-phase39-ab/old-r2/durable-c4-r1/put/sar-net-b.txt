@@ -1,0 +1,21 @@
+Linux 7.0.0-42-generic (<host>) 	11/09/26 	_x86_64_	(4 CPU)
+
+01:47:23        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:47:24           lo  16254.00  16254.00 437893.69 437893.69      0.00      0.00      0.00      0.00
+01:47:24         net0   3143.00   7746.00    271.73 283451.97      0.00      0.00      0.00      0.00
+
+01:47:24        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:47:25           lo  21717.00  21717.00 569902.14 569902.14      0.00      0.00      0.00      0.00
+01:47:25         net0   3892.00   9467.00    335.72 372216.56      0.00      0.00      0.00      0.00
+
+01:47:25        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:47:26           lo  22475.00  22475.00 587500.76 587500.76      0.00      0.00      0.00      0.00
+01:47:26         net0   4124.00  10017.00    355.76 381178.67      0.00      0.00      0.00      0.00
+
+01:47:26        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:47:27           lo  21353.00  21353.00 555268.81 555268.81      0.00      0.00      0.00      0.00
+01:47:27         net0   4250.00  10586.00    358.63 384424.74      0.00      0.00      0.00      0.00
+
+01:47:27        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+01:47:28           lo   8618.00   8618.00 226360.07 226360.07      0.00      0.00      0.00      0.00
+01:47:28         net0   1644.00   4517.00    142.94 156121.25      0.00      0.00      0.00      0.00

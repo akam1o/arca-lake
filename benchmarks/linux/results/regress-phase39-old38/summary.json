@@ -1,0 +1,21 @@
+{
+  "results_dir": "regress-phase39-old38",
+  "cores": 4,
+  "durable_config": "durable-c4",
+  "put_mib_s": 299.27997137709735,
+  "get_warm_mib_s": 697.849461348969,
+  "get_warm_p50_ms": 77.966177,
+  "get_warm_p95_ms": 97.36284500000001,
+  "get_warm_p99_ms": 104.185523,
+  "cpu_s_per_gib_gateway_host": 4.7568,
+  "cpu_s_per_gib_node_host": 2.1362666666666668,
+  "rss_mib": 140.69140625,
+  "meta_txn_per_s": 132.88342479113308,
+  "repetitions": 3,
+  "multipart_config": "durable-c4-multipart",
+  "multipart_put_mib_s": 245.91328562015218,
+  "multipart_get_warm_mib_s": 681.6932532383349,
+  "cache_config": "none-c4",
+  "hit_ratio": 0.9140625,
+  "population_chunks_per_s": 57.44134646072271
+}

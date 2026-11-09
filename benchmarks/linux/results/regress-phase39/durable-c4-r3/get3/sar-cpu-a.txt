@@ -1,0 +1,5 @@
+Linux 7.0.0-42-generic (<host>) 	11/09/26 	_x86_64_	(4 CPU)
+
+01:03:18        CPU     %user     %nice   %system   %iowait    %steal     %idle
+01:03:19        all     10.71      0.00     14.29      0.00      0.00     75.00
+01:03:20        all     18.27      0.00     25.38      0.25      0.25     55.84

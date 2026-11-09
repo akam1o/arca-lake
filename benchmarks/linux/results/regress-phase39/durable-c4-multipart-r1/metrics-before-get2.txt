@@ -1,0 +1,317 @@
+# HELP arca_gateway_cache_hits_total read-through cache: hits (RFC-006 §5.3)
+# TYPE arca_gateway_cache_hits_total counter
+arca_gateway_cache_hits_total 0
+# HELP arca_gateway_cache_misses_total read-through cache: misses (RFC-006 §5.3)
+# TYPE arca_gateway_cache_misses_total counter
+arca_gateway_cache_misses_total 0
+# HELP arca_gateway_cache_fallbacks_total read-through cache: fallbacks (RFC-006 §5.3)
+# TYPE arca_gateway_cache_fallbacks_total counter
+arca_gateway_cache_fallbacks_total 0
+# HELP arca_gateway_cache_invalidations_total read-through cache: invalidations (RFC-006 §5.3)
+# TYPE arca_gateway_cache_invalidations_total counter
+arca_gateway_cache_invalidations_total 0
+# HELP arca_gateway_cache_populated_total read-through cache: populated (RFC-006 §5.3)
+# TYPE arca_gateway_cache_populated_total counter
+arca_gateway_cache_populated_total 0
+# HELP arca_gateway_cache_population_failures_total read-through cache: population failures (RFC-006 §5.3)
+# TYPE arca_gateway_cache_population_failures_total counter
+arca_gateway_cache_population_failures_total 0
+# HELP arca_gateway_cache_populations_deduplicated_total read-through cache: populations deduplicated (RFC-006 §5.3)
+# TYPE arca_gateway_cache_populations_deduplicated_total counter
+arca_gateway_cache_populations_deduplicated_total 0
+# HELP arca_gateway_cache_admissions_rejected_total read-through cache: admissions rejected (RFC-006 §5.3)
+# TYPE arca_gateway_cache_admissions_rejected_total counter
+arca_gateway_cache_admissions_rejected_total 0
+# HELP arca_gateway_cache_degraded_hits_total read-through cache: degraded hits (RFC-006 §5.3)
+# TYPE arca_gateway_cache_degraded_hits_total counter
+arca_gateway_cache_degraded_hits_total 0
+# HELP arca_gateway_cache_shards_repaired_total read-through cache: shards repaired (RFC-006 §5.3)
+# TYPE arca_gateway_cache_shards_repaired_total counter
+arca_gateway_cache_shards_repaired_total 0
+# HELP arca_gateway_cache_shard_repair_failures_total read-through cache: shard repair failures (RFC-006 §5.3)
+# TYPE arca_gateway_cache_shard_repair_failures_total counter
+arca_gateway_cache_shard_repair_failures_total 0
+# HELP arca_gateway_cache_shard_repairs_skipped_total read-through cache: shard repairs skipped (RFC-006 §5.3)
+# TYPE arca_gateway_cache_shard_repairs_skipped_total counter
+arca_gateway_cache_shard_repairs_skipped_total 0
+# HELP arca_gateway_cache_populations_skipped_total read-through cache: populations skipped (RFC-006 §5.3)
+# TYPE arca_gateway_cache_populations_skipped_total counter
+arca_gateway_cache_populations_skipped_total 0
+# HELP arca_gateway_cache_lookup_hits_total read-through cache: lookup hits (RFC-006 §5.3)
+# TYPE arca_gateway_cache_lookup_hits_total counter
+arca_gateway_cache_lookup_hits_total 0
+# HELP arca_gateway_cache_fallback_unreadable_total read-through cache: fallback unreadable (RFC-006 §5.3)
+# TYPE arca_gateway_cache_fallback_unreadable_total counter
+arca_gateway_cache_fallback_unreadable_total 0
+# HELP arca_gateway_cache_fallback_corrupt_total read-through cache: fallback corrupt (RFC-006 §5.3)
+# TYPE arca_gateway_cache_fallback_corrupt_total counter
+arca_gateway_cache_fallback_corrupt_total 0
+# HELP arca_gateway_cache_fallback_node_total read-through cache: fallback node (RFC-006 §5.3)
+# TYPE arca_gateway_cache_fallback_node_total counter
+arca_gateway_cache_fallback_node_total 0
+# HELP arca_gateway_cache_fallback_unknown_group_total read-through cache: fallback unknown group (RFC-006 §5.3)
+# TYPE arca_gateway_cache_fallback_unknown_group_total counter
+arca_gateway_cache_fallback_unknown_group_total 0
+# HELP arca_gateway_cache_admission_rejected_size_total read-through cache: admission rejected size (RFC-006 §5.3)
+# TYPE arca_gateway_cache_admission_rejected_size_total counter
+arca_gateway_cache_admission_rejected_size_total 0
+# HELP arca_gateway_cache_admission_rejected_threshold_total read-through cache: admission rejected threshold (RFC-006 §5.3)
+# TYPE arca_gateway_cache_admission_rejected_threshold_total counter
+arca_gateway_cache_admission_rejected_threshold_total 0
+# HELP arca_gateway_cache_admission_rejected_capacity_total read-through cache: admission rejected capacity (RFC-006 §5.3)
+# TYPE arca_gateway_cache_admission_rejected_capacity_total counter
+arca_gateway_cache_admission_rejected_capacity_total 0
+# HELP arca_gateway_cache_admission_rejected_generation_total read-through cache: admission rejected generation (RFC-006 §5.3)
+# TYPE arca_gateway_cache_admission_rejected_generation_total counter
+arca_gateway_cache_admission_rejected_generation_total 0
+# HELP arca_gateway_cache_population_failures_node_total read-through cache: population failures node (RFC-006 §5.3)
+# TYPE arca_gateway_cache_population_failures_node_total counter
+arca_gateway_cache_population_failures_node_total 0
+# HELP arca_gateway_cache_population_failures_meta_total read-through cache: population failures meta (RFC-006 §5.3)
+# TYPE arca_gateway_cache_population_failures_meta_total counter
+arca_gateway_cache_population_failures_meta_total 0
+# HELP arca_gateway_cache_population_failures_corrupt_total read-through cache: population failures corrupt (RFC-006 §5.3)
+# TYPE arca_gateway_cache_population_failures_corrupt_total counter
+arca_gateway_cache_population_failures_corrupt_total 0
+# HELP arca_gateway_node_rpc_stalled_total shard streams aborted for lack of progress
+# TYPE arca_gateway_node_rpc_stalled_total counter
+arca_gateway_node_rpc_stalled_total 0
+# HELP arca_gateway_node_rpc_deadline_exceeded_total shard streams that missed their deadline
+# TYPE arca_gateway_node_rpc_deadline_exceeded_total counter
+arca_gateway_node_rpc_deadline_exceeded_total 0
+# HELP arca_gateway_node_rpc_unary_timeouts_total unary node RPCs that timed out
+# TYPE arca_gateway_node_rpc_unary_timeouts_total counter
+arca_gateway_node_rpc_unary_timeouts_total 0
+# HELP arca_gateway_node_rpc_retries_total node RPC retries
+# TYPE arca_gateway_node_rpc_retries_total counter
+arca_gateway_node_rpc_retries_total 0
+# HELP arca_gateway_node_rpc_exhausted_total node RPCs that ran out of retries
+# TYPE arca_gateway_node_rpc_exhausted_total counter
+arca_gateway_node_rpc_exhausted_total 0
+# HELP arca_gateway_put_in_flight PUTs being written now
+# TYPE arca_gateway_put_in_flight gauge
+arca_gateway_put_in_flight 0
+# HELP arca_gateway_put_phase_seconds PUT time per phase
+# TYPE arca_gateway_put_phase_seconds histogram
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.001"} 224
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.005"} 472
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.01"} 601
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.025"} 669
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.05"} 672
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.1"} 672
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.25"} 672
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="0.5"} 672
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="1"} 672
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="2.5"} 672
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="5"} 672
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="10"} 672
+arca_gateway_put_phase_seconds_bucket{phase="body_read",le="+Inf"} 672
+arca_gateway_put_phase_seconds_sum{phase="body_read"} 2.666942154
+arca_gateway_put_phase_seconds_count{phase="body_read"} 672
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.005"} 120
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.01"} 420
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.025"} 448
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.05"} 448
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.1"} 448
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.25"} 448
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="0.5"} 448
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="1"} 448
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="2.5"} 448
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="5"} 448
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="10"} 448
+arca_gateway_put_phase_seconds_bucket{phase="encode",le="+Inf"} 448
+arca_gateway_put_phase_seconds_sum{phase="encode"} 2.886315424
+arca_gateway_put_phase_seconds_count{phase="encode"} 448
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.05"} 48
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.1"} 300
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.25"} 448
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="0.5"} 448
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="1"} 448
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="2.5"} 448
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="5"} 448
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="10"} 448
+arca_gateway_put_phase_seconds_bucket{phase="shard_write",le="+Inf"} 448
+arca_gateway_put_phase_seconds_sum{phase="shard_write"} 40.741099897
+arca_gateway_put_phase_seconds_count{phase="shard_write"} 448
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.01"} 75
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.025"} 182
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.05"} 210
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.1"} 222
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.25"} 224
+arca_gateway_put_phase_seconds_bucket{phase="append",le="0.5"} 224
+arca_gateway_put_phase_seconds_bucket{phase="append",le="1"} 224
+arca_gateway_put_phase_seconds_bucket{phase="append",le="2.5"} 224
+arca_gateway_put_phase_seconds_bucket{phase="append",le="5"} 224
+arca_gateway_put_phase_seconds_bucket{phase="append",le="10"} 224
+arca_gateway_put_phase_seconds_bucket{phase="append",le="+Inf"} 224
+arca_gateway_put_phase_seconds_sum{phase="append"} 4.260369891
+arca_gateway_put_phase_seconds_count{phase="append"} 224
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="lease_renew",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_count{phase="lease_renew"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.01"} 11
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.025"} 167
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.05"} 209
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.1"} 222
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.25"} 224
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="0.5"} 224
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="1"} 224
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="2.5"} 224
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="5"} 224
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="10"} 224
+arca_gateway_put_phase_seconds_bucket{phase="commit",le="+Inf"} 224
+arca_gateway_put_phase_seconds_sum{phase="commit"} 4.896787696
+arca_gateway_put_phase_seconds_count{phase="commit"} 224
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.001"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.005"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.01"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.025"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.05"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.25"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="0.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="1"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="2.5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="5"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="10"} 0
+arca_gateway_put_phase_seconds_bucket{phase="total",le="+Inf"} 0
+arca_gateway_put_phase_seconds_sum{phase="total"} 0
+arca_gateway_put_phase_seconds_count{phase="total"} 0
+# HELP arca_gateway_put_phase_max_seconds longest PUT phase observed
+# TYPE arca_gateway_put_phase_max_seconds gauge
+arca_gateway_put_phase_max_seconds{phase="body_read"} 0.033309341
+arca_gateway_put_phase_max_seconds{phase="encode"} 0.01915984
+arca_gateway_put_phase_max_seconds{phase="shard_write"} 0.249936212
+arca_gateway_put_phase_max_seconds{phase="append"} 0.221312502
+arca_gateway_put_phase_max_seconds{phase="lease_renew"} 0
+arca_gateway_put_phase_max_seconds{phase="commit"} 0.104162112
+arca_gateway_put_phase_max_seconds{phase="total"} 0
+# HELP arca_gateway_population_queue_enqueued_total cache populations enqueued
+# TYPE arca_gateway_population_queue_enqueued_total counter
+arca_gateway_population_queue_enqueued_total 0
+# HELP arca_gateway_population_queue_dropped_full_total cache populations dropped: queue full
+# TYPE arca_gateway_population_queue_dropped_full_total counter
+arca_gateway_population_queue_dropped_full_total 0
+# HELP arca_gateway_population_queue_dropped_shutdown_total cache populations dropped at shutdown
+# TYPE arca_gateway_population_queue_dropped_shutdown_total counter
+arca_gateway_population_queue_dropped_shutdown_total 0
+# HELP arca_gateway_population_queue_completed_total cache populations completed
+# TYPE arca_gateway_population_queue_completed_total counter
+arca_gateway_population_queue_completed_total 0
+# HELP arca_gateway_population_queue_retries_total cache population retries
+# TYPE arca_gateway_population_queue_retries_total counter
+arca_gateway_population_queue_retries_total 0
+# HELP arca_gateway_population_queue_deferred_for_reads_total cache populations deferred while reads were busy
+# TYPE arca_gateway_population_queue_deferred_for_reads_total counter
+arca_gateway_population_queue_deferred_for_reads_total 0
+# HELP arca_gateway_population_queue_queued cache populations waiting
+# TYPE arca_gateway_population_queue_queued gauge
+arca_gateway_population_queue_queued 0
+# HELP arca_gateway_population_queue_running cache populations running
+# TYPE arca_gateway_population_queue_running gauge
+arca_gateway_population_queue_running 0
+# HELP arca_gateway_meta_txn_attempts_total metadata transaction attempts
+# TYPE arca_gateway_meta_txn_attempts_total counter
+arca_gateway_meta_txn_attempts_total 2216
+# HELP arca_gateway_meta_txn_conflicts_total metadata transaction conflicts (retried)
+# TYPE arca_gateway_meta_txn_conflicts_total counter
+arca_gateway_meta_txn_conflicts_total 0
+# HELP arca_gateway_meta_txn_unknown_retries_total commits with an unknown outcome that were resolved
+# TYPE arca_gateway_meta_txn_unknown_retries_total counter
+arca_gateway_meta_txn_unknown_retries_total 0
+# HELP arca_gateway_meta_txn_exhausted_total metadata transactions that ran out of retries
+# TYPE arca_gateway_meta_txn_exhausted_total counter
+arca_gateway_meta_txn_exhausted_total 0
+# HELP arca_gateway_degraded_reads_total GETs decoded around a missing or corrupt shard
+# TYPE arca_gateway_degraded_reads_total counter
+arca_gateway_degraded_reads_total 0
+# HELP arca_gateway_unreadable_reads_total GETs that failed with an integrity error
+# TYPE arca_gateway_unreadable_reads_total counter
+arca_gateway_unreadable_reads_total 0
+# HELP arca_gateway_moved_reads_total chunk reads that found the chunk moved (tier migration, rebalancing) since the manifest was read and read it at its new placement
+# TYPE arca_gateway_moved_reads_total counter
+arca_gateway_moved_reads_total 0
+# HELP arca_gateway_integrity_reports_total integrity findings reported to metadata by the read path
+# TYPE arca_gateway_integrity_reports_total counter
+arca_gateway_integrity_reports_total 0
+# HELP arca_gateway_integrity_reports_dropped_total read-path integrity reports dropped (queue full or error)
+# TYPE arca_gateway_integrity_reports_dropped_total counter
+arca_gateway_integrity_reports_dropped_total 0
+# HELP arca_gateway_admission_state write admission state this gateway applies to its tier (0 normal, 1 warning, 2 throttled, 3 write rejected, 4 recovery only; includes escalation of a stale record)
+# TYPE arca_gateway_admission_state gauge
+arca_gateway_admission_state 0
+# HELP arca_gateway_admission_record_age_seconds seconds since the admission record last changed (0 = no record)
+# TYPE arca_gateway_admission_record_age_seconds gauge
+arca_gateway_admission_record_age_seconds 0
+# HELP arca_gateway_admission_throttled_total requests refused with SlowDown by the throttle
+# TYPE arca_gateway_admission_throttled_total counter
+arca_gateway_admission_throttled_total 0
+# HELP arca_gateway_admission_rejected_total requests refused with SlowDown because the tier refuses new data
+# TYPE arca_gateway_admission_rejected_total counter
+arca_gateway_admission_rejected_total 0
+# HELP arca_gateway_node_capacity_refusals_total shard writes storage nodes refused for capacity
+# TYPE arca_gateway_node_capacity_refusals_total counter
+arca_gateway_node_capacity_refusals_total 0
+# HELP arca_gateway_placement_capacity_failures_total chunks no stripe group had capacity for (the request failed with SlowDown)
+# TYPE arca_gateway_placement_capacity_failures_total counter
+arca_gateway_placement_capacity_failures_total 0
+# HELP arca_gateway_admission_charged_bytes_total client bytes charged to write admission chunk by chunk as they were placed (every PUT, UploadPart and copy)
+# TYPE arca_gateway_admission_charged_bytes_total counter
+arca_gateway_admission_charged_bytes_total 1879048192
+# HELP arca_gateway_s3_requests_total S3 requests by operation and status class
+# TYPE arca_gateway_s3_requests_total counter
+arca_gateway_s3_requests_total{op="unknown",status="2xx"} 561
+arca_gateway_s3_requests_total{op="unknown",status="4xx"} 1
+# HELP arca_gateway_s3_request_seconds S3 request time by operation
+# TYPE arca_gateway_s3_request_seconds histogram
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="0.001"} 0
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="0.005"} 1
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="0.01"} 72
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="0.025"} 166
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="0.05"} 294
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="0.1"} 326
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="0.25"} 535
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="0.5"} 558
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="1"} 562
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="2.5"} 562
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="5"} 562
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="10"} 562
+arca_gateway_s3_request_seconds_bucket{op="unknown",le="+Inf"} 562
+arca_gateway_s3_request_seconds_sum{op="unknown"} 52.036943379
+arca_gateway_s3_request_seconds_count{op="unknown"} 562
+# HELP arca_gateway_s3_bytes_total S3 body bytes received and sent
+# TYPE arca_gateway_s3_bytes_total counter
+arca_gateway_s3_bytes_total{dir="in"} 1879073168
+arca_gateway_s3_bytes_total{dir="out"} 1879048192
+# HELP arca_gateway_auth_failures_total requests refused for their access key, by reason
+# TYPE arca_gateway_auth_failures_total counter
+arca_gateway_auth_failures_total{reason="unknown_key"} 0
+arca_gateway_auth_failures_total{reason="inactive_key"} 0
+arca_gateway_auth_failures_total{reason="expired_key"} 0
+# HELP arca_gateway_credentials_reload_failures_total credential file reloads refused
+# TYPE arca_gateway_credentials_reload_failures_total counter
+arca_gateway_credentials_reload_failures_total 0
+# HELP arca_gateway_tls_enabled 1 when node RPCs use mutual TLS, 0 when explicitly plaintext
+# TYPE arca_gateway_tls_enabled gauge
+arca_gateway_tls_enabled 0

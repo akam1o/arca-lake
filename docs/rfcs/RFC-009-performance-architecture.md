@@ -1039,6 +1039,24 @@ HTTP layer into the encoder (removes one of the gateway's copies);
 `O_DIRECT` or `io_uring` writes on the nodes (removes the page-cache
 copy, changes the durability path and needs its own verification).
 
+### 6.23 Phase 3.9: regression and A/B against Phase 3.8
+
+The delete fence adds one mutex-guarded comparison per `DeleteShard`
+and nothing to PUT or GET; gateways read two small records more at
+start and at each 2 s refresh. Regression check (`regress.sh lab-2host`,
+3 repetitions): PUT 235 MiB/s against the 340 of the baseline, multipart
+PUT 134 against 201, below tolerance. The Phase 3.8 binary on the same
+hosts right after: PUT 299, multipart PUT 246. An alternating A/B
+(three repetitions each, durable and multipart configurations,
+`benchmarks/linux/results/regress-phase39-ab/`): PUT 193–334 (median
+232) against 194–362 (median 241) MiB/s, multipart PUT 146–269 (median
+151) against 120–291 (median 126), warm GET 463–686 (median 642)
+against 462–702 (median 675). The spread between repetitions of either
+binary (up to ±40 %) is larger than any difference between them: no
+regression attributable to the code, and none excluded below that
+spread (R-48). The P2 optimizations of §6.22 were not attempted in this
+phase (data safety first).
+
 ## 7. Interpretation
 
 *Verified on this environment* (one run each; see §4 for the error

@@ -309,3 +309,54 @@ without change (Medium/Low, no data loss): a release that misses a node
 is retried by the operator (shown in status); temporary compaction
 output whose removal fails is removed at the next open; R-92 (clock
 skew between restores).
+
+## Performance (§9, regression)
+
+The delete fence costs one comparison under the node's existing guard
+per `DeleteShard` and nothing on PUT or GET. Regression check
+(`regress.sh lab-2host`, 3 repetitions, final code): below tolerance on
+PUT (235 against 340 MiB/s), multipart PUT and GET, cache population
+and RSS; the Phase 3.8 binary right after on the same hosts did better
+(PUT 299). An alternating A/B (3 + 3 repetitions, RFC-009 §6.23) shows
+the same ranges for both binaries (PUT median 232 against 241 MiB/s,
+multipart PUT 151 against 126): the hosts' variance (R-48) dominates,
+and no regression attributable to the code was found. No optimization
+was attempted (§9 is P2; the MD5, zero-copy and `O_DIRECT` candidates of
+RFC-009 §6.22 remain).
+
+## CI (§13, S15)
+
+Final run at 1e376e4 (code identical to 3619574): all four jobs
+passed:
+
+- fmt, clippy (pedantic, `-D warnings`), the workspace tests (531 under
+  nextest, all features), docs
+- FoundationDB backend tests, including e2e, faults, cache,
+  `rebalance_fdb`, multipart under backpressure, the two-binary
+  mixed-version upgrade and the restore drill
+- FoundationDB failover (three processes), including the restore drill
+  on it and member moves under process and quorum loss
+- licenses, secrets, DCO, links (cargo-deny, gitleaks, DCO, sanitizer)
+
+| Run | Failure | Cause | Action |
+| --- | --- | --- | --- |
+| ad438e4 | Linux job: `an_older_protocol_delete_is_refused` and `an_epoch_raise_…`; FDB failover: a stale client without a fence | test bugs (version-bump build; the owned guard moved the release point) | fixed in dd0ed15 |
+| dd0ed15 | "Text file busy" at toolchain setup | runner fault (R-77) | not re-run: superseded by the next push |
+| 21c63c5 | `sigkill_during_writes_and_compaction_never_loses_acknowledged_data` | a real storage-engine defect (torn compaction output read as corrupt) | fixed in cdf1e8f |
+| 15a9952, afb7780, a89a7f8, 2a90705 | `fdb_failover` PUT refused (`write_rejected`) | the test wrote while the leader refused new data (placement threshold above its allotments), unnoticed while gateways ignored the record for 2 s | fixed in 2a90705 and 3619574 |
+| 11aa6c0, ff69929, 04c7a4e, 3619574 | cancelled | superseded by a newer push | — |
+
+No job was re-run to pass.
+
+## Not verified
+
+- A reduced system-model run on FoundationDB.
+- Rebalancing under load against tiering, repair, a full destination and
+  intent expiry (in-process only), on more than two hosts, or on
+  physical storage.
+- Leader failover in `warning`, `throttled` or `recovery_only` with real
+  processes (in-process term tests only).
+- Anything beyond about 30 minutes; physical storage (R-79, R-86).
+- R-90 (a restore without the close, with a controller started before
+  `recovery begin` and a node unreachable during its first round) is
+  accepted, not fixed.
