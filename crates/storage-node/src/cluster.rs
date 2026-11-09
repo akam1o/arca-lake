@@ -21,7 +21,8 @@ const FILE_NAME: &str = "cluster.txt";
 /// file without the version line is damaged, not an earlier release's.
 const MARKER: &str = "cluster.v2";
 
-const KNOWN: [&str; 5] = [
+const KNOWN: [&str; 6] = [
+    "incarnation_seq",
     "incarnation",
     "changed_ms",
     "format_write",
@@ -34,8 +35,11 @@ pub(crate) struct ClusterFacts {
     path: PathBuf,
     /// Incarnation last adopted, if any.
     pub incarnation: Option<[u8; 16]>,
-    /// `changed_ms` of the cluster state that carried it.
+    /// `changed_ms` of the cluster state that carried it (orders
+    /// incarnations only while no sequence is known).
     pub changed_ms: u64,
+    /// Sequence of the incarnation (Phase 3.10, R-92; 0 = none known).
+    pub incarnation_seq: u64,
     /// Storage format the controller allowed (0 = never told).
     pub format_write: u64,
     /// Delete fence generation adopted (0 = none: no delete is allowed).
@@ -105,6 +109,7 @@ impl ClusterFacts {
             path,
             incarnation: None,
             changed_ms: 0,
+            incarnation_seq: 0,
             format_write: 0,
             fence_generation: 0,
             fence_open: false,
@@ -180,6 +185,10 @@ impl ClusterFacts {
                     self.incarnation = parse_hex16(v);
                     ok &= self.incarnation.is_some();
                 }
+                (Some("incarnation_seq"), Some(v)) => match v.parse() {
+                    Ok(x) => self.incarnation_seq = x,
+                    Err(_) => ok = false,
+                },
                 (Some("changed_ms"), Some(v)) => match v.parse() {
                     Ok(x) => self.changed_ms = x,
                     Err(_) => ok = false,
@@ -212,19 +221,42 @@ impl ClusterFacts {
     /// Adopt an incarnation carried by a cluster state changed at
     /// `changed_ms`; ignored when older than what is held. Returns whether
     /// anything changed (and was persisted).
+    #[cfg(test)]
     pub(crate) fn adopt_incarnation(
         &mut self,
         incarnation: [u8; 16],
         changed_ms: u64,
     ) -> std::io::Result<bool> {
-        if changed_ms < self.changed_ms {
-            return Ok(false);
-        }
-        if self.incarnation == Some(incarnation) && self.changed_ms == changed_ms {
+        self.adopt_incarnation_seq(incarnation, changed_ms, 0)
+    }
+
+    /// Adopt an incarnation by its sequence (Phase 3.10, R-92): one of a
+    /// higher sequence than held; the same sequence only with the same
+    /// incarnation (a different one is a conflict, refused); a push
+    /// without a sequence only while none is known (then by `changed_ms`,
+    /// as before). Clocks never order sequenced incarnations.
+    pub(crate) fn adopt_incarnation_seq(
+        &mut self,
+        incarnation: [u8; 16],
+        changed_ms: u64,
+        seq: u64,
+    ) -> std::io::Result<bool> {
+        if seq == 0 {
+            if self.incarnation_seq > 0 || changed_ms < self.changed_ms {
+                return Ok(false);
+            }
+            if self.incarnation == Some(incarnation) && self.changed_ms == changed_ms {
+                return Ok(false);
+            }
+        } else if seq < self.incarnation_seq
+            || (seq == self.incarnation_seq && self.incarnation != Some(incarnation))
+            || (seq == self.incarnation_seq && self.changed_ms == changed_ms)
+        {
             return Ok(false);
         }
         self.incarnation = Some(incarnation);
         self.changed_ms = changed_ms;
+        self.incarnation_seq = self.incarnation_seq.max(seq);
         self.persist()?;
         Ok(true)
     }
@@ -415,6 +447,9 @@ impl ClusterFacts {
             let _ = writeln!(body, "incarnation {}", hex(&i));
         }
         let _ = writeln!(body, "changed_ms {}", self.changed_ms);
+        if self.incarnation_seq > 0 {
+            let _ = writeln!(body, "incarnation_seq {}", self.incarnation_seq);
+        }
         let _ = writeln!(body, "format_write {}", self.format_write);
         let _ = writeln!(
             body,
@@ -754,5 +789,43 @@ mod tests {
         let t = r.unknown_token;
         assert!(r.adopt_fence_held(0, false, None, true, None, t).unwrap());
         assert_eq!(r.fence_hold, None);
+    }
+
+    /// R-92 (Phase 3.10): sequenced incarnations are ordered by their
+    /// sequence, never by the clock that stamped them: a newer one stamped
+    /// by a clock that went back is adopted, an older one stamped later is
+    /// not; the same sequence with another incarnation is a conflict;
+    /// once a sequence is known, a push without one changes nothing; the
+    /// sequence survives a restart.
+    #[test]
+    fn incarnations_are_ordered_by_sequence_not_by_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = ClusterFacts::open(dir.path());
+        assert!(f.adopt_incarnation_seq([1; 16], 1_000, 1).unwrap());
+        // The clock went back: a newer incarnation with an earlier stamp.
+        assert!(f.adopt_incarnation_seq([2; 16], 500, 2).unwrap());
+        // An older incarnation stamped later (a controller of restored
+        // metadata whose clock is ahead).
+        assert!(!f.adopt_incarnation_seq([1; 16], 9_000, 1).unwrap());
+        assert!(
+            !f.adopt_incarnation_seq([3; 16], 9_000, 2).unwrap(),
+            "conflict"
+        );
+        assert!(
+            !f.adopt_incarnation_seq([4; 16], 9_999, 0).unwrap(),
+            "unsequenced"
+        );
+        assert_eq!((f.incarnation, f.incarnation_seq), (Some([2; 16]), 2));
+        let g = ClusterFacts::open(dir.path());
+        assert_eq!((g.incarnation, g.incarnation_seq), (Some([2; 16]), 2));
+        // Before any sequence (an earlier release's facts): by the clock.
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut h = ClusterFacts::open(dir2.path());
+        assert!(h.adopt_incarnation_seq([5; 16], 100, 0).unwrap());
+        assert!(!h.adopt_incarnation_seq([6; 16], 50, 0).unwrap());
+        assert!(
+            h.adopt_incarnation_seq([7; 16], 40, 3).unwrap(),
+            "first sequence"
+        );
     }
 }

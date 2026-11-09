@@ -52,6 +52,9 @@ pub struct Gate {
     pub cluster: Option<ClusterStateRecord>,
     /// Whether any key outside the `("al","meta",…)` subspace exists.
     pub has_data: bool,
+    /// Sequence of the incarnation (0: not recorded, an earlier release's
+    /// store; nodes then order incarnations as before).
+    pub incarnation_seq: u64,
 }
 
 /// Read the gate.
@@ -66,6 +69,7 @@ pub async fn gate<S: KvStore>(store: &S) -> Result<Gate> {
             let schema_write = u64_of(tx.get(&keys::schema_write()).await?);
             let format_write = u64_of(tx.get(&keys::format_write()).await?);
             let cluster = read(tx, &keys::cluster_state()).await?;
+            let incarnation_seq = u64_of(tx.get(&keys::incarnation_seq()).await?).unwrap_or(0);
             // A bucket or a generation means the store holds user data
             // written by some release; node and group records alone are a
             // cluster being set up.
@@ -83,6 +87,7 @@ pub async fn gate<S: KvStore>(store: &S) -> Result<Gate> {
                 format_write,
                 cluster,
                 has_data,
+                incarnation_seq,
             })
         })
     })
@@ -224,6 +229,9 @@ pub async fn init<S: KvStore>(
                     changed_ms: *now_ms,
                     changed_by: who.clone(),
                 };
+                if tx.get(&keys::incarnation_seq()).await?.is_none() {
+                    tx.set(&keys::incarnation_seq(), &1u64.to_le_bytes());
+                }
                 write(tx, &keys::cluster_state(), &rec)?;
                 Ok(rec)
             })
@@ -347,6 +355,23 @@ pub async fn mark_restoring<S: KvStore>(
     who: &str,
     now_ms: u64,
 ) -> Result<ClusterStateRecord> {
+    mark_restoring_above(store, restored_from, backup_point_ms, who, now_ms, 0).await
+}
+
+/// [`mark_restoring`] with the new incarnation's sequence above `at_least`
+/// (the highest any storage node reported, Phase 3.10).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn mark_restoring_above<S: KvStore>(
+    store: &S,
+    restored_from: Option<String>,
+    backup_point_ms: Option<u64>,
+    who: &str,
+    now_ms: u64,
+    at_least: u64,
+) -> Result<ClusterStateRecord> {
     let incarnation = *uuid::Uuid::now_v7().as_bytes();
     transact(
         store,
@@ -356,10 +381,11 @@ pub async fn mark_restoring<S: KvStore>(
             backup_point_ms,
             who.to_string(),
             now_ms,
+            at_least,
         ),
         |tx, env| {
             Box::pin(async move {
-                let (incarnation, from, backup_point_ms, who, now_ms) = env;
+                let (incarnation, from, backup_point_ms, who, now_ms, at_least) = env;
                 let prev: Option<ClusterStateRecord> = read(tx, &keys::cluster_state()).await?;
                 let rec = ClusterStateRecord {
                     incarnation: *incarnation,
@@ -375,6 +401,14 @@ pub async fn mark_restoring<S: KvStore>(
                 // incarnation) for the audit trail.
                 tx.clear(&keys::restore_cursor());
                 let _ = prev;
+                // The incarnation's sequence: above the restored store's and
+                // above every node's (`at_least`, collected by `recovery
+                // begin`), since the restored counter itself went back.
+                let seq = u64_of(tx.get(&keys::incarnation_seq()).await?)
+                    .unwrap_or(0)
+                    .max(*at_least)
+                    + 1;
+                tx.set(&keys::incarnation_seq(), &seq.to_le_bytes());
                 write(tx, &keys::cluster_state(), &rec)?;
                 Ok(rec)
             })

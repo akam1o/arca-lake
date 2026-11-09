@@ -3066,7 +3066,42 @@ async fn run_admin_recovery<S: arca_lake_metadata::KvStore + 'static>(
                 }
                 Err(e) => return fail(format!("recovery begin refused: {e}")),
             }
-            match compat::mark_restoring(meta.as_ref(), from, backup_point_ms, "admin", now).await {
+            // The new incarnation's sequence goes above every node's (the
+            // restored counter went back with the restore; R-92): nodes
+            // order incarnations by it, never by a clock.
+            let at_least = match admin_node_clients(&rpc) {
+                Ok(clients) => match arca_lake_controller::delete_fence::max_incarnation_seq(
+                    meta.as_ref(),
+                    &clients,
+                )
+                .await
+                {
+                    Ok((seq, silent)) => {
+                        let missing: Vec<u64> = silent
+                            .into_iter()
+                            .filter(|id| !absent_node.contains(id))
+                            .collect();
+                        if !missing.is_empty() {
+                            return fail(format!(
+                                "recovery begin refused: nodes {missing:?} did not report their incarnation sequence; make them reachable or declare them --absent-node"
+                            ));
+                        }
+                        seq
+                    }
+                    Err(e) => return fail(format!("recovery begin refused: {e}")),
+                },
+                Err(e) => return fail(e),
+            };
+            match compat::mark_restoring_above(
+                meta.as_ref(),
+                from,
+                backup_point_ms,
+                "admin",
+                now,
+                at_least,
+            )
+            .await
+            {
                 Ok(s) => {
                     println!(
                         "cluster Restoring, incarnation {} (restore point {}): start the controllers; writes after the backup point are lost (RPO) and objects whose shards are gone are reported, not recovered",

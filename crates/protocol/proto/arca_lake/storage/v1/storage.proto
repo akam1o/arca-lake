@@ -275,6 +275,10 @@ message HealthRequest {
   // token the node reports in `delete_fence_unknown_token`, so that a
   // release sent before the loss cannot lift it.
   uint64 delete_fence_release_token = 8;
+  // Sequence of `incarnation` (Phase 3.10, R-92; 0 = not carried): a node
+  // that holds a sequence adopts only an incarnation of a higher one, and
+  // never orders incarnations by `incarnation_changed_ms` again.
+  uint64 incarnation_seq = 9;
 }
 
 message GroupEpoch {
@@ -335,6 +339,8 @@ message HealthResponse {
   // 3.10): 0 = deletes refused until the leader pushes the fence again
   // (after a start, a partition or a lapse of the leader's pushes).
   uint64 delete_fence_lease_ms = 32;
+  // Sequence of the incarnation the node adopted (0 = none known).
+  uint64 incarnation_seq = 33;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").

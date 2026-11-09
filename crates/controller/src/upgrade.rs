@@ -162,9 +162,11 @@ pub async fn upgrade_pass<S: KvStore>(
             // reachable node is already the new format).
             let v = compat::raise_version(meta, VersionKey::FormatWrite, target.format).await?;
             let state = compat::cluster_state(meta).await?;
+            let seq = compat::gate(meta).await?.incarnation_seq;
             for n in cluster::list_nodes(meta).await? {
                 let req = arca_lake_protocol::storage::v1::HealthRequest {
                     format_write: v,
+                    incarnation_seq: seq,
                     incarnation: state
                         .as_ref()
                         .map(|s| bytes::Bytes::copy_from_slice(&s.incarnation))

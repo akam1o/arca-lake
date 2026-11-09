@@ -1003,6 +1003,7 @@ async fn health_pass<S: KvStore>(
             .map(|c| bytes::Bytes::copy_from_slice(&c.incarnation))
             .unwrap_or_default(),
         incarnation_changed_ms: gate.cluster.as_ref().map_or(0, |c| c.changed_ms),
+        incarnation_seq: gate.incarnation_seq,
         delete_fence_generation: fence.record.generation,
         delete_fence_open: fence.record.open,
         // A recorded hold reaches nodes that missed the operator's push;

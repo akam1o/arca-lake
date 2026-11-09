@@ -348,7 +348,11 @@ async fn model_recover(c: &TestCluster) -> [u8; 16] {
     .await
     .unwrap();
     assert_eq!(closed.not_acknowledged(), Vec::<u64>::new());
-    let marked = compat::mark_restoring(c.meta.as_ref(), None, None, "model", now_ms())
+    let (seq, _) =
+        arca_lake_controller::delete_fence::max_incarnation_seq(c.meta.as_ref(), &c.clients)
+            .await
+            .unwrap();
+    let marked = compat::mark_restoring_above(c.meta.as_ref(), None, None, "model", now_ms(), seq)
         .await
         .unwrap();
     let admin = GuardedKv::new(

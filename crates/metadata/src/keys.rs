@@ -636,6 +636,13 @@ pub fn rebalance() -> Key {
     pack(&(ROOT, "rebalance"))
 }
 
+/// Sequence of the current cluster incarnation (Phase 3.10, R-92): grows
+/// with every incarnation, never compared with a clock.
+#[must_use]
+pub fn incarnation_seq() -> Key {
+    pack(&(ROOT, "incarnation_seq"))
+}
+
 /// Which controller process opened the delete fence's generation (Phase
 /// 3.10).
 #[must_use]

@@ -188,3 +188,27 @@ pub async fn release_and_push<S: KvStore>(
     }
     Ok((record, held))
 }
+
+/// The highest incarnation sequence any registered node reports (Phase
+/// 3.10, R-92), and the nodes that did not answer: `recovery begin` mints
+/// the new incarnation above it, since the restored store's own counter
+/// went back with the restore.
+///
+/// # Errors
+///
+/// Metadata errors.
+pub async fn max_incarnation_seq<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+) -> Result<(u64, Vec<u64>), ControlError> {
+    let mut max = 0;
+    let mut silent = Vec::new();
+    for n in cluster::list_nodes(meta).await? {
+        clients.note_node_id(&n.address, n.id);
+        match clients.health(&n.address).await {
+            Ok(h) => max = max.max(h.incarnation_seq),
+            Err(_) => silent.push(n.id),
+        }
+    }
+    Ok((max, silent))
+}

@@ -1161,7 +1161,7 @@ impl StorageNode for StorageNodeService {
                 continue;
             }
             if let Ok(inc) = <[u8; 16]>::try_from(req.incarnation.as_ref())
-                && c.adopt_incarnation(inc, req.incarnation_changed_ms)
+                && c.adopt_incarnation_seq(inc, req.incarnation_changed_ms, req.incarnation_seq)
                     .map_err(|e| tonic::Status::internal(e.to_string()))?
             {
                 tracing::info!(
@@ -1202,12 +1202,13 @@ impl StorageNode for StorageNodeService {
         let (fence_generation, fence_open) = self.delete_fence();
         // Read once, before the response is built (a second lock of the
         // facts inside one expression would wait on the first).
-        let (unknown_token, lease_ms) = {
+        let (unknown_token, lease_ms, incarnation_seq_held) = {
             let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
             (
                 c.unknown_token,
                 u64::try_from(c.lease_left(std::time::Instant::now()).as_millis())
                     .unwrap_or(u64::MAX),
+                c.incarnation_seq,
             )
         };
         let (incarnation, group_epochs) = {
@@ -1260,6 +1261,7 @@ impl StorageNode for StorageNodeService {
             delete_fence_hold: self.delete_fence_held(),
             delete_fence_unknown_token: unknown_token,
             delete_fence_lease_ms: lease_ms,
+            incarnation_seq: incarnation_seq_held,
             devices: vec![self.device_capacity_with(&stats)],
         }))
     }

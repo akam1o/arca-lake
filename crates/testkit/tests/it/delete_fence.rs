@@ -143,6 +143,12 @@ async fn restore<S: KvStore>(meta: &S, snap: &[(Vec<u8>, Vec<u8>)]) {
 
 /// The recovery procedure after the restore: mark, verify, finalize.
 async fn recover(c: &TestCluster) -> [u8; 16] {
+    recover_at(c, now_ms()).await
+}
+
+/// [`recover`] with the restore marked at `marked_ms` (a clock that went
+/// back, Phase 3.10).
+async fn recover_at(c: &TestCluster, marked_ms: u64) -> [u8; 16] {
     // `recovery begin`: close everywhere (with the hold), then mark.
     let closed = close_and_push(
         c.meta.as_ref(),
@@ -154,7 +160,13 @@ async fn recover(c: &TestCluster) -> [u8; 16] {
     .await
     .unwrap();
     assert_eq!(closed.not_acknowledged(), Vec::<u64>::new());
-    let marked = compat::mark_restoring(c.meta.as_ref(), None, None, "admin", now_ms())
+    // Above every node's incarnation sequence, as `recovery begin` does.
+    let (seq, silent) =
+        arca_lake_controller::delete_fence::max_incarnation_seq(c.meta.as_ref(), &c.clients)
+            .await
+            .unwrap();
+    assert_eq!(silent, Vec::<u64>::new());
+    let marked = compat::mark_restoring_above(c.meta.as_ref(), None, None, "admin", marked_ms, seq)
         .await
         .unwrap();
     c.clients.set_incarnation(Some(marked.incarnation));
@@ -795,5 +807,59 @@ async fn a_restore_with_every_procedural_safeguard_skipped_loses_nothing() {
     s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
     c.gc(now_ms() + 3_600_000, 0).await;
     assert!(c.total_shards().await < shards, "GC resumed");
+    c.shutdown().await;
+}
+
+/// R-92 (Phase 3.10): two restores, the clock that marks the second one an
+/// hour behind the first. Nodes adopt the second restore's incarnation
+/// (its sequence is above every node's, collected by `recovery begin`),
+/// and a controller of the first one, whose stamp is the later, cannot
+/// push its incarnation back; its deletes are refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clock_going_back_between_restores_does_not_reorder_incarnations() {
+    let mut c = cluster().await;
+    let kept = put(&c, "kept", 12).await;
+    let first_backup = snapshot(c.meta.as_ref()).await;
+    restore(c.meta.as_ref(), &first_backup).await;
+    let i1 = recover(&c).await;
+    c.restart_backend().await.unwrap();
+    let after_first = compat::cluster_state(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap();
+    let first = frozen_controller(&c);
+    // The second restore goes back to the first backup, marked by a clock
+    // an hour behind.
+    restore(c.meta.as_ref(), &first_backup).await;
+    let i2 = recover_at(&c, now_ms() - 3_600_000).await;
+    assert_ne!(i1, i2);
+    let s2 = compat::gate(c.meta.as_ref()).await.unwrap().incarnation_seq;
+    for n in &c.nodes {
+        let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+        assert_eq!(h.incarnation.as_ref(), &i2, "node kept the first restore's");
+        assert_eq!(h.incarnation_seq, s2);
+    }
+    // The first restore's controller pushes its incarnation, stamped later.
+    for n in &c.nodes {
+        c.clients
+            .health_with(
+                &n.addr.to_string(),
+                arca_lake_protocol::storage::v1::HealthRequest {
+                    incarnation: Bytes::copy_from_slice(&i1),
+                    incarnation_changed_ms: after_first.changed_ms + 7_200_000,
+                    incarnation_seq: s2 - 1,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+        assert_eq!(h.incarnation.as_ref(), &i2);
+    }
+    let deletes = decided_deletes(&c, "kept").await;
+    let d = deliver(&first, &deletes).await;
+    assert_eq!(d.applied, 0, "{d:?}");
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
     c.shutdown().await;
 }
