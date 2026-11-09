@@ -23,6 +23,7 @@ mod cache_fdb;
 mod cache_tokens;
 mod capacity;
 mod capacity_bench;
+mod capacity_failover;
 mod commit_timeouts;
 mod controller;
 mod delete_fence;

@@ -227,7 +227,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
-          cargo test -p arca-lake-testkit --features fdb --test it -- --nocapture --test-threads=1 e2e_fdb:: faults_fdb:: cache_fdb:: cache_ec_fdb:: rebalance_fdb:: multipart_backpressure::multipart_under_backpressure_on_foundationdb
+          cargo test -p arca-lake-testkit --features fdb --test it -- --nocapture --test-threads=1 e2e_fdb:: faults_fdb:: cache_fdb:: cache_ec_fdb:: rebalance_fdb:: multipart_backpressure::multipart_under_backpressure_on_foundationdb system_model::random_operation_sequences_agree_with_the_model_on_foundationdb
       - name: mixed-version rolling upgrade (two binaries, RFC-014 §5.7)
         env:
           ARCA_FDB_TESTS: "1"

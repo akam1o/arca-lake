@@ -25,11 +25,13 @@ use std::time::Instant;
 use arca_lake_controller::integrity::{
     RepairWorkerOptions, ScrubOptions, coders, repair_pass, scrub_group_now,
 };
+use arca_lake_metadata::KvStore;
 use arca_lake_metadata::ops::compat;
 use arca_lake_metadata::records::ClusterPhase;
 use arca_lake_metadata::records::GroupRecord;
 use arca_lake_protocol::client::{NodeClients, ShardRef};
 use arca_lake_testkit::s3::{self, PutOptions, request};
+use arca_lake_testkit::suite::Starter;
 use arca_lake_testkit::{ClusterOptions, TestCluster, now_ms, random_bytes};
 use arca_lake_tiering::durable::Coders;
 use arca_lake_tiering::migrate::{MigrateFault, migrate_chunk};
@@ -123,7 +125,12 @@ fn etag(e: Option<&ETag>) -> String {
     }
 }
 
-async fn multipart(c: &TestCluster, key: &str, parts: &[Bytes], complete: bool) {
+async fn multipart<S: KvStore + 'static>(
+    c: &TestCluster<S>,
+    key: &str,
+    parts: &[Bytes],
+    complete: bool,
+) {
     let id = c
         .backend
         .create_multipart_upload(request(CreateMultipartUploadInput {
@@ -194,7 +201,7 @@ fn scrub_opts() -> ScrubOptions {
     }
 }
 
-async fn ec_groups(c: &TestCluster) -> Vec<GroupRecord> {
+async fn ec_groups<S: KvStore + 'static>(c: &TestCluster<S>) -> Vec<GroupRecord> {
     let mut g: Vec<GroupRecord> = c
         .groups()
         .await
@@ -207,8 +214,8 @@ async fn ec_groups(c: &TestCluster) -> Vec<GroupRecord> {
 
 /// Every chunk of the current version of `key` (a multipart object's are
 /// in its parts' generations): `(generation, index, record)`.
-async fn object_chunks(
-    c: &TestCluster,
+async fn object_chunks<S: KvStore + 'static>(
+    c: &TestCluster<S>,
     key: &str,
 ) -> Vec<(
     arca_lake_metadata::records::GenId,
@@ -242,7 +249,7 @@ type Decided = (String, ShardRef, u64);
 type Snapshot = (Vec<(Vec<u8>, Vec<u8>)>, BTreeMap<String, Bytes>);
 
 /// A controller as it was when it decided (its own incarnation and fence).
-fn frozen(c: &TestCluster) -> NodeClients {
+fn frozen<S: KvStore + 'static>(c: &TestCluster<S>) -> NodeClients {
     let f = NodeClients::new(std::time::Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
     f.set_incarnation(c.clients.incarnation());
     f.set_delete_fence(c.clients.delete_fence());
@@ -250,7 +257,10 @@ fn frozen(c: &TestCluster) -> NodeClients {
 }
 
 /// The shard deletes GC would send for `key`'s current version.
-async fn decided_deletes(c: &TestCluster, key: &str) -> Vec<(String, ShardRef, u64)> {
+async fn decided_deletes<S: KvStore + 'static>(
+    c: &TestCluster<S>,
+    key: &str,
+) -> Vec<(String, ShardRef, u64)> {
     let groups = c.groups().await;
     let mut out = Vec::new();
     for (_, _, rec) in object_chunks(c, key).await {
@@ -275,7 +285,7 @@ async fn decided_deletes(c: &TestCluster, key: &str) -> Vec<(String, ShardRef, u
 }
 
 /// A leader's health pass, the fence part (sync for term `token`, push).
-async fn leader_pass(c: &TestCluster, token: u64) {
+async fn leader_pass<S: KvStore + 'static>(c: &TestCluster<S>, token: u64) {
     let inc = compat::cluster_state(c.meta.as_ref())
         .await
         .unwrap()
@@ -335,7 +345,7 @@ async fn metadata_restore<S: arca_lake_metadata::KvStore>(meta: &S, snap: &[(Vec
 
 /// After a restore: `recovery begin` (close with the hold, mark), the
 /// verification passes, finalize. Returns the new incarnation.
-async fn model_recover(c: &TestCluster) -> [u8; 16] {
+async fn model_recover<S: KvStore + 'static>(c: &TestCluster<S>) -> [u8; 16] {
     use arca_lake_controller::recovery::{RecoveryOptions, recovery_pass};
     use arca_lake_metadata::guard::{GuardedKv, OpClass};
     let closed = arca_lake_controller::delete_fence::close_and_push(
@@ -393,7 +403,12 @@ async fn model_recover(c: &TestCluster) -> [u8; 16] {
 }
 
 /// Every key reads what the model says.
-async fn check(c: &TestCluster, model: &BTreeMap<String, Bytes>, seed: u64, step: usize) {
+async fn check<S: KvStore + 'static>(
+    c: &TestCluster<S>,
+    model: &BTreeMap<String, Bytes>,
+    seed: u64,
+    step: usize,
+) {
     for i in 0..KEYS {
         let k = format!("k{i}");
         match (model.get(&k), s3::get(&c.backend, BUCKET, &k).await) {
@@ -410,9 +425,13 @@ async fn check(c: &TestCluster, model: &BTreeMap<String, Bytes>, seed: u64, step
     }
 }
 
-async fn run(seed: u64, steps: usize) -> BTreeMap<String, usize> {
+async fn run<S: KvStore + 'static>(
+    start: impl Starter<S>,
+    seed: u64,
+    steps: usize,
+) -> BTreeMap<String, usize> {
     let mut rng = Rng(seed | 1);
-    let mut c = TestCluster::start(ClusterOptions {
+    let mut c = start(ClusterOptions {
         groups: 2,
         multipart_min_part_bytes: CHUNK / 4,
         cache_nodes: 2,
@@ -822,40 +841,89 @@ fn env(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn random_operation_sequences_agree_with_the_model() {
-    let steps = env("ARCA_MODEL_STEPS", 80) as usize;
+/// Run the model for the seeds the environment selects (`ARCA_MODEL_SEED`,
+/// or `runs` seeds from the clock), at most until `budget` has passed
+/// (no new seed is started after it); a failing seed is recorded in
+/// `$CARGO_TARGET_TMPDIR/system-model-failures-<backend>.txt`.
+async fn drive<S, St>(
+    backend: &str,
+    starter: impl Fn() -> St + Send + Copy + 'static,
+    runs: u64,
+    steps: usize,
+    budget: std::time::Duration,
+) where
+    S: KvStore + 'static,
+    St: Starter<S> + 'static,
+{
     let seeds: Vec<u64> = if let Ok(s) = std::env::var("ARCA_MODEL_SEED") {
         vec![s.parse().expect("ARCA_MODEL_SEED")]
     } else {
         let base = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_nanos() as u64);
-        (0..env("ARCA_MODEL_RUNS", 8))
-            .map(|i| base.wrapping_add(i * 7919))
-            .collect()
+        (0..runs).map(|i| base.wrapping_add(i * 7919)).collect()
     };
+    let begun = Instant::now();
     for seed in seeds {
-        let started = Instant::now();
-        match tokio::spawn(run(seed, steps)).await {
+        if begun.elapsed() > budget {
+            eprintln!("system model ({backend}): time budget spent, remaining seeds not run");
+            break;
+        }
+        let clock = Instant::now();
+        match tokio::spawn(async move { run(starter(), seed, steps).await }).await {
             Ok(counts) => eprintln!(
-                "system model seed {seed}: {steps} steps in {:?}: {counts:?}",
-                started.elapsed()
+                "system model ({backend}) seed {seed}: {steps} steps in {:?}: {counts:?}",
+                clock.elapsed()
             ),
             Err(e) => {
                 let line = format!("{seed} steps {steps}\n");
                 let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
-                    .join("system-model-failures.txt");
+                    .join(format!("system-model-failures-{backend}.txt"));
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&path)
                     .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
                 panic!(
-                    "system model failed for seed {seed} (replay: ARCA_MODEL_SEED={seed}; recorded in {}): {e:?}",
+                    "system model ({backend}) failed for seed {seed} (replay: ARCA_MODEL_SEED={seed}; recorded in {}): {e:?}",
                     path.display()
                 );
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn random_operation_sequences_agree_with_the_model() {
+    drive(
+        "mem",
+        arca_lake_testkit::mem_starter,
+        env("ARCA_MODEL_RUNS", 8),
+        env("ARCA_MODEL_STEPS", 80) as usize,
+        std::time::Duration::MAX,
+    )
+    .await;
+}
+
+/// The same model on FoundationDB (Phase 3.10): every metadata
+/// transaction of the data path, the background processes and the
+/// restore goes through a real cluster. Bounded for CI:
+/// `ARCA_MODEL_FDB_RUNS` (default 3) seeds of `ARCA_MODEL_FDB_STEPS`
+/// (default 40) steps, no new seed after `ARCA_MODEL_FDB_SECS` (default
+/// 600). Every operation of the in-memory model runs here too.
+#[cfg(feature = "fdb")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn random_operation_sequences_agree_with_the_model_on_foundationdb() {
+    if arca_lake_testkit::fdb::starter().is_none() {
+        eprintln!("ARCA_FDB_TESTS / ARCA_FDB_CLUSTER_FILE not set; skipping");
+        return;
+    }
+    drive(
+        "fdb",
+        || arca_lake_testkit::fdb::starter().expect("FoundationDB starter"),
+        env("ARCA_MODEL_FDB_RUNS", 3),
+        env("ARCA_MODEL_FDB_STEPS", 40) as usize,
+        std::time::Duration::from_secs(env("ARCA_MODEL_FDB_SECS", 600)),
+    )
+    .await;
 }

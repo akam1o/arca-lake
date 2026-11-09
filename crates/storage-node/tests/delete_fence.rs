@@ -403,7 +403,7 @@ async fn an_older_protocol_delete_is_refused() {
         );
     }
     raw.delete_shard(pb::DeleteShardRequest {
-        protocol_version: pb::FENCED_DELETE_VERSION,
+        protocol_version: pb::REJOIN_FENCE_VERSION,
         key: Some(pb::ShardKey {
             group_id: 1,
             chunk_id: Bytes::from(vec![1u8; 16]),
