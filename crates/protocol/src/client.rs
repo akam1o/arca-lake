@@ -508,6 +508,8 @@ pub struct FencePush {
     /// With `release`: the node's `delete_fence_unknown_token` (needed
     /// when its facts were lost; 0 otherwise).
     pub release_token: u64,
+    /// With an open generation: who opened it (Phase 3.10; 0 = unknown).
+    pub opener: u64,
 }
 
 impl std::fmt::Debug for NodeClients {
@@ -1629,6 +1631,7 @@ impl NodeClients {
                     delete_fence_hold: how.hold,
                     delete_fence_release: how.release,
                     delete_fence_release_token: how.release_token,
+                    delete_fence_opener: how.opener,
                     incarnation: how
                         .incarnation
                         .map(|i| Bytes::copy_from_slice(&i))

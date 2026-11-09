@@ -7,25 +7,40 @@
 #   bash benchmarks/linux/fdb-suite.sh <out-dir> [test filters...]
 #
 # Environment: FDB_PORT (4700), FDB_DATA (/mnt/arca-fdb/suite-$$),
-#   TEST_THREADS (1).
+#   TEST_THREADS (1), FDB_PROCS (1; 3 runs three processes on ports
+#   FDB_PORT.. in separate zones, configured triple).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 OUT="${1:?output directory}"; shift
 FILTERS=("${@:-e2e_fdb:: faults_fdb:: cache_fdb:: cache_ec_fdb:: rebalance_fdb::}")
 FDB_PORT="${FDB_PORT:-4700}"
 FDB_DATA="${FDB_DATA:-/mnt/arca-fdb/suite-$$}"
-mkdir -p "$OUT" "$FDB_DATA/data" "$FDB_DATA/log"
+FDB_PROCS="${FDB_PROCS:-1}"
+mkdir -p "$OUT" "$FDB_DATA"
 CF="$FDB_DATA/fdb.cluster"
-echo "arca:suite@127.0.0.1:$FDB_PORT" > "$CF"
-fdbserver -p "127.0.0.1:$FDB_PORT" -C "$CF" -d "$FDB_DATA/data" -L "$FDB_DATA/log" > "$OUT/fdbserver.out" 2>&1 &
-FDB_PID=$!
+coordinators=""
+for i in $(seq 0 $((FDB_PROCS - 1))); do
+  coordinators="$coordinators,127.0.0.1:$((FDB_PORT + i))"
+done
+echo "arca:suite@${coordinators#,}" > "$CF"
+FDB_PIDS=()
+for i in $(seq 0 $((FDB_PROCS - 1))); do
+  mkdir -p "$FDB_DATA/data$i" "$FDB_DATA/log$i"
+  fdbserver -p "127.0.0.1:$((FDB_PORT + i))" -C "$CF" -d "$FDB_DATA/data$i" -L "$FDB_DATA/log$i" \
+    --locality-zoneid "zone$i" --locality-machineid "machine$i" > "$OUT/fdbserver$i.out" 2>&1 &
+  FDB_PIDS+=($!)
+done
 cleanup() {
-  kill "$FDB_PID" 2>/dev/null; wait "$FDB_PID" 2>/dev/null
+  kill "${FDB_PIDS[@]}" 2>/dev/null; wait "${FDB_PIDS[@]}" 2>/dev/null
   rm -rf "$FDB_DATA"
 }
 trap cleanup EXIT
 sleep 2
-fdbcli -C "$CF" --exec 'configure new single ssd' > /dev/null 2>&1
+if [ "$FDB_PROCS" -ge 3 ]; then
+  fdbcli -C "$CF" --exec 'configure new triple ssd' > /dev/null 2>&1
+else
+  fdbcli -C "$CF" --exec 'configure new single ssd' > /dev/null 2>&1
+fi
 for _ in $(seq 1 30); do
   fdbcli -C "$CF" --exec 'status minimal' 2>/dev/null | grep -q 'is available' && break
   sleep 1

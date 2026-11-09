@@ -116,6 +116,7 @@ pub async fn close_and_push<S: KvStore>(
         release: false,
         incarnation: compat::cluster_state(meta).await?.map(|s| s.incarnation),
         release_token: 0,
+        opener: 0,
     };
     let mut nodes = Vec::new();
     for n in cluster::list_nodes(meta).await? {
@@ -158,6 +159,7 @@ pub async fn release_and_push<S: KvStore>(
         release: true,
         incarnation: compat::cluster_state(meta).await?.map(|s| s.incarnation),
         release_token: 0,
+        opener: 0,
     };
     let mut held = Vec::new();
     for n in cluster::list_nodes(meta).await? {

@@ -243,6 +243,29 @@ pub struct LeaderFence {
     /// back (restored without `recovery begin`, or by hand). The fence was
     /// closed with an operator hold.
     pub metadata_behind: bool,
+    /// The record is open and this process opened it (its opener, term
+    /// and incarnation): only then may the leader push it open or delete
+    /// under it. An open record of anyone else (a former leader's, or one
+    /// restored with the metadata) is never pushed open: pushing it would
+    /// renew nodes' rejoin lease on it (Phase 3.10 review).
+    pub ours: bool,
+}
+
+/// The recorded opener of the open generation (Phase 3.10; default when
+/// none is recorded).
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn opener_of<S: KvStore>(store: &S) -> Result<FenceOpener> {
+    transact(store, (), |tx, ()| {
+        Box::pin(async move {
+            Ok(read(tx, &keys::delete_fence_opener())
+                .await?
+                .unwrap_or_default())
+        })
+    })
+    .await
 }
 
 /// The leader's health pass (Phase 3.10): as [`sync_for_term_gated`],
@@ -260,6 +283,7 @@ pub struct LeaderFence {
 /// # Errors
 ///
 /// As [`sync_for_term`].
+#[allow(clippy::too_many_lines)]
 pub async fn sync_leader<S: KvStore>(
     store: &S,
     view: LeaderView,
@@ -278,6 +302,11 @@ pub async fn sync_leader<S: KvStore>(
                 s.state == ClusterPhase::Active && s.incarnation == v.incarnation
             });
             let behind = v.max_node_generation > rec.generation;
+            let ours_now = rec.open
+                && rec.leader_token == v.token
+                && rec.incarnation == v.incarnation
+                && opener.generation == rec.generation
+                && opener.opener == v.opener;
             let next = if behind {
                 Some(DeleteFenceRecord {
                     generation: next_generation(
@@ -294,12 +323,7 @@ pub async fn sync_leader<S: KvStore>(
                     operator_hold: true,
                 })
             } else if active && !rec.operator_hold {
-                let ours = rec.open
-                    && rec.leader_token == v.token
-                    && rec.incarnation == v.incarnation
-                    && opener.generation == rec.generation
-                    && opener.opener == v.opener
-                    && rec.generation >= v.required;
+                let ours = ours_now && rec.generation >= v.required;
                 if ours || !v.may_open {
                     None
                 } else {
@@ -343,12 +367,14 @@ pub async fn sync_leader<S: KvStore>(
                             },
                         )?;
                     }
+                    let ours = n.open;
                     LeaderFence {
                         fence: TermFence {
                             record: n,
                             changed: true,
                         },
                         metadata_behind: behind,
+                        ours,
                     }
                 }
                 None => LeaderFence {
@@ -357,6 +383,7 @@ pub async fn sync_leader<S: KvStore>(
                         changed: false,
                     },
                     metadata_behind: false,
+                    ours: ours_now && active,
                 },
             })
         })

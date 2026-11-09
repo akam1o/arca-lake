@@ -957,3 +957,68 @@ async fn a_finalized_upgrade_is_not_undone_by_a_rollback_or_a_restore() {
     );
     c.shutdown().await;
 }
+
+/// Phase 3.10 review: metadata restored without `recovery begin`, with no
+/// fence change since the backup (the restored record is open, at the
+/// generation the nodes hold). The nodes' rejoin lease on it has lapsed. A
+/// controller started on the restored metadata must not push that
+/// generation open before it has opened one of its own: the push would
+/// renew the lease, and deletes decided before the restore under it would
+/// apply. Delivered in a loop while the controller starts, none applies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restored_open_fence_is_never_renewed_by_a_new_controller() {
+    use arca_lake_controller::process::{ControllerConfig, spawn};
+    let mut c = cluster().await;
+    c.fence_lease = Duration::from_secs(2);
+    for i in 0..c.nodes.len() {
+        c.stop_node(i).await;
+        c.start_node(i).await;
+    }
+    let kept = put(&c, "kept", 14).await;
+    let g = leader_pass(&c, 51).await.generation;
+    let backup = snapshot(c.meta.as_ref()).await;
+    let old = frozen_controller(&c);
+    let deletes = decided_deletes(&c, "kept").await;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    restore(c.meta.as_ref(), &backup).await;
+    // The former leader is gone: the lease lapses.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(deliver(&old, &deletes).await.applied, 0, "lease still live");
+    let mut cfg = ControllerConfig::new("ctl-restored");
+    cfg.lease = Duration::from_secs(2);
+    cfg.health_interval = Duration::from_millis(500);
+    cfg.gc_interval = Duration::from_secs(3600);
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.failure_domain = "host".into();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pump = {
+        let stop = Arc::clone(&stop);
+        let deletes = deletes.clone();
+        tokio::spawn(async move {
+            let mut applied = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                applied += deliver(&old, &deletes).await.applied;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            applied
+        })
+    };
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    // Until the controller has its own generation (or held the fence).
+    let t = Instant::now();
+    loop {
+        let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+        if rec.generation > g {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "{rec:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(pump.await.unwrap(), 0, "a pre-restore delete applied");
+    ctl.shutdown().await;
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    c.shutdown().await;
+}

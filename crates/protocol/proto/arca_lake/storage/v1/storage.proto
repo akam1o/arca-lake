@@ -284,6 +284,13 @@ message HealthRequest {
   // restored metadata back up to it (a restore must not reopen a downgrade
   // that `upgrade finalize` closed).
   uint64 schema_floor = 10;
+  // Who opened `delete_fence_generation` (Phase 3.10 review, with
+  // `delete_fence_open`): a value the opening controller process drew at
+  // its start (0 = not carried, an earlier release's). A node holding that
+  // generation open from another opener takes the push as a conflict and
+  // closes it: two clusters (one restored) that opened the same generation
+  // number never renew each other's lease.
+  uint64 delete_fence_opener = 11;
 }
 
 message GroupEpoch {

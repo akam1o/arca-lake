@@ -1134,10 +1134,16 @@ impl StorageNode for StorageNodeService {
         // caller of a later one the node adopted lifts it. A caller of an
         // older incarnation (a controller started on a backup from before
         // an earlier restore) can neither set nor lift a hold.
+        // The same open generation from another opener: a close of it.
         let fence_args = |c: &crate::cluster::ClusterFacts| {
             (
                 req.delete_fence_generation,
-                req.delete_fence_open,
+                req.delete_fence_open
+                    && !c.opener_conflict(
+                        req.delete_fence_generation,
+                        true,
+                        req.delete_fence_opener,
+                    ),
                 req.delete_fence_hold
                     .then(|| c.incarnation.unwrap_or([0; 16])),
                 req.delete_fence_release,
@@ -1180,9 +1186,23 @@ impl StorageNode for StorageNodeService {
                 );
             }
             let (generation, open, hold, release, from, token) = fence_args(&c);
+            let conflict = c.opener_conflict(
+                req.delete_fence_generation,
+                req.delete_fence_open,
+                req.delete_fence_opener,
+            );
+            if conflict {
+                tracing::warn!(
+                    generation = req.delete_fence_generation,
+                    "delete fence generation pushed open by another opener than the one that opened it: closed"
+                );
+            }
             if c.adopt_fence_held(generation, open, hold, release, from, token)
                 .map_err(|e| tonic::Status::internal(e.to_string()))?
             {
+                if open {
+                    c.note_fence_opener(req.delete_fence_opener);
+                }
                 tracing::info!(
                     generation = c.fence_generation,
                     open = c.fence_open,

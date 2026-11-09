@@ -500,6 +500,13 @@ impl<S: KvStore + 'static> TestCluster<S> {
             .ok()
             .flatten()
             .map(|s| s.incarnation);
+        // As its opener: the same open generation from another opener is
+        // a conflict the node closes (Phase 3.10).
+        let opener = arca_lake_metadata::ops::delete_fence::opener_of(self.meta.as_ref())
+            .await
+            .ok()
+            .filter(|o| rec.open && o.generation == rec.generation)
+            .map_or(0, |o| o.opener);
         for n in self.nodes.iter().filter(|n| n.handle.is_some()) {
             let _ = self
                 .clients
@@ -512,6 +519,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                         release: false,
                         incarnation,
                         release_token: 0,
+                        opener,
                     },
                 )
                 .await;

@@ -216,7 +216,13 @@ impl Run {
         )
         .await;
         if self.target >= 3 {
-            assert!(refused(&r), "{what}: new data admitted: {r:?}");
+            assert!(
+                refused(&r),
+                "{what}: new data admitted: {r:?}; published {:?}, gateway {:?}, free {:.4}",
+                published(&self.c).await,
+                self.c.backend.cluster().admission.snapshot(),
+                free_fraction(&self.c)
+            );
         } else if r.is_ok() {
             // Admitted (throttled admits at its rate): it reads back, and
             // goes again so that the state stays where it was.
@@ -368,19 +374,40 @@ async fn scenario(fault: Fault) {
                 run.c.start_node(2).await;
             }
             Fault::StaleRecord => {
-                // An older record of this incarnation saying normal.
-                let mut old = record(&run.c).await;
-                old.computed_ms = at.saturating_sub(60_000);
-                old.generation = 0;
-                for t in &mut old.tiers {
-                    t.state = 0;
-                    t.excluded_groups.clear();
-                }
+                // Older records of this incarnation saying normal: one of
+                // the former term, and (when there is one) an earlier
+                // publication of this term. Published records never share
+                // a (term, generation).
+                let cur = record(&run.c).await;
+                // The gateway holds the current one (stale means older
+                // than what it holds).
                 run.c
                     .backend
                     .cluster()
                     .admission
-                    .observe(Some(old), Instant::now());
+                    .observe(Some(cur.clone()), Instant::now());
+                let normal = |mut r: AdmissionRecord| {
+                    r.computed_ms = at.saturating_sub(60_000);
+                    for t in &mut r.tiers {
+                        t.state = 0;
+                        t.excluded_groups.clear();
+                    }
+                    r
+                };
+                let mut former = normal(cur.clone());
+                former.leader_token = cur.leader_token.saturating_sub(1);
+                let mut earlier = normal(cur.clone());
+                earlier.generation = cur.generation.saturating_sub(1);
+                for old in [Some(former), (cur.generation > 0).then_some(earlier)]
+                    .into_iter()
+                    .flatten()
+                {
+                    run.c
+                        .backend
+                        .cluster()
+                        .admission
+                        .observe(Some(old), Instant::now());
+                }
             }
             Fault::Partition => {
                 run.c.stop_node(2).await;

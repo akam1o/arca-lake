@@ -456,6 +456,7 @@ async fn push_cluster_facts<S: KvStore>(
         schema_floor: gate.schema.unwrap_or(0),
         delete_fence_generation: if fence.open { 0 } else { fence.generation },
         delete_fence_open: false,
+        delete_fence_opener: 0,
         // Never the hold: recovery runs in the restored incarnation, and a
         // hold tied to it on a node that missed `recovery begin`'s close
         // could not be lifted after finalize. That node refuses this

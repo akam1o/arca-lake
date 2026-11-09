@@ -967,7 +967,7 @@ async fn health_pass<S: KvStore>(
                     .delete_fence_metadata_behind_total
                     .fetch_add(1, Ordering::Relaxed);
             }
-            Some(f.fence)
+            Some((f.fence, f.ours))
         }
         Err(e) if matches!(e, arca_lake_metadata::MetaError::InvalidArgument(_)) => {
             warn!(error = %e, "delete fence not advanced: deletes stop in this process");
@@ -976,10 +976,13 @@ async fn health_pass<S: KvStore>(
         Err(e) => return Err(e.into()),
     };
     // Without a fence: generation 0 (no fence change pushed), none held.
-    let fence = fence.unwrap_or(arca_lake_metadata::ops::delete_fence::TermFence {
-        record: arca_lake_metadata::ops::delete_fence::DeleteFenceRecord::default(),
-        changed: false,
-    });
+    let (fence, ours) = fence.unwrap_or((
+        arca_lake_metadata::ops::delete_fence::TermFence {
+            record: arca_lake_metadata::ops::delete_fence::DeleteFenceRecord::default(),
+            changed: false,
+        },
+        false,
+    ));
     if fence.changed {
         info!(
             generation = fence.record.generation,
@@ -988,12 +991,18 @@ async fn health_pass<S: KvStore>(
             "delete fence changed"
         );
     }
-    // Only a generation of this term (a former leader's, kept while the
-    // first round of reports is collected, is not this process's).
-    clients.set_delete_fence(
-        (fence.record.open && fence.record.leader_token == token)
-            .then_some(fence.record.generation),
-    );
+    // Only a generation this process opened (a former leader's, kept
+    // while the first round of reports is collected, or one restored with
+    // the metadata under a repeated term number, is not).
+    clients.set_delete_fence(ours.then_some(fence.record.generation));
+    // An open generation that is not ours is not pushed (it would renew
+    // the nodes' rejoin lease on it): no fence change goes out, and the
+    // nodes' leases on it lapse (Phase 3.10 review).
+    let (push_generation, push_open) = if fence.record.open && !ours {
+        (0, false)
+    } else {
+        (fence.record.generation, fence.record.open)
+    };
     metrics.delete_fence.set_record(&fence.record);
     let req = arca_lake_protocol::storage::v1::HealthRequest {
         format_write: gate.format_write.unwrap_or(0),
@@ -1005,8 +1014,13 @@ async fn health_pass<S: KvStore>(
         incarnation_changed_ms: gate.cluster.as_ref().map_or(0, |c| c.changed_ms),
         incarnation_seq: gate.incarnation_seq,
         schema_floor: gate.schema.unwrap_or(0),
-        delete_fence_generation: fence.record.generation,
-        delete_fence_open: fence.record.open,
+        delete_fence_generation: push_generation,
+        delete_fence_open: push_open,
+        delete_fence_opener: if push_open {
+            metrics.delete_fence.opener()
+        } else {
+            0
+        },
         // A recorded hold reaches nodes that missed the operator's push;
         // a leader never releases one (only `admin delete-fence release`,
         // or a new incarnation, does): one started on restored metadata

@@ -490,6 +490,65 @@ async fn after_the_finalize_only_releases_with_the_rejoin_fence_delete() {
     n.shutdown().await;
 }
 
+/// Phase 3.10 review: two clusters (one restored from a backup of the
+/// other) opened the same generation number. A push of that open
+/// generation by another opener than the one that opened it on the node
+/// renews nothing: the node closes it, and deletes under it are refused
+/// (the first opener's included); a higher generation opens again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_generation_from_another_opener_closes_it() {
+    use arca_lake_protocol::client::FencePush;
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (n, addr, c) = node_with_shard(dir.path()).await;
+    let push = async |g: u64, open: bool, opener: u64| {
+        c.push_delete_fence_with(
+            &addr,
+            g,
+            open,
+            FencePush {
+                opener,
+                ..FencePush::default()
+            },
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(push(3, true, 11).await, (3, true, false));
+    c.set_delete_fence(Some(3));
+    c.delete_shard(&addr, shard(1), 0).await.unwrap();
+    // The same opener renews; another closes.
+    assert_eq!(push(3, true, 11).await, (3, true, false));
+    assert_eq!(push(3, true, 22).await, (3, false, false));
+    let e = c.delete_shard(&addr, shard(2), 0).await.unwrap_err();
+    assert!(NodeClients::is_fenced(&e), "{e}");
+    // Closed for good, also for the first opener.
+    assert_eq!(push(3, true, 11).await, (3, false, false));
+    let e = c.delete_shard(&addr, shard(2), 0).await.unwrap_err();
+    assert!(NodeClients::is_fenced(&e), "{e}");
+    // The opener survives a restart.
+    assert_eq!(push(4, true, 22).await, (4, true, false));
+    n.shutdown().await;
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let addr = n.local_addr.to_string();
+    let r = c
+        .push_delete_fence_with(
+            &addr,
+            4,
+            true,
+            FencePush {
+                opener: 11,
+                ..FencePush::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, (4, false, false), "another opener after a restart");
+    n.shutdown().await;
+}
+
 /// A fence change is acknowledged only after every delete that passed the
 /// old fence has finished its physical delete, also when the caller gave
 /// up on that delete (its RPC cancelled while the store was writing the
@@ -688,6 +747,7 @@ async fn only_a_later_incarnation_or_a_release_lifts_the_hold() {
                     release,
                     incarnation: Some([inc; 16]),
                     release_token: 0,
+                    opener: 0,
                 },
             )
             .await

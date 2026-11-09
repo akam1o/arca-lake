@@ -10,6 +10,13 @@
 //! everything before it; a file of that version that is truncated or
 //! damaged is detected (the fence then fails closed). A file without the
 //! version line is one of an earlier release.
+//!
+//! The high-water marks of Phase 3.10 (the incarnation sequence and the
+//! schema floor) are also kept in `cluster-floors.txt`, which no earlier
+//! release reads or writes: a node rolled back to an earlier release
+//! rewrites `cluster.txt` without the keys it does not know, and the marks
+//! would otherwise be lost when the node is rolled forward again. A start
+//! takes the higher of both files; a damaged floors file fails closed.
 
 use std::fs::File;
 use std::io::Write;
@@ -17,11 +24,15 @@ use std::path::{Path, PathBuf};
 
 const FILE_NAME: &str = "cluster.txt";
 
+/// The high-water marks, in a file earlier releases never touch.
+const FLOORS_FILE: &str = "cluster-floors.txt";
+
 /// Created (and synced) before the first version-2 facts file: with it, a
 /// file without the version line is damaged, not an earlier release's.
 const MARKER: &str = "cluster.v2";
 
-const KNOWN: [&str; 7] = [
+const KNOWN: [&str; 8] = [
+    "delete_fence_opener",
     "schema_floor",
     "incarnation_seq",
     "incarnation",
@@ -43,6 +54,8 @@ pub(crate) struct ClusterFacts {
     pub incarnation_seq: u64,
     /// Highest metadata schema a controller told it (Phase 3.10).
     pub schema_floor: u64,
+    /// Who opened the open generation (Phase 3.10 review; 0 = unknown).
+    pub fence_opener: u64,
     /// Storage format the controller allowed (0 = never told).
     pub format_write: u64,
     /// Delete fence generation adopted (0 = none: no delete is allowed).
@@ -114,6 +127,7 @@ impl ClusterFacts {
             changed_ms: 0,
             incarnation_seq: 0,
             schema_floor: 0,
+            fence_opener: 0,
             format_write: 0,
             fence_generation: 0,
             fence_open: false,
@@ -139,6 +153,27 @@ impl ClusterFacts {
             }
             Err(_) => true,
         };
+        // The marks an earlier release may have dropped from the facts.
+        let floors_damaged = match std::fs::read_to_string(dir.join(FLOORS_FILE)) {
+            Ok(text) => match parse_floors(&text) {
+                Some((seq, schema)) => {
+                    facts.incarnation_seq = facts.incarnation_seq.max(seq);
+                    facts.schema_floor = facts.schema_floor.max(schema);
+                    false
+                }
+                None => true,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => true,
+        };
+        if floors_damaged {
+            // Unknown marks: the strictest schema floor, and the fence
+            // held as for damaged facts.
+            facts.schema_floor = facts
+                .schema_floor
+                .max(arca_lake_protocol::storage::v1::REJOIN_FENCE_SCHEMA);
+        }
+        let damaged = damaged || floors_damaged;
         if damaged {
             tracing::error!(
                 path = %facts.path.display(),
@@ -189,6 +224,10 @@ impl ClusterFacts {
                     self.incarnation = parse_hex16(v);
                     ok &= self.incarnation.is_some();
                 }
+                (Some("delete_fence_opener"), Some(v)) => match v.parse() {
+                    Ok(x) => self.fence_opener = x,
+                    Err(_) => ok = false,
+                },
                 (Some("schema_floor"), Some(v)) => match v.parse() {
                     Ok(x) => self.schema_floor = x,
                     Err(_) => ok = false,
@@ -262,10 +301,15 @@ impl ClusterFacts {
         {
             return Ok(false);
         }
+        let before = (self.incarnation, self.changed_ms, self.incarnation_seq);
         self.incarnation = Some(incarnation);
         self.changed_ms = changed_ms;
         self.incarnation_seq = self.incarnation_seq.max(seq);
-        self.persist()?;
+        if let Err(e) = self.persist() {
+            // Not persisted: not adopted (a retry must persist it).
+            (self.incarnation, self.changed_ms, self.incarnation_seq) = before;
+            return Err(e);
+        }
         Ok(true)
     }
 
@@ -412,6 +456,29 @@ impl ClusterFacts {
         }
     }
 
+    /// A push of the generation held open by another opener than the one
+    /// that opened it (Phase 3.10 review): two clusters, one of them
+    /// restored, opened the same generation number. Taken as a close of
+    /// it, so that neither renews the other's lease.
+    #[must_use]
+    pub(crate) fn opener_conflict(&self, generation: u64, open: bool, opener: u64) -> bool {
+        open && self.fence_open
+            && generation == self.fence_generation
+            && opener != self.fence_opener
+    }
+
+    /// Remember who opened the generation just adopted open. Lost with a
+    /// failed persist, it is unknown (0): a later push from its opener is
+    /// then a conflict and closes it, which fails safe.
+    pub(crate) fn note_fence_opener(&mut self, opener: u64) {
+        if self.fence_open && self.fence_opener != opener {
+            self.fence_opener = opener;
+            if let Err(e) = self.persist() {
+                tracing::warn!(error = %e, "cannot persist the fence opener");
+            }
+        }
+    }
+
     /// Whether the rejoin lease is running at `now`.
     pub(crate) fn lease_live(&self, now: std::time::Instant) -> bool {
         self.open_until.is_some_and(|t| now < t)
@@ -430,12 +497,20 @@ impl ClusterFacts {
     }
 
     /// Remember the metadata schema the cluster runs at (monotonic).
+    /// A floor kept in memory after a failed persist (the stricter value
+    /// holds regardless) is persisted before the next acknowledgement.
     pub(crate) fn adopt_schema_floor(&mut self, schema: u64) -> std::io::Result<bool> {
         if schema <= self.schema_floor {
+            if self.unpersisted {
+                self.persist()?;
+            }
             return Ok(false);
         }
         self.schema_floor = schema;
-        self.persist()?;
+        if let Err(e) = self.persist() {
+            self.unpersisted = true;
+            return Err(e);
+        }
         Ok(true)
     }
 
@@ -444,8 +519,12 @@ impl ClusterFacts {
         if format_write == 0 || format_write <= self.format_write {
             return Ok(false);
         }
+        let before = self.format_write;
         self.format_write = format_write;
-        self.persist()?;
+        if let Err(e) = self.persist() {
+            self.format_write = before;
+            return Err(e);
+        }
         Ok(true)
     }
 
@@ -459,6 +538,26 @@ impl ClusterFacts {
                 File::open(dir)?.sync_all()?;
             }
         }
+        if (self.incarnation_seq > 0 || self.schema_floor > 0)
+            && let Some(dir) = self.path.parent()
+        {
+            let floors = dir.join(FLOORS_FILE);
+            let body = format!(
+                "incarnation_seq {}\nschema_floor {}\n",
+                self.incarnation_seq, self.schema_floor
+            );
+            let tmp = floors.with_extension("tmp");
+            {
+                let mut f = File::create(&tmp)?;
+                write!(
+                    f,
+                    "floors 1\n{body}crc {:08x}\n",
+                    arca_lake_storage::format::crc32c(body.as_bytes())
+                )?;
+                f.sync_all()?;
+            }
+            std::fs::rename(&tmp, &floors)?;
+        }
         let tmp = self.path.with_extension("tmp");
         let mut body = String::new();
         if let Some(i) = self.incarnation {
@@ -470,6 +569,9 @@ impl ClusterFacts {
         }
         if self.schema_floor > 0 {
             let _ = writeln!(body, "schema_floor {}", self.schema_floor);
+        }
+        if self.fence_opener > 0 {
+            let _ = writeln!(body, "delete_fence_opener {}", self.fence_opener);
         }
         let _ = writeln!(body, "format_write {}", self.format_write);
         let _ = writeln!(
@@ -528,6 +630,31 @@ fn fresh_token() -> u64 {
     );
     h.write_u32(std::process::id());
     h.finish().max(1)
+}
+
+/// `(incarnation_seq, schema_floor)` of a floors file; `None` if damaged.
+fn parse_floors(text: &str) -> Option<(u64, u64)> {
+    let rest = text.strip_prefix("floors 1\n")?;
+    let at = rest.trim_end_matches('\n').rfind("crc ")?;
+    let (content, trailer) = rest.split_at(at);
+    if trailer.trim_end()
+        != format!(
+            "crc {:08x}",
+            arca_lake_storage::format::crc32c(content.as_bytes())
+        )
+    {
+        return None;
+    }
+    let (mut seq, mut schema) = (None, None);
+    for line in content.lines() {
+        let mut it = line.split_whitespace();
+        match (it.next(), it.next()) {
+            (Some("incarnation_seq"), Some(v)) => seq = Some(v.parse().ok()?),
+            (Some("schema_floor"), Some(v)) => schema = Some(v.parse().ok()?),
+            _ => {}
+        }
+    }
+    Some((seq?, schema?))
 }
 
 #[cfg(test)]
@@ -848,5 +975,72 @@ mod tests {
             h.adopt_incarnation_seq([7; 16], 40, 3).unwrap(),
             "first sequence"
         );
+    }
+
+    /// Phase 3.10 review: a node rolled back to Phase 3.9 rewrites
+    /// `cluster.txt` without the keys it does not know; rolled forward, it
+    /// still holds its marks (from the floors file). A damaged floors file
+    /// fails closed: the strictest schema floor and the fence held.
+    #[test]
+    fn the_marks_survive_a_rollback_and_a_damaged_floors_file_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = ClusterFacts::open(dir.path());
+        assert!(f.adopt_incarnation_seq([1; 16], 10, 7).unwrap());
+        assert!(f.adopt_schema_floor(3).unwrap());
+        // What a Phase 3.9 node writes after its next change.
+        let body = format!(
+            "incarnation {}\nchanged_ms 10\nformat_write 0\ndelete_fence 4 open\n",
+            hex(&[1; 16])
+        );
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            format!(
+                "facts 2\n{body}crc {:08x}\n",
+                arca_lake_storage::format::crc32c(body.as_bytes())
+            ),
+        )
+        .unwrap();
+        let g = ClusterFacts::open(dir.path());
+        assert_eq!((g.incarnation_seq, g.schema_floor), (7, 3));
+        assert_eq!(g.fence_hold, None);
+        std::fs::write(
+            dir.path().join(FLOORS_FILE),
+            "floors 1\nincarnation_seq 9\n",
+        )
+        .unwrap();
+        let h = ClusterFacts::open(dir.path());
+        assert!(h.schema_floor >= 3);
+        assert_eq!(h.fence_hold, Some(UNKNOWN_HOLD));
+        assert!(!h.fence_open);
+    }
+
+    /// Phase 3.10 review: a fact whose persist failed is not acknowledged
+    /// by a retry without being persisted: an incarnation is not adopted;
+    /// a schema floor holds in memory and is persisted by the next push.
+    #[test]
+    fn facts_not_persisted_are_not_acknowledged_by_a_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("node");
+        std::fs::create_dir(&sub).unwrap();
+        let mut f = ClusterFacts::open(&sub);
+        let lock = |mode| std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(mode));
+        lock(0o555).unwrap();
+        if std::fs::write(sub.join("probe"), b"x").is_ok() {
+            // Permissions do not stop this user (root): nothing to test.
+            lock(0o755).unwrap();
+            return;
+        }
+        assert!(f.adopt_incarnation_seq([2; 16], 5, 3).is_err());
+        assert_eq!((f.incarnation, f.incarnation_seq), (None, 0));
+        assert!(f.adopt_schema_floor(3).is_err());
+        assert_eq!(f.schema_floor, 3, "the stricter floor holds in memory");
+        assert!(
+            f.adopt_schema_floor(3).is_err(),
+            "not acknowledged unpersisted"
+        );
+        lock(0o755).unwrap();
+        assert!(!f.adopt_schema_floor(3).unwrap());
+        assert_eq!(ClusterFacts::open(&sub).schema_floor, 3);
     }
 }
