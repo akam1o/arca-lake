@@ -16,6 +16,8 @@ pub struct FenceView {
 
 #[derive(Debug, Default)]
 struct FenceInner {
+    /// Drawn at the process's start (see `LeaderView::opener`).
+    opener: u64,
     generation: u64,
     open: bool,
     /// Leader token of the last complete round of node reports.
@@ -32,6 +34,39 @@ impl FenceView {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         g.generation = r.generation;
         g.open = r.open;
+    }
+
+    /// This process's opener value (drawn once, never 0).
+    pub fn opener(&self) -> u64 {
+        let mut g = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if g.opener == 0 {
+            use std::hash::{BuildHasher as _, Hasher as _};
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos()),
+            );
+            h.write_u32(std::process::id());
+            g.opener = h.finish().max(1);
+        }
+        g.opener
+    }
+
+    /// The highest generation any node reported, open or closed.
+    #[must_use]
+    pub fn max_generation(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .nodes
+            .values()
+            .map(|n| n.0)
+            .max()
+            .unwrap_or(0)
     }
 
     /// A round of node reports finished in the term of `token`.
@@ -111,6 +146,9 @@ pub struct Metrics {
     pub delete_fence: FenceView,
     /// Deletes a node (or this process) refused for the delete fence.
     pub delete_fence_refusals_total: AtomicU64,
+    /// Health passes that found the storage nodes ahead of the metadata
+    /// (Phase 3.10: restored without `recovery begin`) and held the fence.
+    pub delete_fence_metadata_behind_total: AtomicU64,
     /// Durable capacity totals of the last admission pass.
     pub capacity: std::sync::Mutex<crate::admission::Totals>,
     /// GC backlog, logical bytes, after the last GC pass.
@@ -275,6 +313,11 @@ impl Metrics {
         out += &c(
             "arca_controller_delete_fence_refusals_total",
             self.delete_fence_refusals_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_delete_fence_metadata_behind_total",
+            self.delete_fence_metadata_behind_total
+                .load(Ordering::Relaxed),
         );
         for (name, v) in [
             (

@@ -582,7 +582,15 @@ async fn a_leader_killed_while_pushing_its_fence_is_superseded_cleanly() {
     assert!(killed.open && killed.generation > first.generation);
     let addr0 = c.nodes[0].addr.to_string();
     c.clients
-        .push_delete_fence(&addr0, killed.generation, true)
+        .push_delete_fence_with(
+            &addr0,
+            killed.generation,
+            true,
+            arca_lake_protocol::client::FencePush {
+                incarnation: Some(inc),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let on0: Vec<_> = deletes.iter().filter(|d| d.0 == addr0).cloned().collect();
@@ -670,15 +678,16 @@ async fn a_new_leader_never_reopens_a_nodes_own_generation_after_a_restore() {
     loop {
         let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
         // Written by the new controller (not the restored record of the
-        // test's term 40).
-        if rec.open && rec.leader_token != 40 {
-            assert!(rec.generation > g, "reopened the nodes' own {g}: {rec:?}");
+        // test's term 40). Since Phase 3.10 it sees the nodes ahead of the
+        // metadata and holds the fence instead of opening above them.
+        assert!(
+            !(rec.open && rec.leader_token != 40 && rec.generation <= g),
+            "reopened the nodes' own {g}: {rec:?}"
+        );
+        if !rec.open && rec.operator_hold && rec.generation > g {
             break;
         }
-        assert!(
-            t.elapsed() < Duration::from_secs(20),
-            "never opened: {rec:?}"
-        );
+        assert!(t.elapsed() < Duration::from_secs(20), "never held: {rec:?}");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let t = Instant::now();
@@ -704,5 +713,87 @@ async fn a_new_leader_never_reopens_a_nodes_own_generation_after_a_restore() {
         2 << 20
     );
     ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// R-90 (Phase 3.10): every safeguard but the nodes' own skipped. The
+/// restore is done without `admin delete-fence close`, a controller is
+/// started on the restored metadata before `recovery begin`, and a node is
+/// down during its first round of reports. The controller finds the
+/// reachable nodes ahead of the metadata and closes the fence with a hold;
+/// the node that was down rejoins closed. Deletes decided before the
+/// restore are refused everywhere, before and after the node is back; the
+/// restored object stays whole; `recovery begin` and finalize let GC
+/// resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::many_single_char_names)]
+async fn a_restore_with_every_procedural_safeguard_skipped_loses_nothing() {
+    use arca_lake_controller::process::{ControllerConfig, spawn};
+    let mut c = cluster().await;
+    let kept = put(&c, "kept", 11).await;
+    leader_pass(&c, 50).await;
+    let backup = snapshot(c.meta.as_ref()).await;
+    let g = leader_pass(&c, 51).await.generation;
+    let old = frozen_controller(&c);
+    let deletes = decided_deletes(&c, "kept").await;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    // No close; restore; one node down.
+    restore(c.meta.as_ref(), &backup).await;
+    c.stop_node(0).await;
+    let mut cfg = ControllerConfig::new("ctl-early");
+    cfg.lease = Duration::from_secs(2);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_millis(100);
+    cfg.gc_grace = Duration::ZERO;
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.failure_domain = "host".into();
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    let t = Instant::now();
+    let held = loop {
+        let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+        if rec.operator_hold && rec.generation > g {
+            break rec;
+        }
+        assert!(
+            !(rec.open && rec.leader_token != 50),
+            "opened on restored metadata: {rec:?}"
+        );
+        assert!(t.elapsed() < Duration::from_secs(20), "never held: {rec:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        !held.open && held.reason.contains("above the metadata"),
+        "{held:?}"
+    );
+    let addr0 = c.nodes[0].addr.to_string();
+    let (on0, reachable): (Vec<_>, Vec<_>) = deletes.iter().cloned().partition(|d| d.0 == addr0);
+    let d = deliver(&old, &reachable).await;
+    assert_eq!(d.applied, 0, "{d:?}");
+    // The node that was down comes back, nobody pushing it yet.
+    c.start_node_quiet(0).await;
+    let d = deliver(&old, &on0).await;
+    assert_eq!(d.applied, 0, "the node rejoined open: {d:?}");
+    // The controller reaches it: closed and held there too.
+    let t = Instant::now();
+    loop {
+        let h = c.clients.health(&addr0).await.unwrap();
+        if h.delete_fence_generation >= held.generation && h.delete_fence_hold {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "{h:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(deliver(&old, &deletes).await.applied, 0);
+    ctl.shutdown().await;
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    // The procedure, late: recovery, then GC collects garbage again.
+    recover(&c).await;
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    leader_pass(&c, 60).await;
+    let shards = c.total_shards().await;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    c.gc(now_ms() + 3_600_000, 0).await;
+    assert!(c.total_shards().await < shards, "GC resumed");
     c.shutdown().await;
 }

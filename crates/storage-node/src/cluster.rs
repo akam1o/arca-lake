@@ -53,6 +53,9 @@ pub(crate) struct ClusterFacts {
     /// the facts damaged (reported in `Health`). A release must carry it,
     /// so that a release sent before the loss cannot lift the hold.
     pub unknown_token: u64,
+    /// End of the rejoin lease of the open fence (memory only: a start
+    /// begins without one).
+    open_until: Option<std::time::Instant>,
 }
 
 /// Largest jump a node takes in one adoption, and the headroom kept below
@@ -108,6 +111,7 @@ impl ClusterFacts {
             fence_hold: None,
             unpersisted: false,
             unknown_token: 0,
+            open_until: None,
         };
         let migrated = dir.join(MARKER).exists();
         let damaged = match std::fs::read_to_string(&facts.path) {
@@ -315,6 +319,12 @@ impl ClusterFacts {
         if generation == 0 {
             return None;
         }
+        // Opening needs a caller of the node's incarnation (Phase 3.10): a
+        // controller of another one (a restored or a stale cluster) never
+        // opens a node's fence.
+        if open && caller.is_none() && self.incarnation.is_some() {
+            return None;
+        }
         let mut hold = self.fence_hold;
         if open && let Some(held) = hold {
             // Only a later incarnation the node adopted lifts a hold (an
@@ -339,6 +349,39 @@ impl ClusterFacts {
         }
         let next = (g, o, hold);
         (next != (self.fence_generation, self.fence_open, self.fence_hold)).then_some(next)
+    }
+
+    /// A push of the fence was adopted: if it carried the open generation
+    /// the node now holds open and came from a caller of the node's
+    /// incarnation (or the node has none), the rejoin lease runs until
+    /// `until`; a closed fence ends it.
+    pub(crate) fn note_fence_push(
+        &mut self,
+        generation: u64,
+        open: bool,
+        caller: Option<[u8; 16]>,
+        until: std::time::Instant,
+    ) {
+        if !self.fence_open {
+            self.open_until = None;
+        } else if open
+            && generation == self.fence_generation
+            && (caller.is_some() || self.incarnation.is_none())
+        {
+            self.open_until = Some(until);
+        }
+    }
+
+    /// Whether the rejoin lease is running at `now`.
+    pub(crate) fn lease_live(&self, now: std::time::Instant) -> bool {
+        self.open_until.is_some_and(|t| now < t)
+    }
+
+    /// What is left of the rejoin lease at `now`.
+    pub(crate) fn lease_left(&self, now: std::time::Instant) -> std::time::Duration {
+        self.open_until.map_or(std::time::Duration::ZERO, |t| {
+            t.saturating_duration_since(now)
+        })
     }
 
     /// Whether a delete under `generation` is allowed now.

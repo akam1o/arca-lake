@@ -43,6 +43,11 @@ pub struct NodeConfig {
     /// (client writes are refused above it, Phase 3.6); `None` = the
     /// default for the device ([`crate::capacity::Reserve::default_for`]).
     pub reserve_bytes: Option<u64>,
+    /// Rejoin lease of an open delete fence (Phase 3.10): deletes are
+    /// admitted only this long after the last push of the open fence by a
+    /// caller of the node's incarnation, measured on the node's monotonic
+    /// clock; a start begins with none.
+    pub fence_lease: Duration,
 }
 
 impl NodeConfig {
@@ -58,6 +63,7 @@ impl NodeConfig {
             compaction: crate::compactor::CompactionPolicy::default(),
             capacity_bytes: None,
             reserve_bytes: None,
+            fence_lease: Duration::from_secs(30),
         }
     }
 }
@@ -86,6 +92,8 @@ pub struct StorageNodeService {
     scrub_slot: tokio::sync::Semaphore,
     /// Incarnation and `format_write` learned from the controller.
     cluster: Mutex<crate::cluster::ClusterFacts>,
+    /// See [`NodeConfig::fence_lease`].
+    fence_lease: Duration,
     /// TLS state; `Some` makes every RPC require an authorised identity.
     tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
     /// Background compaction counters.
@@ -224,6 +232,7 @@ impl StorageNodeService {
             stats: Arc::default(),
             scrub_slot: tokio::sync::Semaphore::new(1),
             cluster: Mutex::new(cluster),
+            fence_lease: cfg.fence_lease,
             tls: cfg.tls.clone(),
             compaction: Arc::default(),
             capacity_bytes: cfg.capacity_bytes,
@@ -433,7 +442,10 @@ impl StorageNodeService {
         generation: u64,
     ) -> Result<(), tonic::Status> {
         let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
-        if protocol_version >= pb::FENCED_DELETE_VERSION && c.fence_admits(generation) {
+        if protocol_version >= pb::FENCED_DELETE_VERSION
+            && c.fence_admits(generation)
+            && c.lease_live(std::time::Instant::now())
+        {
             return Ok(());
         }
         self.fence_refusals.fetch_add(1, Ordering::Relaxed);
@@ -1167,6 +1179,12 @@ impl StorageNode for StorageNodeService {
                     "adopted delete fence"
                 );
             }
+            // The rejoin lease (Phase 3.10): a push of the open fence by a
+            // caller of this node's incarnation (re)starts it; nothing else
+            // does, so a node that started, was cut off, or stopped hearing
+            // the leader refuses deletes until the leader reaches it.
+            let lease = self.fence_lease;
+            c.note_fence_push(generation, open, from, std::time::Instant::now() + lease);
             if req.format_write > 0
                 && c.adopt_format_write(req.format_write)
                     .map_err(|e| tonic::Status::internal(e.to_string()))?
@@ -1182,6 +1200,16 @@ impl StorageNode for StorageNodeService {
         let stats = self.store.stats().map_err(Self::storage_status)?;
         let (qn, qb) = self.store.quarantine_stats();
         let (fence_generation, fence_open) = self.delete_fence();
+        // Read once, before the response is built (a second lock of the
+        // facts inside one expression would wait on the first).
+        let (unknown_token, lease_ms) = {
+            let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+            (
+                c.unknown_token,
+                u64::try_from(c.lease_left(std::time::Instant::now()).as_millis())
+                    .unwrap_or(u64::MAX),
+            )
+        };
         let (incarnation, group_epochs) = {
             let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
             let e = self.epochs.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1230,11 +1258,8 @@ impl StorageNode for StorageNodeService {
             delete_fence_generation: fence_generation,
             delete_fence_open: fence_open,
             delete_fence_hold: self.delete_fence_held(),
-            delete_fence_unknown_token: self
-                .cluster
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .unknown_token,
+            delete_fence_unknown_token: unknown_token,
+            delete_fence_lease_ms: lease_ms,
             devices: vec![self.device_capacity_with(&stats)],
         }))
     }

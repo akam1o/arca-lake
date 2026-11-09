@@ -272,6 +272,8 @@ async fn tokens_from_before_a_lost_sequence_bound_are_refused() {
         .await
         .unwrap();
     let addr = n.local_addr.to_string();
+    // A started node rejoins: the leader's push renews its fence.
+    c.push_delete_fence(&addr, 1, true).await.unwrap();
     let e = c
         .delete_shard_if(&addr, shard(6), 0, old)
         .await
@@ -501,7 +503,86 @@ async fn the_fence_survives_a_node_restart() {
     n.shutdown().await;
     let n = serve(NodeConfig::new(listen, dir.path())).await.unwrap();
     c.set_delete_fence(Some(8));
+    // The rejoin fence (Phase 3.10): open generation 8 is kept, but a
+    // started node admits no delete until the leader pushes it again.
+    assert_eq!(n.service().delete_fence(), (8, true));
+    let e = c.delete_shard(&addr, shard(1), 0).await.unwrap_err();
+    assert!(NodeClients::is_fenced(&e), "before the rejoin push: {e}");
+    c.push_delete_fence(&addr, 8, true).await.unwrap();
     c.delete_shard(&addr, shard(1), 0).await.unwrap();
+    n.shutdown().await;
+}
+
+/// Phase 3.10 rejoin fence: the open fence's lease runs on the node's
+/// monotonic clock from the last push of that generation by a caller of
+/// the node's incarnation. When pushes stop (the node is cut off, or the
+/// leader is gone) deletes are refused after the lease, without the node
+/// learning anything about the cluster; the next push reopens. A push
+/// from a caller of another incarnation neither opens nor renews.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_open_fence_lapses_without_the_leaders_pushes() {
+    use arca_lake_protocol::client::FencePush;
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path());
+    cfg.fence_lease = Duration::from_millis(600);
+    let n = serve(cfg).await.unwrap();
+    let addr = n.local_addr.to_string();
+    let c = NodeClients::new(Duration::from_secs(5));
+    for i in 1..=3 {
+        c.put_shard(&addr, shard(i), 0, Bytes::from(vec![i; 4096]), 1024)
+            .await
+            .unwrap();
+    }
+    c.health_with(
+        &addr,
+        HealthRequest {
+            incarnation: Bytes::from(vec![5; 16]),
+            incarnation_changed_ms: 10,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let push = |g, inc: u8| {
+        let (c, addr) = (c.clone(), addr.clone());
+        async move {
+            c.push_delete_fence_with(
+                &addr,
+                g,
+                true,
+                FencePush {
+                    incarnation: Some([inc; 16]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+        }
+    };
+    // Another incarnation opens nothing.
+    assert_eq!(push(4, 9).await, (0, false, false));
+    assert_eq!(push(4, 5).await, (4, true, false));
+    c.set_incarnation(Some([5; 16]));
+    c.set_delete_fence(Some(4));
+    c.delete_shard(&addr, shard(1), 0).await.unwrap();
+    assert!(c.health(&addr).await.unwrap().delete_fence_lease_ms > 0);
+    // Pushes stop: the lease lapses, deletes are refused.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(c.health(&addr).await.unwrap().delete_fence_lease_ms, 0);
+    let e = c.delete_shard(&addr, shard(2), 0).await.unwrap_err();
+    assert!(NodeClients::is_fenced(&e), "{e}");
+    // A push of another incarnation does not renew it.
+    push(4, 9).await;
+    let e = c.delete_shard(&addr, shard(2), 0).await.unwrap_err();
+    assert!(NodeClients::is_fenced(&e), "{e}");
+    // The leader's next push does.
+    push(4, 5).await;
+    c.delete_shard(&addr, shard(2), 0).await.unwrap();
+    assert_eq!(
+        c.get_shard(&addr, shard(3), 0, 0).await.unwrap(),
+        vec![3u8; 4096]
+    );
     n.shutdown().await;
 }
 

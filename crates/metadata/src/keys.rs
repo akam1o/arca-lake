@@ -636,6 +636,13 @@ pub fn rebalance() -> Key {
     pack(&(ROOT, "rebalance"))
 }
 
+/// Which controller process opened the delete fence's generation (Phase
+/// 3.10).
+#[must_use]
+pub fn delete_fence_opener() -> Key {
+    pack(&(ROOT, "delete_fence_opener"))
+}
+
 /// The rebalancer's pacing (Phase 3.9).
 #[must_use]
 pub fn rebalance_pacing() -> Key {

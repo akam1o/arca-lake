@@ -75,6 +75,8 @@ pub struct TestCluster<S: KvStore + 'static = MemKv> {
     pub store: Arc<CredentialStore>,
     /// Node clients.
     pub clients: NodeClients,
+    /// Rejoin lease given to nodes started from now on (Phase 3.10).
+    pub fence_lease: Duration,
     /// EC profile in use.
     pub profile: EcProfile,
     /// Number of durable nodes (the first `durable_nodes` entries of `nodes`).
@@ -148,6 +150,11 @@ pub struct ClusterOptions {
 /// Small enough that a dozen nodes fit a CI runner's temporary file
 /// system (often a memory file system of a few GiB).
 pub const TEST_ALLOTMENT: u64 = 512 << 20;
+
+/// Rejoin lease of the nodes' delete fence in test clusters (Phase 3.10):
+/// long, since a test cluster runs no controller to renew it; tests of
+/// the lease set [`TestCluster::fence_lease`] and restart a node.
+pub const TEST_FENCE_LEASE: Duration = Duration::from_secs(3600);
 
 /// The cache tier name used by test clusters.
 pub const CACHE_TIER: &str = "fast";
@@ -277,6 +284,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             let dir = tmp.path().join(format!("node{i}"));
             std::fs::create_dir_all(&dir).unwrap();
             let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
+            cfg.fence_lease = TEST_FENCE_LEASE;
             cfg.store = node_store_config(&dir);
             cfg.capacity_bytes = Some(TEST_ALLOTMENT);
             let tls = pki.as_ref().map(|p| p.pending_node(&dir));
@@ -317,6 +325,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             let dir = tmp.path().join(format!("node{i}"));
             std::fs::create_dir_all(&dir).unwrap();
             let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
+            cfg.fence_lease = TEST_FENCE_LEASE;
             cfg.store = node_store_config(&dir);
             cfg.capacity_bytes = Some(TEST_ALLOTMENT);
             let tls = pki.as_ref().map(|p| p.pending_node(&dir));
@@ -474,6 +483,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             cluster_cfg,
             pki,
             tmp,
+            fence_lease: TEST_FENCE_LEASE,
         }
     }
 
@@ -602,8 +612,22 @@ impl<S: KvStore + 'static> TestCluster<S> {
     ///
     /// If the address cannot be re-bound.
     pub async fn start_node(&mut self, i: usize) {
+        self.start_node_quiet(i).await;
+        // A started node rejoins closed (Phase 3.10): push the recorded
+        // fence, as a leader's next pass does.
+        self.sync_delete_fence().await;
+    }
+
+    /// [`Self::start_node`] without pushing the delete fence: the node
+    /// stays as it rejoins (closed) until something pushes it.
+    ///
+    /// # Panics
+    ///
+    /// When the node cannot be started.
+    pub async fn start_node_quiet(&mut self, i: usize) {
         let n = &mut self.nodes[i];
         let mut cfg = NodeConfig::new(n.addr, &n.dir);
+        cfg.fence_lease = self.fence_lease;
         cfg.store = node_store_config(&n.dir);
         cfg.tls = n.tls.clone();
         cfg.capacity_bytes = n.capacity;
@@ -633,6 +657,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         let dir = self.tmp.path().join(format!("node{i}"));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
+        cfg.fence_lease = self.fence_lease;
         cfg.store = node_store_config(&dir);
         cfg.capacity_bytes = Some(TEST_ALLOTMENT);
         let tls = self.pki.as_ref().map(|p| p.pending_node(&dir));
@@ -899,6 +924,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         let dir = self.tmp.path().join(format!("node{i}"));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
+        cfg.fence_lease = self.fence_lease;
         cfg.store = node_store_config(&dir);
         cfg.capacity_bytes = Some(TEST_ALLOTMENT);
         let tls = self.pki.as_ref().map(|p| p.pending_node(&dir));

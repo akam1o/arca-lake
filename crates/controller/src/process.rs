@@ -947,17 +947,28 @@ async fn health_pass<S: KvStore>(
     // process knows no node's generation yet). A failure does not stop the
     // pass: the other facts still go out, and this process stops deleting
     // (Phase 3.9 review).
-    let fence = match arca_lake_metadata::ops::delete_fence::sync_for_term_gated(
-        meta,
+    let view = arca_lake_metadata::ops::delete_fence::LeaderView {
         token,
         incarnation,
-        highest,
-        metrics.delete_fence.round_done(token),
-        now,
-    )
-    .await
-    {
-        Ok(f) => Some(f),
+        opener: metrics.delete_fence.opener(),
+        required: highest,
+        max_node_generation: metrics.delete_fence.max_generation(),
+        may_open: metrics.delete_fence.round_done(token),
+    };
+    let fence = match arca_lake_metadata::ops::delete_fence::sync_leader(meta, view, now).await {
+        Ok(f) => {
+            if f.metadata_behind {
+                tracing::error!(
+                    generation = f.fence.record.generation,
+                    reason = %f.fence.record.reason,
+                    "storage nodes are ahead of the metadata: delete fence closed and held"
+                );
+                metrics
+                    .delete_fence_metadata_behind_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Some(f.fence)
+        }
         Err(e) if matches!(e, arca_lake_metadata::MetaError::InvalidArgument(_)) => {
             warn!(error = %e, "delete fence not advanced: deletes stop in this process");
             None

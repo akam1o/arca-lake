@@ -331,6 +331,10 @@ message HealthResponse {
   // Non-zero while the node holds its fence because its facts were lost or
   // damaged: what a release must carry (drawn at each start).
   uint64 delete_fence_unknown_token = 31;
+  // Milliseconds left of the node's rejoin lease on its open fence (Phase
+  // 3.10): 0 = deletes refused until the leader pushes the fence again
+  // (after a start, a partition or a lapse of the leader's pushes).
+  uint64 delete_fence_lease_ms = 32;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").

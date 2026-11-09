@@ -202,6 +202,168 @@ pub async fn sync_for_term<S: KvStore>(
     sync_for_term_gated(store, token, incarnation, highest_reported, true, now_ms).await
 }
 
+/// Which controller process opened the record's generation (Phase 3.10).
+/// A record of its own, so that the fence record keeps its encoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FenceOpener {
+    /// The generation it opened.
+    pub generation: u64,
+    /// A value the process drew at its start.
+    pub opener: u64,
+}
+
+impl crate::records::Record for FenceOpener {}
+
+/// What a leader's health pass knows (Phase 3.10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaderView {
+    /// Its fencing token.
+    pub token: u64,
+    /// Its cluster incarnation.
+    pub incarnation: [u8; 16],
+    /// A value its process drew at start: "ours" means opened by this
+    /// process, not by a term of the same number (a restore brings the
+    /// leadership counter back).
+    pub opener: u64,
+    /// The lowest generation every node would open (a node's open one, or
+    /// one above a closed one).
+    pub required: u64,
+    /// The highest generation any node reported, open or closed.
+    pub max_node_generation: u64,
+    /// A whole round of node reports was collected in this term.
+    pub may_open: bool,
+}
+
+/// What [`sync_leader`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaderFence {
+    /// The record now, and whether this call changed it.
+    pub fence: TermFence,
+    /// Nodes hold a generation above the metadata's: the metadata went
+    /// back (restored without `recovery begin`, or by hand). The fence was
+    /// closed with an operator hold.
+    pub metadata_behind: bool,
+}
+
+/// The leader's health pass (Phase 3.10): as [`sync_for_term_gated`],
+/// with two more rules.
+///
+/// - **Metadata behind the nodes.** Generations only grow and every one is
+///   recorded before any node sees it, so a node above the record means
+///   the metadata went back: a restore not yet marked by `recovery begin`.
+///   Deletes decided on the metadata before it may still be on their way;
+///   the fence is closed above every node with an operator hold, which only
+///   `recovery begin` (a new incarnation) or an explicit release lifts.
+/// - **Ours** means opened by this process (`opener`), not merely by a
+///   term of the same number.
+///
+/// # Errors
+///
+/// As [`sync_for_term`].
+pub async fn sync_leader<S: KvStore>(
+    store: &S,
+    view: LeaderView,
+    now_ms: u64,
+) -> Result<LeaderFence> {
+    transact(store, (view, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (v, now_ms) = *env;
+            let rec: DeleteFenceRecord =
+                read(tx, &keys::delete_fence()).await?.unwrap_or_default();
+            let opener: FenceOpener = read(tx, &keys::delete_fence_opener())
+                .await?
+                .unwrap_or_default();
+            let state = compat::cluster_state_in_tx(tx).await?;
+            let active = state.as_ref().is_some_and(|s| {
+                s.state == ClusterPhase::Active && s.incarnation == v.incarnation
+            });
+            let behind = v.max_node_generation > rec.generation;
+            let next = if behind {
+                Some(DeleteFenceRecord {
+                    generation: next_generation(
+                        rec.generation.max(v.required).max(v.max_node_generation),
+                    )?,
+                    open: false,
+                    leader_token: 0,
+                    incarnation: v.incarnation,
+                    changed_ms: now_ms,
+                    reason: format!(
+                        "storage nodes hold generation {} above the metadata's {}: the metadata went back (restored without `admin recovery begin`?); deletes held until `admin recovery begin` or `admin delete-fence release`",
+                        v.max_node_generation, rec.generation
+                    ),
+                    operator_hold: true,
+                })
+            } else if active && !rec.operator_hold {
+                let ours = rec.open
+                    && rec.leader_token == v.token
+                    && rec.incarnation == v.incarnation
+                    && opener.generation == rec.generation
+                    && opener.opener == v.opener
+                    && rec.generation >= v.required;
+                if ours || !v.may_open {
+                    None
+                } else {
+                    Some(DeleteFenceRecord {
+                        generation: next_open_generation(rec.generation.max(v.required))?,
+                        open: true,
+                        leader_token: v.token,
+                        incarnation: v.incarnation,
+                        changed_ms: now_ms,
+                        reason: format!("opened by the leader of term {}", v.token),
+                        operator_hold: false,
+                    })
+                }
+            } else if rec.open {
+                Some(DeleteFenceRecord {
+                    generation: next_generation(rec.generation.max(v.required))?,
+                    open: false,
+                    leader_token: 0,
+                    incarnation: v.incarnation,
+                    changed_ms: now_ms,
+                    reason: format!(
+                        "closed by the leader of term {}: cluster {}",
+                        v.token,
+                        state.map_or("state missing", |s| s.state.name())
+                    ),
+                    operator_hold: rec.operator_hold,
+                })
+            } else {
+                None
+            };
+            Ok(match next {
+                Some(n) => {
+                    write(tx, &keys::delete_fence(), &n)?;
+                    if n.open {
+                        write(
+                            tx,
+                            &keys::delete_fence_opener(),
+                            &FenceOpener {
+                                generation: n.generation,
+                                opener: v.opener,
+                            },
+                        )?;
+                    }
+                    LeaderFence {
+                        fence: TermFence {
+                            record: n,
+                            changed: true,
+                        },
+                        metadata_behind: behind,
+                    }
+                }
+                None => LeaderFence {
+                    fence: TermFence {
+                        record: rec,
+                        changed: false,
+                    },
+                    metadata_behind: false,
+                },
+            })
+        })
+    })
+    .await
+}
+
 /// [`sync_for_term`], opening a generation only when `may_open`: a leader
 /// passes it once it has heard every node it could reach in this term, so
 /// that `highest_reported` is not the empty view of a fresh process (which
