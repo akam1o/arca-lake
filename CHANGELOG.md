@@ -15,6 +15,8 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   holds. `admin delete-fence status|close|release`; `--absent-node` for
   `close` and `recovery begin`; metrics `arca_controller_delete_fence_*`
   and `arca_node_delete_fence_*`.
+- `benchmarks/linux/rebalance-load.sh`: capacity rebalancing on real
+  FoundationDB under load with a leader kill and a node stop.
 - Tests: delete fence rules on the node (including a delete cancelled
   while the fence closes), cluster scenarios of deletes delivered after
   a restore, a phase change and a leader change, and a system model
@@ -36,6 +38,21 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   whose delete the fence refused.
 
 ### Fixed (Phase 3.9)
+
+- A gateway restarted while new data was refused for capacity admitted
+  writes until its first refresh (2 s): the admission record is read
+  before it serves.
+- Rebalancing moved about three times what balanced the groups, then
+  moved back: a plan's need is computed once when it starts, and its
+  tier settles (`--rebalance-settle-secs`) before it is planned again.
+- Delete fence, from the independent review: fence fields need the
+  controller or admin role; a close whose persistence failed is not
+  acknowledged until it is on disk; damaged, truncated or lost node
+  facts hold the fence closed until an operator releases it with the
+  node's start token (facts file version 2 with a CRC-32C, written at a
+  node's first start); a release names the generation it releases; the
+  leader opens only after a round of node reports and above every
+  reported generation; generations keep headroom and bound their jumps.
 
 - A compaction killed while writing its output, after the active
   segment had rolled over to a higher id, left a torn segment that the
