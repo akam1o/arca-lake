@@ -226,6 +226,32 @@ pub fn node_states_range() -> KeyRange {
     KeyRange::prefix(&pack(&(ROOT, "nstate")))
 }
 
+/// A node taken out beyond decommission: removed (unregistered) or
+/// quarantined (Phase 3.11, R-100). A key of its own: earlier releases
+/// do not read it.
+#[must_use]
+pub fn node_retirement(node_id: u64) -> Key {
+    pack(&(ROOT, "nretire", node_id))
+}
+
+/// Every node retirement record.
+#[must_use]
+pub fn node_retirements_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "nretire")))
+}
+
+/// The identity a node holds on its disk (Phase 3.11, R-100).
+#[must_use]
+pub fn node_identity(node_id: u64) -> Key {
+    pack(&(ROOT, "nident", node_id))
+}
+
+/// Every node identity record.
+#[must_use]
+pub fn node_identities_range() -> KeyRange {
+    KeyRange::prefix(&pack(&(ROOT, "nident")))
+}
+
 /// Operator request to replace a member of a group.
 #[must_use]
 pub fn replace_request(group_id: u64) -> Key {

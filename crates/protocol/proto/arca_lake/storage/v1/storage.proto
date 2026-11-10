@@ -291,6 +291,14 @@ message HealthRequest {
   // closes it: two clusters (one restored) that opened the same generation
   // number never renew each other's lease.
   uint64 delete_fence_opener = 11;
+  // The node's identity (Phase 3.11, R-100): the id the cluster registered
+  // it under and the random token it was given (empty = not carried).
+  uint64 node_id = 12;
+  bytes node_identity = 13;
+  // Adopt the identity if the node holds none (sent only until the node
+  // acknowledged one; afterwards the identity is only compared, so that an
+  // emptied or swapped disk never takes it silently).
+  bool adopt_identity = 14;
 }
 
 message GroupEpoch {
@@ -359,6 +367,14 @@ message HealthResponse {
   // until it reaches the target (the previous release refuses such a
   // store).
   uint64 newest_segment_format = 36;
+  // The identity the node holds on its disk (Phase 3.11, R-100; older
+  // nodes: identity_supported false). A request whose identity differs
+  // (another cluster, a reused id, another disk) changes nothing on the
+  // node: identity_mismatch.
+  bool identity_supported = 37;
+  uint64 identity_node_id = 38;
+  bytes identity_token = 39;
+  bool identity_mismatch = 40;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").

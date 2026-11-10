@@ -13,6 +13,7 @@ pub mod domain;
 mod epochs;
 #[cfg(feature = "fault-injection")]
 mod fault_control;
+mod identity;
 pub mod load;
 mod service;
 

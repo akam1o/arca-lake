@@ -6,6 +6,25 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Added (Phase 3.11)
+
+- Restore trip wire (ADR-0025, R-94(b) mitigation; R-94(b) stays open):
+  `database_locked` (1038) and a missing leader record or cluster state
+  are errors (`KvError::Locked`, `KvError::Replaced`), no longer retried.
+  Every leader store is wrapped: such errors, or another leader's record,
+  latch the term's deletes off, close its generation on the nodes, and
+  end the term; the next term holds the fence for the operator. A store
+  watch (`store_watch_interval`, 250 ms) and a local stop on a failed
+  renewal. No leadership on a store without a cluster state record.
+- ADR-0026 (proposed): restore-safe deletes to close R-94(b).
+- Node lifecycle (ADR-0027, R-100): `admin node list|status|decommission
+  (drain)|unregister|rejoin`; removed and quarantined states; a node
+  identity on the node's disk (HealthRequest `node_id`, `node_identity`,
+  `adopt_identity`; HealthResponse `identity_*`); quarantine of an
+  emptied, foreign or moved disk; registration of a retired node refused;
+  `--ignore-absent` only for decommissioned nodes; new groups only on
+  active nodes. Metric `arca_controller_nodes_quarantined_total`.
+
 ### Added (Phase 3.10)
 
 - Rejoin fence (ADR-0024, R-90): a storage node admits deletes under an

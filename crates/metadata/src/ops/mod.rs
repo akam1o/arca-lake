@@ -18,6 +18,7 @@ pub mod leader;
 pub mod list;
 pub mod membership;
 pub mod multipart;
+pub mod node_lifecycle;
 pub mod object;
 pub mod rebalance;
 pub mod recovery;

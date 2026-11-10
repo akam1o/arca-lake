@@ -94,6 +94,8 @@ pub struct StorageNodeService {
     scrub_slot: tokio::sync::Semaphore,
     /// Incarnation and `format_write` learned from the controller.
     cluster: Mutex<crate::cluster::ClusterFacts>,
+    /// The identity the cluster gave this disk (Phase 3.11, R-100).
+    identity: Mutex<crate::identity::NodeIdentity>,
     /// See [`NodeConfig::fence_lease`].
     fence_lease: Duration,
     /// TLS state; `Some` makes every RPC require an authorised identity.
@@ -187,6 +189,7 @@ impl StorageNodeService {
         // Before the store opens (and creates its first segment): a missing
         // facts file is a new node only while no segment exists.
         let cluster = crate::cluster::ClusterFacts::open(&cfg.store.dir);
+        let identity = crate::identity::NodeIdentity::open(&cfg.store.dir);
         let (store, report) = Store::open(cfg.store.clone())?;
         if !report.quarantined.is_empty()
             || !report.holes.is_empty()
@@ -239,6 +242,7 @@ impl StorageNodeService {
             stats: Arc::default(),
             scrub_slot: tokio::sync::Semaphore::new(1),
             cluster: Mutex::new(cluster),
+            identity: Mutex::new(identity),
             fence_lease: cfg.fence_lease,
             tls: cfg.tls.clone(),
             compaction: Arc::default(),
@@ -1136,6 +1140,23 @@ impl StorageNode for StorageNodeService {
             },
         )?;
         let req = request.into_inner();
+        // A request carrying another identity than this disk's changes
+        // nothing here (Phase 3.11, R-100): another cluster's controller, a
+        // reused node id, or a controller that registered another disk at
+        // this address. It still gets the report, mismatch flagged.
+        let identity = self
+            .identity
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .check(req.node_id, &req.node_identity, req.adopt_identity)
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        let identity_mismatch = identity == crate::identity::Check::Mismatch;
+        if identity_mismatch {
+            tracing::warn!(
+                node_id = req.node_id,
+                "a request carried another identity than this disk's: nothing adopted"
+            );
+        }
         // Adopt the cluster facts the controller carries (ADR-0016): the
         // incarnation only when not older than what is held, the format
         // monotonically; both persisted before they take effect. A change
@@ -1184,85 +1205,89 @@ impl StorageNode for StorageNodeService {
         // review).
         let mut exclusive =
             needs_exclusive(&self.cluster.lock().unwrap_or_else(PoisonError::into_inner));
-        let _fence = loop {
-            let guard = if exclusive {
-                Some(Arc::clone(&self.fence).write_owned().await)
-            } else {
-                None
-            };
-            let mut c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
-            if guard.is_none() && needs_exclusive(&c) {
-                drop(c);
-                exclusive = true;
-                continue;
-            }
-            if let Ok(inc) = <[u8; 16]>::try_from(req.incarnation.as_ref())
-                && c.adopt_incarnation_seq(inc, req.incarnation_changed_ms, req.incarnation_seq)
+        let _fence = if identity_mismatch {
+            None
+        } else {
+            loop {
+                let guard = if exclusive {
+                    Some(Arc::clone(&self.fence).write_owned().await)
+                } else {
+                    None
+                };
+                let mut c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+                if guard.is_none() && needs_exclusive(&c) {
+                    drop(c);
+                    exclusive = true;
+                    continue;
+                }
+                if let Ok(inc) = <[u8; 16]>::try_from(req.incarnation.as_ref())
+                    && c.adopt_incarnation_seq(inc, req.incarnation_changed_ms, req.incarnation_seq)
+                        .map_err(|e| tonic::Status::internal(e.to_string()))?
+                {
+                    tracing::info!(
+                        incarnation = crate::cluster::hex(&inc),
+                        "adopted cluster incarnation"
+                    );
+                }
+                let (generation, open, hold, release, from, token) = fence_args(&c);
+                let conflict = c.opener_conflict(
+                    req.delete_fence_generation,
+                    req.delete_fence_open,
+                    req.delete_fence_opener,
+                );
+                if conflict {
+                    tracing::warn!(
+                        generation = req.delete_fence_generation,
+                        "delete fence generation pushed open by another opener than the one that opened it: closed"
+                    );
+                }
+                c.set_next_opener(req.delete_fence_opener);
+                if req.delete_fence_opener != 0 {
+                    c.note_rejoin_leader()
+                        .map_err(|e| tonic::Status::internal(e.to_string()))?;
+                }
+                if c.adopt_fence_held(generation, open, hold, release, from, token)
                     .map_err(|e| tonic::Status::internal(e.to_string()))?
-            {
-                tracing::info!(
-                    incarnation = crate::cluster::hex(&inc),
-                    "adopted cluster incarnation"
-                );
+                {
+                    tracing::info!(
+                        generation = c.fence_generation,
+                        open = c.fence_open,
+                        "adopted delete fence"
+                    );
+                }
+                // The rejoin lease (Phase 3.10): a push of the open fence by a
+                // caller of this node's incarnation (re)starts it; nothing else
+                // does, so a node that started, was cut off, or stopped hearing
+                // the leader refuses deletes until the leader reaches it.
+                let lease = self.fence_lease;
+                c.note_fence_push(generation, open, from, std::time::Instant::now() + lease);
+                if req.schema_floor > 0 {
+                    c.adopt_schema_floor(req.schema_floor)
+                        .map_err(|e| tonic::Status::internal(e.to_string()))?;
+                }
+                if req.format_write > 0
+                    && c.adopt_format_write(req.format_write)
+                        .map_err(|e| tonic::Status::internal(e.to_string()))?
+                {
+                    let v = self.store.set_format_write(req.format_write);
+                    tracing::info!(format_write = v, "storage format write gate updated");
+                }
+                // At once, not at the next rollover, and again on every push
+                // until it succeeded (re-review: a failed rollover was not
+                // retried once the value was adopted): an earlier release
+                // refuses the store from then on.
+                // A failure is logged and counted, not returned: the node keeps
+                // answering (re-review: failing Health made it look down), and
+                // the finalize waits on its reported segment format.
+                if req.format_write > 0
+                    && let Err(e) = self.store.roll_to_format_write()
+                {
+                    self.format_rollover_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(error = %e, "cannot roll over to the raised segment format");
+                }
+                break guard;
             }
-            let (generation, open, hold, release, from, token) = fence_args(&c);
-            let conflict = c.opener_conflict(
-                req.delete_fence_generation,
-                req.delete_fence_open,
-                req.delete_fence_opener,
-            );
-            if conflict {
-                tracing::warn!(
-                    generation = req.delete_fence_generation,
-                    "delete fence generation pushed open by another opener than the one that opened it: closed"
-                );
-            }
-            c.set_next_opener(req.delete_fence_opener);
-            if req.delete_fence_opener != 0 {
-                c.note_rejoin_leader()
-                    .map_err(|e| tonic::Status::internal(e.to_string()))?;
-            }
-            if c.adopt_fence_held(generation, open, hold, release, from, token)
-                .map_err(|e| tonic::Status::internal(e.to_string()))?
-            {
-                tracing::info!(
-                    generation = c.fence_generation,
-                    open = c.fence_open,
-                    "adopted delete fence"
-                );
-            }
-            // The rejoin lease (Phase 3.10): a push of the open fence by a
-            // caller of this node's incarnation (re)starts it; nothing else
-            // does, so a node that started, was cut off, or stopped hearing
-            // the leader refuses deletes until the leader reaches it.
-            let lease = self.fence_lease;
-            c.note_fence_push(generation, open, from, std::time::Instant::now() + lease);
-            if req.schema_floor > 0 {
-                c.adopt_schema_floor(req.schema_floor)
-                    .map_err(|e| tonic::Status::internal(e.to_string()))?;
-            }
-            if req.format_write > 0
-                && c.adopt_format_write(req.format_write)
-                    .map_err(|e| tonic::Status::internal(e.to_string()))?
-            {
-                let v = self.store.set_format_write(req.format_write);
-                tracing::info!(format_write = v, "storage format write gate updated");
-            }
-            // At once, not at the next rollover, and again on every push
-            // until it succeeded (re-review: a failed rollover was not
-            // retried once the value was adopted): an earlier release
-            // refuses the store from then on.
-            // A failure is logged and counted, not returned: the node keeps
-            // answering (re-review: failing Health made it look down), and
-            // the finalize waits on its reported segment format.
-            if req.format_write > 0
-                && let Err(e) = self.store.roll_to_format_write()
-            {
-                self.format_rollover_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                tracing::error!(error = %e, "cannot roll over to the raised segment format");
-            }
-            break guard;
         };
         // Adopted and persisted: deletes may go on while the response is
         // assembled (Phase 3.9 review).
@@ -1295,6 +1320,11 @@ impl StorageNode for StorageNodeService {
                     .collect(),
             )
         };
+        let held_identity = self
+            .identity
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .held();
         let space = self.device_space_with(stats.segment_bytes);
         let load = self.load.sample(
             self.stats.get_serve.snapshot(),
@@ -1335,6 +1365,12 @@ impl StorageNode for StorageNodeService {
             incarnation_seq: incarnation_seq_held,
             schema_floor: schema_floor_held,
             newest_segment_format: self.store.newest_segment_format().map_or(0, u64::from),
+            identity_supported: true,
+            identity_node_id: held_identity.map_or(0, |i| i.node_id),
+            identity_token: held_identity
+                .map(|i| Bytes::copy_from_slice(&i.token))
+                .unwrap_or_default(),
+            identity_mismatch,
             devices: vec![self.device_capacity_with(&stats)],
         }))
     }

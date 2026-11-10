@@ -19,6 +19,12 @@ async fn bump_map_version<X: Txn>(tx: &mut X) -> Result<u64> {
     Ok(next)
 }
 
+/// [`bump_map_version`] for other modules' transactions (gateways and
+/// controllers refresh their view of nodes and groups on a change).
+pub(crate) async fn bump_map_version_in_tx<X: Txn>(tx: &mut X) -> Result<u64> {
+    bump_map_version(tx).await
+}
+
 async fn next_id<X: Txn>(tx: &mut X, counter: &[u8]) -> Result<u64> {
     let next = tx
         .get(counter)
@@ -89,6 +95,18 @@ pub async fn register_node<S: KvStore>(
                     return Err(crate::MetaError::InvalidArgument(
                         "an upgrade finalize is past its cut-off: register the node once it completes".into(),
                     ));
+                }
+            }
+            // A node taken out comes back only through `admin node
+            // rejoin`, after its checks (Phase 3.11, R-100).
+            if let Some(n) = &existing {
+                let state = crate::ops::node_lifecycle::state_in_tx(tx, n.id).await?;
+                if !state.in_service() {
+                    return Err(crate::MetaError::InvalidArgument(format!(
+                        "node {} at {address} is {}: bring it back with `admin node rejoin`",
+                        n.id,
+                        state.name()
+                    )));
                 }
             }
             let id = match &existing {

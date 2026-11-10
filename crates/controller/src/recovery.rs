@@ -465,6 +465,11 @@ async fn push_cluster_facts<S: KvStore>(
         delete_fence_hold: false,
         delete_fence_release: false,
         delete_fence_release_token: 0,
+        // No identity: recovery runs on restored metadata, whose identity
+        // records may predate a node's (the leader verifies them later).
+        node_id: 0,
+        node_identity: bytes::Bytes::new(),
+        adopt_identity: false,
     };
     for n in nodes.values() {
         clients.note_node_id(&n.address, n.id);

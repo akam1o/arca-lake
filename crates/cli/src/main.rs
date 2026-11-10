@@ -983,6 +983,12 @@ enum AdminCommand {
     /// decommissioned only when no group lists it and no group is still
     /// rebuilding. Only while the cluster is Active. Requires `--yes`;
     /// `--cancel` stops the drain (members already moved stay moved).
+    /// Node lifecycle (Phase 3.11, R-100): list, status, decommission
+    /// (alias drain), unregister, rejoin.
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
     DecommissionNode {
         /// Node id.
         #[arg(long)]
@@ -2222,50 +2228,8 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
             cancel,
             dry_run,
             plan,
-        } => {
-            use arca_lake_metadata::ops::membership;
-            if dry_run {
-                return dry_run_plan(&plan, async |clients| {
-                    arca_lake_controller::plan::plan_decommission(
-                        meta.as_ref(),
-                        clients,
-                        node,
-                        &plan.plan_failure_domain,
-                        1000,
-                    )
-                    .await
-                })
-                .await;
-            }
-            if cancel {
-                return match membership::cancel_drain(meta.as_ref(), node).await {
-                    Ok(true) => {
-                        println!("node {node}: drain stopped (members already moved stay moved)");
-                        ExitCode::SUCCESS
-                    }
-                    Ok(false) => {
-                        println!("node {node} is not draining");
-                        ExitCode::SUCCESS
-                    }
-                    Err(e) => fail(e),
-                };
-            }
-            if !yes {
-                return fail(
-                    "decommission-node moves every member off the node; re-run with --yes",
-                );
-            }
-            match membership::drain_node(meta.as_ref(), node, "admin", now).await {
-                Ok(r) => {
-                    println!(
-                        "node {node}: {:?}; the controller leader replaces its members (admin status shows progress)",
-                        r.state
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(e) => fail(e),
-            }
-        }
+        } => decommission_command(meta.as_ref(), node, yes, cancel, dry_run, &plan, now).await,
+        AdminCommand::Node { command } => node_command(meta.as_ref(), command, now).await,
         AdminCommand::CheckConfig => check_config(meta.as_ref()).await,
         AdminCommand::Rebalance { command } => rebalance_command(meta.as_ref(), command).await,
         AdminCommand::DeleteFence { command } => {
@@ -2586,6 +2550,339 @@ async fn close_fence_everywhere<S: arca_lake_metadata::KvStore>(
         Err(format!(
             "nodes {missing:?} did not acknowledge the closed fence: deletes may still run there; make them reachable and re-run, or, for a node whose process is stopped and stays stopped, re-run with --absent-node ID"
         ))
+    }
+}
+
+/// `admin decommission-node` and `admin node decommission`.
+async fn decommission_command<S: arca_lake_metadata::KvStore>(
+    meta: &S,
+    node: u64,
+    yes: bool,
+    cancel: bool,
+    dry_run: bool,
+    plan: &PlanArgs,
+    now: u64,
+) -> ExitCode {
+    use arca_lake_metadata::ops::membership;
+    if dry_run {
+        return dry_run_plan(plan, async |clients| {
+            arca_lake_controller::plan::plan_decommission(
+                meta,
+                clients,
+                node,
+                &plan.plan_failure_domain,
+                1000,
+            )
+            .await
+        })
+        .await;
+    }
+    if cancel {
+        return match membership::cancel_drain(meta, node).await {
+            Ok(true) => {
+                println!("node {node}: drain stopped (members already moved stay moved)");
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                println!("node {node} is not draining");
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e),
+        };
+    }
+    if !yes {
+        return fail("decommission-node moves every member off the node; re-run with --yes");
+    }
+    match membership::drain_node(meta, node, "admin", now).await {
+        Ok(r) => {
+            println!(
+                "node {node}: {:?}; the controller leader replaces its members (admin status shows progress)",
+                r.state
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `admin node` subcommands (Phase 3.11, R-100).
+#[derive(Debug, Subcommand)]
+enum NodeCommand {
+    /// Every registered node with its lifecycle state.
+    List,
+    /// One node: state, identity, groups, and what it reports.
+    Status {
+        /// Node id.
+        #[arg(long)]
+        node: u64,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
+    /// Move every member off the node; it becomes decommissioned once no
+    /// group lists it.
+    #[command(alias = "drain")]
+    Decommission {
+        /// Node id.
+        #[arg(long)]
+        node: u64,
+        /// Confirm.
+        #[arg(long)]
+        yes: bool,
+        /// Stop draining.
+        #[arg(long)]
+        cancel: bool,
+        /// Show every move without writing anything.
+        #[arg(long, conflicts_with_all = ["yes", "cancel"])]
+        dry_run: bool,
+        #[command(flatten)]
+        plan: PlanArgs,
+    },
+    /// Take a decommissioned (or quarantined) node out for good: its
+    /// delete fence is closed with a hold on the node first; its id is
+    /// never reused; only `rejoin` brings it back. Idempotent.
+    Unregister {
+        /// Node id.
+        #[arg(long)]
+        node: u64,
+        /// Why (recorded).
+        #[arg(long)]
+        reason: String,
+        /// The node does not answer and its disk will never be started
+        /// again unwiped.
+        #[arg(long)]
+        unreachable: bool,
+        /// Confirm.
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
+    /// Bring a removed, quarantined or decommissioned node back, without
+    /// members, after checking it (release, segment format, incarnation,
+    /// schema floor, identity).
+    Rejoin {
+        /// Node id.
+        #[arg(long)]
+        node: u64,
+        /// The node's disk was emptied: give it a new identity (refused if
+        /// it holds shards).
+        #[arg(long)]
+        fresh_identity: bool,
+        /// Only run the checks.
+        #[arg(long, conflicts_with = "yes")]
+        check: bool,
+        /// Confirm.
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
+}
+
+#[allow(clippy::too_many_lines)]
+async fn node_command<S: arca_lake_metadata::KvStore>(
+    meta: &S,
+    command: NodeCommand,
+    now: u64,
+) -> ExitCode {
+    use arca_lake_metadata::ops::{cluster, node_lifecycle};
+    match command {
+        NodeCommand::List => {
+            let (nodes, states, groups) = match (
+                cluster::list_nodes(meta).await,
+                node_lifecycle::states(meta).await,
+                cluster::list_groups(meta).await,
+            ) {
+                (Ok(n), Ok(s), Ok(g)) => (n, s, g),
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return fail(e),
+            };
+            println!(
+                "{:<6} {:<28} {:<15} {:>7} {:>12}",
+                "id", "address", "state", "groups", "seen_ago_s"
+            );
+            for n in nodes {
+                let state = states
+                    .get(&n.id)
+                    .copied()
+                    .unwrap_or(node_lifecycle::State::Active);
+                let member = groups
+                    .iter()
+                    .filter(|g| g.members.iter().any(|m| m.node_id == n.id))
+                    .count();
+                println!(
+                    "{:<6} {:<28} {:<15} {:>7} {:>12}",
+                    n.id,
+                    n.address,
+                    state.name(),
+                    member,
+                    now.saturating_sub(n.last_seen_ms) / 1000
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        NodeCommand::Status { node, rpc } => {
+            let Some(n) = cluster::list_nodes(meta)
+                .await
+                .ok()
+                .and_then(|ns| ns.into_iter().find(|n| n.id == node))
+            else {
+                return fail(format!("node {node} unknown"));
+            };
+            let state = match node_lifecycle::state(meta, node).await {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            println!("node {node} at {}: {}", n.address, state.name());
+            if let Ok(Some(r)) = node_lifecycle::retirements(meta)
+                .await
+                .map(|rs| rs.into_iter().find(|r| r.node_id == node))
+            {
+                println!("  {:?}", r.state);
+            }
+            if let Ok(Some(i)) = node_lifecycle::identity(meta, node).await {
+                println!("  identity given (acknowledged: {})", i.acknowledged);
+            }
+            let clients = match admin_node_clients(&rpc) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            clients.note_node_id(&n.address, n.id);
+            match clients.health(&n.address).await {
+                Ok(h) => println!(
+                    "  answers: {} protocol {} format {}..{} schema floor {} incarnation seq {} live shards {} identity {}",
+                    h.software,
+                    h.protocol_max,
+                    h.format_min,
+                    h.format_max,
+                    h.schema_floor,
+                    h.incarnation_seq,
+                    h.live_shards,
+                    if !h.identity_supported {
+                        "not reported (earlier release)".to_string()
+                    } else if h.identity_node_id == 0 {
+                        "none".to_string()
+                    } else {
+                        format!("node {}", h.identity_node_id)
+                    }
+                ),
+                Err(e) => println!("  does not answer: {}", e.code()),
+            }
+            ExitCode::SUCCESS
+        }
+        NodeCommand::Decommission {
+            node,
+            yes,
+            cancel,
+            dry_run,
+            plan,
+        } => decommission_command(meta, node, yes, cancel, dry_run, &plan, now).await,
+        NodeCommand::Unregister {
+            node,
+            reason,
+            unreachable,
+            yes,
+            rpc,
+        } => {
+            if !yes {
+                return fail(
+                    "unregister takes the node out for good (only `admin node rejoin` brings it back); re-run with --yes",
+                );
+            }
+            let clients = match admin_node_clients(&rpc) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            match arca_lake_controller::node_ops::unregister(
+                meta,
+                &clients,
+                node,
+                "admin",
+                &reason,
+                unreachable,
+                now,
+            )
+            .await
+            {
+                Ok(u) if u.already => {
+                    println!("node {node} is already removed");
+                    ExitCode::SUCCESS
+                }
+                Ok(u) => {
+                    println!(
+                        "node {node} removed{}",
+                        if u.fenced {
+                            "; its delete fence is closed and held"
+                        } else {
+                            " while unreachable: its disk must never be started again unwiped"
+                        }
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        NodeCommand::Rejoin {
+            node,
+            fresh_identity,
+            check,
+            yes,
+            rpc,
+        } => {
+            let clients = match admin_node_clients(&rpc) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            if check || !yes {
+                return match arca_lake_controller::node_ops::check_rejoin(
+                    meta,
+                    &clients,
+                    node,
+                    fresh_identity,
+                )
+                .await
+                {
+                    Ok(c) if c.problems.is_empty() => {
+                        println!(
+                            "node {node} may rejoin{}{}",
+                            if c.fresh_identity {
+                                " with a new identity"
+                            } else {
+                                ""
+                            },
+                            if check { "" } else { "; re-run with --yes" }
+                        );
+                        if check {
+                            ExitCode::SUCCESS
+                        } else {
+                            ExitCode::from(1)
+                        }
+                    }
+                    Ok(c) => {
+                        for p in &c.problems {
+                            eprintln!("refused: {p}");
+                        }
+                        ExitCode::from(1)
+                    }
+                    Err(e) => fail(e),
+                };
+            }
+            match arca_lake_controller::node_ops::rejoin(meta, &clients, node, fresh_identity).await
+            {
+                Ok((was, c)) => {
+                    println!(
+                        "node {node} rejoined (was {}){}: active without members; reconciliation collects its former shards",
+                        was.name(),
+                        if c.fresh_identity {
+                            " with a new identity"
+                        } else {
+                            ""
+                        }
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
     }
 }
 

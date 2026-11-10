@@ -19,7 +19,7 @@ use arca_lake_metadata::fence::FencedKv;
 use arca_lake_metadata::guard::{GuardedKv, OpClass};
 use arca_lake_metadata::ops::cluster;
 use arca_lake_metadata::ops::leader;
-use arca_lake_metadata::ops::{compat, membership};
+use arca_lake_metadata::ops::{compat, membership, node_lifecycle};
 use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord};
 use arca_lake_metadata::{KvError, KvStore, MetaError};
 use arca_lake_placement::{GroupSpec, choose_replacement};
@@ -1181,11 +1181,66 @@ async fn health_pass<S: KvStore>(
             && fence.record.incarnation == incarnation,
         delete_fence_release: false,
         delete_fence_release_token: 0,
+        node_id: 0,
+        node_identity: bytes::Bytes::new(),
+        adopt_identity: false,
     };
+    // Lifecycle and identity (Phase 3.11, R-100): a removed node gets
+    // nothing; a quarantined one only a probe; every other node its
+    // identity, adopted until it acknowledged one, compared afterwards.
+    let states = node_lifecycle::states(meta).await?;
+    let mut identities = node_lifecycle::identities(meta).await?;
     for n in &nodes {
         clients.note_node_id(&n.address, n.id);
-        match clients.health_with(&n.address, req.clone()).await {
+        let state = states
+            .get(&n.id)
+            .copied()
+            .unwrap_or(node_lifecycle::State::Active);
+        if state == node_lifecycle::State::Removed {
+            continue;
+        }
+        if state == node_lifecycle::State::Quarantined {
+            let _ = clients.health(&n.address).await;
+            unhealthy += 1;
+            continue;
+        }
+        let ident = match identities.remove(&n.id) {
+            Some(i) => i,
+            None => node_lifecycle::ensure_identity(meta, n.id).await?,
+        };
+        let mut node_req = req.clone();
+        node_req.node_id = n.id;
+        node_req.node_identity = bytes::Bytes::copy_from_slice(&ident.token);
+        node_req.adopt_identity = !ident.acknowledged;
+        match clients.health_with(&n.address, node_req).await {
             Ok(h) => {
+                if h.identity_supported {
+                    let holds = h.identity_node_id == n.id
+                        && h.identity_token.as_ref() == ident.token.as_slice();
+                    if h.identity_mismatch || !holds {
+                        let reason = if h.identity_node_id == 0 {
+                            "the node holds no identity although it acknowledged one: an emptied or replaced disk".to_string()
+                        } else if h.identity_node_id == n.id {
+                            "the node holds another identity token for its id: another cluster's disk, or a re-registered id".to_string()
+                        } else {
+                            format!(
+                                "the node holds the identity of node {}: a disk moved or an id reused",
+                                h.identity_node_id
+                            )
+                        };
+                        if node_lifecycle::quarantine(meta, n.id, &reason, now).await? {
+                            tracing::error!(node = n.id, address = %n.address, %reason, "storage node quarantined");
+                        }
+                        metrics
+                            .nodes_quarantined_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        unhealthy += 1;
+                        continue;
+                    }
+                    if !ident.acknowledged {
+                        node_lifecycle::acknowledge_identity(meta, n.id, ident.token).await?;
+                    }
+                }
                 metrics.delete_fence.note_node(
                     n.id,
                     h.delete_fence_generation,
@@ -1294,10 +1349,18 @@ async fn repair_pass<S: KvStore>(
         Ordering::Relaxed,
     );
     let now = now_ms();
+    // A removed or quarantined node is never healthy (Phase 3.11, R-100):
+    // members on it are repaired away at once.
+    let out_of_service: BTreeSet<u64> = node_lifecycle::retirements(meta)
+        .await?
+        .into_iter()
+        .map(|r| r.node_id)
+        .collect();
     let healthy = |id: u64| {
-        nodes
-            .get(&id)
-            .is_some_and(|n| now.saturating_sub(n.last_seen_ms) <= ms(cfg.unhealthy_after))
+        !out_of_service.contains(&id)
+            && nodes
+                .get(&id)
+                .is_some_and(|n| now.saturating_sub(n.last_seen_ms) <= ms(cfg.unhealthy_after))
     };
     let opts = RepairOptions {
         page_size: cfg.page_size,
@@ -1473,6 +1536,9 @@ impl Intents {
                 membership::NodeLifecycle::Draining { .. } => draining.insert(r.node_id),
                 membership::NodeLifecycle::Decommissioned { .. } => retired.insert(r.node_id),
             };
+        }
+        for r in node_lifecycle::retirements(meta).await? {
+            retired.insert(r.node_id);
         }
         let mut requests = HashMap::new();
         for r in membership::replace_requests(meta).await? {

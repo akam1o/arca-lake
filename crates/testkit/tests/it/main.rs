@@ -48,6 +48,7 @@ mod membership_faults;
 mod mixed_version;
 mod multipart_backpressure;
 mod multipart_integrity;
+mod node_lifecycle;
 mod paging;
 mod parallel_read;
 mod phase31;

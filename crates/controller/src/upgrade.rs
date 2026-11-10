@@ -66,8 +66,34 @@ pub async fn upgrade_pass<S: KvStore>(
             // Step 1: every node (live Health) and every fresh heartbeat
             // reaches the target. Absent nodes block unless ignored.
             let mut blockers = Vec::new();
+            // A removed node is out of the cluster (Phase 3.11, R-100);
+            // only a decommissioned or removed node may be named absent.
+            let states = arca_lake_metadata::ops::node_lifecycle::states(meta).await?;
+            let state_of = |id: u64| {
+                states
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(arca_lake_metadata::ops::node_lifecycle::State::Active)
+            };
             for n in cluster::list_nodes(meta).await? {
                 let id = n.id.to_string();
+                let state = state_of(n.id);
+                if state == arca_lake_metadata::ops::node_lifecycle::State::Removed {
+                    continue;
+                }
+                let may_ignore = cur.ignore_absent.contains(&id)
+                    && matches!(
+                        state,
+                        arca_lake_metadata::ops::node_lifecycle::State::Decommissioned
+                    );
+                if cur.ignore_absent.contains(&id) && !may_ignore {
+                    blockers.push(format!(
+                        "node {} is named absent but is {}: only a decommissioned node may be (decommission or unregister it first)",
+                        n.id,
+                        state.name()
+                    ));
+                    continue;
+                }
                 match clients.health(&n.address).await {
                     Ok(h) => {
                         let caps = arca_lake_protocol::client::NodeCaps::from_health(&h).caps;
@@ -80,8 +106,8 @@ pub async fn upgrade_pass<S: KvStore>(
                             ));
                         }
                     }
-                    Err(e) if cur.ignore_absent.contains(&id) => {
-                        warn!(node = n.id, error = %e, "finalize: absent node ignored");
+                    Err(e) if may_ignore => {
+                        warn!(node = n.id, error = %e, "finalize: absent decommissioned node ignored");
                     }
                     Err(e) => blockers.push(format!("node {} unreachable: {}", n.id, e.code())),
                 }
@@ -210,10 +236,25 @@ pub async fn upgrade_pass<S: KvStore>(
                 })
                 .map(|r| r.node_id)
                 .collect();
+            // Removed nodes are not waited for (Phase 3.11, R-100: an
+            // unregistered node never serves again under this cluster).
+            let removed: Vec<u64> = arca_lake_metadata::ops::node_lifecycle::retirements(meta)
+                .await?
+                .into_iter()
+                .filter(arca_lake_metadata::ops::node_lifecycle::NodeRetirementRecord::is_removed)
+                .map(|r| r.node_id)
+                .collect();
+            let waited = |n: &arca_lake_metadata::records::NodeRecord| {
+                let named_away =
+                    decommissioned.contains(&n.id) && cur.ignore_absent.contains(&n.id.to_string());
+                !removed.contains(&n.id) && !named_away
+            };
             let mut missing = Vec::new();
-            for n in cluster::list_nodes(meta).await?.into_iter().filter(|n| {
-                !(decommissioned.contains(&n.id) && cur.ignore_absent.contains(&n.id.to_string()))
-            }) {
+            for n in cluster::list_nodes(meta)
+                .await?
+                .into_iter()
+                .filter(|n| waited(n))
+            {
                 let req = arca_lake_protocol::storage::v1::HealthRequest {
                     schema_floor: target.schema,
                     format_write: target.format,
@@ -254,9 +295,11 @@ pub async fn upgrade_pass<S: KvStore>(
             // is waited for too; until then the upgrade stays open and the
             // step is retried (re-review).
             let mut missing_after = Vec::new();
-            for n in cluster::list_nodes(meta).await?.into_iter().filter(|n| {
-                !(decommissioned.contains(&n.id) && cur.ignore_absent.contains(&n.id.to_string()))
-            }) {
+            for n in cluster::list_nodes(meta)
+                .await?
+                .into_iter()
+                .filter(|n| waited(n))
+            {
                 let req = arca_lake_protocol::storage::v1::HealthRequest {
                     schema_floor: target.schema,
                     format_write: target.format,

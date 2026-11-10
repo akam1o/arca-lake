@@ -1,0 +1,488 @@
+//! Node lifecycle safety (Phase 3.11, R-100): a node's identity on its
+//! disk, quarantine of a disk that is not the one the cluster registered,
+//! unregister and rejoin with their checks, and the finalize's handling of
+//! absent nodes.
+//!
+//! Invariants: an emptied or foreign disk at a member's address is never
+//! counted as that member (it is quarantined and the member repaired);
+//! an unregistered node takes no delete of this cluster, cannot register
+//! again by itself, and leaves the finalize's barriers; a node rejoins
+//! only after its checks, without members, and its former shards are then
+//! collected; `--ignore-absent` names only decommissioned nodes; new
+//! groups are placed on active nodes only.
+
+#![allow(clippy::too_many_lines, clippy::many_single_char_names)]
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use arca_lake_controller::node_ops;
+use arca_lake_controller::process::{ControllerConfig, ControllerHandle, spawn};
+use arca_lake_metadata::Txn;
+use arca_lake_metadata::ops::node_lifecycle::{self, State};
+use arca_lake_metadata::ops::{cluster, compat, membership};
+use arca_lake_protocol::client::{NodeClients, ShardRef};
+use arca_lake_testkit::s3::{self, PutOptions};
+use arca_lake_testkit::{ClusterOptions, TestCluster, now_ms, random_bytes};
+use bytes::Bytes;
+
+const KIB: u64 = 1 << 10;
+const BUCKET: &str = "nodes";
+
+/// Four nodes, one group of three: one spare.
+async fn cluster() -> TestCluster {
+    let c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(4, 2, 1, 128 * KIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    c
+}
+
+fn ctl() -> ControllerConfig {
+    let mut c = ControllerConfig::new("ctl-nodes");
+    c.lease = Duration::from_secs(2);
+    c.health_interval = Duration::from_millis(100);
+    c.repair_interval = Duration::from_millis(100);
+    c.unhealthy_after = Duration::from_secs(3);
+    c.auto_repair = true;
+    c.gc_interval = Duration::from_secs(3600);
+    c.reconcile_interval = Duration::from_secs(3600);
+    c.failure_domain = "host".into();
+    c
+}
+
+async fn wait_until(what: &str, timeout: Duration, mut cond: impl AsyncFnMut() -> bool) {
+    let start = Instant::now();
+    while !cond().await {
+        assert!(start.elapsed() < timeout, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn put_objects(c: &TestCluster, n: u64) -> Vec<(String, Bytes)> {
+    let mut out = Vec::new();
+    for i in 0..n {
+        let d = Bytes::from(random_bytes(usize::try_from(300 * KIB).unwrap(), 9_000 + i));
+        let k = format!("o{i}");
+        s3::put(&c.backend, BUCKET, &k, d.clone(), &PutOptions::default())
+            .await
+            .unwrap();
+        out.push((k, d));
+    }
+    out
+}
+
+async fn all_read_back(c: &TestCluster, objects: &[(String, Bytes)]) {
+    for (k, d) in objects {
+        assert_eq!(&s3::get(&c.backend, BUCKET, k).await.unwrap().0, d, "{k}");
+    }
+}
+
+/// Every node holds the identity the leader gave it.
+async fn identities_acknowledged(c: &TestCluster) {
+    wait_until(
+        "every identity acknowledged",
+        Duration::from_secs(20),
+        async || {
+            let ids = node_lifecycle::identities(c.meta.as_ref()).await.unwrap();
+            c.nodes
+                .iter()
+                .all(|n| ids.get(&n.id).is_some_and(|i| i.acknowledged))
+        },
+    )
+    .await;
+}
+
+async fn leader(c: &TestCluster) -> ControllerHandle {
+    let h = spawn(Arc::clone(&c.meta), ctl()).await.unwrap();
+    wait_until("leadership", Duration::from_secs(20), async || {
+        h.is_leader()
+    })
+    .await;
+    h
+}
+
+/// Before Phase 3.11 a node whose disk was emptied and restarted at a
+/// member's address answered Health and counted as that healthy member: it
+/// held nothing, no repair started, and the group ran with one redundancy
+/// less without anyone knowing. Now it holds no identity although it
+/// acknowledged one: it is quarantined, the member is repaired onto the
+/// spare, and every object reads back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_emptied_disk_at_a_members_address_is_quarantined_and_repaired() {
+    let mut c = cluster().await;
+    let objects = put_objects(&c, 6).await;
+    let ctl = leader(&c).await;
+    identities_acknowledged(&c).await;
+    let g = c.groups().await.remove(0);
+    let victim = g.members[0].node_id;
+    let i = c.node_index(&g.members[0]).unwrap();
+    c.stop_node(i).await;
+    std::fs::remove_dir_all(&c.nodes[i].dir).unwrap();
+    std::fs::create_dir_all(&c.nodes[i].dir).unwrap();
+    c.start_node(i).await;
+    wait_until(
+        "the emptied node quarantined",
+        Duration::from_secs(20),
+        async || {
+            node_lifecycle::state(c.meta.as_ref(), victim)
+                .await
+                .unwrap()
+                == State::Quarantined
+        },
+    )
+    .await;
+    wait_until(
+        "its member repaired away",
+        Duration::from_secs(60),
+        async || {
+            let g = c.groups().await.remove(0);
+            g.state == arca_lake_metadata::records::GroupState::Active
+                && !g.members.iter().any(|m| m.node_id == victim)
+        },
+    )
+    .await;
+    all_read_back(&c, &objects).await;
+    // Quarantined: no new group is placed there.
+    assert!(
+        !arca_lake_controller::groups::placeable_nodes(c.meta.as_ref())
+            .await
+            .unwrap()
+            .iter()
+            .any(|n| n.id == victim)
+    );
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// A disk holding another identity (another cluster's disk at a reused
+/// address, a reused node id, a disk moved between nodes): the node
+/// changes nothing on a request carrying the cluster's identity, and the
+/// leader quarantines it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_holding_another_identity_adopts_nothing_and_is_quarantined() {
+    let c = cluster().await;
+    put_objects(&c, 2).await;
+    let ctl = leader(&c).await;
+    identities_acknowledged(&c).await;
+    let spare = c.nodes.iter().map(|n| n.id).max().unwrap();
+    ctl.shutdown().await;
+    // The metadata now names another identity for the node (as a cluster
+    // whose id was reused, or which registered another disk there).
+    arca_lake_metadata::transact(c.meta.as_ref(), spare, |tx, id| {
+        Box::pin(async move {
+            tx.set(
+                &arca_lake_metadata::keys::node_identity(*id),
+                &arca_lake_metadata::records::encode(&node_lifecycle::NodeIdentityRecord {
+                    node_id: *id,
+                    token: [0x5a; 16],
+                    acknowledged: true,
+                })?,
+            );
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let addr = c
+        .nodes
+        .iter()
+        .find(|n| n.id == spare)
+        .unwrap()
+        .addr
+        .to_string();
+    let before = c.clients.health(&addr).await.unwrap();
+    // A push carrying that identity and a higher format: nothing adopted.
+    let h = c
+        .clients
+        .health_with(
+            &addr,
+            arca_lake_protocol::storage::v1::HealthRequest {
+                node_id: spare,
+                node_identity: Bytes::from_static(&[0x5a; 16]),
+                schema_floor: before.schema_floor + 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(h.identity_mismatch, "{h:?}");
+    assert_eq!(h.schema_floor, before.schema_floor, "nothing adopted");
+    let ctl = leader(&c).await;
+    wait_until(
+        "the node quarantined",
+        Duration::from_secs(20),
+        async || node_lifecycle::state(c.meta.as_ref(), spare).await.unwrap() == State::Quarantined,
+    )
+    .await;
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// The R-100 delete path closed: a node drained and decommissioned still
+/// held its former shards, and every leader kept pushing it the open fence,
+/// so a delete of this cluster applied there (a late one, or one decided
+/// on metadata restored from before its replacement). Unregistered, it is
+/// told first: its fence is closed and held, and such a delete is refused.
+/// Unregistering again changes nothing; it cannot register again by
+/// itself; it rejoins only after its checks, without members, and its
+/// former shards are then collected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unregistered_node_refuses_old_deletes_and_rejoins_only_after_its_checks() {
+    let c = cluster().await;
+    let objects = put_objects(&c, 6).await;
+    let ctl = leader(&c).await;
+    identities_acknowledged(&c).await;
+    let g = c.groups().await.remove(0);
+    let leaving = g.members[1].node_id;
+    let li = c.node_index(&g.members[1]).unwrap();
+    let laddr = c.nodes[li].addr.to_string();
+    // Two shards of the leaving member.
+    let shard_a = ShardRef {
+        group_id: g.id,
+        chunk_id: c.manifest(BUCKET, "o0").await.chunks[0].1.chunk_id,
+        shard_index: 1,
+    };
+    let shard_b = ShardRef {
+        group_id: g.id,
+        chunk_id: c.manifest(BUCKET, "o1").await.chunks[0].1.chunk_id,
+        shard_index: 1,
+    };
+    // Unregister refuses a node in service.
+    let e = node_ops::unregister(
+        c.meta.as_ref(),
+        &c.clients,
+        leaving,
+        "t",
+        "test",
+        false,
+        now_ms(),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.to_string().contains("decommission it first"), "{e}");
+    // Decommission: the member moves to the spare; the node keeps its
+    // former shards.
+    membership::drain_node(c.meta.as_ref(), leaving, "t", now_ms())
+        .await
+        .unwrap();
+    wait_until("decommissioned", Duration::from_secs(60), async || {
+        node_lifecycle::state(c.meta.as_ref(), leaving)
+            .await
+            .unwrap()
+            == State::Decommissioned
+    })
+    .await;
+    assert!(
+        c.shard_count(li, g.id) > 0,
+        "former shards still on the node"
+    );
+    let epoch = c.groups().await.remove(0).epoch;
+    // A delete of this cluster, taken with the leader's open generation as
+    // it is now (a late one, or one decided on metadata restored from
+    // before the replacement).
+    let old = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
+    old.set_incarnation(c.clients.incarnation());
+    let fence = arca_lake_metadata::ops::delete_fence::current(c.meta.as_ref())
+        .await
+        .unwrap();
+    assert!(fence.open);
+    old.set_delete_fence(Some(fence.generation));
+    // Decommissioned only, the node takes it (what R-100 exposes).
+    old.delete_shard(&laddr, shard_a, epoch)
+        .await
+        .expect("a decommissioned node takes this cluster's deletes");
+    let u = node_ops::unregister(
+        c.meta.as_ref(),
+        &c.clients,
+        leaving,
+        "t",
+        "hardware retired",
+        false,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    // The old delete: refused by the node.
+    let r = old.delete_shard(&laddr, shard_b, epoch).await;
+    assert!(
+        r.as_ref().is_err_and(NodeClients::is_fenced),
+        "an unregistered node took a delete: {r:?}"
+    );
+    assert!(u.fenced && !u.already, "{u:?}");
+    // Idempotent.
+    let again = node_ops::unregister(
+        c.meta.as_ref(),
+        &c.clients,
+        leaving,
+        "t",
+        "x",
+        false,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert!(again.already);
+    // It cannot register again by itself.
+    let e = cluster::register_node(c.meta.as_ref(), &laddr, vec![], vec![0], now_ms())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("admin node rejoin"), "{e}");
+    // The leader no longer reaches it: it stays held across passes.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let h = c.clients.health(&laddr).await.unwrap();
+    assert!(!h.delete_fence_open && h.delete_fence_hold, "{h:?}");
+    // Not placed, not waited for by the finalize.
+    assert!(
+        !arca_lake_controller::groups::placeable_nodes(c.meta.as_ref())
+            .await
+            .unwrap()
+            .iter()
+            .any(|n| n.id == leaving)
+    );
+    // Rejoin: its checks pass (same release, same identity).
+    let check = node_ops::check_rejoin(c.meta.as_ref(), &c.clients, leaving, false)
+        .await
+        .unwrap();
+    assert!(check.problems.is_empty(), "{check:?}");
+    let (was, _) = node_ops::rejoin(c.meta.as_ref(), &c.clients, leaving, false)
+        .await
+        .unwrap();
+    assert_eq!(was, State::Removed);
+    assert_eq!(
+        node_lifecycle::state(c.meta.as_ref(), leaving)
+            .await
+            .unwrap(),
+        State::Active
+    );
+    // Its hold is the operator's to release (a rejoin does not delete by
+    // itself); once released and the leader's generation open there again,
+    // reconciliation collects its former shards.
+    arca_lake_controller::delete_fence::release_and_push(
+        c.meta.as_ref(),
+        &c.clients,
+        "rejoined",
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    wait_until(
+        "the former shards collected",
+        Duration::from_secs(30),
+        async || {
+            let _ = c.reconcile(now_ms() + 3_600_000, 0).await;
+            c.shard_count(li, g.id) == 0
+        },
+    )
+    .await;
+    all_read_back(&c, &objects).await;
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Rejoin checks: an emptied disk needs `--fresh-identity`; a disk of
+/// another identity never rejoins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejoin_refuses_a_foreign_disk_and_needs_fresh_identity_for_an_emptied_one() {
+    let mut c = cluster().await;
+    put_objects(&c, 2).await;
+    let ctl = leader(&c).await;
+    identities_acknowledged(&c).await;
+    let spare = c.nodes.iter().map(|n| n.id).max().unwrap();
+    let si = c.nodes.iter().position(|n| n.id == spare).unwrap();
+    membership::drain_node(c.meta.as_ref(), spare, "t", now_ms())
+        .await
+        .unwrap();
+    wait_until("decommissioned", Duration::from_secs(30), async || {
+        node_lifecycle::state(c.meta.as_ref(), spare).await.unwrap() == State::Decommissioned
+    })
+    .await;
+    ctl.shutdown().await;
+    // Emptied disk.
+    c.stop_node(si).await;
+    std::fs::remove_dir_all(&c.nodes[si].dir).unwrap();
+    std::fs::create_dir_all(&c.nodes[si].dir).unwrap();
+    c.start_node(si).await;
+    let check = node_ops::check_rejoin(c.meta.as_ref(), &c.clients, spare, false)
+        .await
+        .unwrap();
+    assert!(
+        check
+            .problems
+            .iter()
+            .any(|p| p.contains("--fresh-identity")),
+        "{check:?}"
+    );
+    let check = node_ops::check_rejoin(c.meta.as_ref(), &c.clients, spare, true)
+        .await
+        .unwrap();
+    assert!(
+        check.problems.is_empty() && check.fresh_identity,
+        "{check:?}"
+    );
+    // The disk adopts an identity of another registration (as another
+    // cluster's would hold): never rejoined, even with --fresh-identity.
+    let addr = c.nodes[si].addr.to_string();
+    c.clients
+        .health_with(
+            &addr,
+            arca_lake_protocol::storage::v1::HealthRequest {
+                node_id: spare,
+                node_identity: Bytes::from_static(&[0x77; 16]),
+                adopt_identity: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let check = node_ops::check_rejoin(c.meta.as_ref(), &c.clients, spare, true)
+        .await
+        .unwrap();
+    assert!(
+        check.problems.iter().any(|p| p.contains("another")),
+        "{check:?}"
+    );
+    assert!(
+        node_ops::rejoin(c.meta.as_ref(), &c.clients, spare, true)
+            .await
+            .is_err()
+    );
+    c.shutdown().await;
+}
+
+/// `--ignore-absent` names only decommissioned nodes: an active node named
+/// absent blocks the finalize's first step (it used to let the finalize
+/// pass the cut-off without checking that node), and a removed node is not
+/// waited for at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ignore_absent_takes_only_decommissioned_nodes_and_removed_ones_are_not_waited_for() {
+    let c = cluster().await;
+    let target = arca_lake_common::compat::Target {
+        protocol: arca_lake_protocol::storage::v1::PROTOCOL_VERSION,
+        schema: arca_lake_metadata::keys::SCHEMA_VERSION,
+        format: u64::from(arca_lake_storage::format::SEGMENT_FORMAT_VERSION),
+    };
+    let active = c.nodes[0].id;
+    compat::request_finalize(
+        c.meta.as_ref(),
+        target,
+        vec![active.to_string()],
+        "admin",
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    let own = arca_lake_controller::capabilities();
+    let r =
+        arca_lake_controller::upgrade::upgrade_pass(c.meta.as_ref(), &c.clients, &own, 7, now_ms())
+            .await
+            .unwrap();
+    let why = r.blocked.unwrap_or_default();
+    assert!(
+        why.contains("named absent but is active"),
+        "an active node named absent was not refused: {why}"
+    );
+    c.shutdown().await;
+}

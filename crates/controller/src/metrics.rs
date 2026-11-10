@@ -289,6 +289,9 @@ pub struct Metrics {
     /// Health passes that found a node at another incarnation of the
     /// cluster's sequence or above it (Phase 3.10 review).
     pub incarnation_conflicts_total: AtomicU64,
+    /// Health passes that found a node holding another identity than the
+    /// one the cluster gave it (Phase 3.11, R-100; the node is quarantined).
+    pub nodes_quarantined_total: AtomicU64,
     /// Groups whose current move this leader started as a planned move
     /// (a drain keeps no request once its move is under way; re-review).
     /// Lost with the leadership: the next leader takes them as failure
@@ -470,6 +473,10 @@ impl Metrics {
         out += &c(
             "arca_controller_incarnation_conflicts_total",
             self.incarnation_conflicts_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_nodes_quarantined_total",
+            self.nodes_quarantined_total.load(Ordering::Relaxed),
         );
         out += &c(
             "arca_controller_repair_group_errors_total",

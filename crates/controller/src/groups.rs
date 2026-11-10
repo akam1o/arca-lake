@@ -10,6 +10,25 @@ use arca_lake_placement::{Device, GroupSpec, choose_group_members};
 
 use crate::ControlError;
 
+/// Registered nodes that may receive new groups: active ones only (not
+/// draining, decommissioned, removed or quarantined; Phase 3.11, R-100).
+///
+/// # Errors
+///
+/// Metadata errors.
+pub async fn placeable_nodes<S: KvStore>(meta: &S) -> Result<Vec<NodeRecord>, ControlError> {
+    let states = arca_lake_metadata::ops::node_lifecycle::states(meta).await?;
+    Ok(cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .filter(|n| {
+            states
+                .get(&n.id)
+                .is_none_or(|s| *s == arca_lake_metadata::ops::node_lifecycle::State::Active)
+        })
+        .collect())
+}
+
 /// Devices of all registered nodes, with membership counts from `groups`.
 #[must_use]
 pub fn devices_of(nodes: &[NodeRecord], groups: &[GroupRecord]) -> Vec<Device> {
@@ -48,7 +67,7 @@ pub async fn create_groups<S: KvStore>(
     tier: &str,
     count: usize,
 ) -> Result<Vec<GroupRecord>, ControlError> {
-    let nodes = cluster::list_nodes(meta).await?;
+    let nodes = placeable_nodes(meta).await?;
     create_groups_from(meta, profile, tier, count, nodes).await
 }
 
@@ -65,7 +84,7 @@ pub async fn create_groups_for_class<S: KvStore>(
     device_class: &str,
     count: usize,
 ) -> Result<Vec<GroupRecord>, ControlError> {
-    let nodes = cluster::list_nodes(meta)
+    let nodes = placeable_nodes(meta)
         .await?
         .into_iter()
         .filter(|n| {
@@ -213,7 +232,7 @@ pub async fn create_cache_groups<S: KvStore>(
     count: usize,
 ) -> Result<Vec<GroupRecord>, ControlError> {
     let (scheme, k, m) = protection.spec()?;
-    let nodes: Vec<NodeRecord> = cluster::list_nodes(meta)
+    let nodes: Vec<NodeRecord> = placeable_nodes(meta)
         .await?
         .into_iter()
         .filter(|n| {

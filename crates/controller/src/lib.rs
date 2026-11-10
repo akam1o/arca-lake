@@ -15,6 +15,7 @@ pub mod gc;
 pub mod groups;
 pub mod integrity;
 pub mod metrics;
+pub mod node_ops;
 pub mod objects;
 pub mod plan;
 pub mod process;
