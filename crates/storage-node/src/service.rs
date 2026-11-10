@@ -211,6 +211,10 @@ impl StorageNodeService {
         let epochs = EpochTable::open(&cfg.store.dir);
         if cluster.format_write > 0 {
             store.set_format_write(cluster.format_write);
+            // A rollover the raise did not finish before a restart.
+            store
+                .roll_to_format_write()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
         tracing::info!(
             format_write = store.format_write(),
