@@ -184,6 +184,7 @@ arca_node_delete_fence_generation	gauge	node	generation	-	delete fence generatio
 arca_node_delete_fence_hold	gauge	node	bool	-	1 while the node holds an operator hold on its delete fence (before a restore, maintenance)
 arca_node_delete_fence_open	gauge	node	bool	-	1 while the node admits deletes under its delete fence generation
 arca_node_delete_fence_refusals_total	counter	node	deletes	-	deletes the node refused for its delete fence (stale generation, closed fence, none adopted, older protocol)
+arca_node_format_rollover_failures_total	counter	node	rollovers	-	rollovers to a raised segment format that failed (the finalize waits on the node's reported format)
 arca_node_device_free_bytes	gauge	node	bytes	-	bytes free for placement on the device (capped by --capacity-bytes)
 arca_node_device_total_bytes	gauge	node	bytes	-	size of the device for placement (capped by --capacity-bytes)
 arca_node_device_usage_bytes	gauge	node	bytes	kind=segments|side_files|fs_used|fs_overhead|delete_reserve	what is on the device now: segments, side_files (quarantine log, sequence bound, temporary files), fs_used (whole file system), fs_overhead (fs_used minus the store files; meaningful when the store has the file system to itself), delete_reserve (kept for the tombstones of deleting every record)

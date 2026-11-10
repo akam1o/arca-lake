@@ -196,8 +196,9 @@ pub async fn upgrade_pass<S: KvStore>(
             // missed it would take the previous release's deletes on
             // metadata restored from before the finalize. Also nodes the
             // operator named absent (re-review: one returning on such
-            // metadata would): only a decommissioned node, which holds no
-            // data, is not waited for.
+            // metadata would). Only a decommissioned node the operator
+            // also names with --ignore-absent is not waited for (an
+            // explicit decision: its disk must never serve again unwiped).
             let decommissioned: Vec<u64> = arca_lake_metadata::ops::membership::node_states(meta)
                 .await?
                 .into_iter()
@@ -210,11 +211,9 @@ pub async fn upgrade_pass<S: KvStore>(
                 .map(|r| r.node_id)
                 .collect();
             let mut missing = Vec::new();
-            for n in cluster::list_nodes(meta)
-                .await?
-                .into_iter()
-                .filter(|n| !decommissioned.contains(&n.id))
-            {
+            for n in cluster::list_nodes(meta).await?.into_iter().filter(|n| {
+                !(decommissioned.contains(&n.id) && cur.ignore_absent.contains(&n.id.to_string()))
+            }) {
                 let req = arca_lake_protocol::storage::v1::HealthRequest {
                     schema_floor: target.schema,
                     format_write: target.format,
@@ -238,7 +237,7 @@ pub async fn upgrade_pass<S: KvStore>(
                         n.id, h.schema_floor
                     )),
                     Err(e) => missing.push(format!(
-                        "node {} unreachable: {} (bring it back, or decommission it)",
+                        "node {} unreachable: {} (bring it back; only if it is decommissioned, name it with --ignore-absent, and never start its disk again unwiped)",
                         n.id,
                         e.code()
                     )),
@@ -255,11 +254,9 @@ pub async fn upgrade_pass<S: KvStore>(
             // is waited for too; until then the upgrade stays open and the
             // step is retried (re-review).
             let mut missing_after = Vec::new();
-            for n in cluster::list_nodes(meta)
-                .await?
-                .into_iter()
-                .filter(|n| !decommissioned.contains(&n.id))
-            {
+            for n in cluster::list_nodes(meta).await?.into_iter().filter(|n| {
+                !(decommissioned.contains(&n.id) && cur.ignore_absent.contains(&n.id.to_string()))
+            }) {
                 let req = arca_lake_protocol::storage::v1::HealthRequest {
                     schema_floor: target.schema,
                     format_write: target.format,

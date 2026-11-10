@@ -212,10 +212,15 @@ Upgrading to Phase 3.10 (protocol 4, metadata schema 3, ADR-0024):
     controllers lead again or the nodes are rolled back too.
   - The recommended order is the reverse of the upgrade: gateways, then
     controllers, then nodes.
-- **Finalize** raises the schema only once every registered node that is
-  not decommissioned reports schema 3 as its floor. A node that does not
-  answer blocks it, including one named with `--ignore-absent`: bring it
-  back, or decommission it.
+- **Finalize** raises the schema only once every registered node reports
+  schema 3 as its floor and holds a segment of format 2. A node that does
+  not answer blocks it, including one named with `--ignore-absent`.
+  - Bring it back.
+  - Only a node that is decommissioned and named with `--ignore-absent`
+    is not waited for. That is an explicit decision: its disk must never
+    be started again unless wiped, because a previous-release binary
+    could still open it.
+  - No new node can be registered while the finalize is past its cut-off.
 - **After finalize**:
   - Phase 3.9 controllers, gateways and storage nodes refuse to start.
     The finalize raises the segment format to 2 (the version-1 layout),

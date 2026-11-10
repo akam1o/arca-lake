@@ -84,6 +84,8 @@ pub struct StorageNodeService {
     fence: Arc<tokio::sync::RwLock<()>>,
     /// Deletes refused by the delete fence (ADR-0023).
     fence_refusals: AtomicU64,
+    /// Rollovers to a raised segment format that failed (Phase 3.10).
+    format_rollover_failures: AtomicU64,
     frame_bytes: usize,
     stream_progress_timeout: Duration,
     stats: Arc<NodeStats>,
@@ -231,6 +233,7 @@ impl StorageNodeService {
             epochs: Mutex::new(epochs),
             fence: Arc::new(tokio::sync::RwLock::new(())),
             fence_refusals: AtomicU64::new(0),
+            format_rollover_failures: AtomicU64::new(0),
             frame_bytes: cfg.frame_bytes,
             stream_progress_timeout: cfg.stream_progress_timeout,
             stats: Arc::default(),
@@ -468,6 +471,12 @@ impl StorageNodeService {
             c.fence_generation,
             if c.fence_open { "open" } else { "closed" }
         )))
+    }
+
+    /// Rollovers to a raised segment format that failed so far.
+    #[must_use]
+    pub fn format_rollover_failures(&self) -> u64 {
+        self.format_rollover_failures.load(Ordering::Relaxed)
     }
 
     /// Deletes refused by the delete fence so far.
@@ -1243,10 +1252,15 @@ impl StorageNode for StorageNodeService {
             // until it succeeded (re-review: a failed rollover was not
             // retried once the value was adopted): an earlier release
             // refuses the store from then on.
-            if req.format_write > 0 {
-                self.store
-                    .roll_to_format_write()
-                    .map_err(Self::storage_status)?;
+            // A failure is logged and counted, not returned: the node keeps
+            // answering (re-review: failing Health made it look down), and
+            // the finalize waits on its reported segment format.
+            if req.format_write > 0
+                && let Err(e) = self.store.roll_to_format_write()
+            {
+                self.format_rollover_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::error!(error = %e, "cannot roll over to the raised segment format");
             }
             break guard;
         };
