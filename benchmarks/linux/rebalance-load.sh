@@ -22,7 +22,12 @@
 #
 #   HOST_A=user@a HOST_B=user@b benchmarks/linux/rebalance-load.sh <out-dir>
 # Environment: WINDOW (minutes, 12), CAP_BYTES (3 GiB), BASE (objects, 320),
-#   FDB_PORT (4510), FDB_DATA (/mnt/arca-fdb/p39-rebalance), RUN_DIR.
+#   FDB_PORT (4510), FDB_DATA (/mnt/arca-fdb/p39-rebalance), RUN_DIR,
+#   REMOTE_REPO (the checkout whose release binaries run; the load
+#   generator always comes from LOAD_REPO, default $HOME/arca-lake),
+#   REBALANCE (on; off keeps rebalancing paused in the second window too:
+#   the same load and faults, for comparison), SAMPLE_SECS (15: admission
+#   state, GC backlog and per-node capacity into samples.tsv).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT="${1:?output directory}"
@@ -44,7 +49,9 @@ ADDR_B="$(addr_of "$HOST_B")"
 strip() { sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g'; }
 ARCA_ENV="${ARCA_ENV:-ARCA_INSECURE_PLAINTEXT=1 ARCA_FDB_INSECURE_PLAINTEXT=1}"
 BIN="env $ARCA_ENV $REMOTE_REPO/target/release/arca-lake"
-S3LOAD="$REMOTE_REPO/target/release/s3load"
+S3LOAD="${LOAD_REPO:-\$HOME/arca-lake}/target/release/s3load"
+REBALANCE="${REBALANCE:-on}"
+SAMPLE_SECS="${SAMPLE_SECS:-15}"
 CF="$RUN_DIR/fdb.cluster"
 ADMIN="$BIN admin --cluster-file $CF"
 EP="http://$ADDR_B:9000"
@@ -117,6 +124,26 @@ snapshot() { # <label>
   } 2>&1 | strip >> "$OUT/snapshots.txt"
 }
 
+# Every SAMPLE_SECS: gateway admission state, the leader's GC backlog and
+# rebalance counters, and each node's capacity (total, available,
+# reserved): write_rejected time, capacity spread, reserve violations.
+sampler() {
+  printf 'time\tsource\tmetric\tvalue\n' > "$OUT/samples.tsv"
+  while [ ! -f "$OUT/.stop-sampler" ]; do
+    local t; t=$(date -u +%s)
+    {
+      sb "curl -s http://127.0.0.1:9900/metrics" | grep -E '^arca_gateway_admission_state' | sed "s/^/gw /"
+      for h in sa sb; do $h "curl -s http://127.0.0.1:9901/metrics" | grep -E '^arca_controller_(leader |gc_backlog_bytes|rebalance_moved_bytes_total|rebalance_capacity_stops_total)' | sed "s/^/ctl-${h#s} /"; done
+      for p in 9910 9911 9912 9913; do sa "curl -s http://127.0.0.1:$p/metrics" | grep -E '^arca_node_capacity_bytes\{kind="(total|available|reserved)"' | sed "s/^/a:$p /"; done
+      for p in 9910 9911; do sb "curl -s http://127.0.0.1:$p/metrics" | grep -E '^arca_node_capacity_bytes\{kind="(total|available|reserved)"' | sed "s/^/b:$p /"; done
+    } 2>/dev/null | awk -v t="$t" '{print t "\t" $1 "\t" $2 "\t" $3}' >> "$OUT/samples.tsv"
+    sleep "$SAMPLE_SECS"
+  done
+}
+rm -f "$OUT/.stop-sampler"
+sampler &
+SAMPLER=$!
+
 # ---- fill group 1
 log "fill: $BASE objects of $SIZE bytes"
 line=$(s3 fill --op put --prefix base --objects "$BASE" --concurrency 8)
@@ -142,7 +169,7 @@ window() { # <label> <minutes> [faults]
   local label="$1" minutes="$2" faults="${3:-}"
   local t0 end third
   t0=$(date +%s); end=$((t0 + minutes * 60)); third=$((minutes * 20))
-  local killed=0 stopped=0
+  local killed=0 stopped=0 restart=""
   while [ "$(date +%s)" -lt "$end" ]; do
     iter=$((iter + 1))
     line=$(s3 "$label-put" --op put --prefix "l$iter" --objects 8 --concurrency 4)
@@ -160,6 +187,7 @@ window() { # <label> <minutes> [faults]
       snapshot "before-leader-kill"
       kill_proc "s$h" controller; killed=1
       ( sleep 30; start "s$h" controller "$BIN controller --id ctl-$h --http 127.0.0.1:9901 $CTL_ARGS"; ) &
+      restart=$!
     fi
     if [ -n "$faults" ] && [ "$stopped" = 0 ] && [ "$now" -ge $((third * 2)) ]; then
       log "fault: stop node d1 for 20 s"
@@ -168,25 +196,30 @@ window() { # <label> <minutes> [faults]
       node sa d1 "$ADDR_A" 9101 9911
     fi
   done
-  wait || true
+  # Only the controller restart (the sampler runs on).
+  [ -z "$restart" ] || wait "$restart" || true
 }
 
 log "baseline window: $WINDOW min, rebalancing paused"
 window baseline "$WINDOW"
 snapshot after-baseline
-sa "$ADMIN rebalance resume" > /dev/null
-log "rebalance window: $WINDOW min, leader kill and node stop"
+if [ "$REBALANCE" = on ]; then
+  sa "$ADMIN rebalance resume" > /dev/null
+fi
+log "rebalance window ($REBALANCE): $WINDOW min, leader kill and node stop"
 window rebalance "$WINDOW" faults
 snapshot after-rebalance
 
 # ---- converge
 log "converge: no load"
+converge_start=$(date +%s)
 deadline=$(( $(date +%s) + 25 * 60 ))
+[ "$REBALANCE" = on ] || deadline=$(date +%s)
 while [ "$(date +%s)" -lt "$deadline" ]; do
   st=$(sa "$ADMIN rebalance status" 2>&1 || true)
   echo "$st" | strip | head -6 >> "$OUT/converge.txt"
   if echo "$st" | grep -q 'last_reason balanced'; then
-    log "rebalancing settled"; break
+    log "rebalancing settled after $(( $(date +%s) - converge_start )) s of converge"; break
   fi
   sleep 30
 done
@@ -207,6 +240,7 @@ for i in "${!state[@]}"; do
 done
 for h in sa sb; do $h "grep -h -E 'ERROR|panicked' $RUN_DIR/logs/*.log | tail -50"; done 2>&1 | strip > "$OUT/errors-in-logs.txt" || true
 log "iterations $iter, failures $failures"
-echo "failures=$failures iterations=$iter window_min=$WINDOW base=$BASE cap=$CAP" > "$OUT/result.txt"
+touch "$OUT/.stop-sampler"; wait "$SAMPLER" 2>/dev/null || true; rm -f "$OUT/.stop-sampler"
+echo "failures=$failures iterations=$iter window_min=$WINDOW base=$BASE cap=$CAP rebalance=$REBALANCE" > "$OUT/result.txt"
 stop_all sa; stop_all sb
 [ "$failures" = 0 ]
