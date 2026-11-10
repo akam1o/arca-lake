@@ -924,8 +924,13 @@ async fn reconcile_pass<S: KvStore>(
     let mut deleted = 0usize;
     let mut unreachable = 0usize;
     for g in &groups {
-        for n in &nodes {
-            advance_lineage(meta, metrics).await?;
+        // Every few node listings: the batch a restore under this leader
+        // could leave undetected stays small, at a commit per batch, not
+        // per (group, node) pair (re-review).
+        for (i, n) in nodes.iter().enumerate() {
+            if i % 8 == 0 {
+                advance_lineage(meta, metrics).await?;
+            }
             match gc::reconcile_node(
                 meta,
                 clients,

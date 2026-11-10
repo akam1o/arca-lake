@@ -455,6 +455,17 @@ async fn finalize_waits_until_every_node_holds_the_schema_floor() {
             .unwrap()
             .is_some()
     );
+    // No new node while the step is open (it could escape the barrier).
+    let e = arca_lake_metadata::ops::cluster::register_node(
+        meta.as_ref(),
+        "127.0.0.1:1",
+        vec![],
+        vec![0],
+        now_ms(),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.to_string().contains("cut-off"), "{e}");
     c.start_node(2).await;
     let r = upgrade_pass(meta.as_ref(), &c.clients, &own, 7, now_ms())
         .await

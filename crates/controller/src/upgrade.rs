@@ -217,10 +217,22 @@ pub async fn upgrade_pass<S: KvStore>(
             {
                 let req = arca_lake_protocol::storage::v1::HealthRequest {
                     schema_floor: target.schema,
+                    format_write: target.format,
                     ..Default::default()
                 };
                 match clients.health_with(&n.address, req).await {
-                    Ok(h) if h.schema_floor >= target.schema => {}
+                    // The floor, and a segment of the target format on the
+                    // device (re-review: a node that missed the format step,
+                    // or whose rollover failed).
+                    Ok(h)
+                        if h.schema_floor >= target.schema
+                            && h.newest_segment_format >= target.format => {}
+                    Ok(h) if h.schema_floor >= target.schema => {
+                        missing.push(format!(
+                            "node {} has no segment of format {} yet (newest {})",
+                            n.id, target.format, h.newest_segment_format
+                        ));
+                    }
                     Ok(h) => missing.push(format!(
                         "node {} keeps schema floor {} (an earlier release?)",
                         n.id, h.schema_floor
@@ -250,10 +262,22 @@ pub async fn upgrade_pass<S: KvStore>(
             {
                 let req = arca_lake_protocol::storage::v1::HealthRequest {
                     schema_floor: target.schema,
+                    format_write: target.format,
                     ..Default::default()
                 };
                 match clients.health_with(&n.address, req).await {
-                    Ok(h) if h.schema_floor >= target.schema => {}
+                    // The floor, and a segment of the target format on the
+                    // device (re-review: a node that missed the format step,
+                    // or whose rollover failed).
+                    Ok(h)
+                        if h.schema_floor >= target.schema
+                            && h.newest_segment_format >= target.format => {}
+                    Ok(h) if h.schema_floor >= target.schema => {
+                        missing_after.push(format!(
+                            "node {} has no segment of format {} yet (newest {})",
+                            n.id, target.format, h.newest_segment_format
+                        ));
+                    }
                     Ok(h) => missing_after.push(format!(
                         "node {} keeps schema floor {} (an earlier release?)",
                         n.id, h.schema_floor

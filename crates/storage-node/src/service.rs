@@ -1237,12 +1237,16 @@ impl StorageNode for StorageNodeService {
                     .map_err(|e| tonic::Status::internal(e.to_string()))?
             {
                 let v = self.store.set_format_write(req.format_write);
-                // At once, not at the next rollover: an earlier release
-                // refuses the store from now on (Phase 3.10).
+                tracing::info!(format_write = v, "storage format write gate updated");
+            }
+            // At once, not at the next rollover, and again on every push
+            // until it succeeded (re-review: a failed rollover was not
+            // retried once the value was adopted): an earlier release
+            // refuses the store from then on.
+            if req.format_write > 0 {
                 self.store
                     .roll_to_format_write()
                     .map_err(Self::storage_status)?;
-                tracing::info!(format_write = v, "storage format write gate updated");
             }
             break guard;
         };
@@ -1316,6 +1320,7 @@ impl StorageNode for StorageNodeService {
             delete_fence_lease_ms: lease_ms,
             incarnation_seq: incarnation_seq_held,
             schema_floor: schema_floor_held,
+            newest_segment_format: self.store.newest_segment_format().map_or(0, u64::from),
             devices: vec![self.device_capacity_with(&stats)],
         }))
     }

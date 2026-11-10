@@ -71,6 +71,26 @@ pub async fn register_node<S: KvStore>(
                 .collect::<Result<Vec<_>>>()?
                 .into_iter()
                 .find(|n| n.address == *address);
+            // No new node while a finalize is past its cut-off: its last
+            // step waits for every node to hold the new floor and format,
+            // and a node added meanwhile could escape it (Phase 3.10
+            // review). Re-registering a known node is allowed.
+            if existing.is_none() {
+                let cursor: Option<crate::records::UpgradeCursor> =
+                    read(tx, &keys::upgrade_cursor()).await?;
+                if cursor.is_some_and(|c| {
+                    !matches!(
+                        c.step,
+                        crate::records::UpgradeStep::Requested
+                            | crate::records::UpgradeStep::Preconditioned
+                            | crate::records::UpgradeStep::Migrated
+                    )
+                }) {
+                    return Err(crate::MetaError::InvalidArgument(
+                        "an upgrade finalize is past its cut-off: register the node once it completes".into(),
+                    ));
+                }
+            }
             let id = match &existing {
                 Some(n) => n.id,
                 None => next_id(tx, &keys::node_counter()).await?,

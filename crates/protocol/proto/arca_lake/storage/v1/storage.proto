@@ -355,6 +355,10 @@ message HealthResponse {
   uint64 incarnation_seq = 33;
   // The highest metadata schema the node was told (0 = none).
   uint64 schema_floor = 34;
+  // Newest segment format on the device (Phase 3.10): the finalize waits
+  // until it reaches the target (the previous release refuses such a
+  // store).
+  uint64 newest_segment_format = 36;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").
