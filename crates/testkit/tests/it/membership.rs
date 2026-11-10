@@ -390,9 +390,12 @@ async fn a_group_that_cannot_finish_its_repair_does_not_stop_the_others() {
     membership::request_replace(c.meta.as_ref(), stuck.id, 0, Some(spare), "admin", now_ms())
         .await
         .unwrap();
-    let ctl = spawn(Arc::clone(&c.meta), fast("ctl-isolated"))
-        .await
-        .unwrap();
+    // Moves of one chunk per pass: the first is still under way when its
+    // replacement goes down.
+    let mut cfg = fast("ctl-isolated");
+    cfg.planned_move_chunks_per_pass = 1;
+    cfg.repair_interval = Duration::from_millis(300);
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
     wait_until(
         "the first group's move",
         Duration::from_secs(30),
