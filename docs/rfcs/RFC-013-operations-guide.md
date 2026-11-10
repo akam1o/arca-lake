@@ -203,10 +203,15 @@ Upgrading to Phase 3.10 (protocol 4, metadata schema 3, ADR-0024):
   protocol-4 nodes. A Phase 3.9 node therefore gets no delete until it is
   upgraded.
 - **Rollback before finalize** is allowed in any order, and every
-  combination is safe: a Phase 3.10 node takes a Phase 3.9 controller's
-  deletes (they renew its rejoin lease), and a Phase 3.9 node gets no
-  delete from Phase 3.10 processes. The recommended order is the reverse
-  of the upgrade: gateways, then controllers, then nodes.
+  combination is safe.
+  - A Phase 3.9 node gets no delete from Phase 3.10 processes.
+  - A Phase 3.10 node takes a Phase 3.9 controller's deletes only until
+    a Phase 3.10 controller has led it. From then on it takes only
+    protocol-4 deletes (kept across its restarts and rollbacks), so
+    rolling back only the controllers pauses deletes until Phase 3.10
+    controllers lead again or the nodes are rolled back too.
+  - The recommended order is the reverse of the upgrade: gateways, then
+    controllers, then nodes.
 - **Finalize** raises the schema only once every registered node that is
   not decommissioned reports schema 3 as its floor. A node that does not
   answer blocks it, including one named with `--ignore-absent`: bring it

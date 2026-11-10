@@ -538,3 +538,29 @@ fn a_pending_chunk_without_a_record_may_be_in_any_group() {
         assert!(gc::chunk_may_be_in_group(&kv, &prefix, 0, 1).await.unwrap());
     });
 }
+
+/// Phase 3.10 re-review: every batch of delete decisions advances the
+/// lineage counter; metadata that went back below what the leader wrote
+/// (restored under it) is refused before any decision is made on it.
+#[test]
+fn delete_decisions_advance_the_lineage_and_refuse_metadata_that_went_back() {
+    use arca_lake_metadata::ops::delete_fence::advance_lineage;
+    use arca_lake_metadata::{Txn, transact};
+    let kv = store();
+    run(async {
+        let a = advance_lineage(&kv, 0).await.unwrap();
+        let b = advance_lineage(&kv, a).await.unwrap();
+        assert!(b > a);
+        // A restore brings the counter back to `a`.
+        transact(&kv, a, |tx, a| {
+            Box::pin(async move {
+                tx.set(&keys::delete_fence_lineage(), &a.to_le_bytes());
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let e = advance_lineage(&kv, b).await.unwrap_err();
+        assert!(matches!(e, MetaError::InvalidArgument(_)), "{e}");
+    });
+}

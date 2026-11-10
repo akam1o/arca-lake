@@ -445,7 +445,9 @@ impl StorageNodeService {
         // Once the cluster finalized a release with the rejoin fence, only
         // such releases delete (an earlier one may run again on restored
         // metadata, which its start check alone would admit).
-        let min_version = if c.schema_floor >= pb::REJOIN_FENCE_SCHEMA {
+        // Also once a controller of this release has led the node (it may
+        // have missed the floor: absent or decommissioned at the finalize).
+        let min_version = if c.schema_floor >= pb::REJOIN_FENCE_SCHEMA || c.rejoin_led {
             pb::REJOIN_FENCE_VERSION
         } else {
             pb::FENCED_DELETE_VERSION
@@ -1159,6 +1161,7 @@ impl StorageNode for StorageNodeService {
             // (re-review).
             new_incarnation
                 || req.schema_floor > c.schema_floor
+                || (req.delete_fence_opener != 0 && !c.rejoin_led)
                 || c.plan_fence(generation, open, hold, release, from, token)
                     .is_some()
         };
@@ -1202,6 +1205,10 @@ impl StorageNode for StorageNodeService {
                 );
             }
             c.set_next_opener(req.delete_fence_opener);
+            if req.delete_fence_opener != 0 {
+                c.note_rejoin_leader()
+                    .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            }
             if c.adopt_fence_held(generation, open, hold, release, from, token)
                 .map_err(|e| tonic::Status::internal(e.to_string()))?
             {

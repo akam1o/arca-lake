@@ -131,6 +131,11 @@ schema at start.
     blocks it, also one the operator named absent (review).
   - A floor increase waits, like a fence change, for the deletes the node
     already admitted.
+  - A node that a controller of this release has led (its pushes carry
+    an opener) takes only protocol-4 deletes from then on, whatever its
+    floor. It may have missed the floor (decommissioned while
+    unreachable, then named again by metadata restored from before its
+    replacement); third review round.
   - Nodes keep the floor and the incarnation with its sequence also in
     `cluster-floors.txt`, which earlier releases never touch: a node
     rolled back rewrites `cluster.txt` without the keys it does not know.
@@ -188,7 +193,10 @@ schema at start.
     previous leader stopped less than one lease before the restore
     completed;
   - a leader that keeps running through a restore is detected by the
-    lineage counter only if it wrote the counter between the backup and
-    the restore (it does every health pass, 5 s by default); a backup
-    restored within one health interval of being taken goes unnoticed,
-    and that leader's deletes decided in between can apply.
+    lineage counter, which it advances at every health pass and before
+    every GC and reconciliation batch, and which it checks before every
+    such batch. Deletes it decided after the backup point and still sends
+    after the restore can apply until its next pass detects the restore:
+    at most one batch and one health pass (plus the pass's own duration).
+    Reviewer A rates the impact (shards that restored objects need) as
+    High; it needs the runbook not followed and a leader left running.

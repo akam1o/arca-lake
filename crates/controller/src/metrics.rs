@@ -36,12 +36,14 @@ impl FenceView {
             .lineage
     }
 
-    /// Remember the lineage counter written.
+    /// Remember the lineage counter written (never lowered: passes that
+    /// write it may finish out of order).
     pub fn set_lineage(&self, v: u64) {
-        self.inner
+        let mut g = self
+            .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .lineage = v;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.lineage = g.lineage.max(v);
     }
 
     /// Remember the record held.
@@ -265,6 +267,11 @@ pub struct Metrics {
     /// Health passes that found a node at another incarnation of the
     /// cluster's sequence or above it (Phase 3.10 review).
     pub incarnation_conflicts_total: AtomicU64,
+    /// Groups whose current move this leader started as a planned move
+    /// (a drain keeps no request once its move is under way; re-review).
+    /// Lost with the leadership: the next leader takes them as failure
+    /// work, the safe side.
+    pub planned_moves: std::sync::Mutex<std::collections::BTreeSet<u64>>,
     /// Stripe repairs that committed.
     pub stripe_repairs_succeeded_total: AtomicU64,
     /// Stripe repair attempts that failed.

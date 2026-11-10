@@ -64,6 +64,11 @@ pub(crate) struct ClusterFacts {
     pub fence_opener: u64,
     /// The opener the next adoption of an open generation records.
     next_opener: u64,
+    /// A controller of this release (one that pushes an opener) has led
+    /// the node (Phase 3.10 re-review): from then on it takes only
+    /// protocol-4 deletes, whatever the schema floor. Kept in the floors
+    /// file, which survives a rollback of the node.
+    pub rejoin_led: bool,
     /// Storage format the controller allowed (0 = never told).
     pub format_write: u64,
     /// Delete fence generation adopted (0 = none: no delete is allowed).
@@ -137,6 +142,7 @@ impl ClusterFacts {
             schema_floor: 0,
             fence_opener: 0,
             next_opener: 0,
+            rejoin_led: false,
             format_write: 0,
             fence_generation: 0,
             fence_open: false,
@@ -168,6 +174,7 @@ impl ClusterFacts {
                 Some(f) => {
                     // The incarnation and its sequence as one pair (an
                     // earlier release may have changed cluster.txt's).
+                    facts.rejoin_led |= f.rejoin_led;
                     if let Some(inc) = f.incarnation {
                         if facts.incarnation != Some(inc) {
                             tracing::warn!(
@@ -494,6 +501,18 @@ impl ClusterFacts {
             && opener != self.fence_opener
     }
 
+    /// Note a push from a controller of this release (it carries an
+    /// opener): from then on only protocol-4 deletes. A failed persist
+    /// keeps it in memory (the stricter rule) and is retried by the next
+    /// persist.
+    pub(crate) fn note_rejoin_leader(&mut self) -> std::io::Result<()> {
+        if self.rejoin_led {
+            return Ok(());
+        }
+        self.rejoin_led = true;
+        self.persist().inspect_err(|_| self.unpersisted = true)
+    }
+
     /// Who opens the generation the next adoption opens (set before it, so
     /// that the opener is persisted with the generation, re-review).
     pub(crate) fn set_next_opener(&mut self, opener: u64) {
@@ -559,7 +578,7 @@ impl ClusterFacts {
                 File::open(dir)?.sync_all()?;
             }
         }
-        if (self.incarnation_seq > 0 || self.schema_floor > 0)
+        if (self.incarnation_seq > 0 || self.schema_floor > 0 || self.rejoin_led)
             && let Some(dir) = self.path.parent()
         {
             let marker = dir.join(FLOORS_MARKER);
@@ -574,6 +593,9 @@ impl ClusterFacts {
             );
             if let Some(i) = self.incarnation {
                 let _ = writeln!(body, "incarnation {}", hex(&i));
+            }
+            if self.rejoin_led {
+                body.push_str("rejoin_led 1\n");
             }
             let tmp = floors.with_extension("tmp");
             {
@@ -667,6 +689,7 @@ struct Floors {
     schema_floor: u64,
     incarnation: Option<[u8; 16]>,
     changed_ms: u64,
+    rejoin_led: bool,
 }
 
 /// A floors file; `None` if damaged.
@@ -683,6 +706,7 @@ fn parse_floors(text: &str) -> Option<Floors> {
         return None;
     }
     let (mut seq, mut schema, mut incarnation, mut changed_ms) = (None, None, None, 0);
+    let mut rejoin_led = false;
     for line in content.lines() {
         let mut it = line.split_whitespace();
         match (it.next(), it.next()) {
@@ -690,11 +714,19 @@ fn parse_floors(text: &str) -> Option<Floors> {
             (Some("schema_floor"), Some(v)) => schema = Some(v.parse().ok()?),
             (Some("incarnation"), Some(v)) => incarnation = Some(parse_hex16(v)?),
             (Some("changed_ms"), Some(v)) => changed_ms = v.parse().ok()?,
+            (Some("rejoin_led"), Some("1")) => rejoin_led = true,
             _ => {}
         }
     }
+    let seq: u64 = seq?;
+    // A sequence without its incarnation (an intermediate format of this
+    // release) cannot be paired safely: damaged (re-review).
+    if seq > 0 && incarnation.is_none() {
+        return None;
+    }
     Some(Floors {
-        incarnation_seq: seq?,
+        rejoin_led,
+        incarnation_seq: seq,
         schema_floor: schema?,
         incarnation,
         changed_ms,

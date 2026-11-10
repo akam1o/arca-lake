@@ -239,6 +239,17 @@ pub async fn upgrade_pass<S: KvStore>(
                 return Ok(report);
             }
             let v = compat::raise_version(meta, VersionKey::Schema, target.schema).await?;
+            // A node registered while the step ran: told now (it cannot
+            // block a schema already raised; re-review).
+            for n in cluster::list_nodes(meta).await? {
+                let req = arca_lake_protocol::storage::v1::HealthRequest {
+                    schema_floor: target.schema,
+                    ..Default::default()
+                };
+                if let Err(e) = clients.health_with(&n.address, req).await {
+                    warn!(node = n.id, error = %e, "finalize: node not told the schema floor after the raise");
+                }
+            }
             if let Some(done) = compat::clear_upgrade(meta, false).await? {
                 let mut audit = done;
                 audit

@@ -261,6 +261,33 @@ fn u64_of_le(v: Option<Vec<u8>>) -> u64 {
         .map_or(0, u64::from_le_bytes)
 }
 
+/// Advance the lineage counter before a batch of delete decisions (GC,
+/// reconciliation; Phase 3.10 re-review): a backup taken before the batch
+/// then holds a lower value than the leader remembers, so a restore of it
+/// under the running leader is detected by its next health pass. Refused
+/// (`InvalidArgument`) when the counter already reads below `remembered`:
+/// the metadata went back, and no decision is made on it.
+///
+/// # Errors
+///
+/// That refusal; backend errors.
+pub async fn advance_lineage<S: KvStore>(store: &S, remembered: u64) -> Result<u64> {
+    transact(store, remembered, |tx, remembered| {
+        Box::pin(async move {
+            let stored = u64_of_le(tx.get(&keys::delete_fence_lineage()).await?);
+            if stored < *remembered {
+                return Err(MetaError::InvalidArgument(format!(
+                    "lineage {stored} below the {remembered} this leader wrote: the metadata went back; no deletes decided"
+                )));
+            }
+            let next = stored.saturating_add(1);
+            tx.set(&keys::delete_fence_lineage(), &next.to_le_bytes());
+            Ok(next)
+        })
+    })
+    .await
+}
+
 /// The recorded opener of the open generation (Phase 3.10; default when
 /// none is recorded).
 ///

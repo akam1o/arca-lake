@@ -549,6 +549,73 @@ async fn the_same_generation_from_another_opener_closes_it() {
     n.shutdown().await;
 }
 
+/// Phase 3.10 re-review: once a controller of this release led the node
+/// (its push carries an opener), the node takes only protocol-4 deletes,
+/// whatever its schema floor (it may have missed the floor, absent or
+/// decommissioned at the finalize), also after a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_a_leader_of_this_release_only_its_deletes_apply() {
+    use arca_lake_protocol::client::FencePush;
+    use arca_lake_protocol::storage::v1 as pb;
+    if pb::PROTOCOL_VERSION_MIN > pb::FENCED_DELETE_VERSION {
+        return; // a version-bump build speaks no protocol 3 at all
+    }
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (n, addr, c) = node_with_shard(dir.path()).await;
+    let delete = async |addr: &str, version: u32, fence: u64, i: u8| {
+        let mut raw = pb::storage_node_client::StorageNodeClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        raw.delete_shard(pb::DeleteShardRequest {
+            protocol_version: version,
+            key: Some(pb::ShardKey {
+                group_id: 1,
+                chunk_id: Bytes::from(vec![i; 16]),
+                shard_index: 0,
+            }),
+            delete_fence: fence,
+            ..Default::default()
+        })
+        .await
+    };
+    // An earlier release's leader (no opener): its deletes apply.
+    c.push_delete_fence(&addr, 1, true).await.unwrap();
+    delete(&addr, pb::FENCED_DELETE_VERSION, 1, 1)
+        .await
+        .unwrap();
+    // A leader of this release.
+    c.push_delete_fence_with(
+        &addr,
+        2,
+        true,
+        FencePush {
+            opener: 7,
+            ..FencePush::default()
+        },
+    )
+    .await
+    .unwrap();
+    let e = delete(&addr, pb::FENCED_DELETE_VERSION, 2, 2)
+        .await
+        .unwrap_err();
+    assert!(NodeClients::is_fenced(&e), "{e}");
+    delete(&addr, pb::REJOIN_FENCE_VERSION, 2, 2).await.unwrap();
+    n.shutdown().await;
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let addr = n.local_addr.to_string();
+    // An earlier release's leader again (opener 0): it opens, but its
+    // deletes are refused.
+    c.push_delete_fence(&addr, 3, true).await.unwrap();
+    let e = delete(&addr, pb::FENCED_DELETE_VERSION, 3, 3)
+        .await
+        .unwrap_err();
+    assert!(NodeClients::is_fenced(&e), "{e}");
+    n.shutdown().await;
+}
+
 /// A fence change is acknowledged only after every delete that passed the
 /// old fence has finished its physical delete, also when the caller gave
 /// up on that delete (its RPC cancelled while the store was writing the

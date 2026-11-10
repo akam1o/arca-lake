@@ -128,6 +128,8 @@ snapshot() { # <label>
 # rebalance counters, and each node's capacity (total, available,
 # reserved): write_rejected time, capacity spread, reserve violations.
 sampler() {
+  # A probe that finds nothing (a node not started yet) must not end it.
+  set +e +o pipefail
   printf 'time\tsource\tmetric\tvalue\n' > "$OUT/samples.tsv"
   while [ ! -f "$OUT/.stop-sampler" ]; do
     local t; t=$(date -u +%s)

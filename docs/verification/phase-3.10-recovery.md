@@ -1,0 +1,297 @@
+# Phase 3.10 recovery safety and autonomous operations verification
+
+Where each result comes from is stated with it:
+
+- **in process**: the in-memory metadata store with real storage-node
+  services and gateways in one test process, on a developer machine
+  (macOS);
+- **host A**: a validation VM running a private `fdbserver` (its own
+  port and data directory; the host's system FoundationDB untouched),
+  one process or three in separate zones configured `triple`;
+- **hosts A+B**: two validation VMs with real processes (storage nodes,
+  controllers, gateway, load generator) over the network, FoundationDB
+  on host A;
+- **CI**: the repository's CI jobs (Linux, FoundationDB in a container).
+
+Nothing here was run longer than about two hours, on physical storage,
+or on more than two hosts (R-79, R-86).
+
+## 1. R-90: what remained after Phase 3.9
+
+ADR-0023 made nodes the enforcement point of the delete fence, but it
+relied on the restore runbook and on reaching every node:
+
+1. a restore without `admin delete-fence close`;
+2. a controller started on the restored metadata before `recovery
+   begin`;
+3. a node unreachable during that controller's first round.
+
+The controller could then reopen the generation that node still held,
+and deletes decided before the restore could apply there. The Phase 3.10
+review found three more ways to the same outcome:
+
+- a fresh controller's first pass pushed a restored open record and
+  renewed the nodes' leases on it;
+- a controller on restored metadata opens `record + 1`, which can be the
+  generation the pre-restore cluster opened after the backup;
+- a leader that keeps running through the restore matches every check
+  of its own fence.
+
+## 2. Rejoin fence and the layers around it (ADR-0024)
+
+| Layer | Where | What it stops | Evidence (all in process unless stated) |
+| --- | --- | --- | --- |
+| Rejoin lease: deletes only within `--fence-lease-secs` (30 s) of the leader's last push, monotonic clock, memory only | storage node | a node that restarted, was cut off, or whose leader went silent | storage-node `delete_fence::the_open_fence_lapses_without_the_leaders_pushes`, `the_fence_survives_a_node_restart` |
+| Opening and renewal need a caller of the node's incarnation | storage node | a controller of another (stale or restored) incarnation | the same tests |
+| Opener bound on the node: the same open generation from another opener closes it | storage node | two clusters (one restored) opening the same number | `the_same_generation_from_another_opener_closes_it` |
+| The leader pushes, and deletes under, only an open generation it opened | controller | renewal of a former or restored leader's generation | `it/delete_fence::a_restored_open_fence_is_never_renewed_by_a_new_controller` |
+| Metadata rollback gate: nodes ahead of the record, or the leader's lineage counter read back lower | controller | a controller on restored metadata; a restore under a running leader | `a_restore_with_every_procedural_safeguard_skipped_loses_nothing`, `a_restore_under_a_running_leader_closes_its_fence` |
+
+Each test fails with its check removed (mutation runs during the phase):
+
+- without the lease, two pre-restore deletes applied;
+- without the gate, the controller opened on restored metadata;
+- without the "ours" rule, nothing stopped the restored leader's
+  renewals (the test was written to the review's schedule);
+- without the lineage check, the fence stayed open.
+
+The normal-operation cost is one refused-delete window per node start,
+until the leader's next pass (5 s by default).
+
+Accepted residuals (R-94), each needing the runbook not followed:
+
+- a delayed renewal can extend a stale fence by at most one lease;
+- a backup restored within one health interval under a running leader
+  goes unnoticed.
+
+## 3. Restore
+
+- `recovery begin` collects every node's incarnation sequence and
+  schema floor (`delete_fence::restore_floors`). It refuses while a node
+  neither answers nor is declared absent.
+- It raises the restored schema and `schema_write` to the highest floor,
+  then marks the new incarnation above every node's sequence.
+- Tests (in process):
+  - `a_clock_going_back_between_restores_does_not_reorder_incarnations`;
+  - `a_finalized_upgrade_is_not_undone_by_a_rollback_or_a_restore`;
+  - the system model, whose restore step goes through `restore_floors`.
+
+## 4. Upgrade and rollback
+
+Gate: metadata schema 3, the node schema floor, protocol 4.
+
+- Nodes that hold schema 3 refuse protocol-3 deletes.
+- The finalize waits until every node that is not decommissioned holds
+  the floor.
+- The floors survive a node rollback to Phase 3.9 in
+  `cluster-floors.txt`.
+
+`it/previous_release::upgrade_from_and_rollback_to_the_previous_release`
+runs real Phase 3.9 binaries (commit `9674894`) and this release's on
+FoundationDB, three nodes, a controller and a gateway as separate
+processes. It ran on host A and runs in the CI FoundationDB job.
+
+| Step | Configuration | Result |
+| --- | --- | --- |
+| 1 | node-only upgrade, one node then all; 3.9 controller | the 3.9 controller's deletes applied on 3.10 nodes (GC collected) |
+| 2 | controller-only upgrade (gateway 3.9) | GC by the 3.10 controller; PUT/GET by the 3.9 gateway |
+| 3 | one node rolled back to 3.9 before finalize | no delete reached it for 6 s; collected once it was current again |
+| 4 | every process rolled back before finalize, then upgraded | allowed (RFC-014); reads, writes, GC on 3.9 |
+| 5 | finalize; 3.9 controller and gateway started | both refused at start; a node rolled back got no delete |
+| 6 | metadata restored from before the finalize; 3.9 controller and gateway started before `recovery begin` | they start (schema 2 admits them); no shard deleted (live shards 21/21/21 unchanged); a delayed protocol-3 delete with the node's open generation (lease 29 s left) refused; after `recovery begin` the 3.9 controller is refused again |
+
+Step 6 with the node-side floor check removed deleted three shards on
+every node (21 → 18). That was a dangerous downgrade path (R-88 class),
+closed by `d2d0a89`.
+
+The two-binary mixed-version test (`mixed_version`, this tree against
+its version-bump build) found that schema 3 stamped record version 3 in
+the bump build, which this release could not read. Record versions now
+map from the schema (`4ee268f`). The test passes on host A and in CI.
+
+Not covered with real processes:
+
+- an absent node at finalize (in process, `it/upgrade::finalize_waits_until_every_node_holds_the_schema_floor`);
+- a crash between the two facts files (unit tests).
+
+## 5. R-93: capacity-aware rebalancing
+
+See §11 for the load comparison. In process:
+
+- `rebalance::rebalancing_yields_to_client_writes_gc_and_tiering`:
+  - tiering, a GC backlog, and throttled, write_rejected or
+    recovery_only tiers move nothing;
+  - warning moves at most half the budget;
+  - a target at the placement threshold stops the pass with nothing
+    written to it.
+- `rebalancing_waits_for_repair_and_stops_at_the_targets_reserve`
+  stops at the threshold before the nodes refuse.
+
+Both run on FoundationDB too (`rebalance_fdb`, host A and CI). Without
+the tier gate one test fails; without the per-chunk check, two.
+
+## 6. R-92: sequenced incarnations
+
+- Unit test `incarnations_are_ordered_by_sequence_not_by_clock`.
+- `it/delete_fence::a_clock_going_back_between_restores_does_not_reorder_incarnations`:
+  two restores, the second marked by a clock an hour behind. It fails
+  when nodes ignore the sequence.
+- A node holding another incarnation at the cluster's sequence is
+  reported (`arca_controller_incarnation_conflicts_total`, R-97).
+
+## 7. The system model on FoundationDB
+
+`system_model::random_operation_sequences_agree_with_the_model_on_foundationdb`
+runs the in-memory model's operations on real FoundationDB
+transactions, all 18 of them:
+
+- client: PUT, DELETE, multipart complete and abort;
+- background: GC, reconcile, compaction, shard loss with repair,
+  migrations with crashes before and after the switch, cache read and
+  eviction;
+- control plane: a former leader's GC, snapshot, restore, delayed
+  delete delivery, leader change, node restart, phase change.
+
+Invariants hold after every step; failing seeds are saved
+(`system-model-failures-fdb.txt`, replay with `ARCA_MODEL_SEED`). No
+operation was left out.
+
+| Where | Seeds × steps | Time | Result |
+| --- | --- | --- | --- |
+| host A, one process | 6 × 60 | 43 s | pass |
+| host A, three processes, triple | 185 × 150 (time budget 40 min) | 2 401 s | pass |
+| CI FoundationDB job | 3 × 40 (bounded) | — | in the job |
+
+## 8. Background operations audit
+
+A read-only audit of GC, reconcile, repair, rebalance, tiering, cache
+eviction, compaction, member moves and admission. It found no path that
+deletes a shard live metadata needs: every remote delete goes through the
+node's fence, incarnation, epoch and lease checks.
+
+| ID | Finding | Severity | Status |
+| --- | --- | --- | --- |
+| H1 | GC read only the head of the retired queue; generations deferred there blocked all others | High | fixed (cursor paging); `gc_safety::generations_deferred_at_the_head_of_the_queue_do_not_block_the_rest` |
+| H2 | one group's repair error ended every pass for the groups after it | High | fixed (per-group isolation); `membership::a_group_that_cannot_finish_its_repair_does_not_stop_the_others` |
+| H3 | an operator's move ran unbudgeted before failed members' repair | High | fixed (failure first, `--planned-move-chunks-per-pass`); `membership::a_failed_member_is_repaired_before_a_planned_move` |
+| M1 | tiering's capacity gate failed open at a new leader | Medium | fixed (published record, no durable group in repair) |
+| M2 | node epochs raised before the membership commit; a crash leaves nodes ahead | Medium | open (R-98) |
+| M3 | a planned move's target check ignores the reserves | Medium | open (R-98) |
+| M4 | stripe repair reads its whole queue in one transaction | Medium | open (R-98) |
+| L1, L3–L10 | leaks, missing guards, dead helpers (see R-99) | Low | open (R-99) |
+
+Each fixed finding has a test that fails without its fix.
+
+Priority, as implemented: Repair > Client writes > GC and compaction >
+Tiering > Rebalance > Prefetch (RFC-008 §8.10).
+
+## 9. Capacity state × failover
+
+`it/capacity_failover.rs`, in process: each admission state (normal,
+warning, throttled, write_rejected, recovery_only), reached by real
+controllers on capped nodes, under each of seven faults:
+
+- leader kill;
+- gateway restart;
+- node restart;
+- metadata loss (every writing commit fails for 3 s);
+- report loss (a node silent past the staleness limit);
+- a stale record delivered to the gateway;
+- a partition (a node unreachable during a leader change).
+
+Eight invariants are checked around every fault:
+
+1. every acknowledged object reads back whole;
+2. no node crosses its reserve;
+3. no node holds in-flight capacity after the writes;
+4. the published state is never less strict than before the fault;
+5. new data is refused from write_rejected up, also by a restarted
+   gateway and against a stale record;
+6. deletes are admitted in every state;
+7. reads are served in every state;
+8. once space returns, normal and writes come back.
+
+All 35 combinations pass (7 tests, about 55 s). With the gateway's
+record-order check removed, the stale-record case fails.
+
+With real processes:
+
+- FoundationDB process and quorum loss, in the CI three-process job
+  (`fdb_failover`);
+- the leader kill and node stop under rebalancing load on hosts A+B
+  (§11).
+
+Write rejected and recovery only were not reached with real processes.
+
+## 10. Crash recovery and persistence
+
+- Node facts are persisted before they are acknowledged. A failed
+  incarnation or format adoption rolls back; a raised schema floor holds
+  in memory and is persisted before the next acknowledgement
+  (`facts_not_persisted_are_not_acknowledged_by_a_retry`).
+- The floors file keeps the incarnation pair across a rollback to 3.9,
+  and a damaged or lost one fails closed
+  (`the_marks_survive_a_rollback_and_a_damaged_floors_file_fails_closed`).
+- A failed write's leftover shard no longer holds a member move
+  `Repairing`; a pending write's chunk is never skipped
+  (`membership::a_move_is_not_held_up_by_a_failed_writes_leftover_in_the_group`,
+  `commit_unknown::a_pending_chunk_without_a_record_may_be_in_any_group`).
+- `membership_faults::mem_replace_during_leader_change_and_traffic`
+  under eight-way parallel load (in process):
+  - Phase 3.9 failed 2/16;
+  - Phase 3.10 before the fix failed 5/32;
+  - after the fix, 32/32 passed.
+
+## 11. Rebalancing under load (hosts A+B)
+
+Pending: filled from `benchmarks/linux/results/phase310-rebalance-*`.
+
+## 12. Independent review
+
+Two models reviewed `9674894..HEAD` read-only, and each fix was
+reviewed again.
+
+| Round | Reviewer | Critical | High | Medium | Low | Outcome |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | A (GPT) | 2 | 3 | 0 | 0 | all fixed (`71465d5`, `a5aea95`) |
+| 1 | B (Claude) | 0 | 2 | 3 | 3 | all fixed (`71465d5`, `7ebdb6a`) |
+| 2 | A | 1 | 3 | 3 | 0 | fixed (`ed5564e`), except the lineage window: accepted as R-94(b) |
+| 2 | B | 0 | 0 | 0 | 5 | fixed (`ed5564e`) |
+| 3 | A, B | pending | | | | |
+
+Round 1, Critical and High findings (fixed):
+
+- A: a fresh controller renewed a restored open fence;
+- A: the finalize did not wait for the nodes' floor;
+- A and B: a node rollback erased the floors;
+- A: repair skipped a pending write's chunk;
+- A: an unpersisted fact was acknowledged on retry;
+- B: generation-number collision across a restore (the opener bound on
+  nodes).
+
+Round 2:
+
+- A: absent nodes skipped the finalize barrier — fixed;
+- A: the floors file could split the incarnation from its sequence —
+  fixed;
+- A: a lost floors file was accepted silently — fixed;
+- A: the lineage counter misses a restore within one health interval —
+  accepted, R-94(b): it needs a running leader, the runbook not
+  followed, and a backup restored within 5 s.
+
+## 13. Performance
+
+Pending: filled from the regression and A/B run.
+
+## 14. CI
+
+See the final report for the run of the final commit.
+
+## Not verified
+
+- Rebalancing, failover and capacity states for longer than the windows
+  above; no 24-hour soak.
+- Write rejected and recovery only with real processes.
+- Physical devices; more than two hosts.
+- An absent node at finalize, and crashes between the two node facts
+  files, with real processes.

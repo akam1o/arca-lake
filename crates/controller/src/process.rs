@@ -832,6 +832,7 @@ async fn gc_pass<S: KvStore>(
     let started = std::time::Instant::now();
     loop {
         let parts_before = metrics.gc.parts_retired.load(Ordering::Relaxed);
+        advance_lineage(meta, metrics).await?;
         let report = gc::run_once_with(
             meta,
             clients,
@@ -899,6 +900,15 @@ async fn gc_pass<S: KvStore>(
     Ok(())
 }
 
+/// Advance the lineage counter before a batch of delete decisions and
+/// remember it (see `delete_fence::advance_lineage`).
+async fn advance_lineage<S: KvStore>(meta: &S, metrics: &Metrics) -> Result<(), ControlError> {
+    let remembered = metrics.delete_fence.lineage();
+    let v = arca_lake_metadata::ops::delete_fence::advance_lineage(meta, remembered).await?;
+    metrics.delete_fence.set_lineage(v.max(remembered));
+    Ok(())
+}
+
 async fn reconcile_pass<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -910,6 +920,7 @@ async fn reconcile_pass<S: KvStore>(
     let mut deleted = 0usize;
     let mut unreachable = 0usize;
     for g in &groups {
+        advance_lineage(meta, metrics).await?;
         for n in &nodes {
             match gc::reconcile_node(
                 meta,
@@ -1234,7 +1245,14 @@ async fn repair_pass<S: KvStore>(
         // members. A group already repairing for any other reason is
         // failure work (re-review: a drain elsewhere does not make it
         // planned).
+        let started_planned = g.state == GroupState::Repairing
+            && metrics
+                .planned_moves
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&g.id);
         let moving = intents.requests.contains_key(&g.id)
+            || started_planned
             || (g.state == GroupState::Active
                 && g.members
                     .iter()
@@ -1253,7 +1271,19 @@ async fn repair_pass<S: KvStore>(
     };
     let mut durable_busy = false;
     for g in durable {
-        let o = if planned(g) { &planned_opts } else { &opts };
+        let is_planned = planned(g);
+        if g.state == GroupState::Active {
+            let mut pm = metrics
+                .planned_moves
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if is_planned {
+                pm.insert(g.id);
+            } else {
+                pm.remove(&g.id);
+            }
+        }
+        let o = if is_planned { &planned_opts } else { &opts };
         match repair_one(
             meta,
             clients,
