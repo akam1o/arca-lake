@@ -47,6 +47,10 @@ pub struct ControllerConfig {
     pub repair_interval: Duration,
     /// Interval between health passes.
     pub health_interval: Duration,
+    /// Interval of the leader's store watch (Phase 3.11, `trip::probe`):
+    /// how soon a leader sees its metadata cleared, locked or replaced
+    /// when its other tasks are idle. Zero disables it.
+    pub store_watch_interval: Duration,
     /// A node is unhealthy when it has not been seen for this long.
     pub unhealthy_after: Duration,
     /// Replace unhealthy members automatically.
@@ -117,6 +121,9 @@ pub struct ControllerConfig {
     /// Largest chunk the gateways write: a group whose fullest member has
     /// no room for 64 of its shards leaves placement.
     pub admission_max_chunk_bytes: u64,
+    /// Test hook: a fault hook on this process's node RPCs (Phase 3.11,
+    /// deterministic delete delays). `None` in deployments.
+    pub rpc_fault_hook: Option<RpcFaultHook>,
 }
 
 impl ControllerConfig {
@@ -131,6 +138,7 @@ impl ControllerConfig {
             reconcile_interval: Duration::from_mins(5),
             repair_interval: Duration::from_secs(15),
             health_interval: Duration::from_secs(5),
+            store_watch_interval: Duration::from_millis(250),
             unhealthy_after: Duration::from_secs(60),
             auto_repair: false,
             repair_source: crate::repair::RepairSource::Reconstruct,
@@ -161,7 +169,18 @@ impl ControllerConfig {
             upgrade_interval: Duration::from_secs(5),
             admission: crate::backpressure::Policy::default(),
             admission_max_chunk_bytes: 8 << 20,
+            rpc_fault_hook: None,
         }
+    }
+}
+
+/// See [`ControllerConfig::rpc_fault_hook`].
+#[derive(Clone)]
+pub struct RpcFaultHook(pub arca_lake_protocol::client::FaultHook);
+
+impl std::fmt::Debug for RpcFaultHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RpcFaultHook")
     }
 }
 
@@ -322,7 +341,9 @@ async fn run<S: KvStore + 'static>(
         }
         // Follower: try to acquire.
         let acquired =
-            match leader::try_acquire(meta.as_ref(), &holder, now_ms(), ms(cfg.lease)).await {
+            match leader::try_acquire_initialized(meta.as_ref(), &holder, now_ms(), ms(cfg.lease))
+                .await
+            {
                 Ok(l) => l,
                 Err(e) => {
                     warn!(controller = %cfg.id, error = %e, "leader acquisition failed");
@@ -348,16 +369,21 @@ async fn run<S: KvStore + 'static>(
         // Leader: fenced store, scheduler tasks, renewal loop.
         let fenced = Arc::new(FencedKv::new(Arc::clone(&meta), leadership.clone()));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let tasks = start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx, incarnation);
+        let (tasks, trip) = start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx, incarnation);
         let lost = loop {
             tokio::select! {
                 () = tokio::time::sleep(renew_every) => {}
+                () = trip.stepped_down() => {
+                    warn!(controller = %cfg.id, "stepping down: the store was replaced or another leader took over");
+                    break true;
+                }
                 _ = shutdown.changed() => break false,
             }
             match leader::renew(meta.as_ref(), &leadership, now_ms(), ms(cfg.lease)).await {
                 Ok(true) => {}
                 Ok(false) => break true,
                 Err(e) => {
+                    renewal_failed(&trip, &e);
                     warn!(controller = %cfg.id, error = %e, "lease renewal failed; retrying");
                     // Keep going until the lease would have expired: a
                     // transient store error must not flap leadership. The
@@ -365,6 +391,9 @@ async fn run<S: KvStore + 'static>(
                 }
             }
         };
+        // Deletes stop now, not when the tasks have finished their passes
+        // (Phase 3.11: a batch would go on sending).
+        trip.stop(true, true);
         let _ = stop_tx.send(true);
         for t in tasks {
             let _ = t.await;
@@ -378,6 +407,38 @@ async fn run<S: KvStore + 'static>(
             let _ = leader::release(meta.as_ref(), &leadership).await;
             info!(controller = %cfg.id, "released leadership");
             return;
+        }
+    }
+}
+
+/// A failed lease renewal (Phase 3.11): a locked or replaced store ends
+/// the term at once; any other failure stops the deletes until a health
+/// pass succeeds again (a leader that cannot show its lease does not
+/// delete). The lease itself is kept.
+fn renewal_failed(trip: &crate::trip::Trip, e: &arca_lake_metadata::MetaError) {
+    if let arca_lake_metadata::MetaError::Kv(k) = e {
+        trip.observe(k);
+    }
+    trip.stop(false, false);
+}
+
+/// The leader's store watch (Phase 3.11): a probe of the store every
+/// `every`, so that a restore under a leader whose tasks are idle or
+/// between transactions is seen within one interval.
+async fn store_watch<S: KvStore>(
+    fenced: Arc<FencedKv<S>>,
+    trip: Arc<crate::trip::Trip>,
+    every: Duration,
+    mut stop: watch::Receiver<bool>,
+) {
+    let leadership = fenced.leadership().clone();
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(every) => {}
+            _ = stop.changed() => return,
+        }
+        if let Some(e) = crate::trip::probe(fenced.inner().as_ref(), &leadership).await {
+            trip.observe(&e);
         }
     }
 }
@@ -401,13 +462,33 @@ fn start_leader_tasks<S: KvStore + 'static>(
     metrics: &Arc<Metrics>,
     stop: &watch::Receiver<bool>,
     incarnation: [u8; 16],
-) -> Vec<JoinHandle<()>> {
+) -> (Vec<JoinHandle<()>>, Arc<crate::trip::Trip>) {
     let clients =
         NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
             arca_lake_protocol::client::RpcPolicy::from_timeout(cfg.node_timeout)
         }))
         .with_tls(cfg.tls.clone());
     clients.set_incarnation(Some(incarnation));
+    clients.set_fault_hook(cfg.rpc_fault_hook.as_ref().map(|h| h.0.clone()));
+    // Every task's store trips the term's deletes off on a failure that
+    // means the metadata is no longer the one they were decided on.
+    let trip = Arc::new(crate::trip::Trip::new(
+        clients.clone(),
+        metrics.delete_fence.suspect_flag(),
+    ));
+    let token = fenced.leadership().token;
+    let watch = (!cfg.store_watch_interval.is_zero()).then(|| {
+        tokio::spawn(store_watch(
+            Arc::clone(fenced),
+            Arc::clone(&trip),
+            cfg.store_watch_interval,
+            stop.clone(),
+        ))
+    });
+    let fenced = &Arc::new(crate::trip::TripKv::new(
+        Arc::clone(fenced),
+        Arc::clone(&trip),
+    ));
     let coders = crate::integrity::coders();
     // One guarded store per operation class (RFC-015 §5.6, ADR-0016): every
     // write of a task is checked against the cluster state at commit.
@@ -417,7 +498,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
     let meta_book = guarded(OpClass::Bookkeeping);
     let meta_admin = guarded(OpClass::Admin);
     let raw = Arc::clone(fenced);
-    vec![
+    let handles = vec![
         tokio::spawn(scheduler(
             "gc",
             cfg.gc_interval,
@@ -697,7 +778,6 @@ fn start_leader_tasks<S: KvStore + 'static>(
                 let metrics = Arc::clone(metrics);
                 let meta = Arc::clone(&meta_admin);
                 let clients = clients.clone();
-                let token = fenced.leadership().token;
                 move || {
                     let meta = Arc::clone(&meta);
                     let clients = clients.clone();
@@ -719,7 +799,10 @@ fn start_leader_tasks<S: KvStore + 'static>(
                 }
             },
         )),
-    ]
+    ];
+    let mut handles = handles;
+    handles.extend(watch);
+    (handles, trip)
 }
 
 /// Metric code of a phase.
@@ -992,6 +1075,7 @@ async fn health_pass<S: KvStore>(
         max_node_generation: metrics.delete_fence.max_generation(),
         may_open: metrics.delete_fence.round_done(token),
         lineage: metrics.delete_fence.lineage(),
+        restore_suspected: metrics.delete_fence.restore_suspected(),
     };
     let lineage_guard = metrics.lineage_lock.lock().await;
     let view = arca_lake_metadata::ops::delete_fence::LeaderView {
@@ -1001,6 +1085,9 @@ async fn health_pass<S: KvStore>(
     let synced = arca_lake_metadata::ops::delete_fence::sync_leader(meta, view, now).await;
     if let Ok(f) = &synced {
         metrics.delete_fence.set_lineage(f.lineage);
+        if f.metadata_behind && view.restore_suspected {
+            metrics.delete_fence.clear_suspected();
+        }
     }
     drop(lineage_guard);
     let fence = match synced {

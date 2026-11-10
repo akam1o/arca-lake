@@ -21,6 +21,8 @@ pub enum CommitFault {
     UnknownWithoutApply,
     /// Drop the transaction and report a backend error (store unavailable).
     Unavailable,
+    /// Drop the transaction and report the store locked (a restore).
+    Locked,
     /// Apply the commit, then report what the FoundationDB backend reports
     /// for a commit that timed out (R-72: the timeout cancels the
     /// transaction after the proxy may already have committed it).
@@ -280,6 +282,9 @@ impl<T: Txn + 'static> Txn for FaultTx<T> {
                 "injected: request lost before apply".into(),
             )),
             CommitFault::Unavailable => Err(KvError::Backend("injected: store unavailable".into())),
+            CommitFault::Locked => Err(KvError::Locked(
+                "injected: database is locked (1038)".into(),
+            )),
             CommitFault::TimeoutAfterApply => {
                 self.inner.commit().await?;
                 Err(timeout_error())

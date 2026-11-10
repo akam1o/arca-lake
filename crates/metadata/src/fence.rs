@@ -114,6 +114,14 @@ impl<T: Txn> Txn for FencedTx<T> {
     }
 
     async fn commit(mut self) -> Result<u64, KvError> {
+        // No leader record at all under a leader: the keyspace was cleared
+        // or replaced (Phase 3.11), not a takeover.
+        if self.inner.get(&crate::keys::leader()).await?.is_none() {
+            return Err(KvError::Replaced(format!(
+                "the leader record of {} is gone: the metadata was cleared or replaced",
+                self.leadership.holder
+            )));
+        }
         let ok = check_in_tx(&mut self.inner, &self.leadership)
             .await
             .map_err(|e| KvError::Backend(e.to_string()))?;

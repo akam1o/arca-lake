@@ -22,6 +22,7 @@ pub mod rebalance;
 pub mod recovery;
 pub mod repair;
 pub mod tiering;
+pub mod trip;
 pub mod upgrade;
 pub mod walk;
 

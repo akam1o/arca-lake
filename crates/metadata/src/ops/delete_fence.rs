@@ -234,6 +234,9 @@ pub struct LeaderView {
     pub may_open: bool,
     /// The lineage counter this process last wrote (0: none yet).
     pub lineage: u64,
+    /// This process saw the store locked or replaced (Phase 3.11): the
+    /// metadata may have been restored under it.
+    pub restore_suspected: bool,
 }
 
 /// What [`sync_leader`] did.
@@ -345,7 +348,8 @@ pub async fn sync_leader<S: KvStore>(
             let lineage = stored_lineage.max(v.lineage).saturating_add(1);
             tx.set(&keys::delete_fence_lineage(), &lineage.to_le_bytes());
             let lineage_behind = v.lineage > stored_lineage;
-            let behind = v.max_node_generation > rec.generation || lineage_behind;
+            let behind =
+                v.max_node_generation > rec.generation || lineage_behind || v.restore_suspected;
             let ours_now = rec.open
                 && rec.leader_token == v.token
                 && rec.incarnation == v.incarnation
@@ -360,7 +364,9 @@ pub async fn sync_leader<S: KvStore>(
                     leader_token: 0,
                     incarnation: v.incarnation,
                     changed_ms: now_ms,
-                    reason: if lineage_behind {
+                    reason: if v.restore_suspected {
+                        "this leader saw the metadata store locked or replaced (a restore?); deletes held until `admin recovery begin` or `admin delete-fence release`".to_string()
+                    } else if lineage_behind {
                         format!(
                             "the leader wrote lineage {} and reads {stored_lineage}: the metadata went back under it (restored without `admin recovery begin`?); deletes held until `admin recovery begin` or `admin delete-fence release`",
                             v.lineage

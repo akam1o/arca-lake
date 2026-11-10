@@ -128,8 +128,8 @@ pub fn check(state: Option<&ClusterStateRecord>, expect: &Expectation) -> Result
         return if expect.class == OpClass::Admin {
             Ok(())
         } else {
-            Err(KvError::ClusterState(
-                "cluster state record missing; run `admin init`".into(),
+            Err(KvError::Replaced(
+                "cluster state record missing (the keyspace was cleared or replaced, or never initialised: `admin init`)".into(),
             ))
         };
     };

@@ -202,6 +202,28 @@ async fn recover_at(c: &TestCluster, marked_ms: u64) -> [u8; 16] {
     marked.incarnation
 }
 
+/// Wait until `ctl` leads with its term's generation open on every node
+/// (the metadata record opens before the pushes reach the nodes).
+async fn term_open_everywhere<S: KvStore + 'static>(
+    c: &TestCluster<S>,
+    ctl: &arca_lake_controller::process::ControllerHandle,
+) {
+    let t = Instant::now();
+    loop {
+        let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+        let mut everywhere = ctl.is_leader() && rec.open && rec.leader_token == ctl.token();
+        for n in &c.nodes {
+            let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+            everywhere &= h.delete_fence_open && h.delete_fence_generation == rec.generation;
+        }
+        if everywhere {
+            return;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "{rec:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// A leader's health pass, the fence part: sync for its term, push to the
 /// nodes, take it for this cluster's clients.
 async fn leader_pass(c: &TestCluster, token: u64) -> delete_fence::DeleteFenceRecord {
@@ -1102,5 +1124,1002 @@ async fn a_restore_under_a_running_leader_closes_its_fence() {
     assert_eq!(deliver(&old, &deletes).await.applied, 0);
     ctl.shutdown().await;
     assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    c.shutdown().await;
+}
+
+/// R-94(b) (Phase 3.11): a leader keeps running through a restore done
+/// without the runbook's fence close. Its GC decided, after the backup
+/// point, to collect an object deleted after that point (the decision is
+/// held between its reference check and its shard deletes). The operator
+/// clears the keyspace (as before `fdbrestore`) and restores the backup,
+/// in which the object exists; the held deletes are then sent, between
+/// the clear and the restore or after it. The restored object must stay
+/// whole: the leader saw the metadata go away (its next transaction
+/// failed) before it sent them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restore_under_a_running_leaders_held_gc_batch_loses_nothing() {
+    held_gc_batch(false).await;
+}
+
+/// [`a_restore_under_a_running_leaders_held_gc_batch_loses_nothing`], the
+/// batch released only once the restore is done (scenario 12).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_gc_batch_released_after_the_restore_loses_nothing() {
+    held_gc_batch(true).await;
+}
+
+async fn held_gc_batch(after_restore: bool) {
+    use arca_lake_controller::process::{ControllerConfig, spawn};
+    let mut c = cluster().await;
+    let kept = put(&c, "kept", 16).await;
+    let mut cfg = ControllerConfig::new("ctl-running");
+    // Long: no renewal falls in the window, the trip alone must act.
+    cfg.lease = Duration::from_secs(60);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_millis(100);
+    cfg.gc_grace = Duration::ZERO;
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.failure_domain = "host".into();
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    term_open_everywhere(&c, &ctl).await;
+    // GC's deletes are held once decided.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *ctl.metrics.gc.delete_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    // Release the batch and wait until it sent every delete (whatever
+    // the nodes answered).
+    let release = async |gate: &tokio::sync::Semaphore| {
+        let sent = ctl.metrics.gc.delete_generation.snapshot().count;
+        gate.add_permits(1_000);
+        let t = Instant::now();
+        while ctl.metrics.gc.delete_generation.snapshot().count == sent {
+            assert!(
+                t.elapsed() < Duration::from_secs(20),
+                "the batch never finished"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let backup = snapshot(c.meta.as_ref()).await;
+    let shards_at_backup = c.total_shards().await;
+    // After the backup point: the client deletes the object; GC decides.
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    let t = Instant::now();
+    while ctl
+        .metrics
+        .gc
+        .gated
+        .load(std::sync::atomic::Ordering::Relaxed)
+        == 0
+    {
+        assert!(t.elapsed() < Duration::from_secs(20), "GC never decided");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The restore: the keyspace cleared, the leader's next passes see it
+    // (bounded: without the trip they never do), the backup written back;
+    // the held deletes are sent before or after it.
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.clear_range(&keys::all_range());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let t = Instant::now();
+    while !ctl.metrics.delete_fence.restore_suspected() && t.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    if !after_restore {
+        release(&gate).await;
+    }
+    restore(c.meta.as_ref(), &backup).await;
+    if after_restore {
+        release(&gate).await;
+    }
+    assert_eq!(
+        c.total_shards().await,
+        shards_at_backup,
+        "deletes decided before the restore applied after it"
+    );
+    ctl.abort();
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    c.shutdown().await;
+}
+
+/// R-94(b), deletes already sent (Phase 3.11): the running leader's GC
+/// batch passed its own fence check and its `DeleteShard` RPCs are in
+/// flight (held before they reach the nodes) when the operator clears the
+/// keyspace for a restore. The leader's next transaction sees the store
+/// replaced and closes its open generation on the nodes themselves (no
+/// metadata needed); the delayed RPCs land after that and are refused, so
+/// the restore that follows finds every shard it references.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_leaders_in_flight_deletes_are_refused_once_it_sees_the_keyspace_cleared() {
+    use arca_lake_controller::process::{ControllerConfig, RpcFaultHook, spawn};
+    use arca_lake_protocol::client::{FaultAction, Rpc};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut c = cluster().await;
+    let kept = put(&c, "kept", 17).await;
+    let armed = Arc::new(AtomicBool::new(false));
+    let held = Arc::new(AtomicUsize::new(0));
+    let rpc_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut cfg = ControllerConfig::new("ctl-running");
+    cfg.lease = Duration::from_secs(2);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_millis(100);
+    cfg.gc_grace = Duration::ZERO;
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.failure_domain = "host".into();
+    cfg.rpc_fault_hook = Some(RpcFaultHook({
+        let (armed, held, rpc_gate) =
+            (Arc::clone(&armed), Arc::clone(&held), Arc::clone(&rpc_gate));
+        Arc::new(move |ctx| {
+            if ctx.rpc == Rpc::DeleteShard && armed.load(Ordering::SeqCst) {
+                held.fetch_add(1, Ordering::SeqCst);
+                FaultAction::Hold(Arc::clone(&rpc_gate))
+            } else {
+                FaultAction::None
+            }
+        })
+    }));
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    term_open_everywhere(&c, &ctl).await;
+    armed.store(true, Ordering::SeqCst);
+    let backup = snapshot(c.meta.as_ref()).await;
+    let shards_at_backup = c.total_shards().await;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    let t = Instant::now();
+    while held.load(Ordering::SeqCst) == 0 {
+        assert!(t.elapsed() < Duration::from_secs(20), "GC never sent");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The operator clears the keyspace; the leader trips on it.
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.clear_range(&keys::all_range());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let t = Instant::now();
+    // Bounded: without the trip the leader never notices.
+    while !ctl.metrics.delete_fence.restore_suspected() && t.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The trip's close reaches the nodes (bounded: without it the deletes
+    // below would land on an open fence).
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(5) {
+        let mut open = false;
+        for n in &c.nodes {
+            open |= c
+                .clients
+                .health(&n.addr.to_string())
+                .await
+                .unwrap()
+                .delete_fence_open;
+        }
+        if !open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The in-flight deletes land between the clear and the restore.
+    rpc_gate.add_permits(1_000);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    restore(c.meta.as_ref(), &backup).await;
+    assert_eq!(
+        c.total_shards().await,
+        shards_at_backup,
+        "in-flight deletes applied after the leader saw the keyspace cleared"
+    );
+    ctl.abort();
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    c.shutdown().await;
+}
+
+/// R-94(b), an idle leader (Phase 3.11): as
+/// [`a_running_leaders_in_flight_deletes_are_refused_once_it_sees_the_keyspace_cleared`],
+/// but no task of the leader runs a transaction while its deletes are in
+/// flight (its health pass stuck on a node RPC, the GC batch busy
+/// sending, no renewal due): only the leader's store watch can see the
+/// keyspace cleared.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_leaders_store_watch_sees_the_keyspace_cleared() {
+    use arca_lake_controller::process::{ControllerConfig, RpcFaultHook, spawn};
+    use arca_lake_protocol::client::{FaultAction, Rpc};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut c = cluster().await;
+    let kept = put(&c, "kept", 21).await;
+    let armed = Arc::new(AtomicBool::new(false));
+    let held = Arc::new(AtomicUsize::new(0));
+    let health_held = Arc::new(AtomicUsize::new(0));
+    let health_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let rpc_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut cfg = ControllerConfig::new("ctl-running");
+    cfg.lease = Duration::from_secs(60);
+    // Every other periodic task far apart.
+    let idle = Duration::from_secs(3600);
+    cfg.repair_interval = idle;
+    cfg.evict_interval = idle;
+    cfg.tiering_interval = idle;
+    cfg.rebalance_interval = idle;
+    cfg.scrub_tick = idle;
+    cfg.stripe_repair_interval = idle;
+    cfg.recovery_interval = idle;
+    cfg.upgrade_interval = idle;
+    cfg.heartbeat = None;
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_millis(100);
+    cfg.gc_grace = Duration::ZERO;
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.failure_domain = "host".into();
+    cfg.rpc_fault_hook = Some(RpcFaultHook({
+        let (armed, held, rpc_gate, health_held, health_gate) = (
+            Arc::clone(&armed),
+            Arc::clone(&held),
+            Arc::clone(&rpc_gate),
+            Arc::clone(&health_held),
+            Arc::clone(&health_gate),
+        );
+        Arc::new(move |ctx| {
+            // One health RPC of the leader's pass held (the pass waits for
+            // it); the trip's own close pushes are not.
+            if ctx.rpc == Rpc::Health
+                && armed.load(Ordering::SeqCst)
+                && health_held.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                FaultAction::Hold(Arc::clone(&health_gate))
+            } else if ctx.rpc == Rpc::DeleteShard && armed.load(Ordering::SeqCst) {
+                held.fetch_add(1, Ordering::SeqCst);
+                FaultAction::Hold(Arc::clone(&rpc_gate))
+            } else {
+                FaultAction::None
+            }
+        })
+    }));
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    term_open_everywhere(&c, &ctl).await;
+    armed.store(true, Ordering::SeqCst);
+    // The health pass is stuck past its transactions.
+    let t = Instant::now();
+    while health_held.load(Ordering::SeqCst) == 0 {
+        assert!(t.elapsed() < Duration::from_secs(20));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let backup = snapshot(c.meta.as_ref()).await;
+    let shards_at_backup = c.total_shards().await;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    let t = Instant::now();
+    while held.load(Ordering::SeqCst) == 0 {
+        assert!(t.elapsed() < Duration::from_secs(20), "GC never sent");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The operator clears the keyspace; the leader trips on it.
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.clear_range(&keys::all_range());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let t = Instant::now();
+    // Bounded: without the trip the leader never notices.
+    while !ctl.metrics.delete_fence.restore_suspected() && t.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The trip's close reaches the nodes (bounded: without it the deletes
+    // below would land on an open fence).
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(5) {
+        let mut open = false;
+        for n in &c.nodes {
+            open |= c
+                .clients
+                .health(&n.addr.to_string())
+                .await
+                .unwrap()
+                .delete_fence_open;
+        }
+        if !open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The in-flight deletes land between the clear and the restore.
+    rpc_gate.add_permits(1_000);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    restore(c.meta.as_ref(), &backup).await;
+    assert_eq!(
+        c.total_shards().await,
+        shards_at_backup,
+        "in-flight deletes applied after the leader saw the keyspace cleared"
+    );
+    health_gate.add_permits(1);
+    ctl.abort();
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    c.shutdown().await;
+}
+
+/// R-94(b), reconciliation (Phase 3.11): after the backup point the
+/// object is deleted and its generation's metadata finished, so its shards
+/// are orphans to the running leader's reconciliation, whose deletes are
+/// in flight when the operator clears the keyspace for a restore. As for
+/// GC, the leader trips on the cleared store, closes its generation on the
+/// nodes, and the delayed deletes are refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_leaders_in_flight_reconcile_deletes_are_refused_once_it_sees_the_keyspace_cleared()
+ {
+    use arca_lake_controller::process::{ControllerConfig, RpcFaultHook, spawn};
+    use arca_lake_protocol::client::{FaultAction, Rpc};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut c = cluster().await;
+    let kept = put(&c, "kept", 18).await;
+    let armed = Arc::new(AtomicBool::new(false));
+    let held = Arc::new(AtomicUsize::new(0));
+    let rpc_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut cfg = ControllerConfig::new("ctl-running");
+    cfg.lease = Duration::from_secs(2);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_secs(3600);
+    cfg.reconcile_interval = Duration::from_millis(100);
+    cfg.min_orphan_age = Duration::ZERO;
+    cfg.failure_domain = "host".into();
+    cfg.rpc_fault_hook = Some(RpcFaultHook({
+        let (armed, held, rpc_gate) =
+            (Arc::clone(&armed), Arc::clone(&held), Arc::clone(&rpc_gate));
+        Arc::new(move |ctx| {
+            if ctx.rpc == Rpc::DeleteShard && armed.load(Ordering::SeqCst) {
+                held.fetch_add(1, Ordering::SeqCst);
+                FaultAction::Hold(Arc::clone(&rpc_gate))
+            } else {
+                FaultAction::None
+            }
+        })
+    }));
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    term_open_everywhere(&c, &ctl).await;
+    armed.store(true, Ordering::SeqCst);
+    let backup = snapshot(c.meta.as_ref()).await;
+    let shards_at_backup = c.total_shards().await;
+    let generation = c.manifest(BUCKET, "kept").await.pointer.generation;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    arca_lake_metadata::ops::gc::finish(c.meta.as_ref(), &generation)
+        .await
+        .unwrap();
+    let t = Instant::now();
+    while held.load(Ordering::SeqCst) == 0 {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "reconciliation never sent"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The operator clears the keyspace; the leader trips on it.
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.clear_range(&keys::all_range());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let t = Instant::now();
+    // Bounded: without the trip the leader never notices.
+    while !ctl.metrics.delete_fence.restore_suspected() && t.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The trip's close reaches the nodes (bounded: without it the deletes
+    // below would land on an open fence).
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(5) {
+        let mut open = false;
+        for n in &c.nodes {
+            open |= c
+                .clients
+                .health(&n.addr.to_string())
+                .await
+                .unwrap()
+                .delete_fence_open;
+        }
+        if !open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The in-flight deletes land between the clear and the restore.
+    rpc_gate.add_permits(1_000);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    restore(c.meta.as_ref(), &backup).await;
+    assert_eq!(
+        c.total_shards().await,
+        shards_at_backup,
+        "in-flight reconcile deletes applied after the leader saw the keyspace cleared"
+    );
+    ctl.abort();
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    c.shutdown().await;
+}
+
+/// R-94(b), the cleanup after a migration (Phase 3.11): after the backup
+/// point the object's chunks move to another group (rebalancing or
+/// tiering); the source shards are then the former placement, which the
+/// running leader's reconciliation deletes (a migration never deletes its
+/// source itself, Phase 3.5 CON-5). Those deletes are in flight when the
+/// operator clears the keyspace; the restored metadata places the chunks
+/// in the source group again and needs every source shard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_leaders_in_flight_migration_cleanup_is_refused_once_it_sees_the_keyspace_cleared()
+ {
+    use arca_lake_controller::process::{ControllerConfig, RpcFaultHook, spawn};
+    use arca_lake_protocol::client::{FaultAction, Rpc};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 2,
+        ..ClusterOptions::rs(6, 2, 1, MIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    // One chunk: one source group.
+    let kept = Bytes::from(random_bytes(usize::try_from(MIB).unwrap(), 20));
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "kept",
+        kept.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let armed = Arc::new(AtomicBool::new(false));
+    let held = Arc::new(AtomicUsize::new(0));
+    let rpc_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut cfg = ControllerConfig::new("ctl-running");
+    cfg.lease = Duration::from_secs(2);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_secs(3600);
+    cfg.reconcile_interval = Duration::from_millis(100);
+    cfg.min_orphan_age = Duration::ZERO;
+    cfg.failure_domain = "host".into();
+    cfg.rpc_fault_hook = Some(RpcFaultHook({
+        let (armed, held, rpc_gate) =
+            (Arc::clone(&armed), Arc::clone(&held), Arc::clone(&rpc_gate));
+        Arc::new(move |ctx| {
+            if ctx.rpc == Rpc::DeleteShard && armed.load(Ordering::SeqCst) {
+                held.fetch_add(1, Ordering::SeqCst);
+                FaultAction::Hold(Arc::clone(&rpc_gate))
+            } else {
+                FaultAction::None
+            }
+        })
+    }));
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    term_open_everywhere(&c, &ctl).await;
+    armed.store(true, Ordering::SeqCst);
+    let backup = snapshot(c.meta.as_ref()).await;
+    // The migration, as rebalancing or tiering runs it.
+    let m = c.manifest(BUCKET, "kept").await;
+    let groups = c.groups().await;
+    let source = groups
+        .iter()
+        .find(|g| g.id == m.chunks[0].1.placement.group_id)
+        .unwrap()
+        .clone();
+    let target = groups.iter().find(|g| g.id != source.id).unwrap().clone();
+    let in_source = |c: &TestCluster| {
+        (0..c.nodes.len())
+            .map(|i| c.shard_count(i, source.id))
+            .sum::<usize>()
+    };
+    let source_at_backup = in_source(&c);
+    assert!(source_at_backup > 0);
+    let nodes: std::collections::HashMap<u64, arca_lake_metadata::records::NodeRecord> =
+        arca_lake_metadata::ops::cluster::list_nodes(c.meta.as_ref())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.id, n))
+            .collect();
+    let addr_of = |id: u64| nodes.get(&id).map(|n| n.address.clone());
+    for (index, record) in &m.chunks {
+        let outcome = arca_lake_tiering::migrate::migrate_chunk(
+            c.meta.as_ref(),
+            &c.clients,
+            arca_lake_controller::integrity::coders().as_ref(),
+            &addr_of,
+            &source,
+            &target,
+            &m.pointer.generation,
+            *index,
+            record,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                arca_lake_tiering::migrate::MigrateOutcome::Switched { .. }
+            ),
+            "{outcome:?}"
+        );
+    }
+    let t = Instant::now();
+    while held.load(Ordering::SeqCst) == 0 {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "the cleanup never sent"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The operator clears the keyspace; the leader trips on it.
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.clear_range(&keys::all_range());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let t = Instant::now();
+    // Bounded: without the trip the leader never notices.
+    while !ctl.metrics.delete_fence.restore_suspected() && t.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The trip's close reaches the nodes (bounded: without it the deletes
+    // below would land on an open fence).
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(5) {
+        let mut open = false;
+        for n in &c.nodes {
+            open |= c
+                .clients
+                .health(&n.addr.to_string())
+                .await
+                .unwrap()
+                .delete_fence_open;
+        }
+        if !open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The in-flight deletes land between the clear and the restore.
+    rpc_gate.add_permits(1_000);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    restore(c.meta.as_ref(), &backup).await;
+    assert_eq!(
+        in_source(&c),
+        source_at_backup,
+        "in-flight migration cleanup applied after the leader saw the keyspace cleared"
+    );
+    ctl.abort();
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    c.shutdown().await;
+}
+
+/// R-94(b), the lock (Phase 3.11): `fdbrestore` locks the database while
+/// it writes (FoundationDB 1038, `database_locked`). A running leader
+/// whose GC deletes are in flight sees its next commit refused as locked:
+/// it stops deleting, closes its generation on the nodes, and steps down;
+/// the delayed deletes are refused. Once the lock is gone, its next term
+/// closes the fence with an operator hold rather than reopening on what
+/// may be restored metadata.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_leader_that_sees_the_store_locked_stops_its_in_flight_deletes() {
+    use arca_lake_controller::process::{ControllerConfig, RpcFaultHook, spawn};
+    use arca_lake_metadata::fault::{CommitFault, FaultKv};
+    use arca_lake_metadata::mem::MemKv;
+    use arca_lake_protocol::client::{FaultAction, Rpc};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let c: TestCluster<FaultKv<MemKv>> = TestCluster::start_with(
+        Arc::new(FaultKv::new(MemKv::default())),
+        ClusterOptions {
+            groups: 1,
+            ..ClusterOptions::rs(3, 2, 1, MIB, 0)
+        },
+    )
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let d = Bytes::from(random_bytes(usize::try_from(2 * MIB).unwrap(), 19));
+    s3::put(&c.backend, BUCKET, "kept", d, &PutOptions::default())
+        .await
+        .unwrap();
+    let armed = Arc::new(AtomicBool::new(false));
+    let held = Arc::new(AtomicUsize::new(0));
+    let rpc_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut cfg = ControllerConfig::new("ctl-running");
+    cfg.lease = Duration::from_secs(2);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_millis(100);
+    cfg.gc_grace = Duration::ZERO;
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.failure_domain = "host".into();
+    cfg.rpc_fault_hook = Some(RpcFaultHook({
+        let (armed, held, rpc_gate) =
+            (Arc::clone(&armed), Arc::clone(&held), Arc::clone(&rpc_gate));
+        Arc::new(move |ctx| {
+            if ctx.rpc == Rpc::DeleteShard && armed.load(Ordering::SeqCst) {
+                held.fetch_add(1, Ordering::SeqCst);
+                FaultAction::Hold(Arc::clone(&rpc_gate))
+            } else {
+                FaultAction::None
+            }
+        })
+    }));
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    term_open_everywhere(&c, &ctl).await;
+    armed.store(true, Ordering::SeqCst);
+    let shards_before = c.total_shards().await;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    let t = Instant::now();
+    while held.load(Ordering::SeqCst) == 0 {
+        assert!(t.elapsed() < Duration::from_secs(20), "GC never sent");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The restore takes the lock: every write is refused.
+    c.meta
+        .inject(|w| !w.is_empty(), CommitFault::Locked, usize::MAX);
+    let t = Instant::now();
+    // Bounded: without the trip the leader never notices.
+    while !ctl.metrics.delete_fence.restore_suspected() && t.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(5) {
+        let mut open = false;
+        for n in &c.nodes {
+            open |= c
+                .clients
+                .health(&n.addr.to_string())
+                .await
+                .unwrap()
+                .delete_fence_open;
+        }
+        if !open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    rpc_gate.add_permits(1_000);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        c.total_shards().await,
+        shards_before,
+        "in-flight deletes applied after the leader saw the store locked"
+    );
+    // The lock is gone: the next term holds the fence for the operator.
+    c.meta.clear_rules();
+    let t = Instant::now();
+    let rec = loop {
+        let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+        if rec.operator_hold && !rec.open {
+            break rec;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "never held: {rec:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(rec.reason.contains("locked or replaced"), "{rec:?}");
+    assert!(!ctl.metrics.delete_fence.restore_suspected());
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Hold `DeleteShard` RPCs of a controller once armed, and optionally the
+/// first `Health` RPC of its health pass (the pass then waits on it, past
+/// its transactions); the trip's own fence pushes are never held.
+struct Holds {
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    held: Arc<std::sync::atomic::AtomicUsize>,
+    deletes: Arc<tokio::sync::Semaphore>,
+    health: Arc<tokio::sync::Semaphore>,
+}
+
+impl Holds {
+    fn new() -> Self {
+        Self {
+            armed: Arc::default(),
+            held: Arc::default(),
+            deletes: Arc::new(tokio::sync::Semaphore::new(0)),
+            health: Arc::new(tokio::sync::Semaphore::new(0)),
+        }
+    }
+
+    fn hook(&self, stall_health: bool) -> arca_lake_controller::process::RpcFaultHook {
+        use arca_lake_protocol::client::{FaultAction, Rpc};
+        use std::sync::atomic::Ordering;
+        let (armed, held, deletes, health) = (
+            Arc::clone(&self.armed),
+            Arc::clone(&self.held),
+            Arc::clone(&self.deletes),
+            Arc::clone(&self.health),
+        );
+        let health_held = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        arca_lake_controller::process::RpcFaultHook(Arc::new(move |ctx| {
+            if !armed.load(Ordering::SeqCst) {
+                return FaultAction::None;
+            }
+            if stall_health
+                && ctx.rpc == Rpc::Health
+                && health_held.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                return FaultAction::Hold(Arc::clone(&health));
+            }
+            if ctx.rpc == Rpc::DeleteShard {
+                held.fetch_add(1, Ordering::SeqCst);
+                return FaultAction::Hold(Arc::clone(&deletes));
+            }
+            FaultAction::None
+        }))
+    }
+}
+
+/// A controller whose only periodic metadata access is its health pass,
+/// GC and the store watch (everything else far apart).
+fn quiet_controller(
+    hook: arca_lake_controller::process::RpcFaultHook,
+) -> arca_lake_controller::process::ControllerConfig {
+    let mut cfg = arca_lake_controller::process::ControllerConfig::new("ctl-running");
+    cfg.lease = Duration::from_secs(60);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_millis(100);
+    cfg.gc_grace = Duration::ZERO;
+    let idle = Duration::from_secs(3600);
+    cfg.reconcile_interval = idle;
+    cfg.repair_interval = idle;
+    cfg.evict_interval = idle;
+    cfg.tiering_interval = idle;
+    cfg.rebalance_interval = idle;
+    cfg.scrub_tick = idle;
+    cfg.stripe_repair_interval = idle;
+    cfg.recovery_interval = idle;
+    cfg.upgrade_interval = idle;
+    cfg.heartbeat = None;
+    cfg.failure_domain = "host".into();
+    cfg.rpc_fault_hook = Some(hook);
+    cfg
+}
+
+/// Wait until `n` more delete RPCs of `ctl`'s GC completed.
+async fn deletes_done(ctl: &arca_lake_controller::process::ControllerHandle, before: u64, n: u64) {
+    let t = Instant::now();
+    while ctl.metrics.gc.delete_rpc.snapshot().count < before + n {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "deletes never completed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// R-94(b) BOUNDARY (Phase 3.11, ADR-0025; this test pins a residual, it
+/// does not show a guarantee): a restore that replaces the metadata
+/// between two observations of the leader is not seen by the trip. Here
+/// the restore is atomic (the clear and the backup's records in one
+/// transaction, the limit of "completes within one watch interval"; a
+/// snapshot rollback of the store's disks is the same). The restored
+/// leader record carries the same holder and token, the cluster state is
+/// there: the store watch finds nothing wrong, and the deletes in flight
+/// apply: the restored object loses its shards. The rollback is detected
+/// only afterwards, by the lineage check of the next health pass (ADR-0024),
+/// which closes the fence with a hold. If this test starts failing, the
+/// boundary moved: update ADR-0025 and R-94.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn boundary_a_restore_between_two_observations_is_not_seen() {
+    use std::sync::atomic::Ordering;
+    let c = cluster().await;
+    put(&c, "kept", 22).await;
+    let holds = Holds::new();
+    let ctl = arca_lake_controller::process::spawn(
+        Arc::clone(&c.meta),
+        quiet_controller(holds.hook(true)),
+    )
+    .await
+    .unwrap();
+    term_open_everywhere(&c, &ctl).await;
+    holds.armed.store(true, Ordering::SeqCst);
+    let backup = snapshot(c.meta.as_ref()).await;
+    let shards_at_backup = c.total_shards().await;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    let t = Instant::now();
+    while holds.held.load(Ordering::SeqCst) < 6 {
+        assert!(t.elapsed() < Duration::from_secs(20), "GC never sent");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    restore(c.meta.as_ref(), &backup).await;
+    // Several watch intervals: nothing to see.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !ctl.metrics.delete_fence.restore_suspected(),
+        "the trip saw an atomic restore: the boundary moved"
+    );
+    let before = ctl.metrics.gc.delete_rpc.snapshot().count;
+    holds.deletes.add_permits(1_000);
+    deletes_done(&ctl, before, 6).await;
+    let lost = shards_at_backup - c.total_shards().await;
+    assert_eq!(lost, 6, "every in-flight delete applied after the restore");
+    // Detected afterwards: the health pass resumes, the lineage went back.
+    holds.health.add_permits(1_000);
+    let t = Instant::now();
+    loop {
+        let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+        if rec.operator_hold && !rec.open {
+            assert!(rec.reason.contains("lineage"), "{rec:?}");
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "never held: {rec:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    ctl.abort();
+    c.shutdown().await;
+}
+
+/// A store that can be cut off from its process (every operation fails as
+/// a lost connection would), sharing the data with everyone else.
+struct Cut {
+    inner: Arc<arca_lake_metadata::mem::MemKv>,
+    cut: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct CutTx {
+    inner: <arca_lake_metadata::mem::MemKv as KvStore>::Tx,
+    cut: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CutTx {
+    fn check(&self) -> Result<(), arca_lake_metadata::KvError> {
+        if self.cut.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(arca_lake_metadata::KvError::Backend(
+                "injected: connection lost".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl KvStore for Cut {
+    type Tx = CutTx;
+
+    async fn begin(&self) -> Result<CutTx, arca_lake_metadata::KvError> {
+        let tx = CutTx {
+            inner: self.inner.begin().await?,
+            cut: Arc::clone(&self.cut),
+        };
+        tx.check()?;
+        Ok(tx)
+    }
+
+    fn limits(&self) -> arca_lake_metadata::kv::Limits {
+        self.inner.limits()
+    }
+}
+
+impl Txn for CutTx {
+    async fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, arca_lake_metadata::KvError> {
+        self.check()?;
+        self.inner.get(key).await
+    }
+
+    async fn get_range(
+        &mut self,
+        range: &arca_lake_metadata::kv::KeyRange,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, arca_lake_metadata::KvError> {
+        self.check()?;
+        self.inner.get_range(range, limit, reverse).await
+    }
+
+    fn set(&mut self, key: &[u8], value: &[u8]) {
+        self.inner.set(key, value);
+    }
+
+    fn clear(&mut self, key: &[u8]) {
+        self.inner.clear(key);
+    }
+
+    fn clear_range(&mut self, range: &arca_lake_metadata::kv::KeyRange) {
+        self.inner.clear_range(range);
+    }
+
+    async fn commit(self) -> Result<u64, arca_lake_metadata::KvError> {
+        self.check()?;
+        self.inner.commit().await
+    }
+}
+
+/// R-94(b) BOUNDARY (Phase 3.11, ADR-0025; pins a residual): the leader is
+/// cut off from FoundationDB with deletes in flight, and the operator
+/// restores without the runbook. The leader sees only transient errors: it
+/// stops sending (its first failed renewal) but cannot close anything, and
+/// no one else can tell the nodes. Deletes in flight that land while the
+/// nodes' rejoin lease still runs apply; those landing after it ended are
+/// refused. The exposure is the rejoin lease (`--fence-lease-secs`, 30 s
+/// by default; 3 s here).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn boundary_a_leader_cut_off_from_the_store_applies_deletes_until_the_rejoin_lease_ends() {
+    use std::sync::atomic::Ordering;
+    let mut c = cluster().await;
+    c.fence_lease = Duration::from_secs(3);
+    for i in 0..c.nodes.len() {
+        c.stop_node(i).await;
+        c.start_node(i).await;
+    }
+    put(&c, "kept", 23).await;
+    let holds = Holds::new();
+    let cut = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let store = Arc::new(Cut {
+        inner: Arc::clone(&c.meta),
+        cut: Arc::clone(&cut),
+    });
+    let mut cfg = quiet_controller(holds.hook(false));
+    cfg.lease = Duration::from_secs(6);
+    let ctl = arca_lake_controller::process::spawn(store, cfg)
+        .await
+        .unwrap();
+    term_open_everywhere(&c, &ctl).await;
+    holds.armed.store(true, Ordering::SeqCst);
+    let backup = snapshot(c.meta.as_ref()).await;
+    let shards_at_backup = c.total_shards().await;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    let t = Instant::now();
+    while holds.held.load(Ordering::SeqCst) < 6 {
+        assert!(t.elapsed() < Duration::from_secs(20), "GC never sent");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Cut off; the operator clears and restores.
+    cut.store(true, Ordering::SeqCst);
+    let cut_at = Instant::now();
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.clear_range(&keys::all_range());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    restore(c.meta.as_ref(), &backup).await;
+    // Half of the in-flight deletes land within the lease ...
+    let before = ctl.metrics.gc.delete_rpc.snapshot().count;
+    holds.deletes.add_permits(3);
+    deletes_done(&ctl, before, 3).await;
+    assert!(
+        cut_at.elapsed() < Duration::from_secs(2),
+        "not within the lease"
+    );
+    let lost_in_lease = shards_at_backup - c.total_shards().await;
+    // ... the rest after it ended.
+    tokio::time::sleep(Duration::from_secs(4).saturating_sub(cut_at.elapsed())).await;
+    let mut open = Vec::new();
+    for n in &c.nodes {
+        open.push(
+            c.clients
+                .health(&n.addr.to_string())
+                .await
+                .unwrap()
+                .delete_fence_lease_ms,
+        );
+    }
+    holds.deletes.add_permits(1_000);
+    deletes_done(&ctl, before, 6).await;
+    let lost_after = shards_at_backup - c.total_shards().await - lost_in_lease;
+    eprintln!(
+        "lost within the lease: {lost_in_lease}, after it: {lost_after}, lease left {open:?}"
+    );
+    assert_eq!(lost_in_lease, 3, "in-flight deletes within the lease apply");
+    assert_eq!(lost_after, 0, "deletes after the lease ended are refused");
+    assert!(
+        !ctl.metrics.delete_fence.restore_suspected(),
+        "a cut-off leader sees nothing"
+    );
+    ctl.abort();
     c.shutdown().await;
 }

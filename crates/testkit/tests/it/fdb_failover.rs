@@ -208,7 +208,7 @@ async fn foundationdb_process_and_coordinator_failures() {
         return;
     }
     // Nothing in this test may wait forever: a hung step is a failure.
-    tokio::time::timeout(Duration::from_mins(15), scenario())
+    tokio::time::timeout(Duration::from_mins(15), Box::pin(scenario()))
         .await
         .expect("the failover scenario exceeded 15 minutes");
 }

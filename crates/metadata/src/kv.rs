@@ -142,6 +142,17 @@ pub enum KvError {
     /// `guard::GuardedKv`). Never retried.
     #[error("cluster state: {0}")]
     ClusterState(String),
+    /// The store is locked (FoundationDB `database_locked`, 1038: a restore
+    /// or a DR switch is writing it; Phase 3.11). Never retried: a process
+    /// that sees it must assume its metadata is being replaced.
+    #[error("metadata store locked: {0}")]
+    Locked(String),
+    /// A record that exists for as long as the store serves this cluster is
+    /// missing (the leader record under a leader, the cluster state): the
+    /// keyspace was cleared or replaced, as before a restore (Phase 3.11).
+    /// Never retried.
+    #[error("metadata replaced: {0}")]
+    Replaced(String),
     /// Any other backend failure.
     #[error("backend error: {0}")]
     Backend(String),

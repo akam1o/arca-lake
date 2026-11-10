@@ -12,6 +12,10 @@ use tokio::net::TcpListener;
 #[derive(Debug, Default)]
 pub struct FenceView {
     inner: std::sync::Mutex<FenceInner>,
+    /// The metadata store was seen locked or replaced under this process
+    /// (Phase 3.11, `trip`): the next health pass closes the fence with an
+    /// operator hold. Kept across leadership terms.
+    suspect: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Default)]
@@ -28,6 +32,24 @@ struct FenceInner {
 }
 
 impl FenceView {
+    /// The flag a [`crate::trip::Trip`] sets.
+    #[must_use]
+    pub fn suspect_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.suspect)
+    }
+
+    /// Whether the store was seen locked or replaced and not yet acted on.
+    #[must_use]
+    pub fn restore_suspected(&self) -> bool {
+        self.suspect.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Acted on: the fence was closed with a hold.
+    pub fn clear_suspected(&self) {
+        self.suspect
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The lineage counter this process last wrote.
     pub fn lineage(&self) -> u64 {
         self.inner

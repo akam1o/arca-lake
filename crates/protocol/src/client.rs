@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -487,6 +487,9 @@ pub struct NodeClients {
     /// Delete fence generation stamped on `DeleteShard` (ADR-0023);
     /// `None`: this process may not delete (deletes fail locally).
     delete_fence: Arc<Mutex<Option<u64>>>,
+    /// Deletes stopped for good (Phase 3.11, [`NodeClients::stop_deletes`]):
+    /// no later [`NodeClients::set_delete_fence`] reopens them.
+    deletes_latched: Arc<AtomicBool>,
     /// Mutual TLS (ADR-0017); `None` = explicitly plaintext.
     tls: Option<Arc<crate::tls::TlsContext>>,
     /// Node id per address: the identity a node must present.
@@ -539,6 +542,7 @@ impl NodeClients {
             negotiated: Arc::default(),
             incarnation: Arc::default(),
             delete_fence: Arc::default(),
+            deletes_latched: Arc::default(),
             tls: None,
             node_ids: Arc::default(),
         }
@@ -561,6 +565,18 @@ impl NodeClients {
     /// Record which node serves `addr`: TLS connections to it then require
     /// `spiffe://<td>/node/<id>` exactly (otherwise any node identity of
     /// the trust domain). A change drops the cached channel.
+    /// The node addresses this client knows an id for.
+    #[must_use]
+    pub fn known_addresses(&self) -> Vec<String> {
+        self.node_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Remember the node id at `addr` (the identity it must present).
     pub fn note_node_id(&self, addr: &str, node_id: u64) {
         let prev = self
             .node_ids
@@ -588,10 +604,28 @@ impl NodeClients {
     /// before any RPC). Nodes enforce the generation; this is what the
     /// process believes it holds.
     pub fn set_delete_fence(&self, generation: Option<u64>) {
-        *self
+        let mut g = self
             .delete_fence
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = generation.filter(|g| *g > 0);
+            .unwrap_or_else(PoisonError::into_inner);
+        *g = generation
+            .filter(|g| *g > 0)
+            .filter(|_| !self.deletes_latched.load(Ordering::SeqCst));
+    }
+
+    /// Stop this process's deletes now and return the generation they
+    /// carried. With `latch`, they stay stopped: a later
+    /// [`Self::set_delete_fence`] (a health pass already under way) does
+    /// not reopen them (Phase 3.11).
+    pub fn stop_deletes(&self, latch: bool) -> Option<u64> {
+        let mut g = self
+            .delete_fence
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if latch {
+            self.deletes_latched.store(true, Ordering::SeqCst);
+        }
+        g.take()
     }
 
     /// The delete fence generation stamped on deletes, if any.

@@ -69,11 +69,10 @@ pub mod codes {
 
 /// `RETRYABLE_NOT_COMMITTED` of `fdb_error_predicate` (7.3): the commit was
 /// rejected, a retry may succeed.
-const RETRYABLE_NOT_COMMITTED: [i32; 10] = [
+const RETRYABLE_NOT_COMMITTED: [i32; 9] = [
     codes::NOT_COMMITTED,
     codes::TRANSACTION_TOO_OLD,
     codes::FUTURE_VERSION,
-    codes::DATABASE_LOCKED,
     codes::GRV_PROXY_MEMORY_LIMIT_EXCEEDED,
     codes::COMMIT_PROXY_MEMORY_LIMIT_EXCEEDED,
     codes::BATCH_TRANSACTION_THROTTLED,
@@ -112,6 +111,9 @@ pub fn classify(code: i32, message: &str, phase: Phase) -> KvError {
             limit: limits.max_value_bytes,
             actual: 0,
         },
+        // A restore (or a DR switch) holds the lock: surfaced, not retried
+        // (Phase 3.11, R-94(b)): a leader that sees it stops deleting.
+        codes::DATABASE_LOCKED => KvError::Locked(format!("{message} ({code})")),
         c if RETRYABLE_NOT_COMMITTED.contains(&c) => KvError::Conflict,
         codes::COMMIT_UNKNOWN_RESULT
         | codes::COMMIT_UNKNOWN_RESULT_FATAL

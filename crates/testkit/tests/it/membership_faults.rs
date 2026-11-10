@@ -519,11 +519,18 @@ async fn decommission_across_groups_survives_a_controller_restart<S: KvStore + '
         .await
         .unwrap();
     let a = spawn(Arc::clone(&c.meta), ctl("ctl-a")).await.unwrap();
+    // The first move under way, or already done (a small move can finish
+    // between two polls on a fast runner: CI at 3f67cb8).
+    let before: Vec<u64> = durable
+        .iter()
+        .filter(|g| g.members.iter().any(|m| m.node_id == node))
+        .map(|g| g.id)
+        .collect();
     wait_until("the first move", Duration::from_secs(30), async || {
-        c.groups()
-            .await
-            .iter()
-            .any(|g| g.state == GroupState::Repairing)
+        c.groups().await.iter().any(|g| {
+            g.state == GroupState::Repairing
+                || (before.contains(&g.id) && !g.members.iter().any(|m| m.node_id == node))
+        })
     })
     .await;
     // The controller restarts mid-drain.

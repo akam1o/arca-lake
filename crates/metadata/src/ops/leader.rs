@@ -65,9 +65,39 @@ pub async fn try_acquire<S: KvStore>(
     now_ms: u64,
     lease_ms: u64,
 ) -> Result<Option<Leadership>> {
-    transact(store, (holder, now_ms, lease_ms), |tx, env| {
+    acquire(store, holder, now_ms, lease_ms, false).await
+}
+
+/// [`try_acquire`], only on an initialised store: no leadership (and no
+/// leader record written) while the cluster state record is missing, in
+/// the same transaction (Phase 3.11). A keyspace cleared for a restore
+/// stays empty, as `fdbrestore` requires, under controllers left running.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn try_acquire_initialized<S: KvStore>(
+    store: &S,
+    holder: &str,
+    now_ms: u64,
+    lease_ms: u64,
+) -> Result<Option<Leadership>> {
+    acquire(store, holder, now_ms, lease_ms, true).await
+}
+
+async fn acquire<S: KvStore>(
+    store: &S,
+    holder: &str,
+    now_ms: u64,
+    lease_ms: u64,
+    initialized: bool,
+) -> Result<Option<Leadership>> {
+    transact(store, (holder, now_ms, lease_ms, initialized), |tx, env| {
         Box::pin(async move {
-            let (holder, now_ms, lease_ms) = *env;
+            let (holder, now_ms, lease_ms, initialized) = *env;
+            if initialized && tx.get(&keys::cluster_state()).await?.is_none() {
+                return Ok(None);
+            }
             let current: Option<LeaderRecord> = read(tx, &keys::leader()).await?;
             let token = match &current {
                 Some(r) if r.holder == holder => r.token,
@@ -156,4 +186,45 @@ pub async fn release<S: KvStore>(store: &S, leadership: &Leadership) -> Result<b
 pub async fn check_in_tx<X: Txn>(tx: &mut X, leadership: &Leadership) -> Result<bool> {
     let r: Option<LeaderRecord> = read(tx, &keys::leader()).await?;
     Ok(r.is_some_and(|r| r.holder == leadership.holder && r.token == leadership.token))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::MemKv;
+
+    #[test]
+    fn no_leadership_on_a_store_without_a_cluster_state() {
+        futures::executor::block_on(async {
+            let kv = MemKv::default();
+            // Cleared (or never initialised): nothing is taken or written.
+            assert_eq!(
+                try_acquire_initialized(&kv, "a", 1_000, 100).await.unwrap(),
+                None
+            );
+            let mut tx = kv.begin().await.unwrap();
+            assert_eq!(tx.get(&keys::leader()).await.unwrap(), None);
+            drop(tx);
+            transact(&kv, (), |tx, ()| {
+                Box::pin(async move {
+                    tx.set(&keys::cluster_state(), b"x");
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+            let l = try_acquire_initialized(&kv, "a", 1_000, 100)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(l.token, 1);
+            // The plain form still takes an uninitialised store.
+            assert!(
+                try_acquire(&MemKv::default(), "b", 1_000, 100)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        });
+    }
 }

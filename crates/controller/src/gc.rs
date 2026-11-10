@@ -39,6 +39,12 @@ pub struct GcStats {
     /// audit): batches page through it and wrap at its end, so that
     /// generations deferred at its head do not hold up the rest.
     pub cursor: std::sync::Mutex<Option<arca_lake_metadata::kv::Key>>,
+    /// Test hook (Phase 3.11): when set, every generation waits here for a
+    /// permit between its reference check and its shard deletes, so that a
+    /// test can hold a batch whose deletes are decided but not sent.
+    pub delete_gate: std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Semaphore>>>,
+    /// Generations that reached [`Self::delete_gate`].
+    pub gated: std::sync::atomic::AtomicU64,
     /// `expire_pending`: one transaction per expired lease.
     pub expire: arca_lake_common::timing::Histogram,
     /// `collectable`: reading the retired queue (candidate discovery).
@@ -314,6 +320,19 @@ async fn collect_one_inner<S: KvStore>(
         Err(e) if is_deferrable(&e) => return Ok(Outcome::Deferred),
         Err(e) => return Err(e.into()),
     };
+    let gate = stats
+        .delete_gate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(gate) = gate {
+        stats
+            .gated
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(p) = gate.acquire().await {
+            p.forget();
+        }
+    }
     let t = std::time::Instant::now();
     let deleted = match delete_shards(clients, nodes, groups, &chunks, stats).await {
         Ok(n) => delete_cache_copies(clients, nodes, groups, generation, &cached)
