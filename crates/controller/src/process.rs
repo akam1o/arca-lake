@@ -861,6 +861,15 @@ async fn gc_pass<S: KvStore>(
         // Parts a multipart root retired are due at once (retired as of
         // the root): another batch collects them in this pass.
         let parts_due = metrics.gc.parts_retired.load(Ordering::Relaxed) > parts_before;
+        if parts_due {
+            // Parts are queued as of their root, possibly behind the
+            // cursor: from the head again (re-review).
+            *metrics
+                .gc
+                .cursor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
         // A full page of the queue also continues (past generations that
         // are deferred, Phase 3.10 audit).
         let full =
@@ -979,7 +988,18 @@ async fn health_pass<S: KvStore>(
             }
             Some((f.fence, f.ours))
         }
-        Err(e) if matches!(e, arca_lake_metadata::MetaError::InvalidArgument(_)) => {
+        // Also a phase that refuses the leader's bookkeeping writes
+        // (recovery): no fence change from this pass, the other facts go
+        // out (re-review).
+        Err(e)
+            if matches!(
+                e,
+                arca_lake_metadata::MetaError::InvalidArgument(_)
+                    | arca_lake_metadata::MetaError::Kv(arca_lake_metadata::KvError::ClusterState(
+                        _
+                    ))
+            ) =>
+        {
             warn!(error = %e, "delete fence not advanced: deletes stop in this process");
             None
         }
@@ -1209,12 +1229,16 @@ async fn repair_pass<S: KvStore>(
             .into_iter()
             .chain(intents.draining.iter().copied())
             .collect();
+        // Only a move this group's own intent names: an operator's
+        // replacement request, or (not yet started) a drain of one of its
+        // members. A group already repairing for any other reason is
+        // failure work (re-review: a drain elsewhere does not make it
+        // planned).
         let moving = intents.requests.contains_key(&g.id)
-            || g.members.iter().any(|m| leaving.contains(&m.node_id))
-            || (g.state == GroupState::Repairing
-                && leaving
+            || (g.state == GroupState::Active
+                && g.members
                     .iter()
-                    .any(|&n| healthy(n) && !g.members.iter().any(|m| m.node_id == n)));
+                    .any(|m| intents.draining.contains(&m.node_id)));
         moving
             && leaving.iter().all(|&n| healthy(n))
             && g.members
@@ -1773,16 +1797,17 @@ async fn tiering_pass<S: KvStore>(
         return Ok(());
     }
     let now = now_ms();
+    let max_age = 60_000u64.max(3 * ms(cfg.health_interval));
     match arca_lake_metadata::ops::admission::current(meta).await? {
         Some(r)
-            if now.saturating_sub(r.computed_ms) <= 60_000
+            if now.saturating_sub(r.computed_ms) <= max_age
                 && r.tiers.iter().all(|t| t.state < 2) => {}
         _ => return Ok(()),
     }
     if cluster::list_groups(meta)
         .await?
         .iter()
-        .any(|g| g.state != GroupState::Active)
+        .any(|g| !g.is_cache() && g.state == GroupState::Repairing)
     {
         return Ok(());
     }

@@ -194,11 +194,27 @@ pub async fn upgrade_pass<S: KvStore>(
             // history kept as an audit record. First every node holds the
             // new schema as its floor (Phase 3.10 review): a node that
             // missed it would take the previous release's deletes on
-            // metadata restored from before the finalize. Nodes the
-            // operator named absent cannot be told; they are told by the
-            // leader's health pass when they return.
+            // metadata restored from before the finalize. Also nodes the
+            // operator named absent (re-review: one returning on such
+            // metadata would): only a decommissioned node, which holds no
+            // data, is not waited for.
+            let decommissioned: Vec<u64> = arca_lake_metadata::ops::membership::node_states(meta)
+                .await?
+                .into_iter()
+                .filter(|r| {
+                    matches!(
+                        r.state,
+                        arca_lake_metadata::ops::membership::NodeLifecycle::Decommissioned { .. }
+                    )
+                })
+                .map(|r| r.node_id)
+                .collect();
             let mut missing = Vec::new();
-            for n in cluster::list_nodes(meta).await? {
+            for n in cluster::list_nodes(meta)
+                .await?
+                .into_iter()
+                .filter(|n| !decommissioned.contains(&n.id))
+            {
                 let req = arca_lake_protocol::storage::v1::HealthRequest {
                     schema_floor: target.schema,
                     ..Default::default()
@@ -209,10 +225,11 @@ pub async fn upgrade_pass<S: KvStore>(
                         "node {} keeps schema floor {} (an earlier release?)",
                         n.id, h.schema_floor
                     )),
-                    Err(e) if cur.ignore_absent.contains(&n.id.to_string()) => {
-                        warn!(node = n.id, error = %e, "finalize: absent node not told the schema floor");
-                    }
-                    Err(e) => missing.push(format!("node {} unreachable: {}", n.id, e.code())),
+                    Err(e) => missing.push(format!(
+                        "node {} unreachable: {} (bring it back, or decommission it)",
+                        n.id,
+                        e.code()
+                    )),
                 }
             }
             if !missing.is_empty() {

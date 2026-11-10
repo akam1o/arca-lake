@@ -16,7 +16,9 @@
 //! release reads or writes: a node rolled back to an earlier release
 //! rewrites `cluster.txt` without the keys it does not know, and the marks
 //! would otherwise be lost when the node is rolled forward again. A start
-//! takes the higher of both files; a damaged floors file fails closed.
+//! takes the floors file's incarnation with its sequence (written first by
+//! every persist, so never older than `cluster.txt` from this release) and
+//! the higher schema floor; a damaged or lost floors file fails closed.
 
 use std::fs::File;
 use std::io::Write;
@@ -26,6 +28,10 @@ const FILE_NAME: &str = "cluster.txt";
 
 /// The high-water marks, in a file earlier releases never touch.
 const FLOORS_FILE: &str = "cluster-floors.txt";
+
+/// Created (and synced) before the first floors file: with it, a missing
+/// floors file is lost, not never written (re-review).
+const FLOORS_MARKER: &str = "cluster.floors";
 
 /// Created (and synced) before the first version-2 facts file: with it, a
 /// file without the version line is damaged, not an earlier release's.
@@ -56,6 +62,8 @@ pub(crate) struct ClusterFacts {
     pub schema_floor: u64,
     /// Who opened the open generation (Phase 3.10 review; 0 = unknown).
     pub fence_opener: u64,
+    /// The opener the next adoption of an open generation records.
+    next_opener: u64,
     /// Storage format the controller allowed (0 = never told).
     pub format_write: u64,
     /// Delete fence generation adopted (0 = none: no delete is allowed).
@@ -128,6 +136,7 @@ impl ClusterFacts {
             incarnation_seq: 0,
             schema_floor: 0,
             fence_opener: 0,
+            next_opener: 0,
             format_write: 0,
             fence_generation: 0,
             fence_open: false,
@@ -156,14 +165,27 @@ impl ClusterFacts {
         // The marks an earlier release may have dropped from the facts.
         let floors_damaged = match std::fs::read_to_string(dir.join(FLOORS_FILE)) {
             Ok(text) => match parse_floors(&text) {
-                Some((seq, schema)) => {
-                    facts.incarnation_seq = facts.incarnation_seq.max(seq);
-                    facts.schema_floor = facts.schema_floor.max(schema);
+                Some(f) => {
+                    // The incarnation and its sequence as one pair (an
+                    // earlier release may have changed cluster.txt's).
+                    if let Some(inc) = f.incarnation {
+                        if facts.incarnation != Some(inc) {
+                            tracing::warn!(
+                                "cluster facts name another incarnation than the floors file: the floors file's is kept"
+                            );
+                        }
+                        facts.incarnation = Some(inc);
+                        facts.changed_ms = f.changed_ms;
+                        facts.incarnation_seq = f.incarnation_seq;
+                    } else {
+                        facts.incarnation_seq = facts.incarnation_seq.max(f.incarnation_seq);
+                    }
+                    facts.schema_floor = facts.schema_floor.max(f.schema_floor);
                     false
                 }
                 None => true,
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => dir.join(FLOORS_MARKER).exists(),
             Err(_) => true,
         };
         if floors_damaged {
@@ -346,6 +368,10 @@ impl ClusterFacts {
             return Ok(false);
         };
         let before = (self.fence_generation, self.fence_open, self.fence_hold);
+        let opener_before = self.fence_opener;
+        if next.1 && next.0 != before.0 {
+            self.fence_opener = std::mem::take(&mut self.next_opener);
+        }
         (self.fence_generation, self.fence_open, self.fence_hold) = next;
         if next.2 != Some(UNKNOWN_HOLD) {
             self.unknown_token = 0;
@@ -356,6 +382,7 @@ impl ClusterFacts {
             // persisted again by the next request.
             if next.1 {
                 (self.fence_generation, self.fence_open, self.fence_hold) = before;
+                self.fence_opener = opener_before;
             } else {
                 self.unpersisted = true;
             }
@@ -467,16 +494,10 @@ impl ClusterFacts {
             && opener != self.fence_opener
     }
 
-    /// Remember who opened the generation just adopted open. Lost with a
-    /// failed persist, it is unknown (0): a later push from its opener is
-    /// then a conflict and closes it, which fails safe.
-    pub(crate) fn note_fence_opener(&mut self, opener: u64) {
-        if self.fence_open && self.fence_opener != opener {
-            self.fence_opener = opener;
-            if let Err(e) = self.persist() {
-                tracing::warn!(error = %e, "cannot persist the fence opener");
-            }
-        }
+    /// Who opens the generation the next adoption opens (set before it, so
+    /// that the opener is persisted with the generation, re-review).
+    pub(crate) fn set_next_opener(&mut self, opener: u64) {
+        self.next_opener = opener;
     }
 
     /// Whether the rejoin lease is running at `now`.
@@ -541,11 +562,19 @@ impl ClusterFacts {
         if (self.incarnation_seq > 0 || self.schema_floor > 0)
             && let Some(dir) = self.path.parent()
         {
+            let marker = dir.join(FLOORS_MARKER);
+            if !marker.exists() {
+                File::create(&marker)?.sync_all()?;
+                File::open(dir)?.sync_all()?;
+            }
             let floors = dir.join(FLOORS_FILE);
-            let body = format!(
-                "incarnation_seq {}\nschema_floor {}\n",
-                self.incarnation_seq, self.schema_floor
+            let mut body = format!(
+                "incarnation_seq {}\nschema_floor {}\nchanged_ms {}\n",
+                self.incarnation_seq, self.schema_floor, self.changed_ms
             );
+            if let Some(i) = self.incarnation {
+                let _ = writeln!(body, "incarnation {}", hex(&i));
+            }
             let tmp = floors.with_extension("tmp");
             {
                 let mut f = File::create(&tmp)?;
@@ -632,8 +661,16 @@ fn fresh_token() -> u64 {
     h.finish().max(1)
 }
 
-/// `(incarnation_seq, schema_floor)` of a floors file; `None` if damaged.
-fn parse_floors(text: &str) -> Option<(u64, u64)> {
+/// What a floors file holds.
+struct Floors {
+    incarnation_seq: u64,
+    schema_floor: u64,
+    incarnation: Option<[u8; 16]>,
+    changed_ms: u64,
+}
+
+/// A floors file; `None` if damaged.
+fn parse_floors(text: &str) -> Option<Floors> {
     let rest = text.strip_prefix("floors 1\n")?;
     let at = rest.trim_end_matches('\n').rfind("crc ")?;
     let (content, trailer) = rest.split_at(at);
@@ -645,16 +682,23 @@ fn parse_floors(text: &str) -> Option<(u64, u64)> {
     {
         return None;
     }
-    let (mut seq, mut schema) = (None, None);
+    let (mut seq, mut schema, mut incarnation, mut changed_ms) = (None, None, None, 0);
     for line in content.lines() {
         let mut it = line.split_whitespace();
         match (it.next(), it.next()) {
             (Some("incarnation_seq"), Some(v)) => seq = Some(v.parse().ok()?),
             (Some("schema_floor"), Some(v)) => schema = Some(v.parse().ok()?),
+            (Some("incarnation"), Some(v)) => incarnation = Some(parse_hex16(v)?),
+            (Some("changed_ms"), Some(v)) => changed_ms = v.parse().ok()?,
             _ => {}
         }
     }
-    Some((seq?, schema?))
+    Some(Floors {
+        incarnation_seq: seq?,
+        schema_floor: schema?,
+        incarnation,
+        changed_ms,
+    })
 }
 
 #[cfg(test)]
@@ -1003,6 +1047,23 @@ mod tests {
         let g = ClusterFacts::open(dir.path());
         assert_eq!((g.incarnation_seq, g.schema_floor), (7, 3));
         assert_eq!(g.fence_hold, None);
+        // An earlier release adopted another incarnation in cluster.txt:
+        // the floors file's pair is kept (never sequence 7 with another
+        // incarnation).
+        let body = format!(
+            "incarnation {}\nchanged_ms 99\nformat_write 0\ndelete_fence 4 open\n",
+            hex(&[9; 16])
+        );
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            format!(
+                "facts 2\n{body}crc {:08x}\n",
+                arca_lake_storage::format::crc32c(body.as_bytes())
+            ),
+        )
+        .unwrap();
+        let p = ClusterFacts::open(dir.path());
+        assert_eq!((p.incarnation, p.incarnation_seq), (Some([1; 16]), 7));
         std::fs::write(
             dir.path().join(FLOORS_FILE),
             "floors 1\nincarnation_seq 9\n",
@@ -1012,6 +1073,11 @@ mod tests {
         assert!(h.schema_floor >= 3);
         assert_eq!(h.fence_hold, Some(UNKNOWN_HOLD));
         assert!(!h.fence_open);
+        // Lost after it existed: closed as well.
+        std::fs::remove_file(dir.path().join(FLOORS_FILE)).unwrap();
+        let l = ClusterFacts::open(dir.path());
+        assert!(l.schema_floor >= 3);
+        assert_eq!(l.fence_hold, Some(UNKNOWN_HOLD));
     }
 
     /// Phase 3.10 review: a fact whose persist failed is not acknowledged

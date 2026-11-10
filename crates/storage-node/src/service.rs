@@ -1154,7 +1154,11 @@ impl StorageNode for StorageNodeService {
         let needs_exclusive = |c: &crate::cluster::ClusterFacts| {
             let new_incarnation = caller.is_some_and(|inc| c.incarnation != Some(inc));
             let (generation, open, hold, release, from, token) = fence_args(c);
+            // A higher schema floor also waits for admitted deletes: once it
+            // is acknowledged no previous-release delete is still running
+            // (re-review).
             new_incarnation
+                || req.schema_floor > c.schema_floor
                 || c.plan_fence(generation, open, hold, release, from, token)
                     .is_some()
         };
@@ -1197,12 +1201,10 @@ impl StorageNode for StorageNodeService {
                     "delete fence generation pushed open by another opener than the one that opened it: closed"
                 );
             }
+            c.set_next_opener(req.delete_fence_opener);
             if c.adopt_fence_held(generation, open, hold, release, from, token)
                 .map_err(|e| tonic::Status::internal(e.to_string()))?
             {
-                if open {
-                    c.note_fence_opener(req.delete_fence_opener);
-                }
                 tracing::info!(
                     generation = c.fence_generation,
                     open = c.fence_open,

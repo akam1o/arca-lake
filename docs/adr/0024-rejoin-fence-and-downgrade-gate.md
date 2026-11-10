@@ -47,7 +47,7 @@ the node has none.
   restart costs one pass of refused deletes, which GC defers and
   reconciliation keeps.
 
-### Opener (metadata)
+### Opener (metadata and nodes)
 
 A leader treats an open generation as its own only if *this process*
 opened it. The process draws an opener value at start, recorded with the
@@ -55,6 +55,22 @@ generation in `delete_fence_opener`. Matching only the term is not
 enough: a restore brings the leadership counter back, so a new leader
 could hold the same term number as the record and adopt a pre-restore
 generation.
+
+- **Pushed only when ours.** The leader pushes an open fence, and its
+  clients delete under it, only when the record is ours. An open record
+  of anyone else (a former leader's, or one restored with the metadata)
+  is not pushed at all, so the nodes' leases on it lapse (review: a
+  fresh process's first pass pushed it and renewed them).
+- **Bound on the node.** Pushes carry the opener (`delete_fence_opener`,
+  HealthRequest field 11), and a node persists the opener of the
+  generation it holds open. A push of that open generation from another
+  opener is a conflict: the node closes the generation. Two clusters, one
+  restored from the other, that opened the same generation number never
+  renew each other's lease (review: a restored controller opens
+  `record + 1`, which may be the generation the pre-restore cluster
+  opened after the backup). An unknown opener (lost, or an earlier
+  release's, 0) conflicts with any other, which fails safe: the leader
+  opens one generation higher.
 
 ### Metadata rollback gate (controller)
 
@@ -69,6 +85,12 @@ or a hand edit. The leader then:
 - counts the event in `arca_controller_delete_fence_metadata_behind_total`.
 
 It never opens on such metadata.
+
+The leader also advances a lineage counter in metadata
+(`delete_fence_lineage`) on every health pass and remembers the value it
+wrote. Reading back less than that means the metadata went back under a
+leader that kept running; it is handled like a node ahead (review: such a
+leader matched every check of its own fence).
 
 ### Sequenced incarnations (R-92)
 
@@ -100,9 +122,20 @@ schema at start.
   stays possible, as RFC-014 requires.
 - **Schema floor.** Controllers push the schema to nodes
   (`schema_floor`), and nodes keep the highest they saw. `recovery begin`
-  raises restored metadata back to that floor, so restoring a backup from
-  before the finalize does not reopen the downgrade. It refuses when the
-  nodes saw a schema newer than its own binary.
+  raises restored metadata (schema and `schema_write`) back to that floor,
+  so restoring a backup from before the finalize does not reopen the
+  downgrade. It refuses when the nodes saw a schema newer than its own
+  binary.
+  - The finalize raises the schema only once every registered node that
+    is not decommissioned reports the floor; a node that does not answer
+    blocks it, also one the operator named absent (review).
+  - A floor increase waits, like a fence change, for the deletes the node
+    already admitted.
+  - Nodes keep the floor and the incarnation with its sequence also in
+    `cluster-floors.txt`, which earlier releases never touch: a node
+    rolled back rewrites `cluster.txt` without the keys it does not know.
+    The floors file is authoritative for the incarnation pair; a damaged
+    or lost one (after its marker exists) fails closed.
 - **Protocol 4.** Nodes of protocol 4 keep the rejoin fence and the
   sequence. Clients send deletes only to such nodes: a node rolled back
   to the previous release receives none. Protocol-4 nodes still accept
@@ -146,9 +179,16 @@ schema at start.
 - After `upgrade finalize` to this release, rolling controllers and
   gateways back to an earlier release is refused at their start.
   Rolling nodes back stops deletes to them.
-- Residual (R-90 narrowed):
+- `upgrade finalize` needs every node that is not decommissioned to
+  answer at its last step.
+- Residuals (R-90 narrowed), each needing the restore runbook not
+  followed:
   - a renewal delayed past the lease can extend a stale open fence on an
-    unreachable node by at most one lease (30 s by default);
-  - this matters only when the restore runbook was not followed and the
+    unreachable node by at most one lease (30 s by default), when the
     previous leader stopped less than one lease before the restore
-    completed.
+    completed;
+  - a leader that keeps running through a restore is detected by the
+    lineage counter only if it wrote the counter between the backup and
+    the restore (it does every health pass, 5 s by default); a backup
+    restored within one health interval of being taken goes unnoticed,
+    and that leader's deletes decided in between can apply.
