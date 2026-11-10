@@ -1771,6 +1771,10 @@ async fn rebalance_pass<S: KvStore>(
     let Some(policy) = cfg.rebalance.as_ref() else {
         return Ok(());
     };
+    // A migration's cleanup deletes too (its own target copies, which a
+    // restore can make the referenced ones): no pass on metadata that went
+    // back (re-review).
+    advance_lineage(meta, metrics).await?;
     // The admission's placement threshold, and what the rest of the
     // controller is doing: rebalancing yields to them (R-93).
     let policy = crate::rebalance::RebalancePolicy {
@@ -1837,6 +1841,7 @@ async fn tiering_pass<S: KvStore>(
     let Some(policy) = cfg.tiering.as_ref() else {
         return Ok(());
     };
+    advance_lineage(meta, metrics).await?;
     // Moves need room on their target: none while any tier is throttled or
     // worse (Phase 3.6 admission). Decided on the published record, not on
     // this process's tracker, which is empty (normal) at a new leader's

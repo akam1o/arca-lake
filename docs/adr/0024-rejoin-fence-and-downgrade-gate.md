@@ -207,8 +207,10 @@ schema at start.
     every GC and reconciliation batch, and which it checks before every
     such batch. Deletes it decided after the backup point and still sends
     after the restore can apply until its next pass detects the restore:
-    the batches in flight at the backup point (one GC batch and one
-    reconciliation batch of up to eight node listings) are never detected;
-    later ones are.
+    the batches in flight at the backup point (one GC batch, one
+    reconciliation batch of up to eight node listings, and the migration
+    attempt of a rebalance or tiering pass, whose cleanup deletes its own
+    target copies) are never detected; later ones are, since every such
+    pass advances and checks the counter first.
     Reviewer A rates the impact (shards that restored objects need) as
     High; it needs the runbook not followed and a leader left running.
