@@ -147,7 +147,17 @@ schema at start.
   the previous release's version-3 deletes, because the node applies the
   lease to every delete. The previous release's controllers push the
   fence every pass, which renews the lease, so deletes go on during a
-  rolling upgrade.
+  rolling upgrade, until a controller of this release has led the node
+  (see below): from then on a previous-release leader's deletes pause on
+  it. Upgrade the controllers together.
+- **Segment format 2.** It keeps the version-1 layout and marks the store
+  of a cluster that finalized: the finalize raises `format_write` to 2,
+  and a node rolls over to a new segment as soon as it adopts the raise.
+  The previous release refuses to open a store with a format-2 segment,
+  so a node cannot be rolled back past the finalize: the one gate the old
+  binary itself enforces (fourth review round). Before the finalize,
+  nodes of this release write format 1 (`F_cur − 1`), which the previous
+  release reads.
 - **Nodes refuse the previous release's deletes after finalize.** A node
   whose schema floor is 3 or more (`REJOIN_FENCE_SCHEMA`) accepts only
   protocol-4 deletes. Without this, metadata restored from before the

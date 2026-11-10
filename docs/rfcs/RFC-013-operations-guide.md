@@ -217,11 +217,13 @@ Upgrading to Phase 3.10 (protocol 4, metadata schema 3, ADR-0024):
   answer blocks it, including one named with `--ignore-absent`: bring it
   back, or decommission it.
 - **After finalize**:
-  - Phase 3.9 controllers and gateways refuse to start.
-  - A node rolled back to Phase 3.9 starts but gets no delete; nodes that
-    hold schema 3 refuse protocol-3 deletes, also on metadata restored
-    from before the finalize.
-  - Rolling a node forward again keeps its floors (`cluster-floors.txt`).
+  - Phase 3.9 controllers, gateways and storage nodes refuse to start.
+    The finalize raises the segment format to 2 (the version-1 layout),
+    and every node rolls over to it at once; Phase 3.9 nodes do not open
+    a store with a format-2 segment.
+  - Nodes that hold schema 3, or that a Phase 3.10 controller has led,
+    refuse protocol-3 deletes, also on metadata restored from before the
+    finalize.
 - **Never restore metadata from before the finalize without `admin
   recovery begin`**: `recovery begin` brings the schema back up to what
   the nodes hold.

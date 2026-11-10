@@ -16,8 +16,8 @@
 //!    others go on; back on the current release, GC completes;
 //! 4. every process rolled back before finalize (allowed, RFC-014), then
 //!    upgraded again;
-//! 5. finalize; then a previous controller and gateway refuse to start, and
-//!    a node rolled back receives no delete;
+//! 5. finalize; then a previous controller, gateway and node refuse to
+//!    start (the node: the segment format the finalize raised);
 //! 6. metadata restored from before the finalize: the previous controller
 //!    and gateway start on it (its schema admits them), but the nodes
 //!    refuse their deletes (and a delayed previous-release delete RPC);
@@ -399,29 +399,30 @@ async fn upgrade_from_and_rollback_to_the_previous_release() {
         "previous gateway started after finalize: {}",
         refused_gw.log()
     );
-    // A node rolled back after finalize: no delete reaches it.
-    c.node(1, false).await;
+    // A node rolled back after finalize: the previous release refuses its
+    // store (the finalize raised the segment format, and every node rolled
+    // over to it at once).
+    c.nodes[1].kill();
+    let mut rolled_back = env.spawn(
+        "node1-prev-after",
+        false,
+        &Env::node_args(&c.dirs[1], &c.addrs[1]),
+    );
+    assert!(
+        rolled_back.exited_within(Duration::from_secs(15)).is_some(),
+        "the previous release opened a finalized store: {}",
+        rolled_back.log()
+    );
+    c.node(1, true).await;
     let before = live(&clients, &c.addrs).await;
     drop_key(&s3, &mut committed, "o5").await;
     collected(
         &clients,
         &c.addrs,
         &before,
-        &[0, 2],
+        &[0, 1, 2],
         3,
-        "GC on the current nodes",
-    )
-    .await;
-    tokio::time::sleep(Duration::from_secs(6)).await;
-    assert_eq!(live(&clients, &c.addrs).await[1], before[1]);
-    c.node(1, true).await;
-    collected(
-        &clients,
-        &c.addrs,
-        &before,
-        &[1],
-        3,
-        "GC once node 1 is current",
+        "GC after the refused rollback",
     )
     .await;
     check(&s3, &committed).await;

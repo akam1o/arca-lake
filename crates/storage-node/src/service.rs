@@ -1233,6 +1233,11 @@ impl StorageNode for StorageNodeService {
                     .map_err(|e| tonic::Status::internal(e.to_string()))?
             {
                 let v = self.store.set_format_write(req.format_write);
+                // At once, not at the next rollover: an earlier release
+                // refuses the store from now on (Phase 3.10).
+                self.store
+                    .roll_to_format_write()
+                    .map_err(Self::storage_status)?;
                 tracing::info!(format_write = v, "storage format write gate updated");
             }
             break guard;

@@ -182,6 +182,12 @@ v1 segment is checked into the repository and must open and byte-match
 forever; a new format version must add a new golden file and a reader for
 the old one before any release.
 
+Segment format 2 (Phase 3.10, ADR-0024) has the version-1 layout. It
+marks the store of a cluster whose `upgrade finalize` raised it; earlier
+releases (format 1 only) refuse to open such a store. Nodes write format
+1 until told the cluster's `format_write`, and roll over at once when it
+is raised.
+
 Cluster facts (outside the segment format, ADR-0016, ADR-0023,
 ADR-0024):
 

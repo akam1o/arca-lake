@@ -239,16 +239,37 @@ pub async fn upgrade_pass<S: KvStore>(
                 return Ok(report);
             }
             let v = compat::raise_version(meta, VersionKey::Schema, target.schema).await?;
-            // A node registered while the step ran: told now (it cannot
-            // block a schema already raised; re-review).
-            for n in cluster::list_nodes(meta).await? {
+            // Again after the raise: a node registered while the step ran
+            // is waited for too; until then the upgrade stays open and the
+            // step is retried (re-review).
+            let mut missing_after = Vec::new();
+            for n in cluster::list_nodes(meta)
+                .await?
+                .into_iter()
+                .filter(|n| !decommissioned.contains(&n.id))
+            {
                 let req = arca_lake_protocol::storage::v1::HealthRequest {
                     schema_floor: target.schema,
                     ..Default::default()
                 };
-                if let Err(e) = clients.health_with(&n.address, req).await {
-                    warn!(node = n.id, error = %e, "finalize: node not told the schema floor after the raise");
+                match clients.health_with(&n.address, req).await {
+                    Ok(h) if h.schema_floor >= target.schema => {}
+                    Ok(h) => missing_after.push(format!(
+                        "node {} keeps schema floor {} (an earlier release?)",
+                        n.id, h.schema_floor
+                    )),
+                    Err(e) => missing_after.push(format!(
+                        "node {} unreachable: {} (bring it back, or decommission it)",
+                        n.id,
+                        e.code()
+                    )),
                 }
+            }
+            if !missing_after.is_empty() {
+                let why = format!("schema floor not held: {}", missing_after.join("; "));
+                compat::note_upgrade_error(meta, &why, now_ms).await?;
+                report.blocked = Some(why);
+                return Ok(report);
             }
             if let Some(done) = compat::clear_upgrade(meta, false).await? {
                 let mut audit = done;

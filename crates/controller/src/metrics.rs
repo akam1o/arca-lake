@@ -272,6 +272,9 @@ pub struct Metrics {
     /// Lost with the leadership: the next leader takes them as failure
     /// work, the safe side.
     pub planned_moves: std::sync::Mutex<std::collections::BTreeSet<u64>>,
+    /// Serializes this process's lineage reads, writes and remembered
+    /// value (health pass, GC, reconciliation).
+    pub lineage_lock: tokio::sync::Mutex<()>,
     /// Stripe repairs that committed.
     pub stripe_repairs_succeeded_total: AtomicU64,
     /// Stripe repair attempts that failed.

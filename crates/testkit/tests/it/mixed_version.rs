@@ -42,6 +42,8 @@ pub(super) const BUCKET: &str = "mixed";
 /// Metadata schema of the "old" build (the new one's is one more).
 const S_OLD: u64 = arca_lake_metadata::keys::SCHEMA_VERSION;
 const S_NEW: u64 = S_OLD + 1;
+/// Segment format of the "old" build (the new one's is one more).
+const F_OLD: u64 = arca_lake_storage::format::SEGMENT_FORMAT_VERSION as u64;
 /// The test cluster runs plaintext node RPCs and metadata, explicitly
 /// (ADR-0017).
 pub(super) const PLAINTEXT: [(&str, &str); 2] = [
@@ -373,7 +375,7 @@ async fn rolling_upgrade_with_two_binaries() {
     let status = env.admin_ok(false, &["status", "--versions"]);
     assert!(
         status.contains(&format!(
-            "schema Some({S_OLD}) schema_write Some({S_OLD}) format_write Some(1)"
+            "schema Some({S_OLD}) schema_write Some({S_OLD}) format_write Some({F_OLD})"
         )),
         "{status}"
     );
@@ -402,8 +404,11 @@ async fn rolling_upgrade_with_two_binaries() {
     committed.retain(|(k, _)| k != "base0");
     let status = env.admin_ok(true, &["status", "--versions"]);
     // The new controller recorded the old nodes' capabilities (protocol
-    // P_OLD, format 1) and left format_write at 1.
-    assert!(status.contains("format_write Some(1)"), "{status}");
+    // P_OLD, format F_OLD) and left format_write there.
+    assert!(
+        status.contains(&format!("format_write Some({F_OLD})")),
+        "{status}"
+    );
     let cap_lines: Vec<&str> = status
         .lines()
         .filter(|l| l.starts_with("node ") && l.contains("software"))
@@ -411,7 +416,7 @@ async fn rolling_upgrade_with_two_binaries() {
     assert_eq!(cap_lines.len(), 3, "{status}");
     assert!(
         cap_lines.iter().all(|l| l.contains(&format!(
-            "protocol [{P_OLD_MIN}, {P_OLD}] format [1, 1] format_write 1"
+            "protocol [{P_OLD_MIN}, {P_OLD}] format [1, {F_OLD}] format_write {F_OLD}"
         ))),
         "{status}"
     );
@@ -419,7 +424,7 @@ async fn rolling_upgrade_with_two_binaries() {
         let h = clients.health(a).await.unwrap();
         assert_eq!(
             (h.protocol_max, h.format_max, h.format_write),
-            (P_OLD, 1, 1)
+            (P_OLD, F_OLD, F_OLD)
         );
     }
 
@@ -474,7 +479,7 @@ async fn rolling_upgrade_with_two_binaries() {
     let st = env.admin_ok(true, &["upgrade", "status"]);
     assert!(st.contains("step Requested"), "{st}");
     assert!(
-        st.contains(&format!("speaks protocol {P_OLD} format 1")),
+        st.contains(&format!("speaks protocol {P_OLD} format {F_OLD}")),
         "{st}"
     );
     // Old gateway heartbeats block too (it reads schema up to 2).
@@ -632,7 +637,8 @@ async fn rolling_upgrade_with_two_binaries() {
     let st = env.admin_ok(true, &["upgrade", "status"]);
     assert!(
         st.contains(&format!(
-            "schema Some({S_NEW}) schema_write Some({S_NEW}) format_write Some(2)"
+            "schema Some({S_NEW}) schema_write Some({S_NEW}) format_write Some({})",
+            F_OLD + 1
         )),
         "{st}"
     );
@@ -649,7 +655,7 @@ async fn rolling_upgrade_with_two_binaries() {
         let h = clients.health(a).await.unwrap();
         assert_eq!(
             (h.protocol_max, h.format_max, h.format_write, h.version_bump),
-            (P_OLD + 1, 2, 2, 1),
+            (P_OLD + 1, F_OLD + 1, F_OLD + 1, 1),
             "{a}"
         );
     }
@@ -711,7 +717,7 @@ async fn rolling_upgrade_with_two_binaries() {
             "--dir",
             &node_dirs[0].display().to_string(),
             "--format",
-            "1",
+            &F_OLD.to_string(),
         ])
         .output()
         .unwrap();
@@ -719,7 +725,8 @@ async fn rolling_upgrade_with_two_binaries() {
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success()
-            && (text.contains("cannot open") || text.contains("segment format version 2")),
+            && (text.contains("cannot open")
+                || text.contains(&format!("segment format version {}", F_OLD + 1))),
         "{text}"
     );
     let mut node_stale = env.spawn(

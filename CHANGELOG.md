@@ -23,9 +23,11 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   and node facts; nodes order incarnations by it, never by a clock.
   `admin recovery begin` marks the new incarnation above every node's.
 - Downgrade gate: metadata schema 3, the node schema floor (persisted
-  with the sequence also in `cluster-floors.txt`), protocol 4. The
-  finalize waits until every node holds the floor; nodes holding it
-  refuse the previous release's deletes.
+  with the sequence also in `cluster-floors.txt`), protocol 4, segment
+  format 2 (the version-1 layout). The finalize waits until every node
+  holds the floor and rolls every node over to format 2, which the
+  previous release does not open. Nodes holding the floor, or led by a
+  controller of this release, refuse the previous release's deletes.
 - Capacity-aware rebalancing (R-93): it yields to tiering, a GC backlog
   (`--rebalance-gc-backlog-pause-mib`) and throttled tiers, and checks
   every target member's device against the placement threshold before

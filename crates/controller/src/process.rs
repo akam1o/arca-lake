@@ -903,6 +903,10 @@ async fn gc_pass<S: KvStore>(
 /// Advance the lineage counter before a batch of delete decisions and
 /// remember it (see `delete_fence::advance_lineage`).
 async fn advance_lineage<S: KvStore>(meta: &S, metrics: &Metrics) -> Result<(), ControlError> {
+    // One lineage operation at a time in this process (re-review: a GC
+    // batch and the health pass interleaving could leave the remembered
+    // value equal to a restored one).
+    let _one = metrics.lineage_lock.lock().await;
     let remembered = metrics.delete_fence.lineage();
     let v = arca_lake_metadata::ops::delete_fence::advance_lineage(meta, remembered).await?;
     metrics.delete_fence.set_lineage(v.max(remembered));
@@ -920,8 +924,8 @@ async fn reconcile_pass<S: KvStore>(
     let mut deleted = 0usize;
     let mut unreachable = 0usize;
     for g in &groups {
-        advance_lineage(meta, metrics).await?;
         for n in &nodes {
+            advance_lineage(meta, metrics).await?;
             match gc::reconcile_node(
                 meta,
                 clients,
@@ -984,7 +988,17 @@ async fn health_pass<S: KvStore>(
         may_open: metrics.delete_fence.round_done(token),
         lineage: metrics.delete_fence.lineage(),
     };
-    let fence = match arca_lake_metadata::ops::delete_fence::sync_leader(meta, view, now).await {
+    let lineage_guard = metrics.lineage_lock.lock().await;
+    let view = arca_lake_metadata::ops::delete_fence::LeaderView {
+        lineage: metrics.delete_fence.lineage(),
+        ..view
+    };
+    let synced = arca_lake_metadata::ops::delete_fence::sync_leader(meta, view, now).await;
+    if let Ok(f) = &synced {
+        metrics.delete_fence.set_lineage(f.lineage);
+    }
+    drop(lineage_guard);
+    let fence = match synced {
         Ok(f) => {
             metrics.delete_fence.set_lineage(f.lineage);
             if f.metadata_behind {

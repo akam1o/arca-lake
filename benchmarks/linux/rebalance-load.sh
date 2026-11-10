@@ -32,6 +32,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT="${1:?output directory}"
 mkdir -p "$OUT"
+# Which command ended a run that stops early.
+trap 'echo "$(date -u +%H:%M:%S) error at line $LINENO: $BASH_COMMAND" >> "$OUT/run.log"' ERR
 : "${HOST_A:?}" "${HOST_B:?}"
 WINDOW="${WINDOW:-12}"
 CAP="${CAP_BYTES:-$((3 << 30))}"
@@ -133,11 +135,11 @@ sampler() {
   printf 'time\tsource\tmetric\tvalue\n' > "$OUT/samples.tsv"
   while [ ! -f "$OUT/.stop-sampler" ]; do
     local t; t=$(date -u +%s)
+    # One SSH session per host per sample.
+    local probe='c=$(curl -s http://127.0.0.1:9901/metrics | grep -E "^arca_controller_(leader |gc_backlog_bytes|rebalance_moved_bytes_total|rebalance_capacity_stops_total)"); [ -n "$c" ] && echo "$c" | sed "s/^/ctl-$H /"; for p in $PORTS; do curl -s http://127.0.0.1:$p/metrics | grep -E "^arca_node_capacity_bytes\{kind=\"(total|available|reserved)\"" | sed "s/^/$H:$p /"; done; [ -n "$GW" ] && curl -s http://127.0.0.1:9900/metrics | grep -E "^arca_gateway_admission_state" | sed "s/^/gw /"; true'
     {
-      sb "curl -s http://127.0.0.1:9900/metrics" | grep -E '^arca_gateway_admission_state' | sed "s/^/gw /"
-      for h in sa sb; do $h "curl -s http://127.0.0.1:9901/metrics" | grep -E '^arca_controller_(leader |gc_backlog_bytes|rebalance_moved_bytes_total|rebalance_capacity_stops_total)' | sed "s/^/ctl-${h#s} /"; done
-      for p in 9910 9911 9912 9913; do sa "curl -s http://127.0.0.1:$p/metrics" | grep -E '^arca_node_capacity_bytes\{kind="(total|available|reserved)"' | sed "s/^/a:$p /"; done
-      for p in 9910 9911; do sb "curl -s http://127.0.0.1:$p/metrics" | grep -E '^arca_node_capacity_bytes\{kind="(total|available|reserved)"' | sed "s/^/b:$p /"; done
+      sa "H=a PORTS='9910 9911 9912 9913' GW=; $probe"
+      sb "H=b PORTS='9910 9911' GW=1; $probe"
     } 2>/dev/null | awk -v t="$t" '{print t "\t" $1 "\t" $2 "\t" $3}' >> "$OUT/samples.tsv"
     sleep "$SAMPLE_SECS"
   done

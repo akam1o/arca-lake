@@ -466,9 +466,16 @@ async fn finalize_waits_until_every_node_holds_the_schema_floor() {
             .unwrap()
             .is_none()
     );
-    for n in &c.nodes {
+    for (i, n) in c.nodes.iter().enumerate() {
         let h = c.clients.health(&n.addr.to_string()).await.unwrap();
         assert!(h.schema_floor >= target.schema, "{h:?}");
+        // The raised segment format is on the device at once (an earlier
+        // release refuses the store from now on), not at the next rollover.
+        assert_eq!(
+            u64::from(c.node_store(i).newest_segment_format().unwrap()),
+            target.format,
+            "node {i}"
+        );
     }
     c.shutdown().await;
 }

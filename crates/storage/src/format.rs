@@ -4,12 +4,15 @@ use crate::error::{Result, StorageError};
 
 /// Segment file magic.
 pub const SEGMENT_MAGIC: [u8; 8] = *b"ARCASEG1";
-/// Newest segment format version this build reads and can write (`F_cur`);
-/// version 2 exists only in a `version-bump` build (ADR-0016) and has the
-/// version-1 layout. New segments are stamped with the store's
-/// `format_write` (RFC-014 §5.3), never above this.
+/// Newest segment format version this build reads and can write (`F_cur`).
+/// Version 2 (Phase 3.10, ADR-0024) has the version-1 layout: it marks a
+/// store of a cluster that finalized the rejoin fence, which no earlier
+/// release opens, so that a node cannot be rolled back past it. Version 3
+/// exists only in a `version-bump` build (ADR-0016), with the same layout.
+/// New segments are stamped with the store's `format_write` (RFC-014
+/// §5.3), never above this.
 #[allow(clippy::cast_possible_truncation)]
-pub const SEGMENT_FORMAT_VERSION: u16 = 1 + arca_lake_common::compat::BUMP as u16;
+pub const SEGMENT_FORMAT_VERSION: u16 = 2 + arca_lake_common::compat::BUMP as u16;
 /// Oldest segment format version this build reads (all `F ≤ F_cur`).
 pub const SEGMENT_FORMAT_VERSION_MIN: u16 = 1;
 /// Encoded segment header length in bytes.

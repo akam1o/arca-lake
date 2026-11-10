@@ -1153,6 +1153,25 @@ impl Store {
         c
     }
 
+    /// Seal the active segment and start one of `format_write` now, if the
+    /// active one is of an older format (Phase 3.10): a raised format then
+    /// takes effect at once, so that an earlier release refuses the store
+    /// from the moment the raise is acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// I/O errors of the rollover.
+    pub fn roll_to_format_write(&self) -> Result<()> {
+        let mut w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        if w.active.header().format_version >= self.format_write() {
+            return Ok(());
+        }
+        let t = Instant::now();
+        self.rollover(&mut w)?;
+        self.timings.rollover.observe(t.elapsed());
+        Ok(())
+    }
+
     /// The format stamped on new segments.
     #[must_use]
     pub fn format_write(&self) -> u16 {
