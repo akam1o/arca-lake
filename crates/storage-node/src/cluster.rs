@@ -1094,8 +1094,11 @@ mod tests {
             ),
         )
         .unwrap();
-        let p = ClusterFacts::open(dir.path());
-        assert_eq!((p.incarnation, p.incarnation_seq), (Some([1; 16]), 7));
+        let paired = ClusterFacts::open(dir.path());
+        assert_eq!(
+            (paired.incarnation, paired.incarnation_seq),
+            (Some([1; 16]), 7)
+        );
         std::fs::write(
             dir.path().join(FLOORS_FILE),
             "floors 1\nincarnation_seq 9\n",
