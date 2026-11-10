@@ -499,7 +499,7 @@ async fn rolling_upgrade_with_two_binaries() {
         committed.push((format!("during{i}"), d));
     }
     // 8 (rollback before the cut-off): node 0 goes back to the old binary.
-    // Everything the new binary wrote while format_write was 1 opens; the
+    // Everything the new binary wrote while format_write was F_OLD opens; the
     // node serves reads and writes; then it is upgraded again.
     nodes[0].kill();
     nodes[0] = env.spawn(
@@ -511,7 +511,7 @@ async fn rolling_upgrade_with_two_binaries() {
     let h = clients.health(&node_addrs[0]).await.unwrap();
     assert_eq!(
         (h.protocol_max, h.format_max, h.version_bump),
-        (P_OLD, 1, 0)
+        (P_OLD, F_OLD, 0)
     );
     for (key, data) in &committed {
         assert_eq!(
@@ -740,7 +740,9 @@ async fn rolling_upgrade_with_two_binaries() {
         node_stale.log()
     );
     assert!(
-        node_stale.log().contains("segment format version 2"),
+        node_stale
+            .log()
+            .contains(&format!("segment format version {}", F_OLD + 1)),
         "{}",
         node_stale.log()
     );
