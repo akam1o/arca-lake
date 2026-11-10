@@ -195,6 +195,32 @@ the backlog converges afterwards. Nothing is deleted unfenced at any
 point. Rolling a node back to version 2 stops deletes on it; rolling
 back nodes and controllers both restores the pre-3.9 behaviour (R-88).
 
+Upgrading to Phase 3.10 (protocol 4, metadata schema 3, ADR-0024):
+
+- **During the rolling upgrade** deletes go on. Phase 3.10 nodes take
+  the previous release's (protocol 3) deletes while the cluster is below
+  schema 3, and Phase 3.10 controllers and gateways send deletes only to
+  protocol-4 nodes. A Phase 3.9 node therefore gets no delete until it is
+  upgraded.
+- **Rollback before finalize** is allowed in any order, and every
+  combination is safe: a Phase 3.10 node takes a Phase 3.9 controller's
+  deletes (they renew its rejoin lease), and a Phase 3.9 node gets no
+  delete from Phase 3.10 processes. The recommended order is the reverse
+  of the upgrade: gateways, then controllers, then nodes.
+- **Finalize** raises the schema only once every registered node that is
+  not decommissioned reports schema 3 as its floor. A node that does not
+  answer blocks it, including one named with `--ignore-absent`: bring it
+  back, or decommission it.
+- **After finalize**:
+  - Phase 3.9 controllers and gateways refuse to start.
+  - A node rolled back to Phase 3.9 starts but gets no delete; nodes that
+    hold schema 3 refuse protocol-3 deletes, also on metadata restored
+    from before the finalize.
+  - Rolling a node forward again keeps its floors (`cluster-floors.txt`).
+- **Never restore metadata from before the finalize without `admin
+  recovery begin`**: `recovery begin` brings the schema back up to what
+  the nodes hold.
+
 1. `admin status --versions` before and after each restart: every node,
    controller and gateway with its software version and P/M/F windows.
    While mixed, new processes negotiate the older protocol and write the
@@ -699,6 +725,31 @@ What deletes stop never stops PUT or GET.
    leader's next pass opens its generation there. A release names the
    recorded closed generation; a node holding a higher one (it saw a
    later close) keeps its hold, and the command reports it.
+
+10. **Phase 3.10: the rejoin lease** (ADR-0024). An open fence admits
+    deletes on a node only for `--fence-lease-secs` (30 s) after the
+    leader's last push of it. After a node restart, or a partition longer
+    than the lease, the node refuses deletes until the leader's next pass
+    reaches it (`arca_node_delete_fence_refusals_total` rises briefly).
+    Keep the lease well above `--health-interval-secs`.
+11. **"storage nodes hold generation N above the metadata's" or "the
+    leader wrote lineage N and reads M"** in the fence reason, with
+    `arca_controller_delete_fence_metadata_behind_total` rising: the
+    metadata went back under the leader (a restore without `admin
+    recovery begin`, or a hand edit). The fence is closed with a hold.
+    Stop and run the restore procedure from `recovery begin` (§5.9);
+    `admin delete-fence release` only if the metadata is known to be
+    current.
+12. **"generation pushed open by another opener"** in a node's log: two
+    controller processes pushed the same generation number (one of them
+    on restored metadata, or a node's opener record was lost). The node
+    closed that generation; the leader opens a higher one at its next
+    pass. Repeated messages mean two clusters share these nodes.
+13. **`arca_controller_incarnation_conflicts_total` rising**: a node
+    holds another incarnation at or above the cluster's sequence (it
+    missed one `recovery begin` and took part in another). It refuses this
+    cluster's deletes. Run `admin recovery begin` again with every node
+    reachable: it marks an incarnation above every node's sequence.
 
 There is deliberately no command that forces deletes open.
 

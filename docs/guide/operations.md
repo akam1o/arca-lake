@@ -17,3 +17,6 @@ design, not a tuning hint; violating one voids a guarantee.
 | Metadata backups and their verification | Restores are the only recovery from metadata loss | RFC-015, [Backup and restore](backup-restore.md) |
 | Upgrades in the documented order (storage nodes first) | Mixed versions are supported within one compatibility window only | RFC-014 |
 | The delete fence closed (`admin delete-fence close`) before a metadata restore | Without it a delete decided before the restore can still remove shards the restored metadata needs | ADR-0023, RFC-013 §5.9 |
+| `--fence-lease-secs` (storage nodes) well above the controllers' `--health-interval-secs` (default 30 s against 5 s) | A node admits deletes only within the lease after the leader's last push; a lease shorter than a pass stops deletes | ADR-0024, RFC-013 §10.12 |
+| Every storage node reachable (or decommissioned) for `admin upgrade finalize`, and reachable or declared absent for `admin recovery begin` | Both collect the nodes' schema floor and incarnation sequence; a node that missed them could take a previous release's deletes | ADR-0024 |
+| After `upgrade finalize`, no controller or gateway of an earlier release; restored metadata only through `admin recovery begin` | The earlier release refuses to start on the finalized schema; `recovery begin` brings restored metadata back up to it | RFC-013 §5.8 |

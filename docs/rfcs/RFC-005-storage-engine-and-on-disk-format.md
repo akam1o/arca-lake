@@ -182,6 +182,24 @@ v1 segment is checked into the repository and must open and byte-match
 forever; a new format version must add a new golden file and a reader for
 the old one before any release.
 
+Cluster facts (outside the segment format, ADR-0016, ADR-0023,
+ADR-0024):
+
+- **`cluster.txt`** holds what a node learned from controllers:
+  - incarnation and its `changed_ms`, `format_write`;
+  - the delete fence generation, open or closed, its hold, and since
+    Phase 3.10 its opener (`delete_fence_opener`);
+  - the Phase 3.10 high-water marks `incarnation_seq` and `schema_floor`.
+
+  It is versioned (`facts 2`) and checksummed. Unknown keys are skipped
+  on read and dropped on write; the earlier release does both.
+- **`cluster-floors.txt`** (Phase 3.10, `floors 1`, checksummed) holds
+  the incarnation, its stamp and sequence, and the schema floor, in a
+  file no earlier release opens. It is written before `cluster.txt` on
+  every change, and is authoritative for the incarnation pair.
+  `cluster.floors` marks that it has existed: a missing or damaged
+  floors file then fails closed (fence held, strictest schema floor).
+
 ## 6. Alternatives considered
 
 | Alternative | Why not |

@@ -340,6 +340,26 @@ placement between durable tiers.
   source shards that reconciliation deletes. The chunk is readable
   throughout from whichever placement the record names.
 
+Phase 3.10 (RFC-008 §8.10): a tiering pass needs the published
+admission record. That record must be younger than 60 s (or three
+health intervals) with no tier throttled or worse, and no durable group
+may be repaired; the leader's own tracker, empty at a new leader's first
+pass, no longer decides alone.
+
+Capacity rebalancing between groups of one tier (Phase 3.8, R-82; R-93
+in Phase 3.10) moves chunks through the same migration path. Since Phase
+3.10 it yields to the work above it:
+
+- no pass while tiering moves chunks, while the GC backlog is above its
+  pause, or on an admission record that is not current;
+- no move in a tier that is throttled or worse, and half the budget in
+  `warning`;
+- before every chunk, each target member is asked for its device, and
+  the chunk moves only if every member keeps the placement threshold
+  (`group_min_shards` of the largest shards above its reserve and
+  in-flight writes) after it, and none needs compaction first. Otherwise
+  the pass stops (`arca_controller_rebalance_capacity_stops_total`).
+
 ### 5.9 Cache protection (Phase 2.1)
 
 A cache tier chooses one *protection mode* for its groups. The mode is

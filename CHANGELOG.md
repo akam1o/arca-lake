@@ -6,6 +6,72 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Added (Phase 3.10)
+
+- Rejoin fence (ADR-0024, R-90): a storage node admits deletes under an
+  open fence only for `--fence-lease-secs` (30 s) after the leader's last
+  push of it, on its monotonic clock. A start, a partition or a silent
+  leader stops its deletes without the node learning anything.
+- The opener of an open fence generation is recorded in metadata and on
+  the nodes (HealthRequest `delete_fence_opener`). A leader pushes, and
+  deletes under, only a generation it opened; a node closes a generation
+  pushed open by another opener.
+- Metadata rollback gate: a leader that finds nodes ahead of the metadata,
+  or reads back a lower lineage counter than it wrote, closes the fence
+  with a hold (`arca_controller_delete_fence_metadata_behind_total`).
+- Sequenced incarnations (R-92): `incarnation_seq` in metadata, Health
+  and node facts; nodes order incarnations by it, never by a clock.
+  `admin recovery begin` marks the new incarnation above every node's.
+- Downgrade gate: metadata schema 3, the node schema floor (persisted
+  with the sequence also in `cluster-floors.txt`), protocol 4. The
+  finalize waits until every node holds the floor; nodes holding it
+  refuse the previous release's deletes.
+- Capacity-aware rebalancing (R-93): it yields to tiering, a GC backlog
+  (`--rebalance-gc-backlog-pause-mib`) and throttled tiers, and checks
+  every target member's device against the placement threshold before
+  each chunk (`arca_controller_rebalance_capacity_stops_total`).
+- `--planned-move-chunks-per-pass` (controller); metrics
+  `arca_controller_repair_group_errors_total`,
+  `arca_controller_incarnation_conflicts_total`.
+- Tests:
+  - `previous_release` (the previous release's and this release's
+    binaries on FoundationDB: upgrade, partial and full rollback before
+    finalize, refusal after it, and a restore of pre-finalize metadata);
+  - the system model on FoundationDB;
+  - a capacity state × failover matrix (5 states × 7 faults, 8
+    invariants);
+  - scenarios for every review and audit finding.
+- `benchmarks/linux/fdb-suite.sh` (FoundationDB suites on a validation
+  host, `FDB_PROCS=3`), `rebalance-load.sh` modes and sampler,
+  `summarize_rebalance.py`.
+
+### Changed (Phase 3.10)
+
+- Protocol version 4: clients send deletes only to protocol-4 nodes.
+  Metadata schema 3 (record layout unchanged; record version 2): after
+  `upgrade finalize`, earlier releases' controllers and gateways refuse to
+  start. `admin upgrade finalize` blocks while a node that is not
+  decommissioned does not report the floor, `--ignore-absent`
+  notwithstanding.
+- `admin recovery begin` collects every node's incarnation sequence and
+  schema floor (refusing while a node neither answers nor is declared
+  absent) and raises restored metadata to the floor.
+- GC pages through the retired queue; repair errors are isolated per
+  group; failed members are repaired before planned moves; tiering needs
+  a current published admission record and no durable group in repair.
+
+### Fixed (Phase 3.10)
+
+- Repair held a member move `Repairing` on the leftover shard of a write
+  that failed in the group and was retried elsewhere (seen as an
+  intermittent `membership_faults` timeout).
+- A schema bump wrote a record version the previous release could not
+  read (record versions now map from the schema).
+- Node facts adopted in memory but not persisted were acknowledged on
+  retry.
+- GC never collected past generations deferred at the head of its queue;
+  one failing group stopped every later group's repair.
+
 ### Added (Phase 3.9)
 
 - Delete fence enforced by storage nodes (ADR-0023, R-88): every

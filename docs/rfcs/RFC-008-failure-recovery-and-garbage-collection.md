@@ -849,6 +849,36 @@ stopped node for drills). Mapping the objects that reference an
 unrecoverable chunk is a follow-up (the chunk id's generation prefix
 identifies the generation; the listing does not resolve it to a key).
 
+### 8.10 Phase 3.10: background work order and isolation
+
+From the background-operations audit (`docs/verification/phase-3.10-recovery.md`).
+
+- **GC pages through the retired queue.** A cursor kept by the leader
+  process carries across batches and wraps at the end of the queue; a
+  batch that read a full page continues the pass. Generations that
+  cannot be collected yet (a member down, the fence closed) no longer
+  hold up those behind them at the head of the queue. A batch that
+  retired multipart parts starts again from the head, because parts are
+  queued as of their root.
+- **Repair is isolated per group.** A group's error is logged and
+  counted (`arca_controller_repair_group_errors_total`), and the other
+  groups go on; only a fencing error stops the task.
+- **Failed members first.** Groups with a failed member, or rebuilding
+  one for any reason other than an operator's move off a healthy node,
+  are repaired before planned moves. Planned moves (a replacement request
+  off a healthy node, a drain of a member of an `Active` group) rebuild
+  at most `--planned-move-chunks-per-pass` (512) chunks per pass.
+- **A pending write's chunk is never an orphan to repair.** A chunk of a
+  pending generation without a chunk record may still be placed in any
+  group (the gateway writes shards before their records), so repair
+  rebuilds it or waits. The leftover of a write retried in another group
+  (recorded there) is reconciliation's.
+- **Priority, end to end:** Repair > Client writes > GC and compaction >
+  Tiering > Rebalance > Prefetch. Tiering and rebalancing need the
+  published admission record (current, no tier throttled or worse) and
+  no durable group being repaired; rebalancing also yields to tiering
+  and to a GC backlog above `--rebalance-gc-backlog-pause-mib`.
+
 ## 9. Alternatives considered
 
 | Alternative | Why not |

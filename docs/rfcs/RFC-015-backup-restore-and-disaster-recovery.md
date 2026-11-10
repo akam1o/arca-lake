@@ -171,6 +171,26 @@ incarnation mismatch.
    opens a new generation, above every generation decided before the
    restore.
 
+Phase 3.10 (ADR-0024): the safeguards that do not depend on the
+runbook.
+
+- **Step 0 skipped.** A node admits deletes only while its rejoin lease
+  runs (30 s after the leader's last push), so a former leader that
+  stopped leaves no node open for longer than that.
+- **Step 4 done before step 3.** A controller started on the restored
+  metadata before `recovery begin`:
+  - holds the fence (closed, with an operator hold) when any node it
+    reaches is ahead of the restored record, or when its own lineage
+    counter reads back less than it wrote;
+  - otherwise opens a generation of its own, which nodes holding the
+    same number from the pre-restore cluster close as a conflict.
+- **`recovery begin`** collects every node's incarnation sequence and
+  schema floor. It refuses while a node neither answers nor is declared
+  absent, marks the new incarnation above every sequence, and raises the
+  restored schema (and `schema_write`) to the highest floor. A backup
+  from before an `upgrade finalize` then cannot re-admit the previous
+  release.
+
 ### 5.3.2 Verification pass
 
 Runs on the controller leader, resumable (cursor per group and per

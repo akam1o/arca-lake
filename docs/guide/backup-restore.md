@@ -20,6 +20,13 @@ that the shards it names exist (RFC-015).
    nodes, and `admin recovery finalize` reopens it. Objects whose data
    was deleted after the backup point are reported as lost.
 
+Since Phase 3.10 a restore done out of order (without step 0, or with
+controllers started before `recovery begin`) deletes nothing: nodes
+admit deletes only under the current leader's lease, and a controller on
+restored metadata holds the fence (ADR-0024). `recovery begin` needs
+every storage node to answer (or `--absent-node` for one whose process
+is stopped).
+
 A metadata backup cannot show that the shards it names still exist
 (R-67): the recovery pass and scrubbing do. The full procedure and its
 drills: [RFC-015](../rfcs/RFC-015-backup-restore-and-disaster-recovery.md),
