@@ -377,9 +377,42 @@ release binaries:
   as in Phase 3.9, R-48) is larger than any difference between them. So
   there is no regression, and no gain either, attributable to the code.
 
-## 14. CI
+## 14. CI and test runs
 
-See the final report for the run of the final commit.
+CI (`1e3a1a6`): every job green.
+
+- fmt, clippy (pedantic, `-D warnings`), the workspace tests with all
+  features;
+- the FoundationDB job: suites, the system model, `mixed_version`,
+  `previous_release` against `9674894`, and the restore drill;
+- the three-process failover job;
+- cargo-deny, gitleaks, the artifact scan, DCO, links.
+
+Earlier runs of this phase that failed:
+
+- the version-bump build's protocol-3 test (fixed);
+- the two-binary record-version bug (fixed);
+- test timing on a fast runner (fixed);
+- a self-hosted runner shut down mid-job;
+- the libfdb crash at process exit after every test had passed (R-68).
+
+Final runs at `1e3a1a6`:
+
+- **In process (macOS):** the crate suites (protocol 2, storage 50,
+  storage-node 36, controller 13, metadata 65, gateway 29, CLI 5) pass;
+  testkit `it` 249 passed, with 4 failed: the known macOS TLS flakes
+  `request_metrics`, `s3_compat` ×2 and `refused_bodies`, which pass on
+  Linux.
+- **Host A:**
+  - the FoundationDB suites: 115 passed;
+  - `previous_release` and `mixed_version`: passed;
+  - the three-process FoundationDB system model (185 × 150) passed
+    earlier in the phase.
+- **Host A, `cargo test --workspace --all-features`** (earlier in the
+  phase): 535 passed. The one failure is environmental: the host's
+  3.9 GiB `/tmp` tmpfs cannot hold `capacity::new_chunks_prefer_the_group_with_more_room`'s
+  allotments; it passes with `TMPDIR` on disk, and fails the same way on
+  Phase 3.9.
 
 ## Not verified
 
