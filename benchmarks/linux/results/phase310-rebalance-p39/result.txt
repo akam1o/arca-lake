@@ -1,0 +1,1 @@
+failures=0 iterations=703 window_min=15 base=320 cap=3221225472 rebalance=on

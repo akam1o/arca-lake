@@ -244,7 +244,62 @@ Write rejected and recovery only were not reached with real processes.
 
 ## 11. Rebalancing under load (hosts A+B)
 
-Pending: filled from `benchmarks/linux/results/phase310-rebalance-*`.
+`benchmarks/linux/rebalance-load.sh`, the layout of the Phase 3.9 run:
+
+- FoundationDB (private `fdbserver`) and four nodes on host A; two nodes,
+  the gateway and the load generator on host B; two controllers, one per
+  host.
+- Group 1 is filled with 320 objects of 8 MiB, then group 2 is added;
+  every node is allotted 3 GiB.
+- Load: a 15-minute baseline window with rebalancing paused, then a
+  15-minute window with the controller leader killed (restarted 30 s
+  later) and a node stopped for 20 s, then a converge phase of up to
+  25 minutes, then every object that must exist read back verified.
+- Three configurations on the same hosts, one after the other:
+  - **off**: Phase 3.10 binaries, rebalancing paused in both windows;
+  - **3.9**: Phase 3.9 binaries (`9674894`);
+  - **3.10**: Phase 3.10 binaries (`f2dac2d`).
+- Results: `benchmarks/linux/results/phase310-rebalance-{off,p39,p310}`,
+  summarized with `summarize_rebalance.py`.
+
+Second window (rebalancing on, with the faults):
+
+| Metric | off | 3.9 | 3.10 |
+| --- | --- | --- | --- |
+| PUT throughput, MiB/s | 143.6 | 108.0 | 202.2 |
+| PUT p50 / worst p99, ms | 157 / 1 916 | 113 / 3 731 | 115 / 1 440 |
+| PUT errors (503, out of batches of 8) | 40 | 699 | 32 |
+| GET throughput, MiB/s | 487 | 626 | 640 |
+| GET p50 / worst p99, ms | 55 / 193 | 42 / 363 | 42 / 191 |
+| Time in write_rejected or worse (15 s samples) | 0 s | 160 s | 0 s |
+| Worst admission state | throttled | write_rejected | throttled |
+| Capacity stops (R-93 placement threshold) | — | — | 10 |
+| Moved by the end of the window | 0 | 1 152 MiB | 1 252 MiB |
+| Capacity spread between nodes at the end (used fraction of usable) | 34.2 % | 10.3 % | 24.9 % |
+| Largest GC backlog | 1 024 MiB | 1 000 MiB | 1 024 MiB |
+| Converge | — | settled after 212 s | still moving at the end (389 chunks moved during converge; "pass budget spent") |
+| Reserve violations (node below its reserve, any sample) | 0 | 0 | 0 |
+| Body mismatches, acknowledged objects missing | 0 | 0 | 0 |
+
+How to read it:
+
+- **Errors.** Every PUT error is a 503.
+  - Off and 3.10 lose whole 8-object batches only around the injected
+    faults (5 and 4 batches).
+  - 3.9 loses objects across many batches, because its rebalancing took
+    the target groups' room until the tier refused writes for 160 s.
+    That is R-93 as seen in Phase 3.9; 3.10 never left throttled.
+- **Spread.** 3.10 evens the groups out more slowly. It moved nothing
+  while the tier was throttled ("client writes first") and stopped 10
+  times at the placement threshold, so it did not finish within the
+  windows. 3.9 finished faster, at the cost of the refused writes.
+- **Throughput.** The baseline windows, identical in all three (rebalancing
+  paused), differ by up to 50 % between runs (PUT 150–223 MiB/s):
+  - Throughput differences of that size are not attributable to the
+    code. The error and write_rejected rows are.
+- **Repetitions.** A first set of runs, whose sampler stopped after its
+  first probe (`*-run0`, no capacity rows), agrees: off 24 PUT errors,
+  3.9 749.
 
 ## 12. Independent review
 
