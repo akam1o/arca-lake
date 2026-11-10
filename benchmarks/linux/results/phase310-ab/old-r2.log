@@ -1,0 +1,11 @@
+== repetition 1: durable-c4-multipart-r1
+{"label":"durable-c4-multipart-r1-put","op":"multipartput","pass":1,"objects":96,"size":16777216,"concurrency"
+{"label":"durable-c4-multipart-r1-get1","op":"get","pass":1,"objects":96,"size":16777216,"concurrency":4,"rang
+{"label":"durable-c4-multipart-r1-get2","op":"get","pass":1,"objects":96,"size":16777216,"concurrency":4,"rang
+{"label":"durable-c4-multipart-r1-get3","op":"get","pass":1,"objects":96,"size":16777216,"concurrency":4,"rang
+== repetition 1: durable-c4-r1
+{"label":"durable-c4-r1-put","op":"put","pass":1,"objects":96,"size":16777216,"concurrency":4,"range_bytes":0,
+{"label":"durable-c4-r1-get1","op":"get","pass":1,"objects":96,"size":16777216,"concurrency":4,"range_bytes":0
+{"label":"durable-c4-r1-get2","op":"get","pass":1,"objects":96,"size":16777216,"concurrency":4,"range_bytes":0
+{"label":"durable-c4-r1-get3","op":"get","pass":1,"objects":96,"size":16777216,"concurrency":4,"range_bytes":0
+done: benchmarks/linux/results/phase310-ab/old-r2

@@ -1,0 +1,29 @@
+Linux 7.0.0-42-generic (<host>) 	11/10/26 	_x86_64_	(4 CPU)
+
+08:30:43        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+08:30:44           lo   6386.00   6386.00 182962.46 182962.46      0.00      0.00      0.00      0.00
+08:30:44         net0   1049.00   2661.00    129.38 102518.60      0.00      0.00      0.00      0.00
+
+08:30:44        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+08:30:45           lo  15270.00  15270.00 411776.88 411776.88      0.00      0.00      0.00      0.00
+08:30:45         net0   2948.00   7952.00    344.57 292136.93      0.00      0.00      0.00      0.00
+
+08:30:45        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+08:30:46           lo  14249.00  14249.00 395413.98 395413.98      0.00      0.00      0.00      0.00
+08:30:46         net0   2707.00   6853.00    338.97 263147.11      0.00      0.00      0.00      0.00
+
+08:30:46        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+08:30:47           lo  16148.00  16148.00 443333.38 443333.38      0.00      0.00      0.00      0.00
+08:30:47         net0   2906.00   7096.00    346.10 281316.68      0.00      0.00      0.00      0.00
+
+08:30:47        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+08:30:48           lo  15026.00  15026.00 406191.01 406191.01      0.00      0.00      0.00      0.00
+08:30:48         net0   3149.00   7290.00    357.58 264633.54      0.00      0.00      0.00      0.00
+
+08:30:48        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+08:30:49           lo  14538.00  14538.00 384641.74 384641.74      0.00      0.00      0.00      0.00
+08:30:49         net0   3076.00   7097.00    351.84 268054.96      0.00      0.00      0.00      0.00
+
+08:30:49        IFACE   rxpck/s   txpck/s    rxkB/s    txkB/s   rxcmp/s   txcmp/s  rxmcst/s   %ifutil
+08:30:50           lo   5689.00   5689.00 147768.01 147768.01      0.00      0.00      0.00      0.00
+08:30:50         net0   1203.00   2652.00    146.44 106895.39      0.00      0.00      0.00      0.00

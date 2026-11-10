@@ -303,40 +303,79 @@ How to read it:
 
 ## 12. Independent review
 
-Two models reviewed `9674894..HEAD` read-only, and each fix was
-reviewed again.
+Two models (A: GPT, B: Claude) reviewed `9674894..HEAD` read-only, and
+then every fix again, until a round found no new Critical or High
+finding. Severity is the reviewer's.
 
-| Round | Reviewer | Critical | High | Medium | Low | Outcome |
+| Round | Reviewer | Critical | High | Medium | Low | Outcome (commits) |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | A (GPT) | 2 | 3 | 0 | 0 | all fixed (`71465d5`, `a5aea95`) |
-| 1 | B (Claude) | 0 | 2 | 3 | 3 | all fixed (`71465d5`, `7ebdb6a`) |
-| 2 | A | 1 | 3 | 3 | 0 | fixed (`ed5564e`), except the lineage window: accepted as R-94(b) |
+| 1 | A | 2 | 3 | 0 | 0 | fixed (`71465d5`, `a5aea95`) |
+| 1 | B | 0 | 2 | 3 | 3 | fixed (`71465d5`, `7ebdb6a`) |
+| 2 | A | 1 | 3 | 3 | 0 | fixed (`ed5564e`); the lineage window bounded later |
 | 2 | B | 0 | 0 | 0 | 5 | fixed (`ed5564e`) |
-| 3 | A, B | pending | | | | |
+| 3 | A | 1 | 1 | 0 | 0 | fixed (`a694f8f`); R-94(b) kept High |
+| 3 | B | 0 | 0 | 1 | 2 | fixed (`a694f8f`) |
+| 4 | A | 2 | 1 | 0 | 0 | fixed (`f2dac2d`: segment format 2) |
+| 4 | B | 0 | 0 | 2 | 2 | fixed (`f2dac2d`) |
+| 5 | A | 2 | 1 | 0 | 0 | fixed (`7c3dc9c`, `a53aa9d`) |
+| 5 | B | 0 | 0 | 0 | 3 | fixed (`a53aa9d`) |
+| 6 | A | 1 | 0 | 0 | 0 | fixed (`ab9e934`: decommissioned nodes excluded only explicitly) |
+| 6 | B | 0 | 0 | 1 | 1 | fixed (`ab9e934`); the 3.9-CLI registration window recorded (R-100) |
+| 7 | A | 0 | 1 | 0 | 0 | migration cleanup across a restore: bounded by lineage checks on rebalance and tiering passes (`0981ccf`); within R-94(b) |
 
-Round 1, Critical and High findings (fixed):
+Critical and High findings, with their schedules, were:
 
-- A: a fresh controller renewed a restored open fence;
-- A: the finalize did not wait for the nodes' floor;
-- A and B: a node rollback erased the floors;
-- A: repair skipped a pending write's chunk;
-- A: an unpersisted fact was acknowledged on retry;
-- B: generation-number collision across a restore (the opener bound on
-  nodes).
+- **Restored fence renewal.** A fresh controller pushed a restored open
+  record and renewed its lease; and a restored controller could open the
+  very generation number the pre-restore cluster had opened. Fixed by
+  "ours" only, and by the opener bound on the nodes.
+- **The finalize barrier.** The finalize did not wait for every node's
+  schema floor, then for absent, registering and decommissioned nodes,
+  then for the segment format. Fixed by both barriers over every node
+  except explicit exclusions, checking the floor and the newest segment
+  format on the device, and by refusing registration past the cut-off.
+- **Node rollback.** A rollback erased the floors, and later an old node
+  binary ignored every node-side rule. Fixed by the floors file, the led
+  flag, and segment format 2, which the old binary refuses to open.
+- **Repair.** It skipped a pending write's chunk. Fixed by
+  `chunk_may_be_in_group`.
+- **Persistence.** Facts were acknowledged without being persisted, and
+  a rollover was not retried. Fixed by roll-back, `unpersisted`, and a
+  rollover on every push and at start.
+- **Lineage.** A restore under a running leader went undetected. The
+  counter is now advanced and checked before every GC, reconciliation,
+  rebalance and tiering batch, serialized in the process. Bounded but
+  open: R-94(b), High by reviewer A.
 
-Round 2:
+## 13. Performance (hosts A+B)
 
-- A: absent nodes skipped the finalize barrier — fixed;
-- A: the floors file could split the incarnation from its sequence —
-  fixed;
-- A: a lost floors file was accepted silently — fixed;
-- A: the lineage counter misses a restore within one health interval —
-  accepted, R-94(b): it needs a running leader, the runbook not
-  followed, and a backup restored within 5 s.
+The P2 optimizations were not attempted: R-94(b) remains a High
+residual, and the plan made performance work conditional on none.
+Measured instead is a regression check against Phase 3.9.
 
-## 13. Performance
+The A/B alternated the Phase 3.9 (`9674894`) and Phase 3.10 (`0981ccf`)
+release binaries:
 
-Pending: filled from the regression and A/B run.
+- three repetitions each, on the same hosts, right after each other;
+- `repeat.sh`, durable 2+1 PUT/GET and multipart PUT, 96 × 16 MiB, four
+  clients;
+- results in `benchmarks/linux/results/phase310-ab`.
+
+| Indicator | 3.9 (three runs) | median | 3.10 (three runs) | median |
+| --- | --- | --- | --- | --- |
+| PUT, MiB/s | 188.8, 264.4, 171.9 | 188.8 | 252.0, 324.7, 330.7 | 324.7 |
+| multipart PUT, MiB/s | 149.6, 146.7, 270.4 | 149.6 | 151.1, 263.9, 189.6 | 189.6 |
+| warm GET, MiB/s | 660.8, 657.2, 693.0 | 660.8 | 668.1, 677.9, 676.5 | 676.5 |
+| warm GET p99, ms | 108.4, 118.4, 120.8 | 118.4 | 126.1, 105.7, 106.6 | 106.6 |
+| CPU s per GiB, gateway host | 4.7, 5.0, 4.7 | 4.7 | 5.0, 4.6, 4.6 | 4.6 |
+| CPU s per GiB, node host | 3.1, 3.1, 1.9 | 3.1 | 3.2, 1.9, 1.8 | 1.9 |
+| gateway RSS, MiB | 155.5, 153.3, 119.5 | 153.3 | 122.8, 138.5, 128.6 | 128.6 |
+
+- Phase 3.10 adds nothing per PUT or GET: the fence lease check and the
+  floor comparison are per delete, and Health carries a few more fields.
+- The spread between repetitions of either binary (up to about ±40 %,
+  as in Phase 3.9, R-48) is larger than any difference between them. So
+  there is no regression, and no gain either, attributable to the code.
 
 ## 14. CI
 

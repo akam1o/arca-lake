@@ -1057,6 +1057,31 @@ regression attributable to the code, and none excluded below that
 spread (R-48). The P2 optimizations of §6.22 were not attempted in this
 phase (data safety first).
 
+### 6.24 Phase 3.10: A/B against Phase 3.9
+
+Phase 3.10 adds nothing to PUT or GET:
+
+- the rejoin lease and the schema-floor comparison are per
+  `DeleteShard`;
+- Health carries a few more fields;
+- the leader writes one lineage key per health pass and before each GC,
+  reconciliation, rebalance or tiering batch.
+
+An alternating A/B on the validation hosts (three repetitions each;
+`benchmarks/linux/results/phase310-ab`, durable and multipart
+configurations; medians, 3.9 → 3.10):
+
+- PUT 188.8 → 324.7 MiB/s;
+- multipart PUT 149.6 → 189.6;
+- warm GET 660.8 → 676.5;
+- warm GET p99 118.4 → 106.6 ms;
+- CPU per GiB on the gateway host 4.7 → 4.6 s.
+
+The spread between repetitions of either binary (up to about ±40 %) is
+larger than the differences: no regression attributable to the code
+(R-48). The P2 optimizations were not attempted (a High residual
+remains, see the Phase 3.10 report).
+
 ## 7. Interpretation
 
 *Verified on this environment* (one run each; see §4 for the error

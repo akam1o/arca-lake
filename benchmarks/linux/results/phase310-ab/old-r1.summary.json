@@ -1,0 +1,18 @@
+{
+  "results_dir": "old-r1",
+  "cores": 4,
+  "durable_config": "durable-c4",
+  "put_mib_s": 188.75900764989234,
+  "get_warm_mib_s": 660.7570722236129,
+  "get_warm_p50_ms": 85.800756,
+  "get_warm_p95_ms": 102.22355800000001,
+  "get_warm_p99_ms": 108.41715,
+  "cpu_s_per_gib_gateway_host": 4.731466666666667,
+  "cpu_s_per_gib_node_host": 3.082133333333333,
+  "rss_mib": 155.5,
+  "meta_txn_per_s": 85.28564538348,
+  "repetitions": 1,
+  "multipart_config": "durable-c4-multipart",
+  "multipart_put_mib_s": 149.64370532294745,
+  "multipart_get_warm_mib_s": 639.5281563926835
+}
