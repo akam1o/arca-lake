@@ -1413,6 +1413,36 @@ impl NodeClients {
         token: RecordToken,
         observed_at_ms: u64,
     ) -> Result<(), tonic::Status> {
+        self.reclaim_or_keep(addr, shard, epoch, token, observed_at_ms, false)
+            .await
+    }
+
+    /// End the retirement of a record the caller's metadata needs (Phase
+    /// 3.12): the record stays; a later delete retires it anew.
+    ///
+    /// # Errors
+    ///
+    /// RPC errors.
+    pub async fn keep_shard(
+        &self,
+        addr: &str,
+        shard: ShardRef,
+        epoch: u64,
+        token: RecordToken,
+    ) -> Result<(), tonic::Status> {
+        self.reclaim_or_keep(addr, shard, epoch, token, 0, true)
+            .await
+    }
+
+    async fn reclaim_or_keep(
+        &self,
+        addr: &str,
+        shard: ShardRef,
+        epoch: u64,
+        token: RecordToken,
+        observed_at_ms: u64,
+        keep: bool,
+    ) -> Result<(), tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::ReclaimShard,
@@ -1445,6 +1475,7 @@ impl NodeClients {
                         .map(|i| Bytes::copy_from_slice(&i.1))
                         .unwrap_or_default(),
                     observed_at_ms,
+                    keep,
                 };
                 client.reclaim_shard(req).await?;
                 Ok(())

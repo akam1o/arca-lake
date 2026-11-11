@@ -1019,7 +1019,17 @@ pub async fn reclaim_node<S: KvStore>(
                 async move {
                     let group = groups.get(&shard.group_id);
                     match shard_needed_in(meta, node_id, shard, group).await {
-                        Ok(true) => return ReclaimOutcome::Needed,
+                        Ok(true) => {
+                            // Needed: the retirement ends (Phase 3.12
+                            // review), so that it is not judged again every
+                            // pass; a later delete retires it anew. A record
+                            // of a missing group is never needed, so the
+                            // group is known here.
+                            if let Some(g) = group {
+                                let _ = clients.keep_shard(node_addr, shard, g.epoch, token).await;
+                            }
+                            return ReclaimOutcome::Needed;
+                        }
                         Ok(false) => {}
                         Err(e) => {
                             tracing::debug!(error = %e, "reclaim: judgement failed, retried next pass");

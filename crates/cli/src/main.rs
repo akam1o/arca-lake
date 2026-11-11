@@ -2751,7 +2751,7 @@ fn pin_cluster_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Re
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let text = std::fs::read(from)?;
-    let _ = std::fs::remove_file(to);
+    // Never replaces anything (create_new): a name in use is refused.
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -2911,8 +2911,14 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
             // `fdbrestore` cannot redirect the restore). With a command
             // prefix (another file system) the tool reads its own file: the
             // probe checks it, and the boundary is that file's owner.
-            let pinned = (prefix.is_empty() && fdbrestore_cluster_file.is_none())
-                .then(|| journal.with_extension("cluster"));
+            // A name of its own (re-review: a fixed extension could be the
+            // journal's own path, or the cluster file's).
+            let pinned = (prefix.is_empty() && fdbrestore_cluster_file.is_none()).then(|| {
+                let name = journal
+                    .file_name()
+                    .map_or_else(|| "restore".into(), |n| n.to_string_lossy().into_owned());
+                journal.with_file_name(format!("{name}.{}.pinned-cluster", std::process::id()))
+            });
             if let Some(p) = &pinned
                 && let Err(e) = pin_cluster_file(cluster_file, p)
             {

@@ -21,8 +21,9 @@ use crate::ControlError;
 /// One member's position in its listing.
 struct MemberCursor {
     addr: Option<String>,
-    /// Buffered page entries `(shard, payload_len)` not yet consumed.
-    page: std::collections::VecDeque<(ShardRef, u64)>,
+    /// Buffered page entries `(shard, payload_len, retired)` not yet
+    /// consumed.
+    page: std::collections::VecDeque<(ShardRef, u64, bool)>,
     /// Cursor for the next page; `None` when the stream ended.
     next: Option<ShardRef>,
     started: bool,
@@ -38,6 +39,12 @@ pub struct ChunkPresence {
     /// Per member (index == shard index): payload length if the member lists
     /// the shard.
     pub present: Vec<Option<u64>>,
+    /// Per member: the listed record is retired (ADR-0028, under any
+    /// incarnation). It is still readable and still a source; a member
+    /// move does not count it as the member's shard, and writes the shard
+    /// again (Phase 3.12 review: a former member made a member again must
+    /// not need a retired record unchanged).
+    pub retired: Vec<bool>,
 }
 
 impl ChunkPresence {
@@ -56,7 +63,6 @@ pub struct GroupWalker<'a> {
     group_id: u64,
     page_size: u32,
     members: Vec<MemberCursor>,
-    retired_absent: bool,
 }
 
 impl<'a> GroupWalker<'a> {
@@ -89,20 +95,7 @@ impl<'a> GroupWalker<'a> {
             group_id: group.id,
             page_size,
             members,
-            retired_absent: false,
         }
-    }
-
-    /// Count a record its node retired (ADR-0028) as absent: for member
-    /// moves, which then write the shard again (Phase 3.12 review: a
-    /// former member made a member again would otherwise need its retired
-    /// record unchanged, and that record could be reclaimed on its first
-    /// retirement's age). Not for verification after a restore, where the
-    /// retired records are exactly what the restored metadata needs.
-    #[must_use]
-    pub fn retired_as_absent(mut self) -> Self {
-        self.retired_absent = true;
-        self
     }
 
     /// Members whose listing failed (presence unknown for the whole walk).
@@ -139,7 +132,6 @@ impl<'a> GroupWalker<'a> {
                 self.members[i].unavailable = true;
                 return;
             };
-            let retired_absent = self.retired_absent;
             let m = &mut self.members[i];
             m.next = page.next;
             // Only this member's own shard index counts as presence.
@@ -148,7 +140,7 @@ impl<'a> GroupWalker<'a> {
                 page.entries
                     .into_iter()
                     .filter(|(s, _)| s.shard_index == own)
-                    .filter(|(s, _)| !(retired_absent && page.retired_any.contains(s))),
+                    .map(|(s, len)| (s, len, page.retired_any.contains(&s))),
             );
             if m.next.is_none() {
                 return;
@@ -169,26 +161,27 @@ impl<'a> GroupWalker<'a> {
         let Some(min) = self
             .members
             .iter()
-            .filter_map(|m| m.page.front().map(|(s, _)| s.chunk_id))
+            .filter_map(|m| m.page.front().map(|(s, _, _)| s.chunk_id))
             .min()
         else {
             return Ok(None);
         };
-        let present = self
+        let (present, retired) = self
             .members
             .iter_mut()
             .map(|m| match m.page.front() {
-                Some((s, len)) if s.chunk_id == min => {
-                    let len = *len;
+                Some((s, len, retired)) if s.chunk_id == min => {
+                    let entry = (Some(*len), *retired);
                     m.page.pop_front();
-                    Some(len)
+                    entry
                 }
-                _ => None,
+                _ => (None, false),
             })
-            .collect();
+            .unzip();
         Ok(Some(ChunkPresence {
             chunk_id: min,
             present,
+            retired,
         }))
     }
 }

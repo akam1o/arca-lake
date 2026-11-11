@@ -913,21 +913,31 @@ impl StorageNode for StorageNodeService {
         let (deleted, was_deferred) = tokio::task::spawn_blocking(move || {
             let _fence = fence;
             let mut d = deferred.lock().unwrap_or_else(PoisonError::into_inner);
-            // A key with no live record (gone, or quarantined: a corrupt
-            // copy is not protected data) is deleted at once, as before
-            // (Phase 3.12 review: its quarantine entry is released).
-            let live = store.locate(&key).map(|l| l.sequence);
-            if d.defers(key.group_id)
-                && let Some(newest) = live
-            {
-                // Retired, not removed (ADR-0028): the record stays readable
-                // until a reclaim proves it unneeded long enough.
-                if if_sequence != 0 && newest != if_sequence {
-                    return Ok((false, true));
+            if d.defers(key.group_id) {
+                if let Some(newest) = store.locate(&key).map(|l| l.sequence) {
+                    // Retired, not removed (ADR-0028): the record stays
+                    // readable until a reclaim proves it unneeded long
+                    // enough.
+                    if if_sequence != 0 && newest != if_sequence {
+                        return Ok((false, true));
+                    }
+                    d.retire(key, newest, now_unix_ms(), incarnation)
+                        .map_err(StorageError::Io)?;
+                    return Ok((true, true));
                 }
-                d.retire(key, newest, now_unix_ms(), incarnation)
-                    .map_err(StorageError::Io)?;
-                return Ok((true, true));
+                // No live record. A quarantined one (a corrupt copy is not
+                // protected data) is removed at once, so that its entry is
+                // released (Phase 3.12 review), but only that record: the
+                // tombstone is conditioned on its sequence, so a write that
+                // lands meanwhile is never deleted (re-review).
+                let Some(quarantined) = store.quarantine_entry(&key).map(|q| q.location.sequence)
+                else {
+                    return Ok((true, false));
+                };
+                if if_sequence != 0 && if_sequence != quarantined {
+                    return Ok((false, false));
+                }
+                return store.delete_if(key, quarantined).map(|r| (r, false));
             }
             drop(d);
             if if_sequence == 0 {
@@ -989,9 +999,18 @@ impl StorageNode for StorageNodeService {
         let skew = self.reclaim_skew_ms;
         let (sequence, observed) = (req.sequence, req.observed_at_ms);
         let incarnation = incarnation_of(&req.incarnation);
+        let keep = req.keep;
         let outcome = tokio::task::spawn_blocking(move || {
             let _fence = fence;
             let mut d = deferred.lock().unwrap_or_else(PoisonError::into_inner);
+            if keep {
+                // Needed: the retirement of exactly this sequence ends, the
+                // record stays (nothing else is checked: keeping is safe).
+                if d.retired(&key).is_some_and(|r| r.sequence == sequence) {
+                    d.reclaimed(&key, sequence).map_err(StorageError::Io)?;
+                }
+                return Ok(Ok(()));
+            }
             let newest = store.locate(&key).map(|l| l.sequence);
             // The record is gone already (a reclaim whose log append
             // failed, or a delete of an earlier release since): its

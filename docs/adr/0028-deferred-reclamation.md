@@ -146,7 +146,10 @@ reclaims only on a confirmation whose metadata observation is at least
    the shard is unneeded (the same attribution reconciliation uses: no
    live chunk places this chunk on this group at this index). If so it
    sends `ReclaimShard(key, sequence, observed_at = t_c)` under the same
-   fence, incarnation and identity checks as a delete.
+   fence, incarnation and identity checks as a delete. A record it finds
+   needed has its retirement ended (`keep`; the record stays, a later
+   delete retires it anew), so that a record needed again through a
+   restore does not stay retired for good.
 3. **Reclaim (node).** The node removes the record only if a pending entry
    with exactly that sequence exists, the newest record of the key is
    still that sequence, the reclaim carries the incarnation the entry was

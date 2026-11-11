@@ -67,6 +67,9 @@ pub struct Deferred {
     cache_groups: HashMap<u64, bool>,
     damaged: bool,
     lines: usize,
+    /// The log's directory entry is durable (it existed at open, or its
+    /// directory was synced since it was created).
+    dir_synced: bool,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -86,6 +89,14 @@ fn unhex(s: &str) -> Option<[u8; 16]> {
         *o = u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()?;
     }
     Some(out)
+}
+
+/// Whether `l` (one line, without its newline) carries its CRC.
+fn line_checks(l: &str) -> bool {
+    l.rsplit_once(' ').is_some_and(|(body, crc)| {
+        u32::from_str_radix(crc, 16).ok()
+            == Some(arca_lake_storage::format::crc32c(body.as_bytes()))
+    })
 }
 
 fn line(body: &str) -> String {
@@ -111,24 +122,47 @@ impl Deferred {
             cache_groups: HashMap::new(),
             damaged: false,
             lines: 0,
+            dir_synced: false,
         };
         match std::fs::read_to_string(&d.path) {
             Ok(mut text) => {
-                // An unterminated last line is an append a crash cut short:
-                // never acknowledged (a line is acknowledged once written
-                // and synced whole). It goes; the rest is read (Phase 3.12
-                // review: it marked the whole log damaged).
+                d.dir_synced = true;
+                // An unterminated last line (Phase 3.12 reviews). If it
+                // checks, it is a whole line that lost its newline: kept,
+                // the newline restored. If not, it is an append a crash cut
+                // short (never acknowledged: a line is acknowledged once
+                // written and synced whole) or damage to the last line,
+                // which cannot be told apart: it is cut, and every cache
+                // role is forgotten with it (an unknown group is durable,
+                // and only a cache write marks one cache again), since a
+                // lost durable role is the one loss that is not safe.
+                let mut forget_cache_roles = false;
                 if !text.is_empty() && !text.ends_with('\n') {
-                    let keep = text.rfind('\n').map_or(0, |i| i + 1);
-                    let cut = OpenOptions::new().write(true).open(&d.path).and_then(|f| {
-                        f.set_len(keep as u64)?;
-                        f.sync_all()
-                    });
-                    if let Err(e) = cut {
-                        tracing::error!(path = %d.path.display(), error = %e, "pending-reclaim log: a torn last line could not be cut: nothing is reclaimed");
+                    let start = text.rfind('\n').map_or(0, |i| i + 1);
+                    let whole = line_checks(&text[start..]);
+                    let fixed = OpenOptions::new()
+                        .write(true)
+                        .open(&d.path)
+                        .and_then(|mut f| {
+                            if whole {
+                                use std::io::{Seek as _, SeekFrom};
+                                f.seek(SeekFrom::End(0))?;
+                                f.write_all(b"\n")?;
+                            } else {
+                                f.set_len(start as u64)?;
+                            }
+                            f.sync_all()
+                        });
+                    if let Err(e) = fixed {
+                        tracing::error!(path = %d.path.display(), error = %e, "pending-reclaim log: an unterminated last line could not be repaired: nothing is reclaimed");
                         d.damaged = true;
                     }
-                    text.truncate(keep);
+                    if whole {
+                        text.push('\n');
+                    } else {
+                        text.truncate(start);
+                        forget_cache_roles = true;
+                    }
                 }
                 for l in text.lines() {
                     d.lines += 1;
@@ -136,6 +170,13 @@ impl Deferred {
                         tracing::error!(path = %d.path.display(), "pending-reclaim log damaged: nothing is reclaimed until it is repaired");
                         d.damaged = true;
                         break;
+                    }
+                }
+                if forget_cache_roles && !d.damaged {
+                    d.cache_groups.retain(|_, cache| !*cache);
+                    if let Err(e) = d.compact() {
+                        tracing::error!(path = %d.path.display(), error = %e, "pending-reclaim log: cache roles not forgotten: nothing is reclaimed");
+                        d.damaged = true;
                     }
                 }
             }
@@ -238,10 +279,14 @@ impl Deferred {
             let _ = f.set_len(before).and_then(|()| f.sync_all());
             return Err(e);
         }
-        if created && let Some(dir) = self.path.parent() {
+        if (created || !self.dir_synced)
+            && let Some(dir) = self.path.parent()
+        {
             // The file's own entry, too (independent review): a crash must
-            // not lose a log whose lines were acknowledged.
+            // not lose a log whose lines were acknowledged. Until it is
+            // synced, every append tries again (re-review).
             File::open(dir)?.sync_all()?;
+            self.dir_synced = true;
         }
         self.lines += 1;
         Ok(())
@@ -691,17 +736,32 @@ mod tests {
     }
 
     #[test]
-    fn a_torn_last_line_is_cut_not_damage() {
+    fn an_unterminated_last_line_is_kept_if_whole_else_cut_with_cache_roles() {
         let dir = tempfile::tempdir().unwrap();
         let good = line(&format!("p {} 5 100 {}", key_fields(&key(1)), hex(&I)));
-        std::fs::write(dir.path().join(FILE), format!("{good}p 1 0101")).unwrap();
+        let cache = line("c 9");
+        // Torn: cut, not damage; the cache role of group 9 is forgotten
+        // (a lost durable role must not leave it cache).
+        std::fs::write(dir.path().join(FILE), format!("{good}{cache}p 1 0101")).unwrap();
         let d = Deferred::open(dir.path(), 1000);
         assert!(!d.damaged());
         assert_eq!(d.retired(&key(1)).unwrap().sequence, 5);
+        assert!(d.defers(9), "a cache role survived a torn last line");
+        let d = Deferred::open(dir.path(), 1000);
+        assert!(!d.damaged() && d.defers(9), "forgotten for good");
+        // Whole but unterminated: kept, its newline restored.
+        let whole = line(&format!("p {} 6 200 {}", key_fields(&key(2)), hex(&I)));
+        std::fs::write(
+            dir.path().join(FILE),
+            format!("{good}{}", whole.trim_end_matches('\n')),
+        )
+        .unwrap();
+        let d = Deferred::open(dir.path(), 1000);
+        assert!(!d.damaged());
+        assert_eq!(d.retired(&key(2)).unwrap().sequence, 6);
         assert_eq!(
             std::fs::read_to_string(dir.path().join(FILE)).unwrap(),
-            good,
-            "the torn line is cut"
+            format!("{good}{whole}")
         );
     }
 }

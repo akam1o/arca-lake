@@ -536,12 +536,13 @@ async fn reconstruct_member<S: KvStore>(
         epoch: group.epoch,
         ..RepairReport::default()
     };
-    let mut walker =
-        GroupWalker::new(clients, nodes, group, cursor, opts.page_size).retired_as_absent();
+    let mut walker = GroupWalker::new(clients, nodes, group, cursor, opts.page_size);
     let mut first_unrebuilt: Option<ControlError> = None;
     while let Some(chunk) = walker.next().await? {
         let cid = chunk.chunk_id;
-        if chunk.present[index].is_some() && !corrupt.contains(&cid) {
+        // The target's record counts only if not retired (ADR-0028 H4,
+        // Phase 3.12 review): a retired one is written again.
+        if chunk.present[index].is_some() && !chunk.retired[index] && !corrupt.contains(&cid) {
             report.skipped += 1;
             persist_cursor(meta, group, index, cid).await?;
             continue;
@@ -923,8 +924,7 @@ async fn check_completeness<S: KvStore>(
     opts: &RepairOptions,
 ) -> Result<Completeness, ControlError> {
     let mut c = Completeness::default();
-    let mut walker =
-        GroupWalker::new(clients, nodes, group, None, opts.page_size).retired_as_absent();
+    let mut walker = GroupWalker::new(clients, nodes, group, None, opts.page_size);
     while let Some(chunk) = walker.next().await? {
         c.chunks += 1;
         // A chunk that no live generation places in this group is an
@@ -932,7 +932,11 @@ async fn check_completeness<S: KvStore>(
         // failed here and was placed elsewhere): reconciliation's, not a
         // gap of the move (Phase 3.10 audit: such a leftover held a move
         // `Repairing` until reconciliation removed it).
-        if chunk.present.iter().any(Option::is_none)
+        // The target's record counts only if not retired (ADR-0028 H4);
+        // the other members' retired records are still theirs (after a
+        // restore they are exactly what the restored metadata needs).
+        let target_retired = chunk.retired.get(index).copied().unwrap_or(false);
+        if (chunk.present.iter().any(Option::is_none) || target_retired)
             && placed_here(meta, group, &chunk.chunk_id).await?
         {
             c.missing += 1;

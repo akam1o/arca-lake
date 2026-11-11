@@ -727,3 +727,61 @@ async fn a_member_moved_away_and_back_writes_its_shard_again() {
     assert_eq!(s3::get(&c.backend, BUCKET, "x").await.unwrap().0, data);
     c.shutdown().await;
 }
+
+/// After a restore, the restored object's shards are retired on every
+/// member (deleted after the backup point; Phase 3.12 re-review). A member
+/// move then finds the chunk and rebuilds it on the new member from the
+/// retired copies (they are still the other members' shards), and only
+/// then completes. A reclaim pass finds the records needed and ends their
+/// retirements.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_a_restore_a_member_move_rebuilds_from_retired_copies() {
+    let mut c = cluster(RETENTION).await;
+    let data = put(&c, "x", 11).await;
+    let backup = snapshot(&c).await;
+    s3::delete(&c.backend, BUCKET, "x").await.unwrap();
+    let r = c.gc(now_ms() + 3_600_000, 0).await;
+    assert!(r.collected >= 1, "{r:?}");
+    restore(&c, &backup).await;
+    c.restart_backend().await.unwrap();
+    recover(&c, 6000).await;
+    c.restart_backend().await.unwrap();
+    let g = c.groups().await.remove(0);
+    let spare = c.add_node().await;
+    let r = c
+        .repair_with(g.id, 0, spare, async |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(r.complete, "{r:?}");
+    assert_eq!(
+        r.reconstructed, 1,
+        "the chunk was not rebuilt on the new member: {r:?}"
+    );
+    assert_eq!(c.shard_count(spare, g.id), 1);
+    assert_eq!(s3::get(&c.backend, BUCKET, "x").await.unwrap().0, data);
+    // Needed (judged once due): the retirements end.
+    tokio::time::sleep(RETENTION + Duration::from_millis(500)).await;
+    let r = c.reclaim().await;
+    assert!(r.needed >= 2, "{r:?}");
+    assert_eq!(r.reclaimed, 0, "{r:?}");
+    for i in 0..c.nodes.len() {
+        let (p, _, _) = c
+            .clients
+            .list_pending(&c.nodes[i].addr.to_string(), None, 0)
+            .await
+            .unwrap();
+        let members: Vec<u64> = c.groups().await[0]
+            .members
+            .iter()
+            .map(|m| m.node_id)
+            .collect();
+        if members.contains(&c.nodes[i].id) {
+            assert!(
+                p.is_empty(),
+                "node {i}: a needed record stayed retired: {p:?}"
+            );
+        }
+    }
+    assert_eq!(s3::get(&c.backend, BUCKET, "x").await.unwrap().0, data);
+    c.shutdown().await;
+}

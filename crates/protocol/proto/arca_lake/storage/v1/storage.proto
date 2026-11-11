@@ -160,6 +160,12 @@ message ReclaimShardRequest {
   uint64 node_id = 8;
   bytes node_identity = 9;
   uint64 observed_at_ms = 10;
+  // Phase 3.12 (review): the record is needed (the caller's metadata
+  // places it): its retirement ends, the record stays. Always safe (it only
+  // keeps data); a later delete retires it anew. A retirement of an earlier
+  // incarnation needed by restored metadata would otherwise stay pending
+  // for good.
+  bool keep = 11;
 }
 message ReclaimShardResponse {}
 

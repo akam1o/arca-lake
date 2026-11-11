@@ -304,7 +304,25 @@ below.
 | The backup point is the operator's statement | Low | documented |
 | A put racing a delete can drop a retirement | Low | open (liveness only: reconciliation deletes it again) |
 
-Both reviewers then re-reviewed the fixes (§12.1).
+### 12.1 Re-review
+
+Both reviewers re-reviewed the fixes (the same sessions, read-only).
+Their earlier findings were confirmed fixed or partly fixed as stated
+above. New findings in the fixes, all fixed:
+
+| Finding | Severity | Resolution |
+| --- | --- | --- |
+| Member moves counting every member's retired records as absent: after a restore, a chunk retired on all members was not found, and a move completed without rebuilding it (both reviewers) | High | only the member being rebuilt: the others' retired records are still theirs and are sources (`after_a_restore_a_member_move_rebuilds_from_retired_copies`) |
+| A needed record retired under an earlier incarnation stayed retired for good, re-judged every pass | Medium | the reclaim pass ends the retirement of a record it finds needed (`ReclaimShardRequest.keep`) |
+| The quarantined-record delete could remove a record written meanwhile | High | the tombstone is conditioned on the quarantined record's sequence |
+| The pinned cluster file could take the journal's own name | High | a unique name, created new, nothing replaced |
+| An unterminated last line dropped without regard to an acknowledged durable role | High | kept if it checks; otherwise cut, and every cache role forgotten (a lost durable role is the one unsafe loss) |
+| Directory sync skipped on a retry after its failure | Medium | retried until it succeeds |
+| The protection re-check cannot see a node that was briefly at a shorter retention since the backup | Medium | documented (residual of H3) |
+| A record retired then quarantined loses the retention | Low | accepted: quarantine follows a checksum failure; the copy is corrupt |
+| An unknown group's first cache write marks it cache although it holds durable records (group id reused after a restore, or a log removed) | Low | open (R-106) |
+
+A second re-review of these fixes is in §12.2.
 
 ## 13. Performance
 
