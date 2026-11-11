@@ -48,6 +48,16 @@ fn env() -> Option<Env> {
     })
 }
 
+fn env_310() -> Option<Env> {
+    std::env::var_os("ARCA_FDB_TESTS")?;
+    Some(Env {
+        old: PathBuf::from(std::env::var_os("ARCA_BIN_PREV_310")?),
+        new: PathBuf::from(std::env::var_os("ARCA_BIN_CUR")?),
+        cluster_file: PathBuf::from(std::env::var_os("ARCA_FDB_CLUSTER_FILE")?),
+        tmp: tempfile::tempdir().ok()?,
+    })
+}
+
 async fn live(clients: &NodeClients, addrs: &[String]) -> Vec<u64> {
     let mut out = Vec::new();
     for a in addrs {
@@ -499,4 +509,234 @@ async fn upgrade_from_and_rollback_to_the_previous_release() {
         "a shard was deleted between the restore and recovery begin"
     );
     drop(c);
+}
+
+/// `admin restore`'s restorer here: the snapshot written back.
+struct SnapRestorer<S> {
+    meta: std::sync::Arc<S>,
+    snap: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl<S: KvStore + 'static> arca_lake_controller::managed_restore::Restorer for SnapRestorer<S> {
+    fn destination(&self) -> String {
+        "previous-release test store".into()
+    }
+
+    async fn restore(&self, _source: &str, _version: u64) -> Result<(), String> {
+        let snap = self.snap.clone();
+        transact(self.meta.as_ref(), snap, |tx, snap| {
+            Box::pin(async move {
+                for (k, v) in snap {
+                    tx.set(k, v);
+                }
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// Phase 3.11 scenario 18 and the old-binary rejoin, with real binaries
+/// (`ARCA_BIN_PREV_310`: the Phase 3.10 release, `3f67cb8`):
+/// - one node rolled back to the previous release (allowed before
+///   finalize): `admin restore` refuses before anything is cleared (its
+///   disk cannot be verified: no identity); back on this release, the
+///   same journal resumes and completes;
+/// - a node removed with `keep-removed`, then started on the previous
+///   release's binary from its own disk, still holds its fence closed and
+///   held, and `admin node rejoin` refuses it.
+#[tokio::test]
+async fn a_managed_restore_and_a_removed_node_with_a_previous_release_binary() {
+    use arca_lake_controller::managed_restore as mr;
+    use arca_lake_metadata::ops::{compat, node_lifecycle};
+    // The Phase 3.10 release as the previous one (the CI job's previous
+    // release is Phase 3.9, which this scenario does not apply to).
+    let Some(env) = env_310() else {
+        eprintln!("ARCA_FDB_TESTS / ARCA_BIN_PREV_310 / ARCA_BIN_CUR not set; skipping");
+        return;
+    };
+    let meta = std::sync::Arc::new(
+        arca_lake_metadata::fdb::FdbKv::open_with_timeout(env.cluster_file.to_str(), 5_000)
+            .expect("open FoundationDB"),
+    );
+    meta.clear_range_blocking(&keys::all_range()).await.unwrap();
+    let clients = NodeClients::new(Duration::from_secs(5));
+    let dirs: Vec<PathBuf> = (0..3)
+        .map(|i| env.tmp.path().join(format!("node{i}")))
+        .collect();
+    let addrs: Vec<String> = (0..3).map(|_| free_addr()).collect();
+    let nodes = dirs
+        .iter()
+        .zip(&addrs)
+        .enumerate()
+        .map(|(i, (d, a))| env.spawn(&format!("node{i}-cur"), true, &Env::node_args(d, a)))
+        .collect();
+    let mut c = Cluster {
+        env: &env,
+        dirs,
+        addrs,
+        nodes,
+    };
+    for a in &c.addrs {
+        wait_tcp(a, Duration::from_secs(20)).await;
+    }
+    env.admin_ok(true, &["init"]);
+    for (i, a) in c.addrs.iter().enumerate() {
+        env.admin_ok(
+            true,
+            &[
+                "register-node",
+                "--address",
+                a,
+                "--label",
+                &format!("node=n{i}"),
+                "--label",
+                "device_class=hdd",
+            ],
+        );
+    }
+    env.admin_ok(
+        true,
+        &[
+            "create-groups",
+            "--tier",
+            "default",
+            "--device-class",
+            "hdd",
+            "--failure-domain",
+            "node",
+            "--count",
+            "1",
+            "--k",
+            "2",
+            "--m",
+            "1",
+            "--chunk-bytes",
+            &(256u64 << 10).to_string(),
+            "--small-threshold",
+            "0",
+        ],
+    );
+    let mut ctl = env.spawn("ctl-cur", true, &env.controller_args("ctl-cur"));
+    let (mut gw, s3) = gateway(&env, "gw-cur", true).await;
+    s3.create_bucket().bucket(BUCKET).send().await.unwrap();
+    let mut committed: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..6u64 {
+        let d = body(600 << 10, 100 + i);
+        put(&s3, &format!("r{i}"), d.clone()).await;
+        committed.push((format!("r{i}"), d));
+    }
+    // The leader gives every node its identity.
+    wait_until(
+        "identities acknowledged",
+        Duration::from_secs(60),
+        async || {
+            node_lifecycle::identities(meta.as_ref())
+                .await
+                .is_ok_and(|ids| ids.len() == 3 && ids.values().all(|i| i.acknowledged))
+        },
+    )
+    .await;
+    let backup = snapshot(meta.as_ref()).await;
+    ctl.kill();
+    gw.kill();
+    let stopped: Vec<String> = compat::procs(meta.as_ref())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+
+    // ---- Scenario 18: one node on the previous release.
+    c.node(2, false).await;
+    let restorer = SnapRestorer {
+        meta: std::sync::Arc::clone(&meta),
+        snap: backup,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("restore.journal");
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
+    };
+    let plan = mr::plan(
+        meta.as_ref(),
+        &clients,
+        "snapshot",
+        1,
+        None,
+        &mr::Restorer::destination(&restorer),
+        &journal,
+        now(),
+    )
+    .await
+    .unwrap();
+    let e = mr::run(
+        &meta,
+        &clients,
+        &restorer,
+        &journal,
+        &plan.journal.token,
+        &stopped,
+        &[],
+        now,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("cannot be verified"), "{e}");
+    assert!(
+        compat::cluster_state(meta.as_ref())
+            .await
+            .unwrap()
+            .is_some(),
+        "cleared with a previous-release node"
+    );
+    // Back on this release: the same journal resumes and completes.
+    c.node(2, true).await;
+    let j = mr::run(
+        &meta,
+        &clients,
+        &restorer,
+        &journal,
+        &plan.journal.token,
+        &stopped,
+        &[],
+        now,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("resume: {e}"));
+    assert_eq!(j.last(), Some(mr::Step::Verified));
+
+    // ---- A removed node started on the previous release's binary.
+    let id1 = cluster_node_id(meta.as_ref(), &c.addrs[1]).await;
+    assert!(
+        arca_lake_controller::node_ops::keep_removed(meta.as_ref(), &clients, id1, false, now())
+            .await
+            .unwrap()
+    );
+    c.node(1, false).await;
+    let h = clients.health(&c.addrs[1]).await.unwrap();
+    assert!(
+        !h.delete_fence_open && h.delete_fence_hold,
+        "the previous binary dropped the hold: {h:?}"
+    );
+    let e = arca_lake_controller::node_ops::rejoin(meta.as_ref(), &clients, id1, true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("does not report an identity"), "{e}");
+    drop(committed);
+}
+
+async fn cluster_node_id<S: KvStore>(meta: &S, addr: &str) -> u64 {
+    arca_lake_metadata::ops::cluster::list_nodes(meta)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.address == addr)
+        .unwrap()
+        .id
 }

@@ -167,14 +167,25 @@ cmd_setup() {
   issue admin admin op
   for g in gw-a gw-b; do issue "$g" gateway "$g"; done
   for c in ctl-a ctl-b; do issue "$c" controller "$c"; done
-  admin init > "$RUN/logs/init.log" 2>&1
+  local try
+  for try in 1 2 3 4 5; do
+    admin init > "$RUN/logs/init.log" 2>&1 && break
+    sleep 3
+  done
   log "setup: nodes"
   for n in $NODES; do
     local class=hdd addr="127.0.0.1:${LISTEN[$n]}"
     case "$n" in c*) class=nvme ;; esac
     [ "$n" = "$PROXIED" ] && addr="127.0.0.1:$PROXY_PORT"
-    admin register-node --address "$addr" --label "node=$n" --label "device_class=$class" \
-      | sed -nE 's/^node ([0-9]+) registered.*/\1/p' > "$RUN/ids/$n"
+    # Retried: a commit outcome unknown on a database that is still
+    # settling (registration is idempotent by address).
+    local try
+    for try in 1 2 3 4 5; do
+      admin register-node --address "$addr" --label "node=$n" --label "device_class=$class" \
+        | sed -nE 's/^node ([0-9]+) registered.*/\1/p' > "$RUN/ids/$n"
+      [ -s "$RUN/ids/$n" ] && break
+      sleep 3
+    done
     issue "$n" node "$(node_id "$n")"
     start_node "$n"
   done

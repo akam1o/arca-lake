@@ -24,8 +24,10 @@
 #      write_rejected or recovery_only; then a leader kill, a gateway kill
 #      and a node restart (soak24.sh fault 2, 1, 0), each followed by a
 #      verified read of every acknowledged object and a probe write; the
-#      state after each fault must not be less strict than before it;
-#      then the data is deleted and writes must come back on their own.
+#      durable tier's state after each fault must not be less strict than
+#      before it (admission-transitions.log; the gauge is the strictest
+#      tier's, the cache tier included); then the data is deleted and
+#      writes must come back on their own.
 #
 #   RUN=~/arca-p36 OUT=~/arca-p36-out NODE_DATA_DIR=/data/p36 capacity-tests.sh A B C D
 #
@@ -230,7 +232,9 @@ test_E() {
   for k in 2 1 0; do
     local before; before="$(state)"
     say "E: fault $k (state before ${before:-none})"
-    bash "$SOAK" fault "$k" >> "$d/faults.log" 2>&1
+    # The restarted processes keep the cap (a node restarted without it
+    # has room again: not a relaxation under test).
+    NODE_EXTRA_ARGS="--capacity-bytes $ecap" bash "$SOAK" fault "$k" >> "$d/faults.log" 2>&1
     sleep 60
     local after; after="$(state)"
     echo "{\"fault\":$k,\"before\":${before:-null},\"after\":${after:-null}}" >> "$d/fault-states.jsonl"

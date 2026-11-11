@@ -1,0 +1,14 @@
+2026-11-11T13:22:58Z setup: FoundationDB (3 processes, TLS)
+2026-11-11T13:23:04Z setup: PKI
+2026-11-11T13:23:04Z setup: nodes
+2026-11-11T13:23:04.471708Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=/home/<user>/p311-capE-run/fdb/pki/ca/ca.pem cert=/home/<user>/p311-capE-run/fdb/pki/admin/cert.pem
+2026-11-11T13:23:04.533400Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=/home/<user>/p311-capE-run/fdb/pki/ca/ca.pem cert=/home/<user>/p311-capE-run/fdb/pki/admin/cert.pem
+2026-11-11T13:23:04.602101Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=/home/<user>/p311-capE-run/fdb/pki/ca/ca.pem cert=/home/<user>/p311-capE-run/fdb/pki/admin/cert.pem
+2026-11-11T13:23:04.681230Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=/home/<user>/p311-capE-run/fdb/pki/ca/ca.pem cert=/home/<user>/p311-capE-run/fdb/pki/admin/cert.pem
+2026-11-11T13:23:04.821061Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=/home/<user>/p311-capE-run/fdb/pki/ca/ca.pem cert=/home/<user>/p311-capE-run/fdb/pki/admin/cert.pem
+2026-11-11T13:23:04.882532Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=/home/<user>/p311-capE-run/fdb/pki/ca/ca.pem cert=/home/<user>/p311-capE-run/fdb/pki/admin/cert.pem
+2026-11-11T13:23:07.955572Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=/home/<user>/p311-capE-run/fdb/pki/ca/ca.pem cert=/home/<user>/p311-capE-run/fdb/pki/admin/cert.pem
+2026-11-11T13:23:08.004269Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=/home/<user>/p311-capE-run/fdb/pki/ca/ca.pem cert=/home/<user>/p311-capE-run/fdb/pki/admin/cert.pem
+2026-11-11T13:23:08.056201Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=/home/<user>/p311-capE-run/fdb/pki/ca/ca.pem cert=/home/<user>/p311-capE-run/fdb/pki/admin/cert.pem
+2026-11-11T13:23:08Z setup: controllers and gateways
+2026-11-11T13:23:13Z setup: done

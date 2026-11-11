@@ -183,12 +183,56 @@ Interpretation (not measured):
 - Two rounds per configuration; differences within the spread between
   rounds are not significant.
 
-## 7. Results pending in this document
+## 7. Capacity state × failover with real processes (host A)
 
-- Capacity state × failover with real processes;
-- scenario 18 and old-binary rejoin with previous-release binaries.
+`benchmarks/linux/capacity-tests.sh E` on the soak layout (`soak24.sh`:
+three FoundationDB processes with TLS, four durable nodes capped at
+512 MiB and two cache nodes, two controllers, two gateways, mutual TLS);
+node and FoundationDB data on a separate disk. Results:
+`benchmarks/linux/results/phase311-capacity-E` (sanitized).
 
-## 8. Flakes seen
+Measured:
+
+- The fill reached write_rejected in the durable tier ("no group has
+  room") after about 35 s and stayed there; 671 objects acknowledged.
+- A leader kill, a gateway kill and a node restart (`soak24.sh fault`
+  2, 1, 0), one after the other in that state: after each, all 671
+  acknowledged objects read back whole (0 missing, 0 wrong), and the
+  durable tier stayed write_rejected (admission transitions: no change
+  until the drain). The leader's gauge (the strictest tier) went 3→4,
+  4→4, 4→4: never less strict across a fault.
+- After the drain the durable tier recovered by itself (throttled at
+  66.5 % usable free, then warning); the recovery load's 464 objects read
+  back whole; it then filled the tier to write_rejected again.
+
+Harness corrections found on the way (not product faults): the first
+attempt stopped in setup on a commit outcome unknown (1021) on the
+freshly created database (now retried); the second restarted the node
+without its capacity cap (its room was real; the cap is now passed), and
+the gauge's 4→3 after the gateway kill came from the cache tier
+recovering by eviction with space freed (the check now follows the
+durable tier).
+
+## 8. Scenario 18 and the old-binary rejoin (host A, real binaries)
+
+`it/previous_release.rs::a_managed_restore_and_a_removed_node_with_a_previous_release_binary`
+with the Phase 3.10 release (`3f67cb8`) as `ARCA_BIN_PREV_310`:
+
+- with one node rolled back to the 3.10 binary (allowed before
+  finalize), `admin restore` refuses before anything is cleared: the
+  node's disk cannot be verified (it reports no identity); back on 3.11,
+  the same journal resumes and completes. With the check removed the
+  restore goes ahead (mutation run);
+- a node removed with `keep-removed`, then started on the 3.10 binary
+  from its own disk, still holds its fence closed and held, and `admin
+  node rejoin` refuses it (no identity).
+
+The existing `upgrade_from_and_rollback_to_the_previous_release` (3.9 as
+the previous release, as in CI) passes with the 3.11 binaries. A restore
+of a cluster with earlier-release nodes is not covered by `admin
+restore`: the manual runbook applies.
+
+## 9. Flakes seen
 
 R-77 `parallel_read::population_retried_after_resets_records_each_chunk_once`:
 3 of 80 isolated runs failed on a validation host (the test's injected

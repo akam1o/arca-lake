@@ -1,0 +1,129 @@
+2026-11-11T13:23:08.110044Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=/home/<user>/p311-capE-run/fdb/pki/ca/ca.pem cert=/home/<user>/p311-capE-run/fdb/pki/controller/cert.pem
+2026-11-11T13:23:08.112250Z  INFO arca_lake: mutual TLS enabled for node RPCs identity=spiffe://soak.arca-lake.invalid/controller/ctl-b not_after=1795007884
+2026-11-11T13:23:08.123100Z  INFO arca_lake_controller::process: controller startup gate passed controller=ctl-b schema=Some(3) schema_write=Some(3) format_write=Some(2) phase="Active" incarnation=01a1cac6bc7370f3b7c6c1a82cd37632
+2026-11-11T13:23:08.123195Z  INFO arca_lake: controller metrics endpoint addr=127.0.0.1:9551
+2026-11-11T13:29:28.353724Z  INFO arca_lake_controller::process: acquired leadership controller=ctl-b token=2
+2026-11-11T13:29:28.364852Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:29:28.412633Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="write_rejected" reason=write_rejected (holding; no group has room (2 excluded))
+2026-11-11T13:29:28.412657Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="write_rejected" reason=write_rejected (holding; no group has room (4 excluded))
+2026-11-11T13:29:28.412663Z  WARN arca_lake_controller::admission: write admission state changed tier=fast state="recovery_only" reason=0.0 % usable free, below 2.0 %
+2026-11-11T13:29:28.496078Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 268435456, usage_after: 186646528, evicted: 39, skipped_pinned: 0, delete_failures: 78, over_watermark: false }
+2026-11-11T13:29:31.699595Z  INFO arca_lake_controller::process: reconcile pass deleted=0 unreachable=0
+2026-11-11T13:29:38.377981Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:29:38.422365Z  INFO arca_lake_controller::process: delete fence changed generation=3 open=true reason=opened by the leader of term 2
+2026-11-11T13:29:48.392976Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:29:58.402959Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:30:08.413078Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:30:18.423604Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:30:28.433586Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:30:38.444721Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:30:48.457549Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:30:58.467101Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:31:08.480971Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:31:18.495261Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:31:28.506230Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:31:38.517463Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:31:48.527797Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:31:58.538525Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:32:08.549275Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:32:18.559974Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:32:28.572421Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:32:38.583221Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:32:48.594044Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:32:58.607034Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:33:08.619064Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:33:18.628229Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:33:28.639616Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:33:38.654122Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:33:48.664992Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:33:58.675358Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:34:08.689399Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:34:18.703152Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:34:28.712351Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:34:38.726985Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:34:48.739208Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:34:58.750428Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:35:08.760918Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:35:18.771838Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:35:28.781922Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:35:38.793664Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:35:48.804820Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:35:58.815200Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:36:08.826125Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:36:18.838368Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:36:29.521453Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 671, shards_deleted: 2191, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:36:39.534840Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:36:49.556995Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:36:59.571399Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:37:09.581919Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:37:19.592169Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:37:29.606506Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:37:39.619808Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:37:41.104812Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="throttled" reason=throttled (recovered; 66.5 % usable free)
+2026-11-11T13:37:49.630657Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:37:51.157571Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="throttled" reason=throttled (recovered; 64.7 % usable free)
+2026-11-11T13:37:59.640948Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:38:09.651771Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:38:19.661334Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:38:29.677741Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:38:39.697295Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:38:49.707715Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:38:51.487947Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="warning" reason=warning (recovered; 57.3 % usable free)
+2026-11-11T13:38:59.722573Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 1, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:39:01.539717Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="warning" reason=warning (recovered; 52.4 % usable free)
+2026-11-11T13:39:09.732568Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:39:19.747536Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:39:29.762166Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:39:39.775269Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:39:49.785796Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:39:51.816398Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="throttled" reason=full in 1396 s at the recent rate
+2026-11-11T13:39:51.816422Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="throttled" reason=full in 1396 s at the recent rate
+2026-11-11T13:39:59.800191Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:40:09.811193Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:40:19.825285Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:40:29.836012Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:40:39.847268Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:40:42.109493Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="write_rejected" reason=no group has room (2 excluded)
+2026-11-11T13:40:42.109516Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="write_rejected" reason=no group has room (4 excluded)
+2026-11-11T13:40:49.861975Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:40:59.880869Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 1, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:41:09.899073Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 2, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:41:19.917184Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 1, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:41:29.930076Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:41:39.948585Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 1, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:41:49.969110Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 3, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:41:59.983959Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:42:09.994425Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:42:20.008714Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:42:30.019112Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:42:40.031416Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:42:50.045402Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:43:00.055724Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:43:10.069006Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:43:20.083813Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:43:30.097757Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:43:40.112338Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:43:50.126036Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:44:00.140027Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:44:10.154851Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:44:20.169523Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:44:30.190730Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:44:34.905344Z  INFO arca_lake_controller::process: reconcile pass deleted=576 unreachable=0
+2026-11-11T13:44:40.201532Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:44:50.215748Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:45:00.229587Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:45:10.243691Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:45:20.257728Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:45:30.267409Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:45:40.282644Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:45:43.714682Z  WARN arca_lake_controller::admission: write admission state changed tier=fast state="write_rejected" reason=write_rejected (recovered; 67.4 % usable free)
+2026-11-11T13:45:50.297915Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:46:00.312903Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:46:10.326601Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:46:20.340972Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:46:30.355111Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:46:40.369621Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:46:50.382317Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }
+2026-11-11T13:46:54.102428Z  WARN arca_lake_controller::admission: write admission state changed tier=fast state="throttled" reason=throttled (recovered; 67.4 % usable free)
+2026-11-11T13:46:59.265370Z  INFO arca_lake_controller::process: evict pass tier=fast r=EvictReport { usage_before: 268435456, usage_after: 186646528, evicted: 39, skipped_pinned: 0, delete_failures: 0, over_watermark: false }
+2026-11-11T13:47:00.394727Z  INFO arca_lake_controller::process: gc pass report=GcReport { expired: 0, collected: 0, shards_deleted: 0, skipped_referenced: 0, deferred: 0, more: false }

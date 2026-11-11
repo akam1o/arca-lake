@@ -1,0 +1,18 @@
+2026-11-11T13:23:08.340226Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="normal" reason=normal (holding; 100.0 % usable free)
+2026-11-11T13:23:08.340250Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="normal" reason=normal (holding; 100.0 % usable free)
+2026-11-11T13:23:08.340253Z  WARN arca_lake_controller::admission: write admission state changed tier=fast state="normal" reason=normal (holding; 100.0 % usable free)
+2026-11-11T13:23:48.687063Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="write_rejected" reason=no group has room (2 excluded)
+2026-11-11T13:23:48.687087Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="write_rejected" reason=no group has room (4 excluded)
+2026-11-11T13:29:28.412633Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="write_rejected" reason=write_rejected (holding; no group has room (2 excluded))
+2026-11-11T13:29:28.412657Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="write_rejected" reason=write_rejected (holding; no group has room (4 excluded))
+2026-11-11T13:29:28.412663Z  WARN arca_lake_controller::admission: write admission state changed tier=fast state="recovery_only" reason=0.0 % usable free, below 2.0 %
+2026-11-11T13:37:41.104812Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="throttled" reason=throttled (recovered; 66.5 % usable free)
+2026-11-11T13:37:51.157571Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="throttled" reason=throttled (recovered; 64.7 % usable free)
+2026-11-11T13:38:51.487947Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="warning" reason=warning (recovered; 57.3 % usable free)
+2026-11-11T13:39:01.539717Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="warning" reason=warning (recovered; 52.4 % usable free)
+2026-11-11T13:39:51.816398Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="throttled" reason=full in 1396 s at the recent rate
+2026-11-11T13:39:51.816422Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="throttled" reason=full in 1396 s at the recent rate
+2026-11-11T13:40:42.109493Z  WARN arca_lake_controller::admission: write admission state changed tier=cold state="write_rejected" reason=no group has room (2 excluded)
+2026-11-11T13:40:42.109516Z  WARN arca_lake_controller::admission: write admission state changed tier=default state="write_rejected" reason=no group has room (4 excluded)
+2026-11-11T13:45:43.714682Z  WARN arca_lake_controller::admission: write admission state changed tier=fast state="write_rejected" reason=write_rejected (recovered; 67.4 % usable free)
+2026-11-11T13:46:54.102428Z  WARN arca_lake_controller::admission: write admission state changed tier=fast state="throttled" reason=throttled (recovered; 67.4 % usable free)
