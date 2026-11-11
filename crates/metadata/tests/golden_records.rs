@@ -20,7 +20,9 @@ use arca_lake_metadata::ops::integrity::{
     Finding, ManifestCursor, RepairState, RepairTask, ScrubCursor, ScrubPhase,
 };
 use arca_lake_metadata::ops::membership::{NodeLifecycle, NodeStateRecord, ReplaceRequest};
-use arca_lake_metadata::ops::rebalance::{RebalancePacing, RebalancePlan, RebalanceState};
+use arca_lake_metadata::ops::rebalance::{
+    RebalanceInTransit, RebalancePacing, RebalancePlan, RebalanceState,
+};
 use arca_lake_metadata::ops::recovery::{
     Acceptance, AffectedObject, DataLossRecord, FinalizeAudit, NodeCapRecord, RecoveryPhase,
     RestoreCounts, RestoreCursor, RestoreReport,
@@ -592,6 +594,12 @@ fn cases() -> Vec<Case> {
                     store_epoch: 3,
                     sequence: 4,
                 }],
+            },
+        ),
+        case(
+            "RebalanceInTransit",
+            RebalanceInTransit {
+                entries: vec![(1, 4 << 20, 9 << 20, 99), (2, 7, 0, 100)],
             },
         ),
     ]

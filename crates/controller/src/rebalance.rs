@@ -38,7 +38,16 @@
 //!   not: client writes keep the room they are admitted on.
 //!
 //! The source space comes back once reconciliation deletes the source
-//! shards and compaction reclaims their segments.
+//! shards, the nodes reclaim them (after their retention, ADR-0028) and
+//! compaction reclaims their segments.
+//!
+//! Units (Phase 3.12): a group's room is its fullest member's headroom, so
+//! a plan's need and a chunk's effect are counted per member: a chunk of
+//! `len` bytes takes one shard of `len / k` on every member of the target
+//! and gives as much back on every member of the source
+//! ([`member_bytes`]). Until it comes back, the source's room is counted
+//! with what its moves will give back (the in-transit record): a plan made
+//! before that would otherwise move again what was moved, then back.
 
 use std::collections::HashMap;
 
@@ -108,12 +117,30 @@ pub struct Pressure {
     pub tiering_active: bool,
 }
 
+/// Bytes every member of `group` takes for a chunk of `len` bytes (one
+/// shard, at the store's 4 KiB alignment): what a move of it changes in the
+/// room of each member of the source and the target, the unit of a group's
+/// room.
+#[must_use]
+pub fn member_bytes(group: &GroupRecord, len: u64) -> u64 {
+    len.div_ceil(u64::from(group.data_shards.max(1)))
+        .next_multiple_of(4096)
+}
+
+/// Whether a move whose shards take `per_member` bytes inverts a pair
+/// whose rooms differ by `difference`: the source gains what the target
+/// loses, so the difference shrinks by twice that.
+#[must_use]
+pub fn inverts(per_member: u64, difference: u64) -> bool {
+    per_member.saturating_mul(2) >= difference
+}
+
 /// Room every member of `target` must keep after a shard of a chunk of
 /// `len` bytes (the placement threshold), and that shard's length.
 fn target_floor(policy: &RebalancePolicy, target: &GroupRecord, len: u64) -> (u64, u64) {
     let k = u64::from(target.data_shards.max(1));
     let floor = (policy.max_chunk_bytes / k).saturating_mul(policy.group_min_shards);
-    (floor, len.div_ceil(k).next_multiple_of(4096))
+    (floor, member_bytes(target, len))
 }
 
 /// Whether every member of `target` takes a shard of a `len`-byte chunk
@@ -205,10 +232,27 @@ pub fn plans(
     policy: &RebalancePolicy,
     current: Option<&RebalancePlan>,
 ) -> Vec<RebalancePlan> {
+    plans_with(groups, record, policy, current, &|_, _| 0)
+}
+
+/// [`plans`] with each group's room counted with what is coming back to it
+/// (`coming_back(group, room)`, per member: the in-transit record).
+#[must_use]
+pub fn plans_with(
+    groups: &[GroupRecord],
+    record: &AdmissionRecord,
+    policy: &RebalancePolicy,
+    current: Option<&RebalancePlan>,
+    coming_back: &dyn Fn(u64, u64) -> u64,
+) -> Vec<RebalancePlan> {
     let room: HashMap<u64, u64> = record
         .tiers
         .iter()
-        .flat_map(|t| t.group_room.iter().map(|g| (g.group, g.room)))
+        .flat_map(|t| {
+            t.group_room
+                .iter()
+                .map(|g| (g.group, g.room.saturating_add(coming_back(g.group, g.room))))
+        })
         .collect();
     let by_id: HashMap<u64, &GroupRecord> = groups.iter().map(|g| (g.id, g)).collect();
     let eligible = |g: &GroupRecord| g.state == GroupState::Active && !g.is_cache();
@@ -365,7 +409,15 @@ pub async fn run_once_with<S: KvStore>(
     }
     let mut pacing = rebalance::pacing(meta).await?;
     pacing.settling.retain(|(_, until)| *until > now_ms);
-    let all = plans(&groups, &record, policy, state.plan.as_ref());
+    let mut transit = rebalance::in_transit(meta).await?;
+    let reported: HashMap<u64, u64> = record
+        .tiers
+        .iter()
+        .flat_map(|t| t.group_room.iter().map(|g| (g.group, g.room)))
+        .collect();
+    let all = plans_with(&groups, &record, policy, state.plan.as_ref(), &|g, room| {
+        transit.coming_back(g, room, now_ms)
+    });
     let settling = !all.is_empty()
         && all
             .iter()
@@ -402,6 +454,8 @@ pub async fn run_once_with<S: KvStore>(
     let coders = Coders::default();
     let mut after = state.cursor;
     let mut examined = 0usize;
+    // Bytes per member moved out of the plan's source this pass.
+    let mut moved_member = 0u64;
     for p in candidates {
         let tier_state = record.tier(&p.tier).map_or(0, |t| t.state);
         if tier_state >= 2 {
@@ -451,7 +505,6 @@ pub async fn run_once_with<S: KvStore>(
         } else {
             policy.bytes_per_pass
         };
-        let budget = per_pass.min(pacing.remaining_bytes);
         let mut spent = 0u64;
         let mut found = 0u64;
         let started_at_start = after.is_none();
@@ -483,16 +536,21 @@ pub async fn run_once_with<S: KvStore>(
                     // chunk larger than the budget would otherwise stop
                     // every pass at the same place), unless moving it
                     // would make the target the fuller group (the next
-                    // pass would move it back).
+                    // pass would move it back). Counted per member, the
+                    // unit of the rooms (Phase 3.12).
+                    let per_member = member_bytes(target, len);
                     let difference = p.target_room.saturating_sub(p.source_room);
-                    if len >= difference {
+                    if inverts(per_member, difference) {
                         // Moving it would invert the pair: leave it, and
                         // keep scanning (stopping here would stop every
                         // pass at the same chunk).
                         report.skipped_chunks += 1;
                         continue;
                     }
-                    if spent > 0 && spent + len > budget {
+                    if spent > 0
+                        && (spent + len > per_pass
+                            || moved_member + per_member > pacing.remaining_bytes)
+                    {
                         report.reason = "pass budget spent".into();
                         stopped = true;
                         break 'pages;
@@ -520,6 +578,7 @@ pub async fn run_once_with<S: KvStore>(
                             report.moved_chunks += 1;
                             report.moved_bytes += len;
                             spent += len;
+                            moved_member += per_member;
                         }
                         Ok(_) => report.skipped_chunks += 1,
                         Err(arca_lake_tiering::TierError::Node { addr, status })
@@ -564,8 +623,24 @@ pub async fn run_once_with<S: KvStore>(
         report.reason = format!("dry run: {}", report.reason);
     } else {
         state.cursor = after;
-        if report.moved_chunks > 0 {
-            pacing.remaining_bytes = pacing.remaining_bytes.saturating_sub(report.moved_bytes);
+        if report.moved_chunks > 0
+            && let Some(p) = &report.plan
+        {
+            // What the source gets back, counted until it shows in its
+            // room (at the latest the nodes' retention and a settle after
+            // now: reconciliation, reclaim, compaction).
+            let retention = retention_of(clients, &nodes, by_id[&p.source]).await;
+            transit.add(
+                p.source,
+                moved_member,
+                reported.get(&p.source).copied().unwrap_or(0),
+                now_ms
+                    .saturating_add(retention)
+                    .saturating_add(policy.settle_ms.saturating_mul(2)),
+                now_ms,
+            );
+            rebalance::put_in_transit(meta, &transit).await?;
+            pacing.remaining_bytes = pacing.remaining_bytes.saturating_sub(moved_member);
             if pacing.remaining_bytes == 0
                 && let Some((tier, ..)) = pacing.plan.take()
             {
@@ -578,6 +653,27 @@ pub async fn run_once_with<S: KvStore>(
     }
     finish(meta, &mut state, &report).await?;
     Ok(report)
+}
+
+/// The longest deferred-reclamation retention of `group`'s members (ms;
+/// a member not answering: a day, the default).
+async fn retention_of(
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+    group: &GroupRecord,
+) -> u64 {
+    let mut longest = 0;
+    for m in &group.members {
+        let r = match nodes.get(&m.node_id) {
+            Some(n) => clients
+                .health(&n.address)
+                .await
+                .map_or(86_400_000, |h| h.reclaim_retention_ms),
+            None => 86_400_000,
+        };
+        longest = longest.max(r);
+    }
+    longest
 }
 
 #[cfg(test)]
@@ -660,5 +756,241 @@ mod tests {
             plans(&sealed, &record(&[(1, 60), (2, 100)]), &p, None),
             Vec::new()
         );
+    }
+
+    /// The convergence simulator (Phase 3.12 §6): the planning and pacing
+    /// of a pass over disjoint groups whose members are equal, a minute a
+    /// pass, with client writes placed on the roomiest group and the
+    /// source's space given back only after reconciliation, the nodes'
+    /// retention and compaction. `fixed`: per-member units and the
+    /// in-transit record (this release); otherwise the accounting of
+    /// earlier releases (logical bytes against per-member rooms, no
+    /// in-transit). Deterministic.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct Sim {
+        k: u16,
+        groups: usize,
+        retention_ms: u64,
+        write_bytes_per_pass: u64,
+        hours: u64,
+        fixed: bool,
+    }
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq)]
+    struct Outcome {
+        /// Minutes until the actual imbalance stayed below the start.
+        settled_min: Option<u64>,
+        /// Actual imbalance at the end.
+        final_imbalance: f64,
+        /// Largest actual imbalance after it was first below the start
+        /// (a relapse: what was evened out comes apart again).
+        worst_after: f64,
+        /// Plans whose source was the target of an earlier one.
+        reversals: u64,
+        /// Bytes per member moved, all passes.
+        moved_member: u64,
+        /// Moves below the placement threshold (must stay 0).
+        floor_violations: u64,
+    }
+
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+    fn simulate(sim: Sim) -> Outcome {
+        const GIB: u64 = 1 << 30;
+        const CHUNK: u64 = 8 << 20;
+        let policy = RebalancePolicy::default();
+        let usable = 100 * GIB;
+        let groups: Vec<GroupRecord> = (0..sim.groups)
+            .map(|i| group(i as u64 + 1, "rs", sim.k))
+            .collect();
+        // Group 1 nearly full, the others half.
+        let mut used: Vec<u64> = (0..sim.groups)
+            .map(|i| if i == 0 { 90 * GIB } else { 50 * GIB })
+            .collect();
+        let s = member_bytes(&groups[0], CHUNK);
+        let (floor, _) = target_floor(&policy, &groups[0], CHUNK);
+        // Reconciliation (orphan age and an interval), then the
+        // retention, then compaction.
+        let delay = 1_200_000 + sim.retention_ms + 600_000;
+        let mut frees: Vec<(u64, usize, u64)> = Vec::new();
+        let mut transit = rebalance::RebalanceInTransit::default();
+        let mut pacing = rebalance::RebalancePacing::default();
+        let mut current: Option<RebalancePlan> = None;
+        let mut out = Outcome::default();
+        let mut targets_seen: Vec<u64> = Vec::new();
+        let mut first_done = false;
+        let mut below_since: Option<u64> = None;
+        let mut write_carry = 0u64;
+        let actual = |used: &[u64]| {
+            let rooms: Vec<u64> = used.iter().map(|u| usable.saturating_sub(*u)).collect();
+            imbalance(*rooms.iter().min().unwrap(), *rooms.iter().max().unwrap())
+        };
+        for minute in 0..sim.hours * 60 {
+            let now = minute * 60_000;
+            frees.retain(|&(at, g, b)| {
+                if at <= now {
+                    used[g] = used[g].saturating_sub(b);
+                    false
+                } else {
+                    true
+                }
+            });
+            // Client writes: chunks to the roomiest group (Phase 3.7).
+            write_carry += sim.write_bytes_per_pass;
+            while write_carry >= CHUNK {
+                write_carry -= CHUNK;
+                let g = (0..sim.groups)
+                    .max_by_key(|&g| (usable.saturating_sub(used[g]), g))
+                    .unwrap();
+                used[g] += s;
+            }
+            let i = actual(&used);
+            if i < policy.start_imbalance {
+                below_since.get_or_insert(minute);
+                first_done = true;
+            } else {
+                below_since = None;
+            }
+            if first_done {
+                out.worst_after = out.worst_after.max(i);
+            }
+            let rec = record(
+                &(0..sim.groups)
+                    .map(|g| (g as u64 + 1, usable.saturating_sub(used[g])))
+                    .collect::<Vec<_>>(),
+            );
+            pacing.settling.retain(|(_, until)| *until > now);
+            let all = if sim.fixed {
+                plans_with(&groups, &rec, &policy, current.as_ref(), &|g, room| {
+                    transit.coming_back(g, room, now)
+                })
+            } else {
+                plans(&groups, &rec, &policy, current.as_ref())
+            };
+            let Some(p) = all.into_iter().next() else {
+                current = None;
+                pacing.plan = None;
+                continue;
+            };
+            if !pacing.settling.is_empty() {
+                continue;
+            }
+            let key = (p.tier.clone(), p.source, p.target);
+            if pacing.plan.as_ref() != Some(&key) {
+                if targets_seen.contains(&p.source) {
+                    out.reversals += 1;
+                }
+                targets_seen.push(p.target);
+                pacing.plan = Some(key);
+                pacing.remaining_bytes = p.target_room.saturating_sub(p.source_room) / 2;
+            }
+            current = Some(p.clone());
+            let (src, dst) = (
+                usize::try_from(p.source - 1).unwrap(),
+                usize::try_from(p.target - 1).unwrap(),
+            );
+            let difference = p.target_room.saturating_sub(p.source_room);
+            let (mut spent, mut moved) = (0u64, 0u64);
+            loop {
+                let inverts_now = if sim.fixed {
+                    inverts(s, difference)
+                } else {
+                    CHUNK >= difference
+                };
+                let (need, unit) = if sim.fixed {
+                    (moved, s)
+                } else {
+                    (spent, CHUNK)
+                };
+                if inverts_now
+                    || (spent > 0
+                        && (spent + CHUNK > policy.bytes_per_pass
+                            || need + unit > pacing.remaining_bytes))
+                {
+                    break;
+                }
+                // target_takes: the threshold kept after the shard.
+                let room = usable.saturating_sub(used[dst]);
+                if room < floor + s {
+                    break;
+                }
+                if room - s < floor {
+                    out.floor_violations += 1;
+                }
+                used[dst] += s;
+                frees.push((now + delay, src, s));
+                spent += CHUNK;
+                moved += s;
+            }
+            out.moved_member += moved;
+            if moved > 0 {
+                let done = if sim.fixed { moved } else { spent };
+                if sim.fixed {
+                    transit.add(
+                        p.source,
+                        moved,
+                        usable.saturating_sub(used[src]),
+                        now + sim.retention_ms + 2 * policy.settle_ms,
+                        now,
+                    );
+                }
+                pacing.remaining_bytes = pacing.remaining_bytes.saturating_sub(done);
+                if pacing.remaining_bytes == 0 {
+                    pacing.plan = None;
+                    pacing
+                        .settling
+                        .push((p.tier.clone(), now + policy.settle_ms));
+                }
+            }
+        }
+        out.final_imbalance = actual(&used);
+        out.settled_min = below_since;
+        out
+    }
+
+    #[test]
+    fn convergence_simulator_compares_the_accounting() {
+        let mut rows = Vec::new();
+        for k in [2u16, 4] {
+            for retention_ms in [0u64, 86_400_000] {
+                for write in [0u64, 8 << 20] {
+                    let base = Sim {
+                        k,
+                        groups: 3,
+                        retention_ms,
+                        write_bytes_per_pass: write,
+                        hours: 24 * 5,
+                        fixed: false,
+                    };
+                    let old = simulate(base);
+                    let new = simulate(Sim {
+                        fixed: true,
+                        ..base
+                    });
+                    eprintln!(
+                        "SIM k={k} retention_h={} write_MiB/min={} | old {:?} | new {:?}",
+                        retention_ms / 3_600_000,
+                        write >> 20,
+                        old,
+                        new
+                    );
+                    rows.push((base, old, new));
+                }
+            }
+        }
+        for (base, old, new) in &rows {
+            assert_eq!(new.floor_violations, 0, "{base:?}");
+            assert_eq!(old.floor_violations, 0, "{base:?}");
+            // This release converges, and never moves back what it moved.
+            assert!(new.settled_min.is_some(), "{base:?}: {new:?}");
+            assert_eq!(new.reversals, 0, "{base:?}: {new:?}");
+            assert!(new.final_imbalance < 0.25, "{base:?}: {new:?}");
+            // Once below the start, it stays within a step of it.
+            assert!(new.worst_after < 0.26, "relapse: {base:?}: {new:?}");
+            // ... no later, and with no more data moved, than before.
+            assert!(
+                new.settled_min.unwrap() <= old.settled_min.unwrap_or(u64::MAX),
+                "{base:?}: {old:?} {new:?}"
+            );
+        }
     }
 }

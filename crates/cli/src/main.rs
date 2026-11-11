@@ -726,6 +726,10 @@ struct ControllerArgs {
     /// Reconciliation interval in seconds.
     #[arg(long, default_value_t = 300)]
     reconcile_interval_secs: u64,
+    /// Reclaim pass interval in seconds (Phase 3.12, ADR-0028): retired
+    /// records the metadata no longer needs, once the nodes' retention old.
+    #[arg(long, default_value_t = 60)]
+    reclaim_interval_secs: u64,
     /// Repair scheduler interval in seconds.
     #[arg(long, default_value_t = 15)]
     repair_interval_secs: u64,
@@ -1957,6 +1961,7 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.admission.allow_shared_filesystem = args.allow_shared_filesystem;
     cfg.admission_max_chunk_bytes = args.admission_max_chunk_bytes.max(1);
     cfg.reconcile_interval = Duration::from_secs(args.reconcile_interval_secs);
+    cfg.reclaim_interval = Duration::from_secs(args.reclaim_interval_secs.max(1));
     cfg.repair_interval = Duration::from_secs(args.repair_interval_secs);
     cfg.health_interval = Duration::from_secs(args.health_interval_secs);
     cfg.failure_domain = args.failure_domain;

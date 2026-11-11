@@ -127,7 +127,8 @@ jobs:
     name: FoundationDB backend tests
     runs-on: [self-hosted, Linux, X64]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    timeout-minutes: 45
+    # Three earlier releases are built here (incremental once cached).
+    timeout-minutes: 75
     env:
       FDB_VERSION: 7.3.77
       # Per-run container name: two runners share the host.
@@ -245,17 +246,28 @@ jobs:
         env:
           ARCA_FDB_TESTS: "1"
           ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
-          # The previous release (Phase 3.9: protocol 3, schema 2).
-          PREVIOUS_RELEASE: 9674894109ec7fe813e63da5fefc90208483b1d5
+          # Earlier releases: Phase 3.9 (protocol 3, schema 2; the upgrade
+          # with a finalize), Phase 3.10 and 3.11 (protocol 4, schema 3, as
+          # this one; mixed versions without a finalize).
+          RELEASE_39: 9674894109ec7fe813e63da5fefc90208483b1d5
+          RELEASE_310: 3f67cb88eba23da6e66039c5a9b26a81cc56321e
+          RELEASE_311: 04e6fe418bd02e52222accc7254d9d719b6f30a5
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "$PREVIOUS_RELEASE"
-          rm -rf "$RUNNER_TEMP/previous-release"
-          mkdir -p "$RUNNER_TEMP/previous-release"
-          git archive "$PREVIOUS_RELEASE" | tar -x -C "$RUNNER_TEMP/previous-release"
-          (cd "$RUNNER_TEMP/previous-release" && cargo build -p arca-lake --features fdb --target-dir "$CARGO_TARGET_DIR/previous")
+          build() {
+            git fetch --no-tags --depth=1 origin "$1"
+            rm -rf "$RUNNER_TEMP/release-$2"
+            mkdir -p "$RUNNER_TEMP/release-$2"
+            git archive "$1" | tar -x -C "$RUNNER_TEMP/release-$2"
+            (cd "$RUNNER_TEMP/release-$2" && cargo build -p arca-lake --features fdb --target-dir "$CARGO_TARGET_DIR/release-$2")
+          }
+          build "$RELEASE_39" 39
+          build "$RELEASE_310" 310
+          build "$RELEASE_311" 311
           cargo build -p arca-lake --features fdb
-          ARCA_BIN_PREV="$CARGO_TARGET_DIR/previous/debug/arca-lake" \
+          ARCA_BIN_PREV="$CARGO_TARGET_DIR/release-39/debug/arca-lake" \
+          ARCA_BIN_PREV_310="$CARGO_TARGET_DIR/release-310/debug/arca-lake" \
+          ARCA_BIN_PREV_311="$CARGO_TARGET_DIR/release-311/debug/arca-lake" \
           ARCA_BIN_CUR="$CARGO_TARGET_DIR/debug/arca-lake" \
             cargo test -p arca-lake-testkit --features fdb --test it previous_release:: -- --nocapture --test-threads=1
       - name: metadata restore drill (fdbbackup/fdbrestore, RFC-015 §5.3.1)

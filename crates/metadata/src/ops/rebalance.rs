@@ -176,3 +176,80 @@ pub async fn put_pacing<S: KvStore>(store: &S, pacing: &RebalancePacing) -> Resu
     })
     .await
 }
+
+/// Room the rebalancer's moves will give back to their source groups
+/// (Phase 3.12): per source group, the bytes each member gets back once the
+/// moved shards are reconciled, reclaimed (deferred reclamation holds them
+/// for the nodes' retention, ADR-0028) and compacted. A plan counts them as
+/// the source's room: without them a plan made before that sees the source
+/// as full as before its move and moves again what was moved (then back,
+/// once the room returns).
+///
+/// Each entry keeps the source's room when it was recorded (`baseline`):
+/// what the room rose above it since has come back, and only the rest is
+/// still counted, so that room counted here and room the source reports are
+/// never counted twice whenever compaction gets to it. `until` is a
+/// backstop only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RebalanceInTransit {
+    /// `(source group, bytes per member, baseline room, until unix ms)`.
+    pub entries: Vec<(u64, u64, u64, u64)>,
+}
+
+impl crate::records::Record for RebalanceInTransit {}
+
+impl RebalanceInTransit {
+    /// Bytes per member still coming back to `group`, whose room is `room`
+    /// now, at `now_ms`.
+    #[must_use]
+    pub fn coming_back(&self, group: u64, room: u64, now_ms: u64) -> u64 {
+        self.entries
+            .iter()
+            .find(|(g, _, _, until)| *g == group && *until > now_ms)
+            .map_or(0, |(_, bytes, baseline, _)| {
+                bytes.saturating_sub(room.saturating_sub(*baseline))
+            })
+    }
+
+    /// `bytes` per member more coming back to `group`, whose room is `room`
+    /// now, until `until_ms` at the latest; expired entries are dropped.
+    pub fn add(&mut self, group: u64, bytes: u64, room: u64, until_ms: u64, now_ms: u64) {
+        let outstanding = self.coming_back(group, room, now_ms);
+        self.entries
+            .retain(|(g, _, _, until)| *until > now_ms && *g != group);
+        let total = outstanding.saturating_add(bytes);
+        if total > 0 {
+            self.entries.push((group, total, room, until_ms));
+        }
+    }
+}
+
+/// The in-transit record (default when none was written).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn in_transit<S: KvStore>(store: &S) -> Result<RebalanceInTransit> {
+    transact(store, (), |tx, ()| {
+        Box::pin(async move {
+            Ok(
+                read::<RebalanceInTransit, _>(tx, &keys::rebalance_in_transit())
+                    .await?
+                    .unwrap_or_default(),
+            )
+        })
+    })
+    .await
+}
+
+/// Write the in-transit record.
+///
+/// # Errors
+///
+/// Backend errors; `Fenced` for a former leader.
+pub async fn put_in_transit<S: KvStore>(store: &S, t: &RebalanceInTransit) -> Result<()> {
+    transact(store, t, |tx, t| {
+        Box::pin(async move { write(tx, &keys::rebalance_in_transit(), *t) })
+    })
+    .await
+}

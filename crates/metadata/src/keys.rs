@@ -740,6 +740,13 @@ pub fn rebalance_pacing() -> Key {
     pack(&(ROOT, "rebalance_pacing"))
 }
 
+/// Room the rebalancer's moves will give back to their sources (Phase
+/// 3.12): a key of its own, which earlier releases never read.
+#[must_use]
+pub fn rebalance_in_transit() -> Key {
+    pack(&(ROOT, "rebalance_in_transit"))
+}
+
 /// Every arca-lake key (for test setup and teardown).
 #[must_use]
 pub fn all_range() -> KeyRange {

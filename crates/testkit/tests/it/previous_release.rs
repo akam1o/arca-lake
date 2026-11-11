@@ -1,6 +1,10 @@
-//! Upgrade from and rollback to the previous release with real binaries
-//! (Phase 3.10, ADR-0024): `ARCA_BIN_PREV` is the previous release (Phase
-//! 3.9: protocol 3, schema 2, no rejoin fence), `ARCA_BIN_CUR` this one.
+//! Upgrade from and rollback to earlier releases with real binaries
+//! (Phase 3.10, ADR-0024; Phase 3.12): `ARCA_BIN_PREV` is the Phase 3.9
+//! release (protocol 3, schema 2, no rejoin fence: the upgrade with a
+//! finalize, below), `ARCA_BIN_PREV_310` and `ARCA_BIN_PREV_311` the Phase
+//! 3.10 and 3.11 releases (protocol 4, schema 3, as this one: mixed versions
+//! without a finalize, [`same_schema_matrix`], and the managed restore with
+//! a removed node), `ARCA_BIN_CUR` this one.
 //! Storage nodes, controllers and gateways are separate processes on a
 //! FoundationDB cluster.
 //!
@@ -23,7 +27,7 @@
 //!    refuse their deletes (and a delayed previous-release delete RPC);
 //!    `recovery begin` raises the schema back and they are refused again.
 
-#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_lines, clippy::many_single_char_names)]
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -128,16 +132,31 @@ struct Cluster<'a> {
     dirs: Vec<PathBuf>,
     addrs: Vec<String>,
     nodes: Vec<Proc>,
+    /// Deferred-reclamation retention of current-release nodes, s (Phase
+    /// 3.12; `None`: removed at once).
+    retention: Option<u64>,
 }
 
 impl Cluster<'_> {
+    fn args(&self, i: usize, cur: bool) -> Vec<String> {
+        let mut a = Env::node_args(&self.dirs[i], &self.addrs[i]);
+        if let (true, Some(r)) = (cur, self.retention) {
+            a.extend([
+                "--reclaim-retention-secs".into(),
+                r.to_string(),
+                "--reclaim-skew-secs".into(),
+                "1".into(),
+            ]);
+        }
+        a
+    }
+
     /// Restart node `i` with the current (`cur`) or previous binary.
     async fn node(&mut self, i: usize, cur: bool) {
         self.nodes[i].kill();
         let name = format!("node{i}-{}", if cur { "cur" } else { "prev" });
-        self.nodes[i] = self
-            .env
-            .spawn(&name, cur, &Env::node_args(&self.dirs[i], &self.addrs[i]));
+        let args = self.args(i, cur);
+        self.nodes[i] = self.env.spawn(&name, cur, &args);
         wait_tcp(&self.addrs[i], Duration::from_secs(20)).await;
     }
 }
@@ -189,6 +208,7 @@ async fn upgrade_from_and_rollback_to_the_previous_release() {
         dirs,
         addrs,
         nodes,
+        retention: None,
     };
     for a in &c.addrs {
         wait_tcp(a, Duration::from_secs(20)).await;
@@ -581,6 +601,7 @@ async fn a_managed_restore_and_a_removed_node_with_a_previous_release_binary() {
         dirs,
         addrs,
         nodes,
+        retention: None,
     };
     for a in &c.addrs {
         wait_tcp(a, Duration::from_secs(20)).await;
@@ -744,4 +765,327 @@ async fn cluster_node_id<S: KvStore>(meta: &S, addr: &str) -> u64 {
         .find(|n| n.address == addr)
         .unwrap()
         .id
+}
+
+fn env_named(var: &str) -> Option<Env> {
+    std::env::var_os("ARCA_FDB_TESTS")?;
+    Some(Env {
+        old: PathBuf::from(std::env::var_os(var)?),
+        new: PathBuf::from(std::env::var_os("ARCA_BIN_CUR")?),
+        cluster_file: PathBuf::from(std::env::var_os("ARCA_FDB_CLUSTER_FILE")?),
+        tmp: tempfile::tempdir().ok()?,
+    })
+}
+
+/// A controller of the current (`cur`) or previous release; the current
+/// one runs its reclaim pass every second.
+fn controller(env: &Env, id: &str, cur: bool) -> Proc {
+    let mut args = env.controller_args(id);
+    if cur {
+        args.extend(["--reclaim-interval-secs".into(), "1".into()]);
+    }
+    env.spawn(id, cur, &args)
+}
+
+async fn pending(clients: &NodeClients, addrs: &[String]) -> Vec<u64> {
+    let mut out = Vec::new();
+    for a in addrs {
+        out.push(
+            clients
+                .health(a)
+                .await
+                .map_or(u64::MAX, |h| h.reclaim_pending),
+        );
+    }
+    out
+}
+
+/// The Phase 3.12 matrix against a release of the same protocol and schema
+/// (Phase 3.10 or 3.11, ADR-0028 upgrade notes), with deferred
+/// reclamation on the current nodes (retention 3 s):
+/// 1. node-only upgrade, partial: the previous controller's deletes are
+///    retained on the current node, removed at once on the previous ones;
+///    the previous controller never reclaims;
+/// 2. controller-only upgrade (gateway and two nodes previous): the current
+///    controller reclaims what the previous one retired, after the
+///    retention;
+/// 3. every node current, gateway previous: deletes retained, then
+///    reclaimed;
+/// 4. gateway upgraded, then rolled back alone;
+/// 5. a node rolled back to the previous release with retirements pending:
+///    it deletes at once (its semantics) and `admin restore` refuses to plan
+///    while it does not defer (unless accepted); back on this release its
+///    retirements are still there and are reclaimed;
+/// 6. every process rolled back, then forward again.
+async fn same_schema_matrix(var: &str) {
+    use arca_lake_controller::managed_restore as mr;
+    let Some(env) = env_named(var) else {
+        eprintln!("ARCA_FDB_TESTS / {var} / ARCA_BIN_CUR not set; skipping");
+        return;
+    };
+    let meta = arca_lake_metadata::fdb::FdbKv::open_with_timeout(env.cluster_file.to_str(), 5_000)
+        .expect("open FoundationDB");
+    meta.clear_range_blocking(&keys::all_range()).await.unwrap();
+    let clients = NodeClients::new(Duration::from_secs(5));
+    let dirs: Vec<PathBuf> = (0..3)
+        .map(|i| env.tmp.path().join(format!("node{i}")))
+        .collect();
+    let addrs: Vec<String> = (0..3).map(|_| free_addr()).collect();
+    let mut c = Cluster {
+        env: &env,
+        dirs,
+        addrs,
+        nodes: Vec::new(),
+        retention: Some(3),
+    };
+    for i in 0..3 {
+        let args = c.args(i, false);
+        c.nodes
+            .push(env.spawn(&format!("node{i}-prev"), false, &args));
+    }
+    for a in &c.addrs {
+        wait_tcp(a, Duration::from_secs(20)).await;
+    }
+    env.admin_ok(false, &["init"]);
+    for (i, a) in c.addrs.iter().enumerate() {
+        env.admin_ok(
+            false,
+            &[
+                "register-node",
+                "--address",
+                a,
+                "--label",
+                &format!("node=n{i}"),
+                "--label",
+                "device_class=hdd",
+            ],
+        );
+    }
+    env.admin_ok(
+        false,
+        &[
+            "create-groups",
+            "--tier",
+            "default",
+            "--device-class",
+            "hdd",
+            "--failure-domain",
+            "node",
+            "--count",
+            "1",
+            "--k",
+            "2",
+            "--m",
+            "1",
+            "--chunk-bytes",
+            &(256u64 << 10).to_string(),
+            "--small-threshold",
+            "0",
+        ],
+    );
+    let mut ctl = controller(&env, "ctl-prev", false);
+    let (mut gw, mut s3) = gateway(&env, "gw-prev", false).await;
+    s3.create_bucket().bucket(BUCKET).send().await.unwrap();
+    // 600 KiB in 256 KiB chunks, 2+1: three shards on every node.
+    let mut committed: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..10u64 {
+        let d = body(600 << 10, 200 + i);
+        put(&s3, &format!("m{i}"), d.clone()).await;
+        committed.push((format!("m{i}"), d));
+    }
+    let check = async |s3: &Client, committed: &[(String, Vec<u8>)]| {
+        for (k, d) in committed {
+            assert_eq!(&get(s3, k).await, d, "{k}");
+        }
+    };
+    let drop_key = async |s3: &Client, committed: &mut Vec<(String, Vec<u8>)>, k: &str| {
+        delete(s3, k).await;
+        committed.retain(|(c, _)| c != k);
+    };
+    let node_addrs = c.addrs.clone();
+    let retained = async |which: &[usize], n: u64, what: &str| {
+        wait_until(what, Duration::from_secs(60), async || {
+            let p = pending(&clients, &node_addrs).await;
+            which.iter().all(|&i| p[i] != u64::MAX && p[i] >= n)
+        })
+        .await;
+    };
+
+    // ---- 1. Node 0 current: the previous controller's deletes retained
+    // there, removed at once on the previous nodes; never reclaimed.
+    c.node(0, true).await;
+    let before = live(&clients, &c.addrs).await;
+    drop_key(&s3, &mut committed, "m0").await;
+    collected(
+        &clients,
+        &c.addrs,
+        &before,
+        &[1, 2],
+        3,
+        "GC on the previous nodes",
+    )
+    .await;
+    retained(&[0], 3, "retired on the current node").await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(
+        live(&clients, &c.addrs).await[0],
+        before[0],
+        "a previous controller reclaimed (it has no reclaim)"
+    );
+    check(&s3, &committed).await;
+
+    // ---- 2. Controller-only upgrade: it reclaims the retirements.
+    ctl.kill();
+    ctl = controller(&env, "ctl-cur", true);
+    leads(&env, "ctl-cur").await;
+    collected(
+        &clients,
+        &c.addrs,
+        &before,
+        &[0],
+        3,
+        "reclaimed by the current controller",
+    )
+    .await;
+    assert_eq!(pending(&clients, &c.addrs).await[0], 0);
+    let d = body(600 << 10, 300);
+    put(&s3, "after-ctl", d.clone()).await;
+    committed.push(("after-ctl".into(), d));
+    check(&s3, &committed).await;
+
+    // ---- 3. Every node current, the gateway previous.
+    c.node(1, true).await;
+    c.node(2, true).await;
+    let before = live(&clients, &c.addrs).await;
+    drop_key(&s3, &mut committed, "m1").await;
+    retained(&[0, 1, 2], 3, "retired everywhere").await;
+    collected(
+        &clients,
+        &c.addrs,
+        &before,
+        &[0, 1, 2],
+        3,
+        "reclaimed everywhere",
+    )
+    .await;
+    check(&s3, &committed).await;
+
+    // ---- 4. Gateway upgraded, then rolled back alone.
+    gw.kill();
+    (gw, s3) = gateway(&env, "gw-cur", true).await;
+    let d = body(600 << 10, 301);
+    put(&s3, "via-cur-gw", d.clone()).await;
+    committed.push(("via-cur-gw".into(), d));
+    check(&s3, &committed).await;
+    gw.kill();
+    (gw, s3) = gateway(&env, "gw-prev-2", false).await;
+    check(&s3, &committed).await;
+
+    // ---- 5. Node 1 rolled back with retirements pending.
+    let before = live(&clients, &c.addrs).await;
+    // Retirements made, then the node rolled back before the retention.
+    c.retention = Some(3600);
+    c.node(1, true).await;
+    drop_key(&s3, &mut committed, "m2").await;
+    retained(&[1], 3, "retired on node 1").await;
+    c.node(1, false).await;
+    let h = clients.health(&c.addrs[1]).await.unwrap();
+    assert_eq!(h.reclaim_retention_ms, 0, "{h:?}");
+    // A previous node deletes at once.
+    let mid = live(&clients, &c.addrs).await;
+    drop_key(&s3, &mut committed, "m3").await;
+    collected(
+        &clients,
+        &c.addrs,
+        &mid,
+        &[1],
+        3,
+        "the previous node deleting at once",
+    )
+    .await;
+    // admin restore refuses to plan while a node does not defer.
+    let journal = env.tmp.path().join("restore.journal");
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
+    };
+    let e = mr::plan(
+        &meta,
+        &clients,
+        "snapshot",
+        1,
+        Some(now()),
+        "test store",
+        &journal,
+        false,
+        now(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("do not defer"), "{e}");
+    assert!(!journal.exists(), "a refused plan wrote a journal");
+    // Back on this release: its retirements of m2 are still there (the
+    // records stayed the newest) and are reclaimed.
+    c.retention = Some(3);
+    c.node(1, true).await;
+    let p = pending(&clients, &c.addrs).await;
+    assert!(p[1] >= 3, "retirements lost across the rollback: {p:?}");
+    collected(
+        &clients,
+        &c.addrs,
+        &before,
+        &[1],
+        6,
+        "node 1 reclaims after the round trip",
+    )
+    .await;
+    collected(
+        &clients,
+        &c.addrs,
+        &before,
+        &[0, 2],
+        6,
+        "nodes 0 and 2 reclaim",
+    )
+    .await;
+    check(&s3, &committed).await;
+
+    // ---- 6. Every process rolled back, then forward again.
+    ctl.kill();
+    gw.kill();
+    for i in 0..3 {
+        c.node(i, false).await;
+    }
+    ctl = controller(&env, "ctl-prev-2", false);
+    (gw, s3) = gateway(&env, "gw-prev-3", false).await;
+    leads(&env, "ctl-prev-2").await;
+    check(&s3, &committed).await;
+    let before = live(&clients, &c.addrs).await;
+    drop_key(&s3, &mut committed, "m4").await;
+    collected(&clients, &c.addrs, &before, &[0, 1, 2], 3, "GC rolled back").await;
+    ctl.kill();
+    gw.kill();
+    for i in 0..3 {
+        c.node(i, true).await;
+    }
+    ctl = controller(&env, "ctl-cur-2", true);
+    (gw, s3) = gateway(&env, "gw-cur-2", true).await;
+    leads(&env, "ctl-cur-2").await;
+    check(&s3, &committed).await;
+    assert_eq!(pending(&clients, &c.addrs).await, vec![0, 0, 0]);
+    ctl.kill();
+    gw.kill();
+    drop(c);
+}
+
+#[tokio::test]
+async fn same_schema_matrix_with_the_phase_3_10_release() {
+    same_schema_matrix("ARCA_BIN_PREV_310").await;
+}
+
+#[tokio::test]
+async fn same_schema_matrix_with_the_phase_3_11_release() {
+    same_schema_matrix("ARCA_BIN_PREV_311").await;
 }

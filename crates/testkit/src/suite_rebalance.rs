@@ -668,7 +668,10 @@ pub async fn an_expired_move_never_deletes_its_successors_shards<S: KvStore + 's
 /// afterwards, although the rooms (the source's old copies not yet
 /// reclaimed) still show an imbalance: no overshoot, no move back. After
 /// reclamation and the settle time the next plan, if any, goes the same
-/// way and is smaller.
+/// way and is smaller. Since Phase 3.12 the need and the moves are counted
+/// per member (the unit of a group's room: a chunk takes `len / k` on each
+/// member), and what the moves give back counts as the source's room until
+/// it shows (the tier may then report itself balanced instead of settling).
 pub async fn a_finished_plan_settles_instead_of_overshooting<S: KvStore + 'static>(
     start: impl Starter<S>,
 ) {
@@ -691,7 +694,7 @@ pub async fn a_finished_plan_settles_instead_of_overshooting<S: KvStore + 'stati
     let mut need = None;
     let mut moved = 0u64;
     let mut done = false;
-    for _ in 0..40 {
+    for _ in 0..160 {
         evaluate(&c).await;
         let r = run_once(c.meta.as_ref(), &c.clients, &p, now)
             .await
@@ -701,14 +704,20 @@ pub async fn a_finished_plan_settles_instead_of_overshooting<S: KvStore + 'stati
             need.get_or_insert((plan.target_room - plan.source_room) / 2);
         }
         moved += r.moved_bytes;
-        if r.reason.starts_with("plan done") {
+        // Done: its need spent, or the pair no longer planned (the rooms,
+        // counted with what is coming back, are even).
+        if r.reason.starts_with("plan done") || (moved > 0 && r.moved_chunks == 0) {
             done = true;
             break;
         }
     }
     assert!(done, "the plan never finished");
     let need = need.unwrap();
-    assert!(moved <= need + MIB, "moved {moved}, needed {need}");
+    let per_member = moved.div_ceil(u64::from(a.data_shards.max(1)));
+    assert!(
+        per_member <= need + MIB,
+        "moved {per_member} per member, needed {need}"
+    );
     // The rooms still show an imbalance (nothing reclaimed yet), the tier
     // settles.
     evaluate(&c).await;
@@ -716,7 +725,14 @@ pub async fn a_finished_plan_settles_instead_of_overshooting<S: KvStore + 'stati
         .await
         .unwrap();
     assert_eq!(r.moved_chunks, 0, "{r:?}");
-    assert!(r.reason.starts_with("settling"), "{r:?}");
+    // Settling, balanced, or a pair of groups sharing these nodes with
+    // nothing of its own to move: never the pair reversed.
+    assert!(
+        r.plan
+            .as_ref()
+            .is_none_or(|p| (p.source, p.target) != (b.id, a.id)),
+        "{r:?}"
+    );
     check(&c, &live).await;
     // Reclaimed, settled: the next plan (if any) goes the same way, less.
     c.reconcile(now_ms() + 3_600_000, 0).await;

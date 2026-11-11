@@ -107,9 +107,21 @@ impl Env {
     pub(super) fn spawn(&self, name: &str, new: bool, args: &[String]) -> Proc {
         let log = self.tmp.path().join(format!("{name}.log"));
         let f = std::fs::File::create(&log).unwrap();
+        // A current-release node retires deleted records for a day by
+        // default (Phase 3.12, ADR-0028); these suites count live shards
+        // after deletes, so it removes at once unless the test asks for a
+        // retention. Earlier releases have no such flag.
+        let mut args = args.to_vec();
+        if new
+            && args.first().is_some_and(|a| a == "storage-node")
+            && args.get(1).is_some_and(|a| a.starts_with("--"))
+            && !args.iter().any(|a| a == "--reclaim-retention-secs")
+        {
+            args.splice(1..1, ["--reclaim-retention-secs".into(), "0".into()]);
+        }
         let child = Command::new(self.bin(new))
             .envs(PLAINTEXT)
-            .args(args)
+            .args(&args)
             .stdout(Stdio::from(f.try_clone().unwrap()))
             .stderr(Stdio::from(f))
             .spawn()
