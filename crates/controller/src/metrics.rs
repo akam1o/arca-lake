@@ -308,6 +308,13 @@ pub struct Metrics {
     /// does not know (restored from before it; Phase 3.11 review): nothing
     /// pushed to it until confirmed.
     pub identity_unconfirmed_total: AtomicU64,
+    /// Retired records reclaimed (Phase 3.12, ADR-0028).
+    pub reclaimed_total: AtomicU64,
+    /// Reclaims a node refused (its retention, sequence or fence checks).
+    pub reclaim_refused_total: AtomicU64,
+    /// Nodes that do not defer deletes (an earlier release, or retention
+    /// 0): R-94(b) is not bounded on them (last reclaim pass).
+    pub nodes_not_deferring: AtomicU64,
     /// Groups whose current move this leader started as a planned move
     /// (a drain keeps no request once its move is under way; re-review).
     /// Lost with the leadership: the next leader takes them as failure
@@ -497,6 +504,18 @@ impl Metrics {
         out += &c(
             "arca_controller_identity_unconfirmed_total",
             self.identity_unconfirmed_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_reclaimed_total",
+            self.reclaimed_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_reclaim_refused_total",
+            self.reclaim_refused_total.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_nodes_not_deferring",
+            self.nodes_not_deferring.load(Ordering::Relaxed),
         );
         out += &c(
             "arca_controller_repair_group_errors_total",

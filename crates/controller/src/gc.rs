@@ -840,6 +840,141 @@ async fn reconcile_shard<S: KvStore>(
     Ok(())
 }
 
+/// What a reclaim pass did (Phase 3.12, ADR-0028).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReclaimReport {
+    /// Retired records listed.
+    pub listed: u64,
+    /// Not yet the node's retention old.
+    pub young: u64,
+    /// Needed by the current metadata: kept (no reclaim sent).
+    pub needed: u64,
+    /// Reclaimed.
+    pub reclaimed: u64,
+    /// Refused by the node (its checks), or fenced.
+    pub refused: u64,
+    /// Nodes that do not defer (an earlier release, or retention 0).
+    pub nodes_not_deferring: u64,
+}
+
+/// Whether the current metadata needs `shard` on `node_id`: the checks
+/// reconciliation makes before a delete, without its age guard (the
+/// retention exceeds it). A missing group needs nothing.
+///
+/// # Errors
+///
+/// Metadata errors.
+pub async fn shard_needed<S: KvStore>(
+    meta: &S,
+    node_id: u64,
+    shard: ShardRef,
+) -> Result<(bool, Option<GroupRecord>), ControlError> {
+    let Some(group) = cluster::list_groups(meta)
+        .await?
+        .into_iter()
+        .find(|g| g.id == shard.group_id)
+    else {
+        return Ok((false, None));
+    };
+    let position = group.members.iter().position(|m| m.node_id == node_id);
+    let needed = match position {
+        // A former member: its shards are a repair source while the group
+        // rebuilds.
+        None => group.state == GroupState::Repairing,
+        Some(p) if usize::from(shard.shard_index) != p => false,
+        Some(_) => {
+            let (prefix, index) = split_chunk_id(&shard.chunk_id);
+            matches!(
+                gc::attribute_shard(meta, &prefix, index, group.id).await?,
+                gc::ShardAttribution::Referenced
+            )
+        }
+    };
+    Ok((needed, Some(group)))
+}
+
+/// Reclaim pass (Phase 3.12, ADR-0028): every retired record of `node`
+/// older than the node's retention that the current metadata does not
+/// need is reclaimed, each with an observation time taken (`now`) before
+/// the metadata reads that judged it. The node decides: it reclaims only
+/// a record retired at least its retention before that observation.
+///
+/// # Errors
+///
+/// Metadata errors; node errors listing.
+pub async fn reclaim_node<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    node_id: u64,
+    node_addr: &str,
+    page: u32,
+    now: impl Fn() -> u64,
+) -> Result<ReclaimReport, ControlError> {
+    let mut report = ReclaimReport::default();
+    let node_err = |status| ControlError::Node {
+        addr: node_addr.to_string(),
+        status,
+    };
+    let mut after = None;
+    loop {
+        let (entries, next, retention) = match clients.list_pending(node_addr, after, page).await {
+            Ok(p) => p,
+            Err(s) if s.code() == tonic::Code::Unimplemented => {
+                report.nodes_not_deferring += 1;
+                return Ok(report);
+            }
+            Err(s) => return Err(node_err(s)),
+        };
+        if retention == 0 {
+            report.nodes_not_deferring += 1;
+        }
+        for (shard, token, retired_ms) in entries {
+            report.listed += 1;
+            if now() < retired_ms.saturating_add(retention) {
+                report.young += 1;
+                continue;
+            }
+            // Before any metadata read (ADR-0028: the observation is at
+            // least this late).
+            let observed = now();
+            let (needed, group) = shard_needed(meta, node_id, shard).await?;
+            if needed {
+                report.needed += 1;
+                continue;
+            }
+            let epoch = match group {
+                Some(g) => g.epoch,
+                None => clients
+                    .health(node_addr)
+                    .await
+                    .map_err(node_err)?
+                    .group_epochs
+                    .iter()
+                    .find(|e| e.group_id == shard.group_id)
+                    .map_or(0, |e| e.epoch),
+            };
+            match clients
+                .reclaim_shard(node_addr, shard, epoch, token, observed)
+                .await
+            {
+                Ok(()) => report.reclaimed += 1,
+                Err(s)
+                    if s.code() == tonic::Code::FailedPrecondition
+                        || s.code() == tonic::Code::Aborted
+                        || NodeClients::is_epoch_rejected(&s) =>
+                {
+                    report.refused += 1;
+                }
+                Err(s) => return Err(node_err(s)),
+            }
+        }
+        match next {
+            Some(n) => after = Some(n),
+            None => return Ok(report),
+        }
+    }
+}
+
 async fn delete_one(
     clients: &NodeClients,
     node_addr: &str,

@@ -77,6 +77,9 @@ pub struct TestCluster<S: KvStore + 'static = MemKv> {
     pub clients: NodeClients,
     /// Rejoin lease given to nodes started from now on (Phase 3.10).
     pub fence_lease: Duration,
+    /// Deferred-reclamation retention of nodes started from now on (Phase
+    /// 3.12, ADR-0028; zero: deletes remove records at once).
+    pub reclaim_retention: Duration,
     /// EC profile in use.
     pub profile: EcProfile,
     /// Number of durable nodes (the first `durable_nodes` entries of `nodes`).
@@ -134,6 +137,9 @@ pub struct ClusterOptions {
     pub principals: Vec<(String, String, String)>,
     /// Gateway heartbeat interval (RFC-014 §5.5); `None` disables it.
     pub heartbeat: Option<Duration>,
+    /// Deferred-reclamation retention of the nodes (Phase 3.12; zero:
+    /// deletes remove records at once).
+    pub reclaim_retention: Duration,
     /// Run every node, the gateway and the test's own clients over mutual
     /// TLS with a development CA (ADR-0017).
     pub tls: bool,
@@ -212,6 +218,7 @@ impl ClusterOptions {
             authorize: false,
             principals: Vec::new(),
             heartbeat: None,
+            reclaim_retention: Duration::ZERO,
             tls: false,
             credential_store: None,
         }
@@ -285,6 +292,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             std::fs::create_dir_all(&dir).unwrap();
             let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
             cfg.fence_lease = TEST_FENCE_LEASE;
+            cfg.reclaim_retention = opts.reclaim_retention;
             cfg.store = node_store_config(&dir);
             cfg.capacity_bytes = Some(TEST_ALLOTMENT);
             let tls = pki.as_ref().map(|p| p.pending_node(&dir));
@@ -326,6 +334,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             std::fs::create_dir_all(&dir).unwrap();
             let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
             cfg.fence_lease = TEST_FENCE_LEASE;
+            cfg.reclaim_retention = opts.reclaim_retention;
             cfg.store = node_store_config(&dir);
             cfg.capacity_bytes = Some(TEST_ALLOTMENT);
             let tls = pki.as_ref().map(|p| p.pending_node(&dir));
@@ -484,6 +493,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             pki,
             tmp,
             fence_lease: TEST_FENCE_LEASE,
+            reclaim_retention: opts.reclaim_retention,
         }
     }
 
@@ -713,6 +723,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         let n = &mut self.nodes[i];
         let mut cfg = NodeConfig::new(n.addr, &n.dir);
         cfg.fence_lease = self.fence_lease;
+        cfg.reclaim_retention = self.reclaim_retention;
         cfg.store = node_store_config(&n.dir);
         cfg.tls = n.tls.clone();
         cfg.capacity_bytes = n.capacity;
@@ -743,6 +754,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
         cfg.fence_lease = self.fence_lease;
+        cfg.reclaim_retention = self.reclaim_retention;
         cfg.store = node_store_config(&dir);
         cfg.capacity_bytes = Some(TEST_ALLOTMENT);
         let tls = self.pki.as_ref().map(|p| p.pending_node(&dir));
@@ -873,6 +885,36 @@ impl<S: KvStore + 'static> TestCluster<S> {
     #[must_use]
     pub fn node_index(&self, member: &GroupMember) -> Option<usize> {
         self.nodes.iter().position(|n| n.id == member.node_id)
+    }
+
+    /// One reclaim pass over every running node, as the leader's (Phase
+    /// 3.12, ADR-0028): the reports summed.
+    ///
+    /// # Panics
+    ///
+    /// On metadata or node errors.
+    pub async fn reclaim(&self) -> gc::ReclaimReport {
+        self.sync_delete_fence().await;
+        let mut total = gc::ReclaimReport::default();
+        for n in self.nodes.iter().filter(|n| n.handle.is_some()) {
+            let r = gc::reclaim_node(
+                self.meta.as_ref(),
+                &self.clients,
+                n.id,
+                &n.addr.to_string(),
+                self.page_size,
+                now_ms,
+            )
+            .await
+            .unwrap();
+            total.listed += r.listed;
+            total.young += r.young;
+            total.needed += r.needed;
+            total.reclaimed += r.reclaimed;
+            total.refused += r.refused;
+            total.nodes_not_deferring += r.nodes_not_deferring;
+        }
+        total
     }
 
     /// Run one GC pass at `now_ms`.
@@ -1010,6 +1052,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = NodeConfig::new(SocketAddr::from(([127, 0, 0, 1], 0)), &dir);
         cfg.fence_lease = self.fence_lease;
+        cfg.reclaim_retention = self.reclaim_retention;
         cfg.store = node_store_config(&dir);
         cfg.capacity_bytes = Some(TEST_ALLOTMENT);
         let tls = self.pki.as_ref().map(|p| p.pending_node(&dir));

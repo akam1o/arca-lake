@@ -232,6 +232,9 @@ pub async fn init<S: KvStore>(
                 if tx.get(&keys::incarnation_seq()).await?.is_none() {
                     tx.set(&keys::incarnation_seq(), &1u64.to_le_bytes());
                 }
+                if tx.get(&keys::cluster_uid()).await?.is_none() {
+                    tx.set(&keys::cluster_uid(), uuid::Uuid::new_v4().as_bytes());
+                }
                 write(tx, &keys::cluster_state(), &rec)?;
                 Ok(rec)
             })
@@ -278,6 +281,48 @@ pub async fn cluster_state_in_tx<X: Txn>(tx: &mut X) -> Result<Option<ClusterSta
 /// Backend errors.
 pub async fn cluster_state<S: KvStore>(store: &S) -> Result<Option<ClusterStateRecord>> {
     transact(store, (), |tx, ()| Box::pin(cluster_state_in_tx(tx))).await
+}
+
+/// The cluster's uid (Phase 3.12; `None`: initialised by an earlier
+/// release and not given one yet, or another value than 16 bytes).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn cluster_uid<S: KvStore>(store: &S) -> Result<Option<[u8; 16]>> {
+    transact(store, (), |tx, ()| {
+        Box::pin(async move {
+            Ok(tx
+                .get(&keys::cluster_uid())
+                .await?
+                .and_then(|v| <[u8; 16]>::try_from(v.as_slice()).ok()))
+        })
+    })
+    .await
+}
+
+/// The cluster's uid, given one now if it has none (a cluster an earlier
+/// release initialised). Only on a store holding a cluster state: a
+/// cleared store is not given one (it would be another cluster's).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn ensure_cluster_uid<S: KvStore>(store: &S) -> Result<Option<[u8; 16]>> {
+    let fresh = *uuid::Uuid::new_v4().as_bytes();
+    transact(store, fresh, |tx, fresh| {
+        Box::pin(async move {
+            if tx.get(&keys::cluster_state()).await?.is_none() {
+                return Ok(None);
+            }
+            if let Some(v) = tx.get(&keys::cluster_uid()).await? {
+                return Ok(<[u8; 16]>::try_from(v.as_slice()).ok());
+            }
+            tx.set(&keys::cluster_uid(), fresh);
+            Ok(Some(*fresh))
+        })
+    })
+    .await
 }
 
 /// Set the recovery phase, keeping the incarnation (operator transitions

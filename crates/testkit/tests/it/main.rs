@@ -26,6 +26,7 @@ mod capacity_bench;
 mod capacity_failover;
 mod commit_timeouts;
 mod controller;
+mod deferred_reclaim;
 mod delete_fence;
 mod e2e;
 #[cfg(feature = "fdb")]

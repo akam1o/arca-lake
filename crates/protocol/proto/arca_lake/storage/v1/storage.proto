@@ -137,7 +137,50 @@ message DeleteShardRequest {
   bytes node_identity = 9;
 }
 
-message DeleteShardResponse {}
+message DeleteShardResponse {
+  // Phase 3.12 (ADR-0028): the record was retired, not removed: it stays
+  // readable until a `ReclaimShard`. An earlier node answers false.
+  bool deferred = 1;
+}
+
+// Reclaim a retired record (Phase 3.12, ADR-0028). The node removes it only
+// if it retired exactly `sequence`, the key's newest record is still that
+// sequence, and `observed_at_ms` (the caller's clock, taken before the
+// metadata read that found the shard unneeded) is at least the node's
+// retention after the retirement. The incarnation, fence and identity
+// checks are those of `DeleteShard`.
+message ReclaimShardRequest {
+  uint32 protocol_version = 1;
+  ShardKey key = 2;
+  uint64 group_epoch = 3;
+  bytes incarnation = 4;
+  uint64 sequence = 5;
+  uint64 store_epoch = 6;
+  uint64 delete_fence = 7;
+  uint64 node_id = 8;
+  bytes node_identity = 9;
+  uint64 observed_at_ms = 10;
+}
+message ReclaimShardResponse {}
+
+// Retired records in key order (Phase 3.12, ADR-0028).
+message ListPendingRequest {
+  uint32 protocol_version = 1;
+  ShardKey after = 2;
+  uint32 limit = 3;
+}
+message PendingShard {
+  ShardKey key = 1;
+  uint64 sequence = 2;
+  uint64 retired_at_ms = 3;
+  uint64 store_epoch = 4;
+}
+message ListPendingResponse {
+  repeated PendingShard shards = 1;
+  ShardKey next = 2;
+  // The node's retention (ms).
+  uint64 retention_ms = 3;
+}
 
 // Paged listing. Entries are returned in key order (chunk_id, shard_index)
 // strictly after `after` when `after` is set. Each page is a snapshot of the
@@ -387,6 +430,16 @@ message HealthResponse {
   // before the node had an incarnation; empty: no hold, or an earlier
   // release that does not report it.
   bytes delete_fence_hold_incarnation = 41;
+  // Deferred reclamation (Phase 3.12, ADR-0028): the retention (ms; 0:
+  // deletes are not deferred, or an earlier release), the retired records,
+  // and whether the node's retirement state is damaged (nothing reclaimed).
+  uint64 reclaim_retention_ms = 42;
+  uint64 reclaim_pending = 43;
+  bool reclaim_damaged = 44;
+  // The clock skew the node allows a reclaim's observation (ms, ADR-0028
+  // H2): `admin restore` bounds a backup's age by the retention less twice
+  // this.
+  uint64 reclaim_skew_ms = 45;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").
@@ -397,6 +450,8 @@ service StorageNode {
   rpc PutShard(stream PutShardRequest) returns (PutShardResponse);
   rpc GetShard(GetShardRequest) returns (stream GetShardResponse);
   rpc DeleteShard(DeleteShardRequest) returns (DeleteShardResponse);
+  rpc ReclaimShard(ReclaimShardRequest) returns (ReclaimShardResponse);
+  rpc ListPending(ListPendingRequest) returns (ListPendingResponse);
   rpc ListShards(ListShardsRequest) returns (ListShardsResponse);
   rpc VerifyShards(VerifyShardsRequest) returns (VerifyShardsResponse);
   rpc ScrubShards(ScrubShardsRequest) returns (ScrubShardsResponse);

@@ -89,6 +89,10 @@ impl Restorer for Snapshot {
         "in-memory test store".into()
     }
 
+    async fn probe(&self, key: &[u8], value: &[u8]) -> Result<bool, String> {
+        arca_lake_controller::managed_restore::probe_store(self.meta.as_ref(), key, value).await
+    }
+
     async fn restore(&self, source: &str, _version: u64) -> Result<(), String> {
         assert_eq!(source, "snapshot://test");
         if self
@@ -241,6 +245,7 @@ async fn plan(c: &TestCluster, r: &Snapshot, path: &std::path::Path) -> Result<m
         Some(now_ms()),
         &r.destination(),
         path,
+        true,
         now_ms(),
     )
     .await
@@ -597,6 +602,10 @@ impl Restorer for Delivering<'_> {
         self.inner.destination()
     }
 
+    async fn probe(&self, key: &[u8], value: &[u8]) -> Result<bool, String> {
+        self.inner.probe(key, value).await
+    }
+
     async fn restore(&self, source: &str, version: u64) -> Result<(), String> {
         self.applied
             .fetch_add(deliver(&self.old, &self.deletes).await, Ordering::SeqCst);
@@ -609,6 +618,9 @@ struct Then<'a>(&'a Snapshot, arca_lake_metadata::records::ProcRecord);
 impl Restorer for Then<'_> {
     fn destination(&self) -> String {
         self.0.destination()
+    }
+    async fn probe(&self, key: &[u8], value: &[u8]) -> Result<bool, String> {
+        self.0.probe(key, value).await
     }
     async fn restore(&self, source: &str, version: u64) -> Result<(), String> {
         self.0.restore(source, version).await?;
@@ -735,7 +747,9 @@ async fn a_backup_from_before_node_identities_quarantines_no_node() {
 
 /// Review #3 (Phase 3.11): another cluster's backup (a wrong `--source`)
 /// is refused before the mark: no fence or incarnation of this cluster
-/// reaches its nodes.
+/// reaches its nodes. Since Phase 3.12 by its uid, right after the
+/// restore; a backup without a uid (an earlier release's) by the nodes it
+/// names.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_clusters_backup_is_refused_before_the_mark() {
     let c = cluster().await;
@@ -756,6 +770,26 @@ async fn another_clusters_backup_is_refused_before_the_mark() {
     let path = journal_path(&dir);
     let p = plan(&c, &wrong, &path).await.unwrap();
     let e = run(&c, &wrong, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("another cluster"), "{e}");
+    assert_eq!(
+        mr::Journal::load(&path).unwrap().last(),
+        Some(Step::Cleared)
+    );
+    let no_uid = Snapshot {
+        meta: Arc::clone(&c.meta),
+        data: theirs
+            .data
+            .iter()
+            .filter(|(k, _)| *k != keys::cluster_uid())
+            .cloned()
+            .collect(),
+        fail: AtomicUsize::new(0),
+        restores: AtomicUsize::new(0),
+    };
+    mr::amend(&path, "snapshot://test", 1, None).unwrap();
+    let e = run(&c, &no_uid, &path, &p.journal.token, &[])
         .await
         .unwrap_err();
     assert!(e.contains("not this cluster's backup"), "{e}");
@@ -1514,5 +1548,280 @@ async fn a_node_lost_after_the_clear_can_be_declared_absent() {
     .await
     .unwrap();
     assert_eq!(j.last(), Some(Step::Verified));
+    c.shutdown().await;
+}
+
+/// A restorer whose tool reaches another database (a cluster file at the
+/// same path that names another cluster, a link or mount replaced since
+/// the plan, a container's own file): it does not see the probe.
+struct Elsewhere<'a>(&'a Snapshot);
+impl Restorer for Elsewhere<'_> {
+    fn destination(&self) -> String {
+        self.0.destination()
+    }
+    fn probe(
+        &self,
+        _key: &[u8],
+        _value: &[u8],
+    ) -> impl std::future::Future<Output = Result<bool, String>> + Send {
+        std::future::ready(Ok(false))
+    }
+    async fn restore(&self, source: &str, version: u64) -> Result<(), String> {
+        self.0.restore(source, version).await
+    }
+}
+
+/// Phase 3.12 (§4.1): the destination is identified by content. A tool
+/// that does not read back the probe written through this command's own
+/// connection clears nothing; the planned store is untouched and the same
+/// journal then completes with the right tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restore_tool_reaching_another_database_clears_nothing() {
+    let c = cluster().await;
+    let kept = put(&c, "kept", 30).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    let e = mr::run(
+        &c.meta,
+        &c.clients,
+        &Elsewhere(&backup),
+        &path,
+        &p.journal.token,
+        &[],
+        &[],
+        now_ms,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("not the store this command uses"), "{e}");
+    let j = mr::Journal::load(&path).unwrap();
+    assert!(!j.done.contains(&Step::Clearing), "{:?}", j.done);
+    assert_eq!(backup.restores.load(Ordering::SeqCst), 0);
+    assert!(
+        arca_lake_metadata::ops::compat::cluster_state(c.meta.as_ref())
+            .await
+            .unwrap()
+            .is_some(),
+        "the planned store was cleared"
+    );
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    let ctl = spawn(Arc::clone(&c.meta), controller("ctl-after"))
+        .await
+        .unwrap();
+    finish(&c, &path).await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// The right backup only after an amend: the restorer serves another
+/// cluster's backup until the test switches it.
+struct Foreign<'a> {
+    theirs: Snapshot,
+    ours: &'a Snapshot,
+    amended: std::sync::atomic::AtomicBool,
+}
+impl Restorer for Foreign<'_> {
+    fn destination(&self) -> String {
+        self.ours.destination()
+    }
+    async fn probe(&self, key: &[u8], value: &[u8]) -> Result<bool, String> {
+        self.ours.probe(key, value).await
+    }
+    async fn restore(&self, source: &str, version: u64) -> Result<(), String> {
+        if self.amended.load(Ordering::SeqCst) {
+            self.ours.restore(source, version).await
+        } else {
+            self.theirs.restore(source, version).await
+        }
+    }
+}
+
+/// Phase 3.12 (§4.1, wrong cluster): a backup carrying another cluster's
+/// uid is refused before the mark, nothing is pushed to the nodes, and the
+/// cleared store's journal goes on once the backup is replaced (`amend`);
+/// amend is refused before the clear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_clusters_backup_is_refused_and_amended() {
+    let c = cluster().await;
+    let kept = put(&c, "kept", 31).await;
+    arca_lake_metadata::ops::compat::ensure_cluster_uid(c.meta.as_ref())
+        .await
+        .unwrap();
+    let ours = Snapshot::take(&c.meta).await;
+    let mut data: Vec<(Vec<u8>, Vec<u8>)> = ours
+        .data
+        .iter()
+        .filter(|(k, _)| *k != keys::cluster_uid())
+        .cloned()
+        .collect();
+    data.push((keys::cluster_uid(), vec![0xee; 16]));
+    let r = Foreign {
+        theirs: Snapshot {
+            meta: Arc::clone(&c.meta),
+            data,
+            fail: AtomicUsize::new(0),
+            restores: AtomicUsize::new(0),
+        },
+        ours: &ours,
+        amended: std::sync::atomic::AtomicBool::new(false),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &ours, &path).await.unwrap();
+    assert!(
+        mr::amend(&path, "snapshot://test", 1, None).is_err(),
+        "amend before the clear"
+    );
+    let e = mr::run(
+        &c.meta,
+        &c.clients,
+        &r,
+        &path,
+        &p.journal.token,
+        &[],
+        &[],
+        now_ms,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("another cluster"), "{e}");
+    let j = mr::Journal::load(&path).unwrap();
+    assert!(j.done.contains(&Step::Cleared) && !j.done.contains(&Step::Restored));
+    // Nothing marked: the nodes still hold the fence closed for the restore.
+    for n in &c.nodes {
+        let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+        assert!(!h.delete_fence_open && h.delete_fence_hold, "{h:?}");
+    }
+    mr::amend(&path, "snapshot://test", 1, Some(now_ms())).unwrap();
+    r.amended.store(true, Ordering::SeqCst);
+    mr::run(
+        &c.meta,
+        &c.clients,
+        &r,
+        &path,
+        &p.journal.token,
+        &[],
+        &[],
+        now_ms,
+    )
+    .await
+    .unwrap();
+    let ctl = spawn(Arc::clone(&c.meta), controller("ctl-after"))
+        .await
+        .unwrap();
+    finish(&c, &path).await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Phase 3.12 (ADR-0028 H1): `plan` refuses a backup outside deferred
+/// reclamation's protection (nodes that do not defer, an unknown backup
+/// point, a backup older than the retention less twice the skew), unless
+/// accepted explicitly; `run` refuses one that left it since the plan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plan_refuses_a_backup_outside_the_retention_unless_accepted() {
+    let plan_at = |c: &TestCluster, point: Option<u64>, accept: bool, path: std::path::PathBuf| {
+        let meta = Arc::clone(&c.meta);
+        let clients = c.clients.clone();
+        async move {
+            mr::plan(
+                meta.as_ref(),
+                &clients,
+                "snapshot://test",
+                1,
+                point,
+                "in-memory test store",
+                &path,
+                accept,
+                now_ms(),
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // Nodes that do not defer (retention 0, as an earlier release).
+    let c = cluster().await;
+    let e = plan_at(&c, Some(now_ms()), false, dir.path().join("a"))
+        .await
+        .unwrap_err();
+    assert!(e.contains("do not defer"), "{e}");
+    let p = plan_at(&c, Some(now_ms()), true, dir.path().join("a"))
+        .await
+        .unwrap();
+    assert!(p.journal.unprotected.is_some());
+    assert!(
+        p.summary.iter().any(|l| l.starts_with("ACCEPTED")),
+        "{:?}",
+        p.summary
+    );
+    c.shutdown().await;
+    // Nodes deferring for 4 s with the default skew allowance (60 s):
+    // nothing is younger than R - 2ε < 0, so every backup is outside.
+    let c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        reclaim_retention: Duration::from_secs(4),
+        ..ClusterOptions::rs(3, 2, 1, MIB, 0)
+    })
+    .await;
+    c.acknowledge_identities().await;
+    let e = plan_at(&c, Some(now_ms()), false, dir.path().join("b"))
+        .await
+        .unwrap_err();
+    assert!(e.contains("older than the nodes' retention"), "{e}");
+    let e = plan_at(&c, None, false, dir.path().join("b"))
+        .await
+        .unwrap_err();
+    assert!(e.contains("backup point is not given"), "{e}");
+    c.shutdown().await;
+    // Retention of an hour: a backup of now is inside, one of two hours
+    // ago is not; inside at plan, outside at run: refused before the clear.
+    let c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        reclaim_retention: Duration::from_secs(3600),
+        ..ClusterOptions::rs(3, 2, 1, MIB, 0)
+    })
+    .await;
+    c.acknowledge_identities().await;
+    let e = plan_at(&c, Some(now_ms() - 7_200_000), false, dir.path().join("c"))
+        .await
+        .unwrap_err();
+    assert!(e.contains("older than"), "{e}");
+    let p = plan_at(&c, Some(now_ms()), false, dir.path().join("c"))
+        .await
+        .unwrap();
+    assert!(p.journal.unprotected.is_none());
+    let until = p.journal.protected_until_ms.unwrap();
+    assert!(until > now_ms() + 3_000_000, "{until}");
+    let backup = Snapshot::take(&c.meta).await;
+    let late = move || until + 1;
+    let e = mr::run(
+        &c.meta,
+        &c.clients,
+        &backup,
+        &dir.path().join("c"),
+        &p.journal.token,
+        &[],
+        &[],
+        late,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("left the protection"), "{e}");
+    assert!(
+        arca_lake_metadata::ops::compat::cluster_state(c.meta.as_ref())
+            .await
+            .unwrap()
+            .is_some()
+    );
     c.shutdown().await;
 }

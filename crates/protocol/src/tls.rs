@@ -934,6 +934,10 @@ pub enum NodeRpc {
     ListShards,
     /// `DeleteShard`.
     DeleteShard,
+    /// `ReclaimShard` (Phase 3.12).
+    ReclaimShard,
+    /// `ListPending` (Phase 3.12).
+    ListPending,
     /// `VerifyShards`.
     VerifyShards,
     /// `ScrubShards`.
@@ -948,11 +952,13 @@ pub enum NodeRpc {
 
 impl NodeRpc {
     /// Every RPC (the table test walks it).
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::PutShard,
         Self::GetShard,
         Self::ListShards,
         Self::DeleteShard,
+        Self::ReclaimShard,
+        Self::ListPending,
         Self::VerifyShards,
         Self::ScrubShards,
         Self::UpdateGroupEpoch,
@@ -967,7 +973,9 @@ impl NodeRpc {
             Self::PutShard | Self::GetShard | Self::ListShards | Self::DeleteShard => {
                 matches!(role, Role::Gateway | Role::Controller | Role::Admin)
             }
-            Self::VerifyShards
+            Self::ReclaimShard
+            | Self::ListPending
+            | Self::VerifyShards
             | Self::ScrubShards
             | Self::UpdateGroupEpoch
             | Self::HealthWithFacts => matches!(role, Role::Controller | Role::Admin),
@@ -1036,9 +1044,12 @@ mod tests {
                 R::PutShard | R::GetShard | R::ListShards | R::DeleteShard => {
                     [true, true, true, false]
                 }
-                R::VerifyShards | R::ScrubShards | R::UpdateGroupEpoch | R::HealthWithFacts => {
-                    [false, true, true, false]
-                }
+                R::ReclaimShard
+                | R::ListPending
+                | R::VerifyShards
+                | R::ScrubShards
+                | R::UpdateGroupEpoch
+                | R::HealthWithFacts => [false, true, true, false],
                 R::Health => [true, true, true, true],
             }
         };

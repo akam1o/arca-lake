@@ -302,6 +302,26 @@ pub fn restore_marker() -> Key {
     pack(&(ROOT, "restoreop"))
 }
 
+/// A managed restore's probe (Phase 3.12): a random value written through
+/// the procedure's own connection right before the clear, which the
+/// restore tool must read back through its own (the same database,
+/// whatever paths, links, mounts or containers lie between). The clear
+/// removes it.
+#[must_use]
+pub fn restore_probe() -> Key {
+    pack(&(ROOT, "restoreprobe"))
+}
+
+/// The cluster's uid (Phase 3.12): 16 random bytes written once, when the
+/// cluster is initialised (or, for a cluster an earlier release
+/// initialised, by the first `admin restore plan` or leader of this
+/// release). Unlike the incarnation it survives restores, so a backup of
+/// another cluster is told apart from one of this cluster.
+#[must_use]
+pub fn cluster_uid() -> Key {
+    pack(&(ROOT, "clusteruid"))
+}
+
 /// Where the repair scheduler's next scan of the queue starts (Phase
 /// 3.11, M4). Outside the queue's range.
 #[must_use]

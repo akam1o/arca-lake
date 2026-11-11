@@ -522,6 +522,10 @@ impl<S: KvStore + 'static> arca_lake_controller::managed_restore::Restorer for S
         "previous-release test store".into()
     }
 
+    async fn probe(&self, key: &[u8], value: &[u8]) -> Result<bool, String> {
+        arca_lake_controller::managed_restore::probe_store(self.meta.as_ref(), key, value).await
+    }
+
     async fn restore(&self, _source: &str, _version: u64) -> Result<(), String> {
         let snap = self.snap.clone();
         transact(self.meta.as_ref(), snap, |tx, snap| {
@@ -669,6 +673,7 @@ async fn a_managed_restore_and_a_removed_node_with_a_previous_release_binary() {
         None,
         &mr::Restorer::destination(&restorer),
         &journal,
+        true,
         now(),
     )
     .await

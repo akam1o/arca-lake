@@ -816,6 +816,31 @@ impl arca_lake_controller::managed_restore::Restorer for Fdb {
     fn destination(&self) -> String {
         self.backup.cluster_file.clone()
     }
+    // Through `fdbcli` where `fdbrestore` runs (its own view of the
+    // cluster file), as the CLI's restorer does.
+    fn probe(
+        &self,
+        key: &[u8],
+        value: &[u8],
+    ) -> impl std::future::Future<Output = Result<bool, String>> + Send {
+        use arca_lake_controller::managed_restore as mr;
+        let (ok, text) = self.backup.run(
+            "fdbcli",
+            &[
+                "-C",
+                &self.backup.cluster_file,
+                "--timeout",
+                "30",
+                "--exec",
+                &mr::fdbcli_get(key),
+            ],
+        );
+        std::future::ready(if ok {
+            Ok(mr::fdbcli_shows(&text, value))
+        } else {
+            Err(text)
+        })
+    }
     // Blocking: the test runs on a multi-threaded runtime and does
     // nothing else meanwhile.
     fn restore(
@@ -954,6 +979,7 @@ async fn admin_restore_with_fdbrestore_resumes_after_a_failed_restore() {
         Some(now_ms()),
         &fdb.destination(),
         &journal,
+        true,
         now_ms(),
     )
     .await

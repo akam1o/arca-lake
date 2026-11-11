@@ -1389,6 +1389,116 @@ impl NodeClients {
         .await
     }
 
+    /// Reclaim a retired record (Phase 3.12, ADR-0028): `observed_at_ms`
+    /// is this process's clock taken before the metadata read that found
+    /// the shard unneeded. Sent under the same fence, incarnation and
+    /// identity as a delete.
+    ///
+    /// # Errors
+    ///
+    /// RPC errors; `FAILED_PRECONDITION` when the node refuses.
+    pub async fn reclaim_shard(
+        &self,
+        addr: &str,
+        shard: ShardRef,
+        epoch: u64,
+        token: RecordToken,
+        observed_at_ms: u64,
+    ) -> Result<(), tonic::Status> {
+        let ctx = RpcContext {
+            addr,
+            rpc: Rpc::DeleteShard,
+            shard: Some(shard),
+            group_id: Some(shard.group_id),
+        };
+        let Some(fence) = self.delete_fence() else {
+            return Err(tonic::Status::failed_precondition(
+                "delete fence closed in this process: no reclaim is sent",
+            ));
+        };
+        let identity = self.identity_of(addr);
+        self.with_faults(ctx, |_| {
+            self.unary(async {
+                let mut client = self.client(addr)?;
+                let negotiated = self.version_for(addr).await?;
+                let req = pb::ReclaimShardRequest {
+                    protocol_version: negotiated.max(pb::REJOIN_FENCE_VERSION),
+                    key: Some(shard.pb()),
+                    group_epoch: epoch,
+                    incarnation: self
+                        .incarnation()
+                        .map(|i| Bytes::copy_from_slice(&i))
+                        .unwrap_or_default(),
+                    sequence: token.sequence,
+                    store_epoch: token.store_epoch,
+                    delete_fence: fence,
+                    node_id: identity.map_or(0, |i| i.0),
+                    node_identity: identity
+                        .map(|i| Bytes::copy_from_slice(&i.1))
+                        .unwrap_or_default(),
+                    observed_at_ms,
+                };
+                client.reclaim_shard(req).await?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    /// One page of the node's retired records after `after` (Phase 3.12):
+    /// `(shard, token, retired_at_ms)`, the next cursor, and the node's
+    /// retention (ms).
+    ///
+    /// # Errors
+    ///
+    /// RPC errors (`UNIMPLEMENTED` from an earlier release).
+    #[allow(clippy::type_complexity)]
+    pub async fn list_pending(
+        &self,
+        addr: &str,
+        after: Option<ShardRef>,
+        limit: u32,
+    ) -> Result<(Vec<(ShardRef, RecordToken, u64)>, Option<ShardRef>, u64), tonic::Status> {
+        let ctx = RpcContext {
+            addr,
+            rpc: Rpc::ListShards,
+            shard: None,
+            group_id: None,
+        };
+        self.with_faults(ctx, |_| {
+            self.unary(async {
+                let mut client = self.client(addr)?;
+                let negotiated = self.version_for(addr).await?;
+                let r = client
+                    .list_pending(pb::ListPendingRequest {
+                        protocol_version: negotiated,
+                        after: after.map(|a| a.pb()),
+                        limit,
+                    })
+                    .await?
+                    .into_inner();
+                let page = r
+                    .shards
+                    .iter()
+                    .filter_map(|p| {
+                        let k = ShardRef::from_pb(p.key.as_ref()?)?;
+                        Some((
+                            k,
+                            RecordToken {
+                                store_epoch: p.store_epoch,
+                                sequence: p.sequence,
+                            },
+                            p.retired_at_ms,
+                        ))
+                    })
+                    .collect();
+                let next = r.next.as_ref().and_then(ShardRef::from_pb);
+                Ok((page, next, r.retention_ms))
+            })
+        })
+        .await
+    }
+
     /// One page of a group's shards after `after` (key order), with payload
     /// lengths. `limit == 0` selects the node's default page size.
     ///

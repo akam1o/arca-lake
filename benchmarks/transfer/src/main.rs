@@ -555,6 +555,20 @@ impl pb::storage_node_server::StorageNode for GrpcServer {
         Err(tonic::Status::unimplemented("benchmark server"))
     }
 
+    async fn reclaim_shard(
+        &self,
+        _request: tonic::Request<pb::ReclaimShardRequest>,
+    ) -> Result<tonic::Response<pb::ReclaimShardResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("benchmark server"))
+    }
+
+    async fn list_pending(
+        &self,
+        _request: tonic::Request<pb::ListPendingRequest>,
+    ) -> Result<tonic::Response<pb::ListPendingResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("benchmark server"))
+    }
+
     async fn list_shards(
         &self,
         _request: tonic::Request<pb::ListShardsRequest>,

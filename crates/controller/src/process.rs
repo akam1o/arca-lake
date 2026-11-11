@@ -43,6 +43,9 @@ pub struct ControllerConfig {
     pub gc_interval: Duration,
     /// Interval between reconciliation passes.
     pub reconcile_interval: Duration,
+    /// Interval between reclaim passes (Phase 3.12, ADR-0028): retired
+    /// records the metadata no longer needs, once the nodes' retention old.
+    pub reclaim_interval: Duration,
     /// Interval between repair scheduler passes.
     pub repair_interval: Duration,
     /// Interval between health passes.
@@ -135,6 +138,7 @@ impl ControllerConfig {
             id: id.into(),
             lease: Duration::from_secs(10),
             gc_interval: Duration::from_secs(30),
+            reclaim_interval: Duration::from_secs(60),
             reconcile_interval: Duration::from_mins(5),
             repair_interval: Duration::from_secs(15),
             health_interval: Duration::from_secs(5),
@@ -256,6 +260,17 @@ pub async fn spawn<S: KvStore + 'static>(
         .clone()
         .ok_or_else(|| std::io::Error::other("cluster state record missing"))?;
     arca_lake_metadata::records::set_schema_write(gate.schema_write.unwrap_or(0));
+    // A cluster an earlier release initialised gets its uid (Phase 3.12):
+    // `admin restore` tells this cluster's backups from others' by it.
+    if matches!(
+        state.state,
+        arca_lake_metadata::records::ClusterPhase::Active
+            | arca_lake_metadata::records::ClusterPhase::ReadOnly
+    ) {
+        compat::ensure_cluster_uid(meta.as_ref())
+            .await
+            .map_err(|e| std::io::Error::other(format!("cluster uid: {e}")))?;
+    }
     info!(
         controller = %cfg.id,
         schema = ?gate.schema,
@@ -607,6 +622,27 @@ fn start_leader_tasks<S: KvStore + 'static>(
                     let cfg = cfg.clone();
                     let metrics = Arc::clone(&metrics);
                     async move { reconcile_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
+                }
+            },
+        )),
+        tokio::spawn(scheduler(
+            "reclaim",
+            cfg.reclaim_interval,
+            stop.clone(),
+            Arc::clone(metrics),
+            OpClass::Delete,
+            Arc::clone(&raw),
+            {
+                let metrics = Arc::clone(metrics);
+                let meta = Arc::clone(&meta_delete);
+                let clients = clients.clone();
+                let cfg = cfg.clone();
+                move || {
+                    let meta = Arc::clone(&meta);
+                    let clients = clients.clone();
+                    let cfg = cfg.clone();
+                    let metrics = Arc::clone(&metrics);
+                    async move { reclaim_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
                 }
             },
         )),
@@ -1062,6 +1098,47 @@ async fn advance_lineage<S: KvStore>(meta: &S, metrics: &Metrics) -> Result<(), 
     let remembered = metrics.delete_fence.lineage();
     let v = arca_lake_metadata::ops::delete_fence::advance_lineage(meta, remembered).await?;
     metrics.delete_fence.set_lineage(v.max(remembered));
+    Ok(())
+}
+
+/// One reclaim pass over every node in service (Phase 3.12, ADR-0028).
+async fn reclaim_pass<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    cfg: &ControllerConfig,
+    metrics: &Metrics,
+) -> Result<(), ControlError> {
+    let retired: BTreeSet<u64> = node_lifecycle::retirements(meta)
+        .await?
+        .into_iter()
+        .map(|r| r.node_id)
+        .collect();
+    let mut not_deferring = 0;
+    for n in cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .filter(|n| !retired.contains(&n.id))
+    {
+        match crate::gc::reclaim_node(meta, clients, n.id, &n.address, cfg.page_size, now_ms).await
+        {
+            Ok(r) => {
+                not_deferring += r.nodes_not_deferring;
+                metrics
+                    .reclaimed_total
+                    .fetch_add(r.reclaimed, Ordering::Relaxed);
+                metrics
+                    .reclaim_refused_total
+                    .fetch_add(r.refused, Ordering::Relaxed);
+            }
+            Err(ControlError::Node { addr, status }) => {
+                tracing::debug!(node = n.id, %addr, code = ?status.code(), "reclaim pass: node not reached");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    metrics
+        .nodes_not_deferring
+        .store(not_deferring, Ordering::Relaxed);
     Ok(())
 }
 

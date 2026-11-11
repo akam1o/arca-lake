@@ -48,6 +48,15 @@ pub struct NodeConfig {
     /// caller of the node's incarnation, measured on the node's monotonic
     /// clock; a start begins with none.
     pub fence_lease: Duration,
+    /// Deferred reclamation (Phase 3.12, ADR-0028): a delete of a durable
+    /// shard retires the record, which is removed only by a `ReclaimShard`
+    /// whose metadata observation is at least this long after the
+    /// retirement. Zero: deletes remove records at once (earlier releases'
+    /// behaviour; no protection of R-94(b) on this node).
+    pub reclaim_retention: Duration,
+    /// Clock skew allowed between a reclaim's observation and this node's
+    /// clock (an observation further ahead is refused).
+    pub reclaim_skew: Duration,
 }
 
 impl NodeConfig {
@@ -64,8 +73,17 @@ impl NodeConfig {
             capacity_bytes: None,
             reserve_bytes: None,
             fence_lease: Duration::from_secs(30),
+            reclaim_retention: Duration::ZERO,
+            reclaim_skew: Duration::from_secs(60),
         }
     }
+}
+
+/// The node's wall clock (ms since the epoch; 0 before it).
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The service state shared by all requests.
@@ -96,6 +114,10 @@ pub struct StorageNodeService {
     cluster: Mutex<crate::cluster::ClusterFacts>,
     /// The identity the cluster gave this disk (Phase 3.11, R-100).
     identity: Mutex<crate::identity::NodeIdentity>,
+    /// Retired records and group roles (Phase 3.12, ADR-0028).
+    deferred: Arc<Mutex<crate::reclaim::Deferred>>,
+    /// See [`NodeConfig::reclaim_skew`].
+    reclaim_skew_ms: u64,
     /// See [`NodeConfig::fence_lease`].
     fence_lease: Duration,
     /// TLS state; `Some` makes every RPC require an authorised identity.
@@ -190,7 +212,16 @@ impl StorageNodeService {
         // facts file is a new node only while no segment exists.
         let cluster = crate::cluster::ClusterFacts::open(&cfg.store.dir);
         let identity = crate::identity::NodeIdentity::open(&cfg.store.dir);
+        let mut deferred = crate::reclaim::Deferred::open(
+            &cfg.store.dir,
+            u64::try_from(cfg.reclaim_retention.as_millis()).unwrap_or(u64::MAX),
+        );
         let (store, report) = Store::open(cfg.store.clone())?;
+        // Retirements of records written again since (a crash between the
+        // write and its supersede) end.
+        deferred
+            .prune(|k| store.locate(k).map(|l| l.sequence))
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         if !report.quarantined.is_empty()
             || !report.holes.is_empty()
             || !report.corrupt_segments.is_empty()
@@ -243,6 +274,8 @@ impl StorageNodeService {
             scrub_slot: tokio::sync::Semaphore::new(1),
             cluster: Mutex::new(cluster),
             identity: Mutex::new(identity),
+            deferred: Arc::new(Mutex::new(deferred)),
+            reclaim_skew_ms: u64::try_from(cfg.reclaim_skew.as_millis()).unwrap_or(u64::MAX),
             fence_lease: cfg.fence_lease,
             tls: cfg.tls.clone(),
             compaction: Arc::default(),
@@ -724,6 +757,19 @@ impl StorageNode for StorageNodeService {
         self.stats.put_queue.observe(queue_wait);
         self.stats.put_store.observe(store_time);
         let sequence = result.map_err(Self::storage_status)?;
+        {
+            // The new record is live: a retirement of the key ends; the
+            // group's role is noted (ADR-0028). A failure here leaves a
+            // retirement of an older sequence, which is never reclaimed
+            // (the newest record differs).
+            let mut d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Err(e) = d
+                .supersede(&key)
+                .and_then(|()| d.note_write(key.group_id, class == pb::WriteClass::Cache))
+            {
+                tracing::warn!(error = %e, "pending-reclaim log not updated after a write");
+            }
+        }
         self.class_bytes[class as usize].fetch_add(header.payload_len, Ordering::Relaxed);
         Ok(tonic::Response::new(pb::PutShardResponse {
             crc32c: crc,
@@ -843,12 +889,28 @@ impl StorageNode for StorageNodeService {
                 "delete token of another store epoch",
             ));
         }
-        let deleted = tokio::task::spawn_blocking(move || {
+        let deferred = Arc::clone(&self.deferred);
+        let (deleted, was_deferred) = tokio::task::spawn_blocking(move || {
             let _fence = fence;
+            let mut d = deferred.lock().unwrap_or_else(PoisonError::into_inner);
+            if d.defers(key.group_id) {
+                // Retired, not removed (ADR-0028): the record stays readable
+                // until a reclaim proves it unneeded long enough.
+                let Some(newest) = store.locate(&key).map(|l| l.sequence) else {
+                    return Ok((true, false));
+                };
+                if if_sequence != 0 && newest != if_sequence {
+                    return Ok((false, true));
+                }
+                d.retire(key, newest, now_unix_ms())
+                    .map_err(StorageError::Io)?;
+                return Ok((true, true));
+            }
+            drop(d);
             if if_sequence == 0 {
-                store.delete(key).map(|()| true)
+                store.delete(key).map(|()| (true, false))
             } else {
-                store.delete_if(key, if_sequence)
+                store.delete_if(key, if_sequence).map(|r| (r, false))
             }
         })
         .await
@@ -859,7 +921,106 @@ impl StorageNode for StorageNodeService {
                 "shard changed since the delete was decided",
             ));
         }
-        Ok(tonic::Response::new(pb::DeleteShardResponse {}))
+        Ok(tonic::Response::new(pb::DeleteShardResponse {
+            deferred: was_deferred,
+        }))
+    }
+
+    async fn reclaim_shard(
+        &self,
+        request: tonic::Request<pb::ReclaimShardRequest>,
+    ) -> Result<tonic::Response<pb::ReclaimShardResponse>, tonic::Status> {
+        self.authorize(&request, arca_lake_protocol::tls::NodeRpc::ReclaimShard)?;
+        let req = request.into_inner();
+        Self::check_version(req.protocol_version)?;
+        let key = Self::key(req.key)?;
+        // The checks of a delete (ADR-0023/24/27), under the fence guard.
+        let fence = Arc::clone(&self.fence).read_owned().await;
+        self.check_incarnation(&req.incarnation)?;
+        self.check_delete_fence(req.protocol_version, req.delete_fence)?;
+        self.check_epoch(key.group_id, req.group_epoch)?;
+        {
+            let (held, damaged) = {
+                let id = self.identity.lock().unwrap_or_else(PoisonError::into_inner);
+                (id.held(), id.damaged())
+            };
+            let carried = req.node_identity.len() == 16;
+            let refused = damaged
+                || match held {
+                    Some(h) => {
+                        !carried || h.node_id != req.node_id || h.token[..] != req.node_identity[..]
+                    }
+                    None => carried,
+                };
+            if refused {
+                return Err(tonic::Status::failed_precondition(
+                    "identity rejected: the reclaim was not decided for this node's disk",
+                ));
+            }
+        }
+        if req.store_epoch != self.store.store_epoch() {
+            return Err(tonic::Status::aborted("reclaim of another store epoch"));
+        }
+        let store = Arc::clone(&self.store);
+        let deferred = Arc::clone(&self.deferred);
+        let skew = self.reclaim_skew_ms;
+        let (sequence, observed) = (req.sequence, req.observed_at_ms);
+        let outcome = tokio::task::spawn_blocking(move || {
+            let _fence = fence;
+            let mut d = deferred.lock().unwrap_or_else(PoisonError::into_inner);
+            let newest = store.locate(&key).map(|l| l.sequence);
+            match d.reclaim_check(&key, sequence, newest, observed, now_unix_ms(), skew) {
+                crate::reclaim::ReclaimCheck::Refused(why) => Ok(Err(why)),
+                crate::reclaim::ReclaimCheck::Allowed => {
+                    let removed = store.delete_if(key, sequence)?;
+                    d.reclaimed(&key, sequence).map_err(StorageError::Io)?;
+                    Ok(if removed {
+                        Ok(())
+                    } else {
+                        Err("the record changed".to_string())
+                    })
+                }
+            }
+        })
+        .await
+        .map_err(|e| tonic::Status::internal(e.to_string()))?
+        .map_err(Self::storage_status)?;
+        match outcome {
+            Ok(()) => Ok(tonic::Response::new(pb::ReclaimShardResponse {})),
+            Err(why) => Err(tonic::Status::failed_precondition(format!(
+                "reclaim refused: {why}"
+            ))),
+        }
+    }
+
+    async fn list_pending(
+        &self,
+        request: tonic::Request<pb::ListPendingRequest>,
+    ) -> Result<tonic::Response<pb::ListPendingResponse>, tonic::Status> {
+        self.authorize(&request, arca_lake_protocol::tls::NodeRpc::ListPending)?;
+        let req = request.into_inner();
+        Self::check_version(req.protocol_version)?;
+        let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
+        let limit = Self::page_limit(req.limit);
+        let d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+        let page = d.page(after, limit);
+        let store_epoch = self.store.store_epoch();
+        let next = (page.len() == limit)
+            .then(|| page.last().map(|(k, _)| Self::pb_key(k)))
+            .flatten();
+        Ok(tonic::Response::new(pb::ListPendingResponse {
+            shards: page
+                .iter()
+                .map(|(k, r)| pb::PendingShard {
+                    key: Some(Self::pb_key(k)),
+                    sequence: r.sequence,
+                    retired_at_ms: r.retired_ms,
+                    store_epoch,
+                })
+                .collect(),
+            next,
+            retention_ms: d.retention_ms(),
+        }))
     }
 
     async fn list_shards(
@@ -1362,6 +1523,12 @@ impl StorageNode for StorageNodeService {
             self.stats.get_serve.snapshot(),
             self.stats.put_store.snapshot(),
         );
+        // One lock, released before the response (a guard kept in the
+        // expression below would deadlock the next lock).
+        let (reclaim_retention_ms, reclaim_pending, reclaim_damaged) = {
+            let d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+            (d.retention_ms(), d.len() as u64, d.damaged())
+        };
         Ok(tonic::Response::new(pb::HealthResponse {
             live_shards: stats.live_shards as u64,
             live_bytes: stats.live_bytes,
@@ -1392,6 +1559,10 @@ impl StorageNode for StorageNodeService {
             delete_fence_generation: fence_generation,
             delete_fence_open: fence_open,
             delete_fence_hold: self.delete_fence_held(),
+            reclaim_retention_ms,
+            reclaim_pending,
+            reclaim_damaged,
+            reclaim_skew_ms: self.reclaim_skew_ms,
             delete_fence_hold_incarnation: self
                 .delete_fence_hold_incarnation()
                 .map(|h| Bytes::copy_from_slice(&h))

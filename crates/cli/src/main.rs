@@ -591,6 +591,19 @@ struct StorageNodeArgs {
     /// Keep it well above the controllers' `--health-interval-secs`.
     #[arg(long = "fence-lease-secs", default_value_t = 30)]
     fence_lease_secs: u64,
+    /// Deferred reclamation, s (Phase 3.12, ADR-0028): a delete of a
+    /// durable shard retires its record, which stays readable and is
+    /// removed only by a reclaim whose metadata observation is at least this
+    /// long after the retirement. Restores of backups older than this
+    /// (minus the clock skew allowance, twice) are outside the protection;
+    /// freed space arrives this much later. 0 removes records at once (no
+    /// protection on this node).
+    #[arg(long = "reclaim-retention-secs", default_value_t = 86_400)]
+    reclaim_retention_secs: u64,
+    /// Clock skew allowed between a reclaim's observation and this node's
+    /// clock, s (ADR-0028, assumption H2).
+    #[arg(long = "reclaim-skew-secs", default_value_t = 60)]
+    reclaim_skew_secs: u64,
     #[command(flatten)]
     tls: TlsArgs,
     #[command(subcommand)]
@@ -1654,6 +1667,19 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
     cfg.capacity_bytes = args.capacity_bytes;
     cfg.reserve_bytes = args.reserve_bytes;
     cfg.fence_lease = Duration::from_secs(args.fence_lease_secs.max(1));
+    cfg.reclaim_retention = Duration::from_secs(args.reclaim_retention_secs);
+    cfg.reclaim_skew = Duration::from_secs(args.reclaim_skew_secs);
+    if args.reclaim_retention_secs == 0 {
+        tracing::warn!(
+            "--reclaim-retention-secs 0: deletes remove records at once; restores are not protected on this node (R-94(b), ADR-0028)"
+        );
+    } else {
+        tracing::info!(
+            retention_secs = args.reclaim_retention_secs,
+            skew_secs = args.reclaim_skew_secs,
+            "deferred reclamation on"
+        );
+    }
     cfg.compaction = arca_lake_storage_node::compactor::CompactionPolicy {
         interval: Duration::from_secs(args.compaction_interval_secs),
         min_dead_fraction: args.compaction_min_dead_fraction,
@@ -2578,15 +2604,38 @@ enum RestoreCommand {
         /// restorable version for its snapshot point).
         #[arg(long)]
         version: u64,
-        /// Backup point, wall clock ms (splits orphans in the report).
+        /// Backup point, wall clock ms (splits orphans in the report; with
+        /// the nodes' retention, bounds the backup's age, ADR-0028).
         #[arg(long)]
         backup_point_ms: Option<u64>,
         /// Journal file (outside the metadata store; keep it until
         /// `finish` completed).
         #[arg(long)]
         journal: PathBuf,
+        /// Restore a backup outside the protection of deferred
+        /// reclamation (older than the nodes' retention less twice their
+        /// skew allowance, of unknown age, or with nodes that do not
+        /// defer): objects whose shards were reclaimed since are lost.
+        #[arg(long)]
+        accept_unprotected_backup: bool,
         #[command(flatten)]
         rpc: NodeRpcArgs,
+    },
+    /// Replace the backup of a restore whose store was cleared and whose
+    /// restore failed or was refused (another cluster's backup).
+    Amend {
+        /// Journal file.
+        #[arg(long)]
+        journal: PathBuf,
+        /// Backup URL.
+        #[arg(long)]
+        source: String,
+        /// Version to restore to.
+        #[arg(long)]
+        version: u64,
+        /// Backup point, wall clock ms.
+        #[arg(long)]
+        backup_point_ms: Option<u64>,
     },
     /// Freeze, close and hold the fence on every node, clear and restore,
     /// `recovery begin`, verify. Resumes from the journal.
@@ -2660,26 +2709,78 @@ enum RestoreCommand {
     },
 }
 
+/// This command's destination as the journal records it: the cluster
+/// file's path and the cluster's connection id (`description:id`, the part
+/// of its content before `@`; Phase 3.12), so that a file that now names
+/// another cluster at the same path is not the planned destination.
+fn destination_of(cluster_file: &std::path::Path) -> String {
+    let id = std::fs::read_to_string(cluster_file)
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+                .and_then(|l| l.split_once('@'))
+                .map(|(id, _)| id.to_string())
+        })
+        .unwrap_or_else(|| "unreadable".into());
+    format!("{} (cluster {id})", cluster_file.display())
+}
+
 /// Runs `fdbrestore` into this command's cluster.
 struct FdbRestorer {
     prefix: Vec<String>,
     cluster_file: String,
+    /// [`destination_of`] this command's cluster file.
+    destination: String,
+}
+
+impl FdbRestorer {
+    fn tool(&self, name: &str) -> tokio::process::Command {
+        match self.prefix.split_first() {
+            Some((first, rest)) => {
+                let mut c = tokio::process::Command::new(first);
+                c.args(rest).arg(name);
+                c
+            }
+            None => tokio::process::Command::new(name),
+        }
+    }
 }
 
 impl arca_lake_controller::managed_restore::Restorer for FdbRestorer {
     fn destination(&self) -> String {
-        self.cluster_file.clone()
+        self.destination.clone()
+    }
+
+    async fn probe(&self, key: &[u8], value: &[u8]) -> Result<bool, String> {
+        use arca_lake_controller::managed_restore as mr;
+        let out = self
+            .tool("fdbcli")
+            .args([
+                "-C",
+                &self.cluster_file,
+                "--timeout",
+                "30",
+                "--exec",
+                &mr::fdbcli_get(key),
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("fdbcli: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() {
+            return Err(format!(
+                "fdbcli exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(mr::fdbcli_shows(&text, value))
     }
 
     async fn restore(&self, source: &str, version: u64) -> Result<(), String> {
-        let mut cmd = match self.prefix.split_first() {
-            Some((first, rest)) => {
-                let mut c = tokio::process::Command::new(first);
-                c.args(rest).arg("fdbrestore");
-                c
-            }
-            None => tokio::process::Command::new("fdbrestore"),
-        };
+        let mut cmd = self.tool("fdbrestore");
         cmd.args([
             "start",
             "--dest-cluster-file",
@@ -2725,6 +2826,7 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
             version,
             backup_point_ms,
             journal,
+            accept_unprotected_backup,
             rpc,
         } => {
             let clients = match admin_node_clients(&rpc) {
@@ -2737,8 +2839,9 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
                 &source,
                 version,
                 backup_point_ms,
-                &cluster_file.display().to_string(),
+                &destination_of(cluster_file),
                 &journal,
+                accept_unprotected_backup,
                 now,
             )
             .await
@@ -2771,6 +2874,7 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
                     .unwrap_or_default(),
                 cluster_file: fdbrestore_cluster_file
                     .unwrap_or_else(|| cluster_file.display().to_string()),
+                destination: destination_of(cluster_file),
             };
             match mr::run(
                 meta,
@@ -2859,12 +2963,29 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
                 Err(e) => fail(e),
             }
         }
+        RestoreCommand::Amend {
+            journal,
+            source,
+            version,
+            backup_point_ms,
+        } => match mr::amend(&journal, &source, version, backup_point_ms) {
+            Ok(_) => {
+                println!("backup replaced: re-run `admin restore run`");
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e),
+        },
         RestoreCommand::Status { journal } => match mr::Journal::load(&journal) {
             Ok(j) => {
                 println!(
                     "source {} version {} destination {}",
                     j.source, j.version, j.destination
                 );
+                match (&j.unprotected, j.protected_until_ms) {
+                    (Some(why), _) => println!("accepted outside deferred reclamation: {why}"),
+                    (None, Some(until)) => println!("protected until {until} (ms)"),
+                    (None, None) => println!("protection unknown"),
+                }
                 println!(
                     "steps done: {}",
                     j.done

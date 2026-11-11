@@ -432,6 +432,10 @@ impl<S: KvStore + 'static> arca_lake_controller::managed_restore::Restorer for M
         "model store".into()
     }
 
+    async fn probe(&self, key: &[u8], value: &[u8]) -> Result<bool, String> {
+        arca_lake_controller::managed_restore::probe_store(self.meta.as_ref(), key, value).await
+    }
+
     async fn restore(&self, _source: &str, _version: u64) -> Result<(), String> {
         let held = std::mem::take(&mut *self.delayed.lock().unwrap());
         for (who, deletes) in held {
@@ -699,6 +703,7 @@ async fn run<S: KvStore + 'static>(
                         None,
                         &mr::Restorer::destination(&restorer),
                         &journal,
+                        true,
                         now_ms(),
                     )
                     .await
@@ -768,6 +773,7 @@ async fn run<S: KvStore + 'static>(
                     None,
                     "model store",
                     &journal,
+                    true,
                     now_ms(),
                 )
                 .await;

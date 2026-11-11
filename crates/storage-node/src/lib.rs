@@ -15,6 +15,7 @@ mod epochs;
 mod fault_control;
 mod identity;
 pub mod load;
+pub mod reclaim;
 mod service;
 
 pub use arca_lake_storage::{ShardKey, Store, StoreTimingsSnapshot};

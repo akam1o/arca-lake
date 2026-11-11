@@ -8,9 +8,17 @@
 //! finished) before any metadata changed; no controller or gateway was
 //! running; the restored metadata deletes nothing until finalize and a
 //! leader opened a new generation. A restore done any other way (a direct
-//! `fdbrestore`, a DR switch, a disk snapshot rollback) is not covered:
-//! R-94(b) stays open for it (ADR-0025 mitigates, ADR-0026 option Q is a
-//! proposal).
+//! `fdbrestore`, a DR switch, a disk snapshot rollback) is not covered by
+//! this procedure; since Phase 3.12 the nodes' deferred reclamation
+//! (ADR-0028) bounds R-94(b) for every restore of a backup younger than the
+//! retention, this procedure's included, and `plan` refuses an older
+//! backup unless the operator accepts the loss explicitly.
+//!
+//! The destination is identified by content, not by path (Phase 3.12):
+//! right before every clear a random probe is written through this
+//! procedure's own connection and must be read back by the restore tool
+//! through its own; after the restore, the restored metadata must carry
+//! this cluster's uid (when the backup has one).
 //!
 //! The progress lives in a journal file outside the metadata store (the
 //! restore replaces the store): every step records itself once done, and
@@ -53,6 +61,45 @@ pub trait Restorer: Send + Sync {
         source: &str,
         version: u64,
     ) -> impl Future<Output = Result<(), String>> + Send;
+
+    /// Whether the destination, as the restore tool reaches it, holds
+    /// `key` = `value` (Phase 3.12): the procedure writes a random probe
+    /// through its own connection right before the clear, and nothing is
+    /// cleared unless the tool reads it back. A path compared as a string
+    /// cannot tell links, mounts, containers or a file replaced since the
+    /// plan; the database's content can.
+    fn probe(&self, key: &[u8], value: &[u8]) -> impl Future<Output = Result<bool, String>> + Send;
+}
+
+/// The `fdbcli --exec` command reading `key` (every byte escaped as
+/// `\xNN`), for [`Restorer::probe`] through `fdbcli`.
+#[must_use]
+pub fn fdbcli_get(key: &[u8]) -> String {
+    key.iter().fold(String::from("get "), |mut s, b| {
+        let _ = write!(s, "\\x{b:02x}");
+        s
+    })
+}
+
+/// Whether `fdbcli get` output shows `value` (`` `KEY' is `VALUE' ``; the
+/// probe values are hex, printed as they are).
+#[must_use]
+pub fn fdbcli_shows(output: &str, value: &[u8]) -> bool {
+    std::str::from_utf8(value).is_ok_and(|v| output.contains(&format!(" is `{v}'")))
+}
+
+/// [`Restorer::probe`] for a restorer that writes through `meta` itself.
+///
+/// # Errors
+///
+/// Metadata errors, as text.
+pub async fn probe_store<S: KvStore>(meta: &S, key: &[u8], value: &[u8]) -> Result<bool, String> {
+    let (key, value) = (key.to_vec(), value.to_vec());
+    arca_lake_metadata::transact(meta, (key, value), |tx, (key, value)| {
+        Box::pin(async move { Ok(tx.get(key).await?.as_deref() == Some(value.as_slice())) })
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// A step of the procedure, in order.
@@ -159,6 +206,15 @@ pub struct Journal {
     /// A marker about to be written (recorded before it is, so that this
     /// journal can always tell its markers from any other's).
     pub pending_marker: Option<String>,
+    /// The uid of the cluster restored over (hex, Phase 3.12): the restored
+    /// metadata must carry the same, when the backup has one.
+    pub cluster_uid: Option<String>,
+    /// Until when the backup is younger than the nodes' retention less twice
+    /// their skew allowance (ADR-0028 H1), wall clock ms; `None`: unknown.
+    pub protected_until_ms: Option<u64>,
+    /// Why the backup is outside that protection, accepted by the operator
+    /// (`None`: inside it).
+    pub unprotected: Option<String>,
 }
 
 impl Journal {
@@ -210,6 +266,15 @@ impl Journal {
         if let Some(m) = &self.pending_marker {
             let _ = writeln!(b, "pending_marker {m}");
         }
+        if let Some(u) = &self.cluster_uid {
+            let _ = writeln!(b, "cluster_uid {u}");
+        }
+        if let Some(ms) = self.protected_until_ms {
+            let _ = writeln!(b, "protected_until_ms {ms}");
+        }
+        if let Some(why) = &self.unprotected {
+            let _ = writeln!(b, "unprotected {}", why.replace('\n', " "));
+        }
         for s in &self.done {
             let _ = writeln!(b, "done {}", s.name());
         }
@@ -252,6 +317,9 @@ impl Journal {
             marker: None,
             abandoned: false,
             pending_marker: None,
+            cluster_uid: None,
+            protected_until_ms: None,
+            unprotected: None,
         };
         let num = |v: &str| v.parse::<u64>().map_err(|e| format!("{v}: {e}"));
         for l in &lines[1..] {
@@ -290,6 +358,9 @@ impl Journal {
                 "marker" => j.marker = Some(v.into()),
                 "abandoned" => j.abandoned = true,
                 "pending_marker" => j.pending_marker = Some(v.into()),
+                "cluster_uid" => j.cluster_uid = Some(v.into()),
+                "protected_until_ms" => j.protected_until_ms = Some(num(v)?),
+                "unprotected" => j.unprotected = Some(v.into()),
                 "done" => j
                     .done
                     .push(Step::parse(v).ok_or_else(|| format!("unknown step {v}"))?),
@@ -403,7 +474,7 @@ async fn running_processes<S: KvStore>(
 /// # Errors
 ///
 /// Why the restore may not start; metadata or I/O errors.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn plan<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -412,6 +483,7 @@ pub async fn plan<S: KvStore>(
     backup_point_ms: Option<u64>,
     destination: &str,
     path: &Path,
+    accept_unprotected: bool,
     now_ms: u64,
 ) -> Result<Plan, ControlError> {
     let _lock = lock(path)?;
@@ -446,6 +518,11 @@ pub async fn plan<S: KvStore>(
     let mut removed = Vec::new();
     let mut removed_at = Vec::new();
     let mut unreachable = Vec::new();
+    // Deferred reclamation (ADR-0028): the shortest retention less twice
+    // the largest skew allowance bounds the backup's age.
+    let mut retention_ms = u64::MAX;
+    let mut skew_ms = 0u64;
+    let mut not_deferring = Vec::new();
     for n in cluster::list_nodes(meta).await? {
         if states.get(&n.id) == Some(&State::Removed) {
             removed.push(n.id);
@@ -453,8 +530,15 @@ pub async fn plan<S: KvStore>(
             continue;
         }
         clients.note_node_id(&n.address, n.id);
-        if let Err(e) = clients.health(&n.address).await {
-            unreachable.push(format!("node {} ({}): {}", n.id, n.address, e.code()));
+        match clients.health(&n.address).await {
+            Ok(h) => {
+                if h.reclaim_retention_ms == 0 {
+                    not_deferring.push(n.id);
+                }
+                retention_ms = retention_ms.min(h.reclaim_retention_ms);
+                skew_ms = skew_ms.max(h.reclaim_skew_ms);
+            }
+            Err(e) => unreachable.push(format!("node {} ({}): {}", n.id, n.address, e.code())),
         }
         nodes.push((n.id, n.address.clone()));
     }
@@ -464,6 +548,35 @@ pub async fn plan<S: KvStore>(
             unreachable.join(", ")
         )));
     }
+    let protected_until_ms = backup_point_ms
+        .filter(|_| retention_ms != u64::MAX && not_deferring.is_empty())
+        .map(|b| {
+            b.saturating_add(retention_ms)
+                .saturating_sub(skew_ms.saturating_mul(2))
+        });
+    let mut outside = Vec::new();
+    if !not_deferring.is_empty() {
+        outside.push(format!(
+            "nodes {not_deferring:?} do not defer deletes (an earlier release, or --reclaim-retention-secs 0): what they deleted after the backup point is gone"
+        ));
+    }
+    if backup_point_ms.is_none() {
+        outside.push("the backup point is not given (--backup-point-ms): its age cannot be checked against the nodes' retention".into());
+    }
+    if let Some(until) = protected_until_ms
+        && now_ms > until
+    {
+        outside.push(format!(
+            "the backup is older than the nodes' retention ({retention_ms} ms) less twice their skew allowance ({skew_ms} ms): shards reclaimed since are gone"
+        ));
+    }
+    if !outside.is_empty() && !accept_unprotected {
+        return Err(refuse(format!(
+            "the backup is outside the protection of deferred reclamation (ADR-0028): {}; objects whose shards were reclaimed are lost (reported, not recovered). Accept this explicitly with --accept-unprotected-backup",
+            outside.join("; ")
+        )));
+    }
+    let cluster_uid = compat::ensure_cluster_uid(meta).await?;
     let journal = Journal {
         source: source.to_string(),
         version,
@@ -487,6 +600,9 @@ pub async fn plan<S: KvStore>(
         marker: None,
         abandoned: false,
         pending_marker: None,
+        cluster_uid: cluster_uid.map(|u| compat::hex(&u)),
+        protected_until_ms,
+        unprotected: (!outside.is_empty()).then(|| outside.join("; ")),
     };
     journal.save(path).map_err(ControlError::Other)?;
     let summary = vec![
@@ -503,6 +619,13 @@ pub async fn plan<S: KvStore>(
             journal.destination
         ),
         "every write after the backup point is lost (RPO); objects whose shards are gone are reported, not recovered".into(),
+        match (&journal.unprotected, journal.protected_until_ms) {
+            (Some(why), _) => format!("ACCEPTED outside deferred reclamation's protection: {why}"),
+            (None, Some(until)) => format!(
+                "inside deferred reclamation's protection until {until} (ms): run before then"
+            ),
+            (None, None) => "deferred reclamation's protection unknown".into(),
+        },
         format!("confirm with: admin restore run --confirm {}", journal.token),
         format!("(now {now_ms})"),
     ];
@@ -803,6 +926,46 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 )));
             }
         }
+        // The backup still inside the protection it was planned with (time
+        // passed since the plan); only before the first clear: once the
+        // store is gone, the restore is the only way on.
+        if !j.has(Step::Clearing)
+            && j.unprotected.is_none()
+            && let Some(until) = j.protected_until_ms
+            && now() > until
+        {
+            return Err(refuse(format!(
+                "the backup left the protection of deferred reclamation at {until} (ms) since the plan: nothing cleared; plan again, accepting it explicitly"
+            )));
+        }
+        // The restore tool's destination is this store (Phase 3.12): a
+        // fresh probe written here must be read back there, whatever paths,
+        // links, mounts or containers lie between. The clear removes it.
+        let probe = compat::hex(&arca_lake_metadata::records::new_gen_id());
+        arca_lake_metadata::transact(meta_ref, probe.clone(), |tx, probe| {
+            Box::pin(async move {
+                tx.set(&arca_lake_metadata::keys::restore_probe(), probe.as_bytes());
+                Ok(())
+            })
+        })
+        .await?;
+        match restorer
+            .probe(&arca_lake_metadata::keys::restore_probe(), probe.as_bytes())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(refuse(format!(
+                    "the restore tool's destination ({}) is not the store this command uses: the probe written here is not there; nothing cleared",
+                    restorer.destination()
+                )));
+            }
+            Err(e) => {
+                return Err(refuse(format!(
+                    "the restore tool's destination cannot be confirmed ({e}): nothing cleared"
+                )));
+            }
+        }
         j.record(path, Step::Clearing)?;
         // On the planned store, only while it still holds this attempt's
         // marker, in the clear's own transaction (re-review: a marker
@@ -835,6 +998,17 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
         let after = compat::cluster_state(meta_ref).await?.ok_or_else(|| {
             refuse("the restored metadata has no cluster state: not an arca-lake backup")
         })?;
+        // Another cluster's backup (Phase 3.12): its uid differs. A backup
+        // of an earlier release has none (the node check below remains).
+        if let (Some(planned), Some(restored)) =
+            (&j.cluster_uid, compat::cluster_uid(meta_ref).await?)
+            && *planned != compat::hex(&restored)
+        {
+            return Err(refuse(format!(
+                "the backup is of another cluster (uid {}, this cluster {planned}): nothing marked; give the right backup with `admin restore amend`, then re-run",
+                compat::hex(&restored)
+            )));
+        }
         j.restored_incarnation = Some(compat::hex(&after.incarnation));
         j.record(path, Step::Restored)?;
     }
@@ -897,6 +1071,7 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
         arca_lake_metadata::transact(meta_ref, (), |tx, ()| {
             Box::pin(async move {
                 tx.clear(&arca_lake_metadata::keys::restore_marker());
+                tx.clear(&arca_lake_metadata::keys::restore_probe());
                 Ok(())
             })
         })
@@ -1101,6 +1276,39 @@ pub async fn finish<S: KvStore>(
     Ok(j)
 }
 
+/// Replace the backup of a restore whose store was cleared and not yet
+/// restored (`admin restore amend`, Phase 3.12): after a restore refused as
+/// another cluster's backup, or a source that cannot be restored. The
+/// cleared store leaves no other way on; before the clear, plan again.
+///
+/// # Errors
+///
+/// Refused at another step; I/O errors.
+pub fn amend(
+    path: &Path,
+    source: &str,
+    version: u64,
+    backup_point_ms: Option<u64>,
+) -> Result<Journal, ControlError> {
+    let _lock = lock(path)?;
+    let mut j = Journal::load(path).map_err(ControlError::Other)?;
+    if j.abandoned || !j.has(Step::Cleared) || j.has(Step::Restored) {
+        return Err(refuse(format!(
+            "the backup can be replaced only after the clear and before the restore succeeded (at {}); before the clear, plan again",
+            j.last().map_or("none", Step::name)
+        )));
+    }
+    j.source = source.to_string();
+    j.version = version;
+    j.backup_point_ms = backup_point_ms;
+    // Past the clear, the age guard no longer applies: recorded as such.
+    j.unprotected = Some(format!(
+        "backup replaced after the clear by {source} at {version}; its age was not checked"
+    ));
+    j.save(path).map_err(ControlError::Other)?;
+    Ok(j)
+}
+
 /// Give up a managed restore before its clear (`admin restore abandon`):
 /// the journal is marked abandoned (never run or finished again), then its
 /// marker, which holds node changes, is removed if the store still holds
@@ -1165,6 +1373,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fdbcli_probe_command_and_output() {
+        assert_eq!(fdbcli_get(&[0x02, b'a', 0]), "get \\x02\\x61\\x00");
+        assert!(fdbcli_shows("`\\x02al' is `0abc'\n", b"0abc"));
+        assert!(!fdbcli_shows("`\\x02al': not found\n", b"0abc"));
+        assert!(!fdbcli_shows("`\\x02al' is `0abcd'\n", b"0abc"));
+    }
+
+    #[test]
     fn the_journal_round_trips_and_damage_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("j");
@@ -1186,6 +1402,9 @@ mod tests {
             marker: Some("ab".into()),
             abandoned: false,
             pending_marker: Some("cd".into()),
+            cluster_uid: Some("0a0b".into()),
+            protected_until_ms: Some(99),
+            unprotected: Some("node 3 does not defer".into()),
         };
         j.save(&p).unwrap();
         assert_eq!(Journal::load(&p).unwrap(), j);
