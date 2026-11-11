@@ -1,0 +1,645 @@
+== expanded 11:19:25
+2026-11-11T11:19:26.046595Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused true dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794395964455 last_reason paused
+plan none
+cursor start
+2026-11-11T11:19:26.287177Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+record generation 2 open leader_token 1 changed_ms 1794395939483 reason opened by the leader of term 1
+2026-11-11T11:19:26.290423Z  WARN arca_lake: node RPCs run in PLAINTEXT with no authentication or authorization (--insecure-plaintext) role="admin"
+node 1 generation 2 open
+node 2 generation 2 open
+node 3 generation 2 open
+node 4 generation 2 open
+node 5 generation 2 open
+node 6 generation 2 open
+nodes 6 at the record's generation and state 6 other 0
+a:9910 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9910 arca_node_capacity_bytes{kind="available"} 2212617792
+a:9910 arca_node_capacity_bytes{kind="allocated"} 1008607232
+a:9910 arca_node_capacity_bytes{kind="live"} 1006632960
+a:9910 arca_node_capacity_bytes{kind="reclaimable"} 1974272
+a:9910 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9910 arca_node_capacity_bytes{kind="reserved"} 811466752
+a:9910 arca_node_capacity_bytes{kind="repair_floor"} 811466752
+a:9910 arca_node_capacity_bytes{kind="inflight"} 0
+a:9910 arca_node_delete_fence_generation 2
+a:9910 arca_node_delete_fence_open 1
+a:9910 arca_node_delete_fence_hold 0
+a:9910 arca_node_delete_fence_refusals_total 0
+a:9911 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9911 arca_node_capacity_bytes{kind="available"} 2212617791
+a:9911 arca_node_capacity_bytes{kind="allocated"} 1008607232
+a:9911 arca_node_capacity_bytes{kind="live"} 1006632960
+a:9911 arca_node_capacity_bytes{kind="reclaimable"} 1974272
+a:9911 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9911 arca_node_capacity_bytes{kind="reserved"} 811466752
+a:9911 arca_node_capacity_bytes{kind="repair_floor"} 811466752
+a:9911 arca_node_capacity_bytes{kind="inflight"} 0
+a:9911 arca_node_delete_fence_generation 2
+a:9911 arca_node_delete_fence_open 1
+a:9911 arca_node_delete_fence_hold 0
+a:9911 arca_node_delete_fence_refusals_total 0
+a:9912 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9912 arca_node_capacity_bytes{kind="available"} 3221216831
+a:9912 arca_node_capacity_bytes{kind="allocated"} 8192
+a:9912 arca_node_capacity_bytes{kind="live"} 0
+a:9912 arca_node_capacity_bytes{kind="reclaimable"} 8192
+a:9912 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9912 arca_node_capacity_bytes{kind="reserved"} 809500672
+a:9912 arca_node_capacity_bytes{kind="repair_floor"} 809500672
+a:9912 arca_node_capacity_bytes{kind="inflight"} 0
+a:9912 arca_node_delete_fence_generation 2
+a:9912 arca_node_delete_fence_open 1
+a:9912 arca_node_delete_fence_hold 0
+a:9912 arca_node_delete_fence_refusals_total 0
+a:9913 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9913 arca_node_capacity_bytes{kind="available"} 3221216832
+a:9913 arca_node_capacity_bytes{kind="allocated"} 8192
+a:9913 arca_node_capacity_bytes{kind="live"} 0
+a:9913 arca_node_capacity_bytes{kind="reclaimable"} 8192
+a:9913 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9913 arca_node_capacity_bytes{kind="reserved"} 809500672
+a:9913 arca_node_capacity_bytes{kind="repair_floor"} 809500672
+a:9913 arca_node_capacity_bytes{kind="inflight"} 0
+a:9913 arca_node_delete_fence_generation 2
+a:9913 arca_node_delete_fence_open 1
+a:9913 arca_node_delete_fence_hold 0
+a:9913 arca_node_delete_fence_refusals_total 0
+b:9910 arca_node_capacity_bytes{kind="total"} 3221225472
+b:9910 arca_node_capacity_bytes{kind="available"} 2212617791
+b:9910 arca_node_capacity_bytes{kind="allocated"} 1008607232
+b:9910 arca_node_capacity_bytes{kind="live"} 1006632960
+b:9910 arca_node_capacity_bytes{kind="reclaimable"} 1974272
+b:9910 arca_node_capacity_bytes{kind="quarantined"} 0
+b:9910 arca_node_capacity_bytes{kind="reserved"} 811466752
+b:9910 arca_node_capacity_bytes{kind="repair_floor"} 811466752
+b:9910 arca_node_capacity_bytes{kind="inflight"} 0
+b:9910 arca_node_delete_fence_generation 2
+b:9910 arca_node_delete_fence_open 1
+b:9910 arca_node_delete_fence_hold 0
+b:9910 arca_node_delete_fence_refusals_total 0
+b:9911 arca_node_capacity_bytes{kind="total"} 3221225472
+b:9911 arca_node_capacity_bytes{kind="available"} 3221216832
+b:9911 arca_node_capacity_bytes{kind="allocated"} 8192
+b:9911 arca_node_capacity_bytes{kind="live"} 0
+b:9911 arca_node_capacity_bytes{kind="reclaimable"} 8192
+b:9911 arca_node_capacity_bytes{kind="quarantined"} 0
+b:9911 arca_node_capacity_bytes{kind="reserved"} 809500672
+b:9911 arca_node_capacity_bytes{kind="repair_floor"} 809500672
+b:9911 arca_node_capacity_bytes{kind="inflight"} 0
+b:9911 arca_node_delete_fence_generation 2
+b:9911 arca_node_delete_fence_open 1
+b:9911 arca_node_delete_fence_hold 0
+b:9911 arca_node_delete_fence_refusals_total 0
+ctl-a arca_controller_leader 1
+ctl-a arca_controller_delete_fence_generation 2
+ctl-a arca_controller_delete_fence_open 1
+ctl-a arca_controller_delete_fence_nodes_current 6
+ctl-a arca_controller_delete_fence_nodes_stale 0
+ctl-a arca_controller_delete_fence_refusals_total 0
+ctl-a arca_controller_delete_fence_metadata_behind_total 0
+ctl-a arca_controller_shards_deleted_total 0
+ctl-a arca_controller_groups_repairing 0
+ctl-a arca_controller_rebalance_moved_chunks_total 0
+ctl-a arca_controller_rebalance_moved_bytes_total 0
+ctl-a arca_controller_rebalance_skipped_chunks_total 0
+ctl-a arca_controller_rebalance_capacity_stops_total 0
+ctl-a arca_controller_rebalance_imbalance_permille 0
+ctl-a arca_controller_gc_backlog 0
+ctl-a arca_controller_gc_backlog_oldest_age_seconds 0
+ctl-a arca_controller_gc_backlog_bytes 0
+ctl-a arca_controller_gc_backlog_physical_bytes 0
+ctl-b arca_controller_leader 0
+ctl-b arca_controller_delete_fence_generation 0
+ctl-b arca_controller_delete_fence_open 0
+ctl-b arca_controller_delete_fence_nodes_current 0
+ctl-b arca_controller_delete_fence_nodes_stale 0
+ctl-b arca_controller_delete_fence_refusals_total 0
+ctl-b arca_controller_delete_fence_metadata_behind_total 0
+ctl-b arca_controller_shards_deleted_total 0
+ctl-b arca_controller_groups_repairing 0
+ctl-b arca_controller_rebalance_moved_chunks_total 0
+ctl-b arca_controller_rebalance_moved_bytes_total 0
+ctl-b arca_controller_rebalance_skipped_chunks_total 0
+ctl-b arca_controller_rebalance_capacity_stops_total 0
+ctl-b arca_controller_rebalance_imbalance_permille 0
+ctl-b arca_controller_gc_backlog 0
+ctl-b arca_controller_gc_backlog_oldest_age_seconds 0
+ctl-b arca_controller_gc_backlog_bytes 0
+ctl-b arca_controller_gc_backlog_physical_bytes 0
+== after-baseline 11:27:29
+2026-11-11T11:27:29.892559Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused true dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794396445411 last_reason paused
+plan none
+cursor start
+2026-11-11T11:27:30.132122Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+record generation 2 open leader_token 1 changed_ms 1794395939483 reason opened by the leader of term 1
+2026-11-11T11:27:30.135336Z  WARN arca_lake: node RPCs run in PLAINTEXT with no authentication or authorization (--insecure-plaintext) role="admin"
+node 1 generation 2 open
+node 2 generation 2 open
+node 3 generation 2 open
+node 4 generation 2 open
+node 5 generation 2 open
+node 6 generation 2 open
+nodes 6 at the record's generation and state 6 other 0
+a:9910 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9910 arca_node_capacity_bytes{kind="available"} 1522060864
+a:9910 arca_node_capacity_bytes{kind="allocated"} 1699164160
+a:9910 arca_node_capacity_bytes{kind="live"} 1006632960
+a:9910 arca_node_capacity_bytes{kind="reclaimable"} 692531200
+a:9910 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9910 arca_node_capacity_bytes{kind="reserved"} 811466752
+a:9910 arca_node_capacity_bytes{kind="repair_floor"} 811466752
+a:9910 arca_node_capacity_bytes{kind="inflight"} 0
+a:9910 arca_node_delete_fence_generation 2
+a:9910 arca_node_delete_fence_open 1
+a:9910 arca_node_delete_fence_hold 0
+a:9910 arca_node_delete_fence_refusals_total 0
+a:9911 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9911 arca_node_capacity_bytes{kind="available"} 1522060863
+a:9911 arca_node_capacity_bytes{kind="allocated"} 1699164160
+a:9911 arca_node_capacity_bytes{kind="live"} 1006632960
+a:9911 arca_node_capacity_bytes{kind="reclaimable"} 692531200
+a:9911 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9911 arca_node_capacity_bytes{kind="reserved"} 811466752
+a:9911 arca_node_capacity_bytes{kind="repair_floor"} 811466752
+a:9911 arca_node_capacity_bytes{kind="inflight"} 0
+a:9911 arca_node_delete_fence_generation 2
+a:9911 arca_node_delete_fence_open 1
+a:9911 arca_node_delete_fence_hold 0
+a:9911 arca_node_delete_fence_refusals_total 0
+a:9912 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9912 arca_node_capacity_bytes{kind="available"} 2166517760
+a:9912 arca_node_capacity_bytes{kind="allocated"} 621944832
+a:9912 arca_node_capacity_bytes{kind="live"} 167772160
+a:9912 arca_node_capacity_bytes{kind="reclaimable"} 454172672
+a:9912 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9912 arca_node_capacity_bytes{kind="reserved"} 809828352
+a:9912 arca_node_capacity_bytes{kind="repair_floor"} 809828352
+a:9912 arca_node_capacity_bytes{kind="inflight"} 0
+a:9912 arca_node_delete_fence_generation 2
+a:9912 arca_node_delete_fence_open 1
+a:9912 arca_node_delete_fence_hold 0
+a:9912 arca_node_delete_fence_refusals_total 0
+a:9913 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9913 arca_node_capacity_bytes{kind="available"} 2166513664
+a:9913 arca_node_capacity_bytes{kind="allocated"} 615628800
+a:9913 arca_node_capacity_bytes{kind="live"} 167772160
+a:9913 arca_node_capacity_bytes{kind="reclaimable"} 447856640
+a:9913 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9913 arca_node_capacity_bytes{kind="reserved"} 809828352
+a:9913 arca_node_capacity_bytes{kind="repair_floor"} 809828352
+a:9913 arca_node_capacity_bytes{kind="inflight"} 0
+a:9913 arca_node_delete_fence_generation 2
+a:9913 arca_node_delete_fence_open 1
+a:9913 arca_node_delete_fence_hold 0
+a:9913 arca_node_delete_fence_refusals_total 0
+b:9910 arca_node_capacity_bytes{kind="total"} 3221225472
+b:9910 arca_node_capacity_bytes{kind="available"} 1522060863
+b:9910 arca_node_capacity_bytes{kind="allocated"} 1699164160
+b:9910 arca_node_capacity_bytes{kind="live"} 1006632960
+b:9910 arca_node_capacity_bytes{kind="reclaimable"} 692531200
+b:9910 arca_node_capacity_bytes{kind="quarantined"} 0
+b:9910 arca_node_capacity_bytes{kind="reserved"} 811466752
+b:9910 arca_node_capacity_bytes{kind="repair_floor"} 811466752
+b:9910 arca_node_capacity_bytes{kind="inflight"} 0
+b:9910 arca_node_delete_fence_generation 2
+b:9910 arca_node_delete_fence_open 1
+b:9910 arca_node_delete_fence_hold 0
+b:9910 arca_node_delete_fence_refusals_total 0
+b:9911 arca_node_capacity_bytes{kind="total"} 3221225472
+b:9911 arca_node_capacity_bytes{kind="available"} 2609802816
+b:9911 arca_node_capacity_bytes{kind="allocated"} 611422208
+b:9911 arca_node_capacity_bytes{kind="live"} 165675008
+b:9911 arca_node_capacity_bytes{kind="reclaimable"} 445747200
+b:9911 arca_node_capacity_bytes{kind="quarantined"} 0
+b:9911 arca_node_capacity_bytes{kind="reserved"} 809824256
+b:9911 arca_node_capacity_bytes{kind="repair_floor"} 809824256
+b:9911 arca_node_capacity_bytes{kind="inflight"} 0
+b:9911 arca_node_delete_fence_generation 2
+b:9911 arca_node_delete_fence_open 1
+b:9911 arca_node_delete_fence_hold 0
+b:9911 arca_node_delete_fence_refusals_total 0
+ctl-a arca_controller_leader 1
+ctl-a arca_controller_delete_fence_generation 2
+ctl-a arca_controller_delete_fence_open 1
+ctl-a arca_controller_delete_fence_nodes_current 6
+ctl-a arca_controller_delete_fence_nodes_stale 0
+ctl-a arca_controller_delete_fence_refusals_total 0
+ctl-a arca_controller_delete_fence_metadata_behind_total 0
+ctl-a arca_controller_shards_deleted_total 4688
+ctl-a arca_controller_groups_repairing 0
+ctl-a arca_controller_rebalance_moved_chunks_total 0
+ctl-a arca_controller_rebalance_moved_bytes_total 0
+ctl-a arca_controller_rebalance_skipped_chunks_total 0
+ctl-a arca_controller_rebalance_capacity_stops_total 0
+ctl-a arca_controller_rebalance_imbalance_permille 0
+ctl-a arca_controller_gc_backlog 29
+ctl-a arca_controller_gc_backlog_oldest_age_seconds 26
+ctl-a arca_controller_gc_backlog_bytes 100663296
+ctl-a arca_controller_gc_backlog_physical_bytes 150994944
+ctl-b arca_controller_leader 0
+ctl-b arca_controller_delete_fence_generation 0
+ctl-b arca_controller_delete_fence_open 0
+ctl-b arca_controller_delete_fence_nodes_current 0
+ctl-b arca_controller_delete_fence_nodes_stale 0
+ctl-b arca_controller_delete_fence_refusals_total 0
+ctl-b arca_controller_delete_fence_metadata_behind_total 0
+ctl-b arca_controller_shards_deleted_total 0
+ctl-b arca_controller_groups_repairing 0
+ctl-b arca_controller_rebalance_moved_chunks_total 0
+ctl-b arca_controller_rebalance_moved_bytes_total 0
+ctl-b arca_controller_rebalance_skipped_chunks_total 0
+ctl-b arca_controller_rebalance_capacity_stops_total 0
+ctl-b arca_controller_rebalance_imbalance_permille 0
+ctl-b arca_controller_gc_backlog 0
+ctl-b arca_controller_gc_backlog_oldest_age_seconds 0
+ctl-b arca_controller_gc_backlog_bytes 0
+ctl-b arca_controller_gc_backlog_physical_bytes 0
+== before-leader-kill 11:30:13
+2026-11-11T11:30:13.670202Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 32 moved_bytes 134217728 skipped_chunks 0 last_pass_ms 1794396607692 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-11T11:30:13.905824Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+record generation 2 open leader_token 1 changed_ms 1794395939483 reason opened by the leader of term 1
+2026-11-11T11:30:13.910227Z  WARN arca_lake: node RPCs run in PLAINTEXT with no authentication or authorization (--insecure-plaintext) role="admin"
+node 1 generation 2 open
+node 2 generation 2 open
+node 3 generation 2 open
+node 4 generation 2 open
+node 5 generation 2 open
+node 6 generation 2 open
+nodes 6 at the record's generation and state 6 other 0
+a:9910 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9910 arca_node_capacity_bytes{kind="available"} 1427189312
+a:9910 arca_node_capacity_bytes{kind="allocated"} 1794035712
+a:9910 arca_node_capacity_bytes{kind="live"} 939524096
+a:9910 arca_node_capacity_bytes{kind="reclaimable"} 854511616
+a:9910 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9910 arca_node_capacity_bytes{kind="reserved"} 811335680
+a:9910 arca_node_capacity_bytes{kind="repair_floor"} 811335680
+a:9910 arca_node_capacity_bytes{kind="inflight"} 0
+a:9910 arca_node_delete_fence_generation 2
+a:9910 arca_node_delete_fence_open 1
+a:9910 arca_node_delete_fence_hold 0
+a:9910 arca_node_delete_fence_refusals_total 0
+a:9911 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9911 arca_node_capacity_bytes{kind="available"} 1425083967
+a:9911 arca_node_capacity_bytes{kind="allocated"} 1796141056
+a:9911 arca_node_capacity_bytes{kind="live"} 939524096
+a:9911 arca_node_capacity_bytes{kind="reclaimable"} 856616960
+a:9911 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9911 arca_node_capacity_bytes{kind="reserved"} 811335680
+a:9911 arca_node_capacity_bytes{kind="repair_floor"} 811335680
+a:9911 arca_node_capacity_bytes{kind="inflight"} 0
+a:9911 arca_node_delete_fence_generation 2
+a:9911 arca_node_delete_fence_open 1
+a:9911 arca_node_delete_fence_hold 0
+a:9911 arca_node_delete_fence_refusals_total 0
+a:9912 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9912 arca_node_capacity_bytes{kind="available"} 2008137728
+a:9912 arca_node_capacity_bytes{kind="allocated"} 124395520
+a:9912 arca_node_capacity_bytes{kind="live"} 71303168
+a:9912 arca_node_capacity_bytes{kind="reclaimable"} 53092352
+a:9912 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9912 arca_node_capacity_bytes{kind="reserved"} 809639936
+a:9912 arca_node_capacity_bytes{kind="repair_floor"} 809639936
+a:9912 arca_node_capacity_bytes{kind="inflight"} 0
+a:9912 arca_node_delete_fence_generation 2
+a:9912 arca_node_delete_fence_open 1
+a:9912 arca_node_delete_fence_hold 0
+a:9912 arca_node_delete_fence_refusals_total 0
+a:9913 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9913 arca_node_capacity_bytes{kind="available"} 2008137728
+a:9913 arca_node_capacity_bytes{kind="allocated"} 1074782208
+a:9913 arca_node_capacity_bytes{kind="live"} 71303168
+a:9913 arca_node_capacity_bytes{kind="reclaimable"} 1003479040
+a:9913 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9913 arca_node_capacity_bytes{kind="reserved"} 809639936
+a:9913 arca_node_capacity_bytes{kind="repair_floor"} 809639936
+a:9913 arca_node_capacity_bytes{kind="inflight"} 0
+a:9913 arca_node_delete_fence_generation 2
+a:9913 arca_node_delete_fence_open 1
+a:9913 arca_node_delete_fence_hold 0
+a:9913 arca_node_delete_fence_refusals_total 0
+b:9910 arca_node_capacity_bytes{kind="total"} 3221225472
+b:9910 arca_node_capacity_bytes{kind="available"} 1427189311
+b:9910 arca_node_capacity_bytes{kind="allocated"} 1794035712
+b:9910 arca_node_capacity_bytes{kind="live"} 939524096
+b:9910 arca_node_capacity_bytes{kind="reclaimable"} 854511616
+b:9910 arca_node_capacity_bytes{kind="quarantined"} 0
+b:9910 arca_node_capacity_bytes{kind="reserved"} 811335680
+b:9910 arca_node_capacity_bytes{kind="repair_floor"} 811335680
+b:9910 arca_node_capacity_bytes{kind="inflight"} 0
+b:9910 arca_node_delete_fence_generation 2
+b:9910 arca_node_delete_fence_open 1
+b:9910 arca_node_delete_fence_hold 0
+b:9910 arca_node_delete_fence_refusals_total 0
+b:9911 arca_node_capacity_bytes{kind="total"} 3221225472
+b:9911 arca_node_capacity_bytes{kind="available"} 2152754752
+b:9911 arca_node_capacity_bytes{kind="allocated"} 1068470272
+b:9911 arca_node_capacity_bytes{kind="live"} 69206016
+b:9911 arca_node_capacity_bytes{kind="reclaimable"} 999264256
+b:9911 arca_node_capacity_bytes{kind="quarantined"} 0
+b:9911 arca_node_capacity_bytes{kind="reserved"} 809635840
+b:9911 arca_node_capacity_bytes{kind="repair_floor"} 809635840
+b:9911 arca_node_capacity_bytes{kind="inflight"} 0
+b:9911 arca_node_delete_fence_generation 2
+b:9911 arca_node_delete_fence_open 1
+b:9911 arca_node_delete_fence_hold 0
+b:9911 arca_node_delete_fence_refusals_total 0
+ctl-a arca_controller_leader 1
+ctl-a arca_controller_delete_fence_generation 2
+ctl-a arca_controller_delete_fence_open 1
+ctl-a arca_controller_delete_fence_nodes_current 6
+ctl-a arca_controller_delete_fence_nodes_stale 0
+ctl-a arca_controller_delete_fence_refusals_total 0
+ctl-a arca_controller_delete_fence_metadata_behind_total 0
+ctl-a arca_controller_shards_deleted_total 5711
+ctl-a arca_controller_groups_repairing 0
+ctl-a arca_controller_rebalance_moved_chunks_total 32
+ctl-a arca_controller_rebalance_moved_bytes_total 134217728
+ctl-a arca_controller_rebalance_skipped_chunks_total 0
+ctl-a arca_controller_rebalance_capacity_stops_total 0
+ctl-a arca_controller_rebalance_imbalance_permille 0
+ctl-a arca_controller_gc_backlog 0
+ctl-a arca_controller_gc_backlog_oldest_age_seconds 0
+ctl-a arca_controller_gc_backlog_bytes 0
+ctl-a arca_controller_gc_backlog_physical_bytes 0
+ctl-b arca_controller_leader 0
+ctl-b arca_controller_delete_fence_generation 0
+ctl-b arca_controller_delete_fence_open 0
+ctl-b arca_controller_delete_fence_nodes_current 0
+ctl-b arca_controller_delete_fence_nodes_stale 0
+ctl-b arca_controller_delete_fence_refusals_total 0
+ctl-b arca_controller_delete_fence_metadata_behind_total 0
+ctl-b arca_controller_shards_deleted_total 0
+ctl-b arca_controller_groups_repairing 0
+ctl-b arca_controller_rebalance_moved_chunks_total 0
+ctl-b arca_controller_rebalance_moved_bytes_total 0
+ctl-b arca_controller_rebalance_skipped_chunks_total 0
+ctl-b arca_controller_rebalance_capacity_stops_total 0
+ctl-b arca_controller_rebalance_imbalance_permille 0
+ctl-b arca_controller_gc_backlog 0
+ctl-b arca_controller_gc_backlog_oldest_age_seconds 0
+ctl-b arca_controller_gc_backlog_bytes 0
+ctl-b arca_controller_gc_backlog_physical_bytes 0
+== after-rebalance 11:35:33
+2026-11-11T11:35:33.555132Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 80 moved_bytes 335544320 skipped_chunks 0 last_pass_ms 1794396933011 last_reason balanced
+plan none
+cursor start
+2026-11-11T11:35:33.784473Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+record generation 4 open leader_token 2 changed_ms 1794396623645 reason opened by the leader of term 2
+2026-11-11T11:35:33.788009Z  WARN arca_lake: node RPCs run in PLAINTEXT with no authentication or authorization (--insecure-plaintext) role="admin"
+node 1 generation 4 open
+node 2 generation 4 open
+node 3 generation 4 open
+node 4 generation 4 open
+node 5 generation 4 open
+node 6 generation 4 open
+nodes 6 at the record's generation and state 6 other 0
+a:9910 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9910 arca_node_capacity_bytes{kind="available"} 879542272
+a:9910 arca_node_capacity_bytes{kind="allocated"} 1876340736
+a:9910 arca_node_capacity_bytes{kind="live"} 838860800
+a:9910 arca_node_capacity_bytes{kind="reclaimable"} 1037479936
+a:9910 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9910 arca_node_capacity_bytes{kind="reserved"} 811139072
+a:9910 arca_node_capacity_bytes{kind="repair_floor"} 811139072
+a:9910 arca_node_capacity_bytes{kind="inflight"} 0
+a:9910 arca_node_delete_fence_generation 4
+a:9910 arca_node_delete_fence_open 1
+a:9910 arca_node_delete_fence_hold 0
+a:9910 arca_node_delete_fence_refusals_total 0
+a:9911 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9911 arca_node_capacity_bytes{kind="available"} 879542272
+a:9911 arca_node_capacity_bytes{kind="allocated"} 1878446080
+a:9911 arca_node_capacity_bytes{kind="live"} 838860800
+a:9911 arca_node_capacity_bytes{kind="reclaimable"} 1039585280
+a:9911 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9911 arca_node_capacity_bytes{kind="reserved"} 811139072
+a:9911 arca_node_capacity_bytes{kind="repair_floor"} 811139072
+a:9911 arca_node_capacity_bytes{kind="inflight"} 0
+a:9911 arca_node_delete_fence_generation 4
+a:9911 arca_node_delete_fence_open 1
+a:9911 arca_node_delete_fence_hold 0
+a:9911 arca_node_delete_fence_refusals_total 0
+a:9912 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9912 arca_node_capacity_bytes{kind="available"} 879538176
+a:9912 arca_node_capacity_bytes{kind="allocated"} 1105297408
+a:9912 arca_node_capacity_bytes{kind="live"} 167772160
+a:9912 arca_node_capacity_bytes{kind="reclaimable"} 937525248
+a:9912 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9912 arca_node_capacity_bytes{kind="reserved"} 809828352
+a:9912 arca_node_capacity_bytes{kind="repair_floor"} 809828352
+a:9912 arca_node_capacity_bytes{kind="inflight"} 0
+a:9912 arca_node_delete_fence_generation 4
+a:9912 arca_node_delete_fence_open 1
+a:9912 arca_node_delete_fence_hold 0
+a:9912 arca_node_delete_fence_refusals_total 0
+a:9913 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9913 arca_node_capacity_bytes{kind="available"} 879534080
+a:9913 arca_node_capacity_bytes{kind="allocated"} 1048145920
+a:9913 arca_node_capacity_bytes{kind="live"} 167772160
+a:9913 arca_node_capacity_bytes{kind="reclaimable"} 880373760
+a:9913 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9913 arca_node_capacity_bytes{kind="reserved"} 809828352
+a:9913 arca_node_capacity_bytes{kind="repair_floor"} 809828352
+a:9913 arca_node_capacity_bytes{kind="inflight"} 0
+a:9913 arca_node_delete_fence_generation 4
+a:9913 arca_node_delete_fence_open 1
+a:9913 arca_node_delete_fence_hold 0
+a:9913 arca_node_delete_fence_refusals_total 0
+b:9910 arca_node_capacity_bytes{kind="total"} 3221225472
+b:9910 arca_node_capacity_bytes{kind="available"} 1344884287
+b:9910 arca_node_capacity_bytes{kind="allocated"} 1876340736
+b:9910 arca_node_capacity_bytes{kind="live"} 838860800
+b:9910 arca_node_capacity_bytes{kind="reclaimable"} 1037479936
+b:9910 arca_node_capacity_bytes{kind="quarantined"} 0
+b:9910 arca_node_capacity_bytes{kind="reserved"} 811139072
+b:9910 arca_node_capacity_bytes{kind="repair_floor"} 811139072
+b:9910 arca_node_capacity_bytes{kind="inflight"} 0
+b:9910 arca_node_delete_fence_generation 4
+b:9910 arca_node_delete_fence_open 1
+b:9910 arca_node_delete_fence_hold 0
+b:9910 arca_node_delete_fence_refusals_total 0
+b:9911 arca_node_capacity_bytes{kind="total"} 3221225472
+b:9911 arca_node_capacity_bytes{kind="available"} 2181492288
+b:9911 arca_node_capacity_bytes{kind="allocated"} 1039732736
+b:9911 arca_node_capacity_bytes{kind="live"} 167772160
+b:9911 arca_node_capacity_bytes{kind="reclaimable"} 871960576
+b:9911 arca_node_capacity_bytes{kind="quarantined"} 0
+b:9911 arca_node_capacity_bytes{kind="reserved"} 809828352
+b:9911 arca_node_capacity_bytes{kind="repair_floor"} 809828352
+b:9911 arca_node_capacity_bytes{kind="inflight"} 0
+b:9911 arca_node_delete_fence_generation 4
+b:9911 arca_node_delete_fence_open 1
+b:9911 arca_node_delete_fence_hold 0
+b:9911 arca_node_delete_fence_refusals_total 0
+ctl-a arca_controller_leader 0
+ctl-a arca_controller_delete_fence_generation 0
+ctl-a arca_controller_delete_fence_open 0
+ctl-a arca_controller_delete_fence_nodes_current 0
+ctl-a arca_controller_delete_fence_nodes_stale 0
+ctl-a arca_controller_delete_fence_refusals_total 0
+ctl-a arca_controller_delete_fence_metadata_behind_total 0
+ctl-a arca_controller_shards_deleted_total 0
+ctl-a arca_controller_groups_repairing 0
+ctl-a arca_controller_rebalance_moved_chunks_total 0
+ctl-a arca_controller_rebalance_moved_bytes_total 0
+ctl-a arca_controller_rebalance_skipped_chunks_total 0
+ctl-a arca_controller_rebalance_capacity_stops_total 0
+ctl-a arca_controller_rebalance_imbalance_permille 0
+ctl-a arca_controller_gc_backlog 0
+ctl-a arca_controller_gc_backlog_oldest_age_seconds 0
+ctl-a arca_controller_gc_backlog_bytes 0
+ctl-a arca_controller_gc_backlog_physical_bytes 0
+ctl-b arca_controller_leader 1
+ctl-b arca_controller_delete_fence_generation 4
+ctl-b arca_controller_delete_fence_open 1
+ctl-b arca_controller_delete_fence_nodes_current 6
+ctl-b arca_controller_delete_fence_nodes_stale 0
+ctl-b arca_controller_delete_fence_refusals_total 8
+ctl-b arca_controller_delete_fence_metadata_behind_total 0
+ctl-b arca_controller_shards_deleted_total 1515
+ctl-b arca_controller_groups_repairing 0
+ctl-b arca_controller_rebalance_moved_chunks_total 48
+ctl-b arca_controller_rebalance_moved_bytes_total 201326592
+ctl-b arca_controller_rebalance_skipped_chunks_total 0
+ctl-b arca_controller_rebalance_capacity_stops_total 0
+ctl-b arca_controller_rebalance_imbalance_permille 0
+ctl-b arca_controller_gc_backlog 0
+ctl-b arca_controller_gc_backlog_oldest_age_seconds 0
+ctl-b arca_controller_gc_backlog_bytes 0
+ctl-b arca_controller_gc_backlog_physical_bytes 0
+== converged 11:38:35
+2026-11-11T11:38:36.088976Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 80 moved_bytes 335544320 skipped_chunks 0 last_pass_ms 1794397113265 last_reason balanced
+plan none
+cursor start
+2026-11-11T11:38:36.336934Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+record generation 4 open leader_token 2 changed_ms 1794396623645 reason opened by the leader of term 2
+2026-11-11T11:38:36.340674Z  WARN arca_lake: node RPCs run in PLAINTEXT with no authentication or authorization (--insecure-plaintext) role="admin"
+node 1 generation 4 open
+node 2 generation 4 open
+node 3 generation 4 open
+node 4 generation 4 open
+node 5 generation 4 open
+node 6 generation 4 open
+nodes 6 at the record's generation and state 6 other 0
+a:9910 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9910 arca_node_capacity_bytes{kind="available"} 874049536
+a:9910 arca_node_capacity_bytes{kind="allocated"} 1876340736
+a:9910 arca_node_capacity_bytes{kind="live"} 838860800
+a:9910 arca_node_capacity_bytes{kind="reclaimable"} 1037479936
+a:9910 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9910 arca_node_capacity_bytes{kind="reserved"} 811139072
+a:9910 arca_node_capacity_bytes{kind="repair_floor"} 811139072
+a:9910 arca_node_capacity_bytes{kind="inflight"} 0
+a:9910 arca_node_delete_fence_generation 4
+a:9910 arca_node_delete_fence_open 1
+a:9910 arca_node_delete_fence_hold 0
+a:9910 arca_node_delete_fence_refusals_total 0
+a:9911 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9911 arca_node_capacity_bytes{kind="available"} 874033152
+a:9911 arca_node_capacity_bytes{kind="allocated"} 1878446080
+a:9911 arca_node_capacity_bytes{kind="live"} 838860800
+a:9911 arca_node_capacity_bytes{kind="reclaimable"} 1039585280
+a:9911 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9911 arca_node_capacity_bytes{kind="reserved"} 811139072
+a:9911 arca_node_capacity_bytes{kind="repair_floor"} 811139072
+a:9911 arca_node_capacity_bytes{kind="inflight"} 0
+a:9911 arca_node_delete_fence_generation 4
+a:9911 arca_node_delete_fence_open 1
+a:9911 arca_node_delete_fence_hold 0
+a:9911 arca_node_delete_fence_refusals_total 0
+a:9912 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9912 arca_node_capacity_bytes{kind="available"} 874020864
+a:9912 arca_node_capacity_bytes{kind="allocated"} 1105297408
+a:9912 arca_node_capacity_bytes{kind="live"} 167772160
+a:9912 arca_node_capacity_bytes{kind="reclaimable"} 937525248
+a:9912 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9912 arca_node_capacity_bytes{kind="reserved"} 809828352
+a:9912 arca_node_capacity_bytes{kind="repair_floor"} 809828352
+a:9912 arca_node_capacity_bytes{kind="inflight"} 0
+a:9912 arca_node_delete_fence_generation 4
+a:9912 arca_node_delete_fence_open 1
+a:9912 arca_node_delete_fence_hold 0
+a:9912 arca_node_delete_fence_refusals_total 0
+a:9913 arca_node_capacity_bytes{kind="total"} 3221225472
+a:9913 arca_node_capacity_bytes{kind="available"} 874016768
+a:9913 arca_node_capacity_bytes{kind="allocated"} 1048145920
+a:9913 arca_node_capacity_bytes{kind="live"} 167772160
+a:9913 arca_node_capacity_bytes{kind="reclaimable"} 880373760
+a:9913 arca_node_capacity_bytes{kind="quarantined"} 0
+a:9913 arca_node_capacity_bytes{kind="reserved"} 809828352
+a:9913 arca_node_capacity_bytes{kind="repair_floor"} 809828352
+a:9913 arca_node_capacity_bytes{kind="inflight"} 0
+a:9913 arca_node_delete_fence_generation 4
+a:9913 arca_node_delete_fence_open 1
+a:9913 arca_node_delete_fence_hold 0
+a:9913 arca_node_delete_fence_refusals_total 0
+b:9910 arca_node_capacity_bytes{kind="total"} 3221225472
+b:9910 arca_node_capacity_bytes{kind="available"} 1344884287
+b:9910 arca_node_capacity_bytes{kind="allocated"} 1876340736
+b:9910 arca_node_capacity_bytes{kind="live"} 838860800
+b:9910 arca_node_capacity_bytes{kind="reclaimable"} 1037479936
+b:9910 arca_node_capacity_bytes{kind="quarantined"} 0
+b:9910 arca_node_capacity_bytes{kind="reserved"} 811139072
+b:9910 arca_node_capacity_bytes{kind="repair_floor"} 811139072
+b:9910 arca_node_capacity_bytes{kind="inflight"} 0
+b:9910 arca_node_delete_fence_generation 4
+b:9910 arca_node_delete_fence_open 1
+b:9910 arca_node_delete_fence_hold 0
+b:9910 arca_node_delete_fence_refusals_total 0
+b:9911 arca_node_capacity_bytes{kind="total"} 3221225472
+b:9911 arca_node_capacity_bytes{kind="available"} 2181492288
+b:9911 arca_node_capacity_bytes{kind="allocated"} 1039732736
+b:9911 arca_node_capacity_bytes{kind="live"} 167772160
+b:9911 arca_node_capacity_bytes{kind="reclaimable"} 871960576
+b:9911 arca_node_capacity_bytes{kind="quarantined"} 0
+b:9911 arca_node_capacity_bytes{kind="reserved"} 809828352
+b:9911 arca_node_capacity_bytes{kind="repair_floor"} 809828352
+b:9911 arca_node_capacity_bytes{kind="inflight"} 0
+b:9911 arca_node_delete_fence_generation 4
+b:9911 arca_node_delete_fence_open 1
+b:9911 arca_node_delete_fence_hold 0
+b:9911 arca_node_delete_fence_refusals_total 0
+ctl-a arca_controller_leader 0
+ctl-a arca_controller_delete_fence_generation 0
+ctl-a arca_controller_delete_fence_open 0
+ctl-a arca_controller_delete_fence_nodes_current 0
+ctl-a arca_controller_delete_fence_nodes_stale 0
+ctl-a arca_controller_delete_fence_refusals_total 0
+ctl-a arca_controller_delete_fence_metadata_behind_total 0
+ctl-a arca_controller_shards_deleted_total 0
+ctl-a arca_controller_groups_repairing 0
+ctl-a arca_controller_rebalance_moved_chunks_total 0
+ctl-a arca_controller_rebalance_moved_bytes_total 0
+ctl-a arca_controller_rebalance_skipped_chunks_total 0
+ctl-a arca_controller_rebalance_capacity_stops_total 0
+ctl-a arca_controller_rebalance_imbalance_permille 0
+ctl-a arca_controller_gc_backlog 0
+ctl-a arca_controller_gc_backlog_oldest_age_seconds 0
+ctl-a arca_controller_gc_backlog_bytes 0
+ctl-a arca_controller_gc_backlog_physical_bytes 0
+ctl-b arca_controller_leader 1
+ctl-b arca_controller_delete_fence_generation 4
+ctl-b arca_controller_delete_fence_open 1
+ctl-b arca_controller_delete_fence_nodes_current 6
+ctl-b arca_controller_delete_fence_nodes_stale 0
+ctl-b arca_controller_delete_fence_refusals_total 8
+ctl-b arca_controller_delete_fence_metadata_behind_total 0
+ctl-b arca_controller_shards_deleted_total 1515
+ctl-b arca_controller_groups_repairing 0
+ctl-b arca_controller_rebalance_moved_chunks_total 48
+ctl-b arca_controller_rebalance_moved_bytes_total 201326592
+ctl-b arca_controller_rebalance_skipped_chunks_total 0
+ctl-b arca_controller_rebalance_capacity_stops_total 0
+ctl-b arca_controller_rebalance_imbalance_permille 0
+ctl-b arca_controller_gc_backlog 0
+ctl-b arca_controller_gc_backlog_oldest_age_seconds 0
+ctl-b arca_controller_gc_backlog_bytes 0
+ctl-b arca_controller_gc_backlog_physical_bytes 0

@@ -129,13 +129,66 @@ identities).
   unbounded pages or without the cursor); the queue depth is counted
   every pass while it fits in one page.
 
-## 6. Results pending in this document
+## 6. Rebalancing A/B (hosts A+B)
 
-- Rebalancing A/B (off / 3.9 / 3.10 / 3.11, two rounds, hosts A+B);
-- capacity state × failover with real processes;
+`benchmarks/linux/rebalance-load.sh`, the Phase 3.10 layout (FoundationDB
+and four nodes on host A; two nodes, the gateway and the load generator
+on host B; two controllers), with a shorter window: 240 objects of 8 MiB
+filled into group 1, group 2 added, every node allotted 3 GiB; an 8-minute
+baseline window (rebalancing paused), an 8-minute window with the leader
+killed and a node stopped for 20 s, a converge phase, then every object
+that must exist read back. Four configurations, two rounds, the second in
+reverse order (off, 3.9, 3.10, 3.11, then 3.11, 3.10, 3.9, off), 20 min
+each; release binaries of `9674894` (3.9), `3f67cb8` (3.10) and `5414fa7`
+(3.11; product code unchanged up to the final commit). Results:
+`benchmarks/linux/results/phase311-rebalance/<config>-r<round>`, table by
+`summarize_rebalance.py`.
+
+Measured (second window, per round r1 / r2):
+
+| Metric | off | 3.9 | 3.10 | 3.11 |
+| --- | --- | --- | --- | --- |
+| PUT, MiB/s | 47.5 / 52.1 | 26.7 / 39.5 | 44.2 / 34.0 | 50.5 / 43.3 |
+| PUT worst p99, ms | 3 265 / 3 568 | 3 517 / 3 863 | 3 057 / 3 568 | 3 845 / 3 830 |
+| PUT errors (refused, retried by the load) | 1 732 / 1 541 | 1 441 / 1 236 | 1 389 / 1 940 | 1 554 / 1 611 |
+| GET, MiB/s | 651 / 648 | 653 / 644 | 649 / 649 | 647 / 652 |
+| GET worst p99, ms | 68 / 338 | 68 / 113 | 359 / 348 | 369 / 333 |
+| GET errors | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| Seconds in write_rejected or worse | 720 / 592 | 624 / 300 | 555 / 690 | 592 / 608 |
+| Moved, MiB | 0 / 0 | 816 / 948 | 192 / 128 | 128 / 192 |
+| Spread between nodes at the end | 48.8 % / 50.2 % | 47.0 % / 10.6 % | 59.8 % / 49.8 % | 58.9 % / 54.3 % |
+| Reserve violations (samples) | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| Body mismatches, acknowledged objects missing | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+
+Interpretation (not measured):
+
+- Safety: no run lost or corrupted an acknowledged object, no GET
+  failed, no node went below its reserve, in any configuration, with
+  the leader killed and a node stopped under load.
+- 3.11 against 3.10: no regression beyond the spread between rounds
+  (PUT 50.5 / 43.3 against 44.2 / 34.0 MiB/s; the same amounts moved).
+  3.11 changes nothing on the PUT and GET paths; its delete path carries
+  two more fields.
+- This configuration is harder than Phase 3.10's (shorter window,
+  smaller per-node allotment relative to the fill): every configuration,
+  including rebalancing off, spent 5 to 12 minutes in write_rejected, so
+  PUT errors here are mostly capacity refusals and are not comparable
+  with the Phase 3.10 numbers.
+- 3.10 and 3.11 move much less than 3.9 (the capacity-aware stop of
+  R-93), and the spread between nodes stays near 50-60 % at the end;
+  3.9 evened one round out to 10.6 %. Rebalancing in 3.10/3.11 does not
+  close a large spread within this window; recorded as an observation,
+  not a fault (the converge phase ended "balanced" by its own
+  criterion).
+- Two rounds per configuration; differences within the spread between
+  rounds are not significant.
+
+## 7. Results pending in this document
+
+- Capacity state × failover with real processes;
 - scenario 18 and old-binary rejoin with previous-release binaries.
 
-## 7. Flakes seen
+## 8. Flakes seen
 
 R-77 `parallel_read::population_retried_after_resets_records_each_chunk_once`:
 3 of 80 isolated runs failed on a validation host (the test's injected

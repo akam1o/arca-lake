@@ -1088,7 +1088,11 @@ Phase 3.11 adds nothing to PUT or GET; `DeleteShard` carries the node's
 identity (two additive fields) and the node compares it under the lock
 it already takes. The rebalancing A/B (off, 3.9, 3.10, 3.11; two rounds,
 the second in reverse order; hosts A+B) and its results are in
-`docs/verification/phase-3.11-restore-safety.md`.
+`docs/verification/phase-3.11-restore-safety.md`. Measured: no lost or corrupted object, no GET
+error and no reserve violation in any of the eight runs; 3.11 within the
+spread between rounds of 3.10 (PUT 50.5 / 43.3 against 44.2 / 34.0 MiB/s
+in the rebalance window); every configuration reached write_rejected in
+this harder configuration.
 
 ## 7. Interpretation
 

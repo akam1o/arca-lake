@@ -1,0 +1,4 @@
+2026-11-11T11:55:46.055629Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 32 moved_bytes 134217728 skipped_chunks 0 last_pass_ms 1794398138907 last_reason balanced
+plan none
+cursor start
