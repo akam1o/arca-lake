@@ -49,7 +49,12 @@ Facts the design rests on (Phase 3.12 survey):
 
 - **A.** No shard needed by metadata that is current at any time is
   physically removed because of a decision made on metadata before that
-  metadata became current (a restore included).
+  metadata became current (a restore included). *Needed* means what a
+  chunk record places: the shard of a live chunk at its member index on
+  the group's current member (what reconciliation's attribution checks).
+  Copies kept beyond that (a former member's copy kept as a repair source
+  while its group is `Repairing`) are a margin, not part of this
+  invariant (Phase 3.12 third review).
 - **B.** A delete RPC of an earlier term, incarnation or metadata history
   is not *physically* applied on the strength of that decision alone.
 - **C.** A node physically removes a durable shard only when the
@@ -254,6 +259,14 @@ argument reads a counter of the metadata store (invariant D).
   that leader's reclaim to fall between the two restores before its next
   health pass observes the first. Run `recovery begin` (or use
   `admin restore`) after any restore.
+- A former member's copy kept as a repair source while its group is
+  `Repairing` (outside invariant A's *needed*): it is kept while a reclaim
+  pass sees the group `Repairing`; a backup taken during a repair that no
+  reclaim pass observed, restored later, may lack that margin. The
+  members' own shards (what the restored group needs) are protected.
+- After a torn last line of `pending-reclaim.log`, every group is durable
+  on that node for good (the `D` line): its cache deletes are retained
+  for the retention until an operator removes the log.
 - `admin node keep-removed` / `unregister` do not change this: a removed
   node gets no reclaims.
 

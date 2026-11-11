@@ -32,6 +32,7 @@ explicit and observable:
 | Nodes of earlier releases | they delete physically | `arca_controller_nodes_not_deferring`; `admin restore` refuses to plan |
 | H5 exception: a leader that keeps running through a direct restore, unobserved, operating on the restored metadata under the old incarnation, followed by a second restore of a backup of that restored history | no component observes the first restore in that window | none; run `recovery begin` (or use `admin restore`) after any restore |
 | A total, unobserved rollback of metadata and every node disk together | indistinguishable from the past state | none (it restores a consistent past, losing nothing of it) |
+| A former member's copy kept as a repair source while a group is `Repairing` (a margin beyond what chunk records place) | kept only while a reclaim pass observes the group `Repairing` | none; the members' shards are protected |
 
 ## 2. Failure model and invariants
 
@@ -336,6 +337,13 @@ A second re-review of these fixes is in §12.2.
 
 The Claude reviewer found no new Critical or High in the second
 re-review; the other reviewer's two are resolved above.
+
+### 12.3 Third check (other model)
+
+| Finding | Severity | Resolution |
+| --- | --- | --- |
+| Torn tail: a group whose first durable role was the lost line had no known role, so a later cache write could make it cache | High | fixed: the `D` line, every group durable for good on that node |
+| A former member's copy kept as a repair source while `Repairing`, unobserved by any reclaim pass, keeps its old retirement | High (as the claim stood) | the claim narrowed: invariant A's *needed* is what a chunk record places; the repair-source copy is a margin, stated as not covered (ADR-0028); Medium residual |
 
 ## 13. Performance
 

@@ -14,6 +14,9 @@
 //! - `c GROUP` / `d GROUP`: the group was written with the cache class /
 //!   with a durable class. Durable is sticky: once a group is durable, it
 //!   stays durable.
+//! - `D`: every group is durable on this node for good (after a torn last
+//!   line that may have been a group's first durable role; Phase 3.12
+//!   review): no cache write marks a group cache any more.
 //!
 //! A retirement belongs to the cluster incarnation of the delete that made
 //! it, and only a reclaim of that incarnation may end it: a restore made
@@ -70,6 +73,8 @@ pub struct Deferred {
     /// The log's directory entry is durable (it existed at open, or its
     /// directory was synced since it was created).
     dir_synced: bool,
+    /// Every group durable for good (the `D` line).
+    all_durable: bool,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -123,6 +128,7 @@ impl Deferred {
             damaged: false,
             lines: 0,
             dir_synced: false,
+            all_durable: false,
         };
         match std::fs::read_to_string(&d.path) {
             Ok(mut text) => {
@@ -171,6 +177,9 @@ impl Deferred {
                     for cache in d.cache_groups.values_mut() {
                         *cache = false;
                     }
+                    // Also groups the lost line may have been the first
+                    // role of (third review): none becomes cache again.
+                    d.all_durable = true;
                     tracing::warn!(path = %d.path.display(), "pending-reclaim log: a torn last line cut; every group is durable on this node from now on");
                     if let Err(e) = d.compact() {
                         tracing::error!(path = %d.path.display(), error = %e, "pending-reclaim log: not rewritten after a torn line: nothing is reclaimed");
@@ -250,6 +259,10 @@ impl Deferred {
                 self.cache_groups.entry(g).or_insert(true);
                 true
             }
+            Some("D") if f.len() == 1 => {
+                self.all_durable = true;
+                true
+            }
             Some("d") if f.len() == 2 => {
                 let Ok(g) = f[1].parse::<u64>() else {
                     return false;
@@ -306,7 +319,7 @@ impl Deferred {
     /// is not known as a cache group (an unknown group is durable).
     #[must_use]
     pub fn defers(&self, group: u64) -> bool {
-        self.retention_ms > 0 && self.cache_groups.get(&group) != Some(&true)
+        self.retention_ms > 0 && (self.all_durable || self.cache_groups.get(&group) != Some(&true))
     }
 
     /// A write of `group` with the cache class (`cache`) or another class.
@@ -320,6 +333,7 @@ impl Deferred {
         }
         match (self.cache_groups.get(&group).copied(), cache) {
             (Some(false), _) | (Some(true), true) => Ok(()),
+            (None, true) if self.all_durable => Ok(()),
             (None, true) => {
                 self.append(&format!("c {group}"))?;
                 self.cache_groups.insert(group, true);
@@ -521,6 +535,9 @@ impl Deferred {
         }
         let tmp = self.path.with_extension("tmp");
         let mut body = String::new();
+        if self.all_durable {
+            body.push_str(&line("D"));
+        }
         let mut groups: Vec<(&u64, &bool)> = self.cache_groups.iter().collect();
         groups.sort();
         for (g, cache) in groups {
@@ -546,7 +563,7 @@ impl Deferred {
         if let Some(dir) = self.path.parent() {
             File::open(dir)?.sync_all()?;
         }
-        self.lines = self.entries.len() + self.cache_groups.len();
+        self.lines = self.entries.len() + self.cache_groups.len() + usize::from(self.all_durable);
         Ok(())
     }
 }
@@ -750,6 +767,15 @@ mod tests {
         assert!(!d.damaged() && d.defers(9), "durable for good");
         d.note_write(9, true).unwrap();
         assert!(d.defers(9), "a cache write made it cache again");
+        // A group of no known role (the lost line may have been its first
+        // durable role): a cache write does not make it cache either.
+        d.note_write(10, true).unwrap();
+        assert!(d.defers(10));
+        drop(d);
+        assert!(
+            Deferred::open(dir.path(), 1000).defers(10),
+            "the marker was not kept"
+        );
         // Whole but unterminated: kept, its newline restored.
         let whole = line(&format!("p {} 6 200 {}", key_fields(&key(2)), hex(&I)));
         std::fs::write(
