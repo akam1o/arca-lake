@@ -2954,6 +2954,18 @@ enum NodeCommand {
         #[command(flatten)]
         rpc: NodeRpcArgs,
     },
+    /// Mark a node removed again right after a manual restore of metadata
+    /// from before it was unregistered (with `admin restore` this is done
+    /// for you). No state or membership check: its members are repaired
+    /// away by the leader.
+    KeepRemoved {
+        /// Node id.
+        #[arg(long)]
+        node: u64,
+        /// Confirm.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Confirm that the identity the node holds is this cluster's (after
     /// metadata restored from before the node had one, nothing is pushed to
     /// it until then).
@@ -3126,6 +3138,18 @@ async fn node_command<S: arca_lake_metadata::KvStore>(
                             " while unreachable: its disk must never be started again unwiped"
                         }
                     );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        NodeCommand::KeepRemoved { node, yes } => {
+            if !yes {
+                return fail("keep-removed takes the node out again; re-run with --yes");
+            }
+            match node_lifecycle::keep_removed(meta, node, now).await {
+                Ok(()) => {
+                    println!("node {node} removed again; start the controllers now");
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(e),

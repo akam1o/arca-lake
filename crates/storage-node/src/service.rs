@@ -808,18 +808,18 @@ impl StorageNode for StorageNodeService {
         // (review: an unstamped one, from an earlier controller or any other
         // client, could have been decided for another disk at this address).
         {
-            let held = self
-                .identity
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .held();
-            let carried = req.node_identity.len() == 16;
-            let refused = match held {
-                Some(h) => {
-                    !carried || h.node_id != req.node_id || h.token[..] != req.node_identity[..]
-                }
-                None => carried,
+            let (held, damaged) = {
+                let id = self.identity.lock().unwrap_or_else(PoisonError::into_inner);
+                (id.held(), id.damaged())
             };
+            let carried = req.node_identity.len() == 16;
+            let refused = damaged
+                || match held {
+                    Some(h) => {
+                        !carried || h.node_id != req.node_id || h.token[..] != req.node_identity[..]
+                    }
+                    None => carried,
+                };
             if refused {
                 return Err(tonic::Status::failed_precondition(
                     "identity rejected: the delete was not decided for this node's disk",

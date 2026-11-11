@@ -691,3 +691,49 @@ async fn an_unconfirmed_identity_is_left_alone_until_an_operator_adopts_it() {
     ctl.shutdown().await;
     c.shutdown().await;
 }
+
+/// Third review (Phase 3.11): a node whose identity file is damaged takes
+/// no delete at all, stamped or not, until an operator repairs it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_damaged_identity_file_refuses_every_delete() {
+    let mut c = cluster().await;
+    put_objects(&c, 1).await;
+    let ctl = leader(&c).await;
+    identities_acknowledged(&c).await;
+    let n = c.nodes[0].id;
+    let token = node_lifecycle::identity(c.meta.as_ref(), n)
+        .await
+        .unwrap()
+        .unwrap()
+        .token;
+    let addr = c.nodes[0].addr.to_string();
+    c.stop_node(0).await;
+    std::fs::write(
+        c.nodes[0].dir.join("node-identity.txt"),
+        "identity 1\nnode_id 1\ntoken zz\ncrc 0\n",
+    )
+    .unwrap();
+    c.start_node(0).await;
+    let g = c.groups().await.remove(0);
+    let shard = ShardRef {
+        group_id: g.id,
+        chunk_id: [0xdd; 16],
+        shard_index: 0,
+    };
+    let h = c.clients.health(&addr).await.unwrap();
+    for stamp in [None, Some((n, token))] {
+        let any = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
+        any.set_incarnation(c.clients.incarnation());
+        any.set_delete_fence(Some(h.delete_fence_generation.max(1)));
+        any.note_identity(&addr, stamp);
+        let r = any.delete_shard(&addr, shard, g.epoch).await;
+        assert!(
+            r.as_ref().is_err_and(
+                |e| e.message().contains("identity rejected") || NodeClients::is_fenced(e)
+            ),
+            "a node with a damaged identity took a delete ({stamp:?}): {r:?}"
+        );
+    }
+    ctl.shutdown().await;
+    c.shutdown().await;
+}

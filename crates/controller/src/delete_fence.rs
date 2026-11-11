@@ -60,7 +60,9 @@ pub async fn node_fences<S: KvStore>(
     clients: &NodeClients,
 ) -> Result<Vec<NodeFence>, ControlError> {
     let mut out = Vec::new();
-    for n in cluster::list_nodes(meta).await? {
+    // Not removed nodes (third review): what answers at their address must
+    // not set the generation a close goes to.
+    for n in active_nodes(meta).await? {
         clients.note_node_id(&n.address, n.id);
         let h = clients.health(&n.address).await;
         let held = h.as_ref().is_ok_and(|h| h.delete_fence_hold);

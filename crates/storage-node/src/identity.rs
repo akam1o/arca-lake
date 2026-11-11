@@ -91,6 +91,12 @@ impl NodeIdentity {
         self.held.as_ref().ok().copied().flatten()
     }
 
+    /// The file is damaged or unreadable (not merely absent): the node
+    /// takes no delete until an operator repairs it (third review).
+    pub fn damaged(&self) -> bool {
+        self.held.is_err()
+    }
+
     /// Compare (and adopt, if asked and nothing valid is held).
     pub fn check(&mut self, node_id: u64, token: &[u8], adopt: bool) -> std::io::Result<Check> {
         let Ok(token) = <[u8; 16]>::try_from(token) else {

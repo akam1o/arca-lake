@@ -166,8 +166,16 @@ at any step.
   - metadata restored by hand (`recovery begin`, not `admin restore`)
     from before an unregister names the node active again; its hold is
     lifted by the new incarnation. Only `admin restore` keeps removed
-    nodes removed. After a manual restore, unregister them again before
-    starting controllers;
+    nodes removed. After a manual restore, run `admin node keep-removed
+    --node N --yes` for each before starting controllers (third review);
+  - once a leader of this release gave the nodes identities, controllers
+    of earlier releases (a failover to one during a rolling upgrade, or a
+    rollback) have every delete refused, so GC and reconciliation stall
+    and used space grows. Upgrade every controller before running a
+    leader of this release (third review);
+  - `admin node adopt-identity` applies only to an unconfirmed node: no
+    record, the node holding its own id; never over a record or for a
+    quarantined node (third review);
   - a node unregistered with `--unreachable` relies on the operator's
     statement;
   - nodes of earlier releases are not checked by identity;

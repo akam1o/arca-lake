@@ -264,6 +264,18 @@ pub async fn adopt_identity<S: KvStore>(
     let h = clients.health(&node.address).await.map_err(|e| {
         ControlError::Other(format!("node {node_id} does not answer: {}", e.code()))
     })?;
+    // Only the unconfirmed case (third review): no record, the node holding
+    // its own id; never over a record, never for a quarantined node.
+    if node_lifecycle::identity(meta, node_id).await?.is_some() {
+        return Err(ControlError::Other(format!(
+            "node {node_id} has an identity record: nothing to adopt (a mismatch is a quarantine; `admin node rejoin` decides)"
+        )));
+    }
+    if node_lifecycle::state(meta, node_id).await? == State::Quarantined {
+        return Err(ControlError::Other(format!(
+            "node {node_id} is quarantined: `admin node rejoin` decides"
+        )));
+    }
     let token = <[u8; 16]>::try_from(h.identity_token.as_ref()).ok();
     match (h.identity_supported, h.identity_node_id, token) {
         (true, id, Some(t)) if id == node_id => {

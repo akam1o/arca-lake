@@ -585,6 +585,25 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 running.join(", ")
             )));
         }
+        // What the restored metadata gets back is taken now, after the
+        // freeze and right before the clear (third review: a node
+        // rejoined with a fresh identity since the plan).
+        if !j.has(Step::Clearing) {
+            j.identities = node_lifecycle::identities(meta_ref)
+                .await?
+                .into_values()
+                .filter(|i| i.acknowledged)
+                .map(|i| (i.node_id, i.token))
+                .collect();
+            let states = node_lifecycle::states(meta_ref).await?;
+            j.removed_at = cluster::list_nodes(meta_ref)
+                .await?
+                .into_iter()
+                .filter(|n| states.get(&n.id) == Some(&State::Removed))
+                .map(|n| (n.id, n.address))
+                .collect();
+            j.removed = j.removed_at.iter().map(|(id, _)| *id).collect();
+        }
         j.record(path, Step::Clearing)?;
         arca_lake_metadata::transact(meta_ref, (), |tx, ()| {
             Box::pin(async move {
@@ -650,8 +669,7 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 None if j
                     .removed_at
                     .iter()
-                    .any(|(id, a)| *id == n.id && *a == n.address)
-                    || (j.removed_at.is_empty() && j.removed.contains(&n.id)) => {}
+                    .any(|(id, a)| *id == n.id && *a == n.address) => {}
                 None => {
                     return Err(refuse(format!(
                         "the restored metadata names node {} at {}, unknown to this cluster: not this cluster's backup",

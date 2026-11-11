@@ -1295,6 +1295,10 @@ async fn health_pass<S: KvStore>(
                     p.delete_fence_generation,
                     p.delete_fence_open,
                 );
+                // Its capacity still counts for admission (third review).
+                metrics
+                    .admission
+                    .note_device(crate::admission::device_of(n.id, &p, now_ms()));
                 cluster::touch_node(meta, n.id, now).await?;
                 continue;
             } else if p.identity_supported {
