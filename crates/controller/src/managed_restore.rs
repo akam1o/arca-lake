@@ -788,9 +788,18 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
         if !planned_here || j.has(Step::Cleared) {
             let ids: std::collections::HashMap<u64, [u8; 16]> =
                 j.identities.iter().copied().collect();
-            if let Err(why) = verify_held_as(clients, &j.nodes, &ids, j.closed_generation).await {
+            // A node stopped for good may be named with --absent-node (the
+            // operator's statement, as at the mark; final review: otherwise
+            // a node lost after the clear left no supported way on).
+            let present: Vec<(u64, String)> = j
+                .nodes
+                .iter()
+                .filter(|(id, _)| !absent.contains(id))
+                .cloned()
+                .collect();
+            if let Err(why) = verify_held_as(clients, &present, &ids, j.closed_generation).await {
                 return Err(refuse(format!(
-                    "the nodes no longer hold the restore's fence since the clear ({why}): the restored store may have been put to use; nothing cleared, plan a new restore"
+                    "the nodes no longer hold the restore's fence since the clear ({why}): the restored store may have been put to use, nothing cleared, plan a new restore; a node stopped for good may be named with --absent-node"
                 )));
             }
         }

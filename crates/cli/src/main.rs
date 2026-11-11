@@ -2600,9 +2600,9 @@ enum RestoreCommand {
         /// A process whose heartbeat is fresh but which is stopped.
         #[arg(long)]
         stopped: Vec<String>,
-        /// A node stopped for good that need not acknowledge the fence on
-        /// the restored metadata (the operator's statement, as for
-        /// `recovery begin`).
+        /// A node stopped for good: it need not acknowledge the fence on the
+        /// restored metadata nor answer on a retry after the clear (the
+        /// operator's statement, as for `recovery begin`).
         #[arg(long)]
         absent_node: Vec<u64>,
         /// Command prefix running `fdbrestore` where the backup agent

@@ -176,7 +176,12 @@ at any step.
     verifiably the node's disk: it holds the identity this cluster
     acknowledged for it. A node without an acknowledged identity is not
     removed while it answers, since two disks without one cannot be told
-    apart; a leader gives it one first. Otherwise
+    apart; a leader gives it one first. `--unreachable` on a node that
+    still answers (an earlier release, or one no leader gave an identity
+    yet) pushes nothing to it: it is not fenced by the removal and relies
+    on its rejoin lease lapsing, since a removed node gets no more pushes
+    (on releases before 3.10, without a lease, this is the R-100
+    residual). Otherwise
     nothing is pushed, so another cluster's node keeps its own hold and
     facts, and the node is removed only with `--unreachable` (the
     operator's statement that its own disk is gone for good; nothing is

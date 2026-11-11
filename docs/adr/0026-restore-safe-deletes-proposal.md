@@ -189,7 +189,8 @@ Review fixes (Phase 3.11):
   (partly or wholly restored, possibly put to use since), or `Clearing`
   recorded with the store empty because the clear committed before its
   record. Otherwise nothing is cleared and a new restore is planned. A
-  node that does not answer stops the retry until it is back.
+  node that does not answer stops the retry until it is back, or until
+  the operator names it with `--absent-node` (stopped for good).
 - **Point-in-time checks (re-review).** The holds are verified, not
   locked: a privileged fence release sent by hand to a node after the
   verification (`admin delete-fence release`, a direct RPC) is not

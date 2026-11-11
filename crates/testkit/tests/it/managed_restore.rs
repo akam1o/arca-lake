@@ -1475,3 +1475,44 @@ async fn a_clear_committed_before_its_record_refuses_once_the_fence_was_reopened
     assert_eq!(backup.restores.load(Ordering::SeqCst), 0, "restored");
     c.shutdown().await;
 }
+
+/// Final review (Phase 3.11): a node lost for good after the clear does
+/// not trap the restore: the retry refuses until the operator names it
+/// with --absent-node, then completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_lost_after_the_clear_can_be_declared_absent() {
+    let mut c = cluster().await;
+    put(&c, "kept", 21).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    backup.fail.store(1, Ordering::SeqCst);
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        mr::Journal::load(&path).unwrap().last(),
+        Some(Step::Cleared)
+    );
+    c.stop_node(2).await;
+    let gone = c.nodes[2].id;
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("--absent-node"), "{e}");
+    let j = mr::run(
+        &c.meta,
+        &c.clients,
+        &backup,
+        &path,
+        &p.journal.token,
+        &[],
+        &[gone],
+        now_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(j.last(), Some(Step::Verified));
+    c.shutdown().await;
+}
