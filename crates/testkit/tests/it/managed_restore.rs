@@ -1049,3 +1049,47 @@ async fn a_live_store_without_this_restores_marker_is_never_cleared() {
     assert_eq!(backup.restores.load(Ordering::SeqCst), 0);
     c.shutdown().await;
 }
+
+/// Re-review (Phase 3.11): a retry wrote a new marker and died before
+/// recording it (the journal names it as pending): the resume and abandon
+/// both take it as this journal's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pending_marker_is_this_journals_own() {
+    let c = cluster().await;
+    put(&c, "kept", 17).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    let pending = |name: &'static str| {
+        let mut j = p.journal.clone();
+        j.done = vec![Step::Planned, Step::Frozen, Step::Fenced, Step::Clearing];
+        j.marker = Some("attempt-a".into());
+        j.pending_marker = Some(name.into());
+        j
+    };
+    let write = async |m: &'static [u8]| {
+        transact(c.meta.as_ref(), (), |tx, ()| {
+            Box::pin(async move {
+                tx.set(&keys::restore_marker(), m);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    };
+    // Abandon accepts it.
+    let other = dir.path().join("b.journal");
+    pending("attempt-b").save(&other).unwrap();
+    write(b"attempt-b").await;
+    assert!(mr::abandon(c.meta.as_ref(), &other).await.unwrap());
+    // The resume goes on from it (the store is the planned one).
+    pending("attempt-c").save(&path).unwrap();
+    write(b"attempt-c").await;
+    let j = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    assert_eq!(j.last(), Some(Step::Verified));
+    assert_eq!(backup.restores.load(Ordering::SeqCst), 1);
+    c.shutdown().await;
+}

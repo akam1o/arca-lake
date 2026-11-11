@@ -646,20 +646,17 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
         // store, or such a frozen copy of it (re-reviews: incarnation
         // equality cannot tell it from a restored copy). A crash before the
         // journal records the marker resumes as a fresh attempt.
-        let still_planned = match j.marker.clone() {
-            Some(marker) => {
-                arca_lake_metadata::transact(meta_ref, marker, |tx, marker| {
-                    Box::pin(async move {
-                        Ok(tx
-                            .get(&arca_lake_metadata::keys::restore_marker())
-                            .await?
-                            .is_some_and(|v| v == marker.as_bytes()))
-                    })
+        // Its recorded or its pending marker (a crash after writing a new
+        // one, before recording it; re-review): both are this journal's.
+        let names: Vec<String> = j.marker.iter().chain(&j.pending_marker).cloned().collect();
+        let still_planned = !names.is_empty()
+            && arca_lake_metadata::transact(meta_ref, names, |tx, names| {
+                Box::pin(async move {
+                    let held = tx.get(&arca_lake_metadata::keys::restore_marker()).await?;
+                    Ok(held.is_some_and(|v| names.iter().any(|m| v == m.as_bytes())))
                 })
-                .await?
-            }
-            None => false,
-        };
+            })
+            .await?;
         // Clearing recorded, its marker gone, not cleared: only a crash
         // between the clear's commit and its record leaves that, with the
         // store empty. A store still holding a cluster state was not
@@ -1033,8 +1030,9 @@ pub async fn abandon<S: KvStore>(meta: &S, path: &Path) -> Result<bool, ControlE
     .await?;
     let ours = j
         .marker
-        .as_deref()
-        .is_some_and(|m| held.as_deref() == Some(m.as_bytes()));
+        .iter()
+        .chain(&j.pending_marker)
+        .any(|m| held.as_deref() == Some(m.as_bytes()));
     if j.has(Step::Clearing) && !ours {
         return Err(refuse(
             "the clear may have committed (its marker is gone): resume `admin restore run`",
