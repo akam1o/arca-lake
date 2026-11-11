@@ -202,6 +202,19 @@ async fn frozen(c: &TestCluster) -> NodeClients {
     let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
     assert!(rec.open, "{rec:?}");
     old.set_delete_fence(Some(rec.generation));
+    // Stamped with the identities, as a leader's deletes are: refused by
+    // the fence, not for a missing identity.
+    let ids = arca_lake_metadata::ops::node_lifecycle::identities(c.meta.as_ref())
+        .await
+        .unwrap();
+    for n in &c.nodes {
+        old.note_identity(
+            &n.addr.to_string(),
+            ids.get(&n.id)
+                .filter(|i| i.acknowledged)
+                .map(|i| (n.id, i.token)),
+        );
+    }
     old
 }
 
@@ -567,6 +580,27 @@ async fn two_restores_in_a_row() {
     assert_eq!(deliver(&old1, &deletes1).await, 0, "second era");
     ctl.shutdown().await;
     c.shutdown().await;
+}
+
+/// A restorer that delivers held deletes between the clear and the
+/// write-back, counting those applied.
+struct Delivering<'a> {
+    inner: &'a Snapshot,
+    old: NodeClients,
+    deletes: Vec<(String, ShardRef, u64)>,
+    applied: AtomicUsize,
+}
+
+impl Restorer for Delivering<'_> {
+    fn destination(&self) -> String {
+        self.inner.destination()
+    }
+
+    async fn restore(&self, source: &str, version: u64) -> Result<(), String> {
+        self.applied
+            .fetch_add(deliver(&self.old, &self.deletes).await, Ordering::SeqCst);
+        self.inner.restore(source, version).await
+    }
 }
 
 /// A restorer that, after restoring, writes a process heartbeat there.
@@ -1196,5 +1230,87 @@ async fn another_disk_at_a_nodes_address_stops_the_restore_before_the_clear() {
         "cleared"
     );
     assert_eq!(backup.restores.load(Ordering::SeqCst), 0);
+    c.shutdown().await;
+}
+
+/// Re-review (Phase 3.11): a run fenced every node and stopped before the
+/// clear; the cluster was then reactivated and a leader opened a new
+/// generation and decided deletes. The resume does not trust the journal's
+/// `Fenced`: it freezes and fences again, so those deletes are refused
+/// after the restore.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fence_reopened_between_runs_is_closed_again_before_the_clear() {
+    let mut c = cluster().await;
+    put(&c, "kept", 19).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    // Fenced, stopped before the clear (a process started meanwhile).
+    c.stop_node(2).await;
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    c.start_node(2).await;
+    let closed = arca_lake_controller::delete_fence::close_and_push(
+        c.meta.as_ref(),
+        &c.clients,
+        "admin restore",
+        true,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    let mut j = mr::Journal::load(&path).unwrap();
+    j.closed_generation = closed.record.generation;
+    j.done.push(Step::Fenced);
+    j.save(&path).unwrap();
+    // Reactivated: Active, hold released, a leader opens and decides.
+    arca_lake_metadata::ops::recovery::activate_read_only(c.meta.as_ref(), "op", now_ms())
+        .await
+        .unwrap()
+        .unwrap();
+    arca_lake_controller::delete_fence::release_and_push(
+        c.meta.as_ref(),
+        &c.clients,
+        "op",
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    let ctl = leading(&c, "ctl-between").await;
+    let deletes = decided_deletes(&c, "kept").await;
+    let old = frozen(&c).await;
+    ctl.abort();
+    // Delivered in the middle of the restore (before the mark closes the
+    // fence again on the restored metadata).
+    let during = Delivering {
+        inner: &backup,
+        old,
+        deletes,
+        applied: AtomicUsize::new(0),
+    };
+    let j = mr::run(
+        &c.meta,
+        &c.clients,
+        &during,
+        &path,
+        &p.journal.token,
+        &[],
+        &[],
+        now_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(j.last(), Some(Step::Verified));
+    assert_eq!(
+        during.applied.load(Ordering::SeqCst),
+        0,
+        "a reopened generation's deletes applied during the restore"
+    );
+    assert!(
+        j.closed_generation > closed.record.generation,
+        "fenced again"
+    );
     c.shutdown().await;
 }

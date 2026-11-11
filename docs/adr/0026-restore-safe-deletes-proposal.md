@@ -173,6 +173,19 @@ Review fixes (Phase 3.11):
   acknowledged for it. A node that cannot be verified (no acknowledged
   identity, or an earlier release) stops the restore; earlier-release
   nodes are restored by the manual runbook (re-review).
+- **Fence held again on a resume.** A journal's `Fenced` is not proof
+  that the nodes are still held: the cluster may have been reactivated
+  between runs. While the planned store is there and not cleared, a
+  resume checks again that the cluster is `ReadOnly`, the fence record
+  is closed and held at the recorded generation, and every node holds
+  it on its own disk. If anything is no longer as recorded, it freezes
+  and fences again, and the new close refuses deletes of any generation
+  opened meanwhile (re-review; test: without it, 3 such deletes applied
+  during the restore).
+- **Accepted (re-review).** The close reaches a node without an
+  acknowledged identity unstamped, so another disk at that address can
+  take it. That can only close or hold that disk's fence (the fail-safe
+  direction), and the restore's read-back refuses an unverifiable node.
 - **Node check.** Before the mark, the restored metadata must name only
   this cluster's nodes, at their addresses. Another cluster's backup is
   refused.

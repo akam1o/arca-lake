@@ -509,6 +509,49 @@ pub async fn plan<S: KvStore>(
     Ok(Plan { journal, summary })
 }
 
+/// Every node closed and holds the fence at `generation` or above, on its
+/// own disk (the identity this cluster acknowledged for it). `Ok(Err)`:
+/// why not.
+async fn verify_held<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    nodes: &[(u64, String)],
+    generation: u64,
+) -> Result<Result<(), String>, ControlError> {
+    // Each node's own disk, by the identity this cluster acknowledged
+    // for it (re-review: another disk at its address could otherwise
+    // acknowledge the hold for it); one that cannot be verified stops
+    // the restore.
+    let identities = node_lifecycle::identities(meta).await?;
+    for (id, addr) in nodes {
+        let h = match clients.health(addr).await {
+            Ok(h) => h,
+            Err(e) => return Ok(Err(format!("node {id} stopped answering: {}", e.code()))),
+        };
+        let verified = identities
+            .get(id)
+            .filter(|i| i.acknowledged)
+            .is_some_and(|i| {
+                h.identity_supported
+                    && h.identity_node_id == *id
+                    && h.identity_token.as_ref() == i.token.as_slice()
+            });
+        if !verified {
+            return Ok(Err(format!(
+                "node {id}'s disk cannot be verified (no acknowledged identity, an earlier release, or another disk at its address, which holds node {}'s): the restore does not start; let a leader give it its identity, or decommission and unregister it",
+                h.identity_node_id
+            )));
+        }
+        if h.delete_fence_open || !h.delete_fence_hold || h.delete_fence_generation < generation {
+            return Ok(Err(format!(
+                "node {id} reports generation {} open {} hold {}: not held at {}",
+                h.delete_fence_generation, h.delete_fence_open, h.delete_fence_hold, generation
+            )));
+        }
+    }
+    Ok(Ok(()))
+}
+
 /// Steps 2 to 8. Resumes from the journal. `stopped` names processes the
 /// operator declares stopped although their heartbeat is fresh.
 ///
@@ -550,6 +593,39 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
         )));
     }
     let meta_ref = meta.as_ref();
+    // A fence recorded as held may have been reopened since (the cluster
+    // reactivated between runs; re-review): while the planned store is
+    // there, it is checked again, and the freeze and the fence are done
+    // again if anything is no longer as recorded.
+    if j.has(Step::Fenced) && !j.has(Step::Cleared) {
+        let planned = compat::cluster_state(meta_ref)
+            .await?
+            .filter(|c| compat::hex(&c.incarnation) == j.incarnation);
+        // With `Clearing` recorded and this journal's marker gone, the
+        // store is refused further on (plan again); not fenced again here.
+        let names: Vec<String> = j.marker.iter().chain(&j.pending_marker).cloned().collect();
+        let marked = arca_lake_metadata::transact(meta_ref, names, |tx, names| {
+            Box::pin(async move {
+                let held = tx.get(&arca_lake_metadata::keys::restore_marker()).await?;
+                Ok(held.is_some_and(|v| names.iter().any(|m| v == m.as_bytes())))
+            })
+        })
+        .await?;
+        if let Some(state) = planned.filter(|_| !j.has(Step::Clearing) || marked) {
+            let rec = delete_fence::current(meta_ref).await?;
+            let still = state.state == ClusterPhase::ReadOnly
+                && !rec.open
+                && rec.operator_hold
+                && rec.generation == j.closed_generation
+                && verify_held(meta_ref, clients, &j.nodes, j.closed_generation)
+                    .await?
+                    .is_ok();
+            if !still {
+                j.done.retain(|s| *s < Step::Frozen);
+                j.save(path).map_err(ControlError::Other)?;
+            }
+        }
+    }
     // Before the clear the store must still be the planned cluster.
     if !j.has(Step::Clearing) {
         let state = compat::cluster_state(meta_ref).await?.ok_or_else(|| {
@@ -604,43 +680,9 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 "nodes {missing:?} did not acknowledge the closed, held fence: the restore does not start (nothing was restored; re-run once they answer)"
             )));
         }
-        // Each node's own disk, by the identity this cluster acknowledged
-        // for it (re-review: another disk at its address could otherwise
-        // acknowledge the hold for it); one that cannot be verified stops
-        // the restore.
-        let identities = node_lifecycle::identities(meta_ref).await?;
-        for (id, addr) in &j.nodes {
-            let h = clients
-                .health(addr)
-                .await
-                .map_err(|e| refuse(format!("node {id} stopped answering: {}", e.code())))?;
-            let verified = identities
-                .get(id)
-                .filter(|i| i.acknowledged)
-                .is_some_and(|i| {
-                    h.identity_supported
-                        && h.identity_node_id == *id
-                        && h.identity_token.as_ref() == i.token.as_slice()
-                });
-            if !verified {
-                return Err(refuse(format!(
-                    "node {id}'s disk cannot be verified (no acknowledged identity, an earlier release, or another disk at its address, which holds node {}'s): the restore does not start; let a leader give it its identity, or decommission and unregister it",
-                    h.identity_node_id
-                )));
-            }
-            if h.delete_fence_open
-                || !h.delete_fence_hold
-                || h.delete_fence_generation < closed.record.generation
-            {
-                return Err(refuse(format!(
-                    "node {id} reports generation {} open {} hold {}: not held at {}",
-                    h.delete_fence_generation,
-                    h.delete_fence_open,
-                    h.delete_fence_hold,
-                    closed.record.generation
-                )));
-            }
-        }
+        verify_held(meta_ref, clients, &j.nodes, closed.record.generation)
+            .await?
+            .map_err(refuse)?;
         j.closed_generation = closed.record.generation;
         j.record(path, Step::Fenced)?;
     }
