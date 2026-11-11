@@ -88,13 +88,15 @@ async fn verified_identity<S: KvStore>(
     let rec = node_lifecycle::identity(meta, node_id).await?;
     let held = <[u8; 16]>::try_from(h.identity_token.as_ref()).ok();
     {
-        let ours = match &rec {
-            Some(r) if r.acknowledged => h.identity_node_id == node_id && held == Some(r.token),
-            Some(r) => {
-                h.identity_node_id == 0 || (h.identity_node_id == node_id && held == Some(r.token))
-            }
-            None => h.identity_node_id == 0,
+        // Only an identity this cluster acknowledged can be stamped on every
+        // push and checked on the read-back: two disks without one cannot
+        // be told apart (re-review).
+        let Some(r) = rec.as_ref().filter(|r| r.acknowledged) else {
+            return Ok(Err(format!(
+                "node {node_id} has no acknowledged identity (a leader gives it one): nothing pushed; start a leader and retry, or, if its own disk will never be started again unwiped, re-run with --unreachable"
+            )));
         };
+        let ours = h.identity_node_id == node_id && held == Some(r.token);
         if !ours {
             return Ok(Err(format!(
                 "the disk at node {node_id}'s address is not verifiably this node's (it holds the identity of node {}): nothing pushed; if this node's own disk will never be started again unwiped, re-run with --unreachable",

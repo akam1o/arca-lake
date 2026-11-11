@@ -1210,3 +1210,40 @@ async fn fence_pushes_carry_the_identity_and_unreachable_covers_an_answering_dis
     );
     c.shutdown().await;
 }
+
+/// Re-review (Phase 3.11): a node answering without an acknowledged
+/// identity is not removed (two disks without one cannot be told apart):
+/// nothing is pushed; `--unreachable` is the operator's way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_without_an_acknowledged_identity_is_not_removed_while_it_answers() {
+    let mut c = cluster().await;
+    let i = c.add_node().await;
+    let id = c.nodes[i].id;
+    let addr = c.nodes[i].addr.to_string();
+    let before = c.clients.health(&addr).await.unwrap();
+    let e = node_ops::keep_removed(c.meta.as_ref(), &c.clients, id, false, now_ms())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no acknowledged identity"), "{e}");
+    let after = c.clients.health(&addr).await.unwrap();
+    assert_eq!(
+        (after.delete_fence_generation, after.delete_fence_hold),
+        (before.delete_fence_generation, before.delete_fence_hold),
+        "pushed"
+    );
+    assert_eq!(
+        node_lifecycle::state(c.meta.as_ref(), id).await.unwrap(),
+        State::Active
+    );
+    assert!(
+        !node_ops::keep_removed(c.meta.as_ref(), &c.clients, id, true, now_ms())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        node_lifecycle::state(c.meta.as_ref(), id).await.unwrap(),
+        State::Removed
+    );
+    c.shutdown().await;
+}

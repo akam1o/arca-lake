@@ -738,6 +738,27 @@ async fn a_node_unregistered_after_the_backup_stays_removed() {
     put(&c, "kept", 12).await;
     let spare = c.add_node().await;
     let spare_id = c.nodes[spare].id;
+    // Its identity adopted and acknowledged, as a leader does.
+    let token = node_lifecycle::identity(c.meta.as_ref(), spare_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .token;
+    c.clients
+        .health_with(
+            &c.nodes[spare].addr.to_string(),
+            arca_lake_protocol::storage::v1::HealthRequest {
+                node_id: spare_id,
+                node_identity: Bytes::copy_from_slice(&token),
+                adopt_identity: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    node_lifecycle::acknowledge_identity(c.meta.as_ref(), spare_id, token)
+        .await
+        .unwrap();
     let backup = Snapshot::take(&c.meta).await;
     membership::drain_node(c.meta.as_ref(), spare_id, "t", now_ms())
         .await

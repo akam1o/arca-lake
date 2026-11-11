@@ -174,7 +174,9 @@ at any step.
     (confirmation review: a removed node is trusted to be fenced).
     Before anything is pushed, what answers at the address must be
     verifiably the node's disk: it holds the identity this cluster
-    acknowledged for it, or none where none was acknowledged. Otherwise
+    acknowledged for it. A node without an acknowledged identity is not
+    removed while it answers, since two disks without one cannot be told
+    apart; a leader gives it one first. Otherwise
     nothing is pushed, so another cluster's node keeps its own hold and
     facts, and the node is removed only with `--unreachable` (the
     operator's statement that its own disk is gone for good; nothing is
