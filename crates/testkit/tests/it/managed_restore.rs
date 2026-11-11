@@ -905,3 +905,84 @@ async fn a_restored_copy_with_the_planned_incarnation_is_not_taken_for_the_plann
     }
     c.shutdown().await;
 }
+
+/// Re-review (Phase 3.11): `admin restore abandon`. Refused while another
+/// `admin restore` command holds the journal; otherwise the journal is
+/// marked abandoned (never run again) and the marker that holds node
+/// changes removed; refused once the store was cleared.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abandon_gives_up_a_restore_before_its_clear_only() {
+    use arca_lake_metadata::ops::node_lifecycle;
+    let mut c = cluster().await;
+    put(&c, "kept", 15).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    // Paused before its clear: the marker in the store, `Clearing` recorded.
+    c.stop_node(2).await;
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    c.start_node(2).await;
+    let mut j = mr::Journal::load(&path).unwrap();
+    j.marker = Some("paused-attempt".into());
+    j.done.push(Step::Fenced);
+    j.done.push(Step::Clearing);
+    j.save(&path).unwrap();
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.set(&keys::restore_marker(), b"paused-attempt");
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    // Another command holds the journal.
+    {
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path.with_extension("lock"))
+            .unwrap();
+        held.try_lock().unwrap();
+        let e = mr::abandon(c.meta.as_ref(), &path)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("one at a time"), "{e}");
+    }
+    assert!(mr::abandon(c.meta.as_ref(), &path).await.unwrap());
+    assert!(mr::Journal::load(&path).unwrap().abandoned);
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("abandoned"), "{e}");
+    assert_eq!(
+        backup.restores.load(Ordering::SeqCst),
+        0,
+        "nothing restored"
+    );
+    // Node changes go on again.
+    node_lifecycle::set_identity(c.meta.as_ref(), c.nodes[0].id, [1; 16])
+        .await
+        .unwrap();
+    // A new plan is allowed over an abandoned journal; once its store is
+    // cleared, abandon is refused.
+    let p2 = plan(&c, &backup, &path).await.unwrap();
+    backup.fail.store(1, Ordering::SeqCst);
+    run(&c, &backup, &path, &p2.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        mr::Journal::load(&path).unwrap().last(),
+        Some(Step::Cleared)
+    );
+    let e = mr::abandon(c.meta.as_ref(), &path)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("cleared"), "{e}");
+    c.shutdown().await;
+}

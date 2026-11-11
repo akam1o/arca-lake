@@ -191,9 +191,20 @@ Review fixes (Phase 3.11):
   before the journal records the marker resumes as a fresh attempt.
   Incarnation equality cannot tell the planned store from a restored
   copy, and a fixed marker could be in a backup. The mark step removes a
-  marker a restored copy carries. `admin restore abandon` removes the
-  marker when a restore is given up before its clear; the cluster stays
-  read-only and held (re-reviews).
+  marker a restored copy carries. The writes gated by the marker are
+  every write to the node state the restore captures: operator lifecycle
+  commands, registrations, and the leader's identity and quarantine
+  writes. The clear itself, on the planned store, checks in its own
+  transaction that the store still holds this attempt's marker.
+- **Abandon.** `admin restore abandon --journal J --yes` gives up a
+  restore before its clear. It marks the journal abandoned, so `run` and
+  `finish` refuse it from then on, and removes the marker. `run`,
+  `finish` and `abandon` hold an exclusive lock on the journal
+  (`J.lock`), so `abandon` cannot race a live run. Abandon is refused
+  once the clear may have committed; resume `run` instead. The cluster
+  stays read-only and held until the operator activates it and releases
+  the hold. One managed restore of a cluster at a time, from one journal
+  (re-reviews).
 - **Removed nodes' addresses.** The plan records them. A restored record
   of a removed id at another address is refused, and the restore's fence
   and floor RPCs skip removed nodes.

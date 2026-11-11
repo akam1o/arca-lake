@@ -319,6 +319,7 @@ pub async fn quarantine<S: KvStore>(
 ) -> Result<bool> {
     transact(store, (node_id, reason.to_string(), now_ms), |tx, env| {
         Box::pin(async move {
+            no_restore_in_progress(tx).await?;
             let (node_id, reason, now_ms) = env;
             let cur: Option<NodeRetirementRecord> =
                 read(tx, &keys::node_retirement(*node_id)).await?;
@@ -404,6 +405,7 @@ pub async fn identity<S: KvStore>(store: &S, node_id: u64) -> Result<Option<Node
 pub async fn ensure_identity<S: KvStore>(store: &S, node_id: u64) -> Result<NodeIdentityRecord> {
     transact(store, node_id, |tx, node_id| {
         Box::pin(async move {
+            no_restore_in_progress(tx).await?;
             if let Some(r) =
                 read::<NodeIdentityRecord, _>(tx, &keys::node_identity(*node_id)).await?
             {
@@ -564,6 +566,7 @@ pub async fn acknowledge_identity<S: KvStore>(
 ) -> Result<()> {
     transact(store, (node_id, token), |tx, env| {
         Box::pin(async move {
+            no_restore_in_progress(tx).await?;
             let (node_id, token) = *env;
             let cur: Option<NodeIdentityRecord> = read(tx, &keys::node_identity(node_id)).await?;
             if let Some(mut r) = cur.filter(|r| r.token == token && !r.acknowledged) {

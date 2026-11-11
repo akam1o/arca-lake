@@ -2645,6 +2645,9 @@ enum RestoreCommand {
     /// Give up a restore before its clear: remove its marker, which holds
     /// node changes (the cluster stays read-only and held).
     Abandon {
+        /// Journal file.
+        #[arg(long)]
+        journal: PathBuf,
         /// Confirm.
         #[arg(long)]
         yes: bool,
@@ -2836,13 +2839,13 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
                 Err(e) => fail(e),
             }
         }
-        RestoreCommand::Abandon { yes } => {
+        RestoreCommand::Abandon { journal, yes } => {
             if !yes {
                 return fail(
                     "abandon lets node changes go on before the restore cleared anything; re-run with --yes",
                 );
             }
-            match mr::abandon(meta.as_ref()).await {
+            match mr::abandon(meta.as_ref(), &journal).await {
                 Ok(true) => {
                     println!(
                         "restore marker removed; the cluster stays read-only with its fence held (activate it and release the hold when ready)"

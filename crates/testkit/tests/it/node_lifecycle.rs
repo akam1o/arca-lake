@@ -1019,11 +1019,14 @@ async fn node_changes_wait_while_a_restore_holds_its_marker() {
         .unwrap_err()
         .to_string(),
     );
-    assert!(
-        arca_lake_controller::managed_restore::abandon(c.meta.as_ref())
-            .await
-            .unwrap()
-    );
+    arca_lake_metadata::transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.clear(&arca_lake_metadata::keys::restore_marker());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
     node_lifecycle::set_identity(c.meta.as_ref(), n, [1; 16])
         .await
         .unwrap();

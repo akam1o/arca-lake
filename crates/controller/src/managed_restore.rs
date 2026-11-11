@@ -154,6 +154,8 @@ pub struct Journal {
     /// The marker of the current clear attempt (random, new each attempt),
     /// written into the store right before the clear.
     pub marker: Option<String>,
+    /// Given up (`admin restore abandon`): never run or finished again.
+    pub abandoned: bool,
 }
 
 impl Journal {
@@ -199,6 +201,9 @@ impl Journal {
         if let Some(m) = &self.marker {
             let _ = writeln!(b, "marker {m}");
         }
+        if self.abandoned {
+            let _ = writeln!(b, "abandoned");
+        }
         for s in &self.done {
             let _ = writeln!(b, "done {}", s.name());
         }
@@ -239,6 +244,7 @@ impl Journal {
             restored_incarnation: None,
             new_incarnation: None,
             marker: None,
+            abandoned: false,
         };
         let num = |v: &str| v.parse::<u64>().map_err(|e| format!("{v}: {e}"));
         for l in &lines[1..] {
@@ -275,6 +281,7 @@ impl Journal {
                 "restored_incarnation" => j.restored_incarnation = Some(v.into()),
                 "new_incarnation" => j.new_incarnation = Some(v.into()),
                 "marker" => j.marker = Some(v.into()),
+                "abandoned" => j.abandoned = true,
                 "done" => j
                     .done
                     .push(Step::parse(v).ok_or_else(|| format!("unknown step {v}"))?),
@@ -331,6 +338,26 @@ impl Journal {
     }
 }
 
+/// The journal's lock (`J.lock`), held by `run`, `finish` and `abandon`
+/// for their whole duration: one of them at a time (re-review: `abandon`
+/// must not race a live run).
+fn lock(path: &Path) -> Result<std::fs::File, ControlError> {
+    let p = path.with_extension("lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&p)
+        .map_err(|e| ControlError::Other(format!("{}: {e}", p.display())))?;
+    f.try_lock().map_err(|_| {
+        refuse(format!(
+            "another `admin restore` command holds {} (one at a time)",
+            p.display()
+        ))
+    })?;
+    Ok(f)
+}
+
 fn refuse(why: impl Into<String>) -> ControlError {
     ControlError::Other(why.into())
 }
@@ -381,6 +408,7 @@ pub async fn plan<S: KvStore>(
 ) -> Result<Plan, ControlError> {
     if let Ok(j) = Journal::load(path)
         && !j.has(Step::Reopened)
+        && !j.abandoned
     {
         return Err(refuse(format!(
             "an unfinished restore journal is at {} (last step {}): resume it with `admin restore run`, or move it away",
@@ -448,6 +476,7 @@ pub async fn plan<S: KvStore>(
         restored_incarnation: None,
         new_incarnation: None,
         marker: None,
+        abandoned: false,
     };
     journal.save(path).map_err(ControlError::Other)?;
     let summary = vec![
@@ -489,7 +518,11 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
     absent: &[u64],
     now: impl Fn() -> u64,
 ) -> Result<Journal, ControlError> {
+    let _lock = lock(path)?;
     let mut j = Journal::load(path).map_err(ControlError::Other)?;
+    if j.abandoned {
+        return Err(refuse("this restore was abandoned: plan a new one"));
+    }
     if confirm != j.token {
         return Err(refuse(format!(
             "confirmation token does not match the plan at {} (target incarnation {}, source {}, destination {})",
@@ -645,14 +678,30 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
             j.removed = j.removed_at.iter().map(|(id, _)| *id).collect();
             j.marker = Some(marker);
         }
+        let planned_here = !j.has(Step::Clearing) || still_planned;
         j.record(path, Step::Clearing)?;
-        arca_lake_metadata::transact(meta_ref, (), |tx, ()| {
+        // On the planned store, only while it still holds this attempt's
+        // marker, in the clear's own transaction (re-review: a marker
+        // removed meanwhile means the restore was given up).
+        let owned = planned_here.then(|| j.marker.clone()).flatten();
+        let cleared = arca_lake_metadata::transact(meta_ref, owned, |tx, owned| {
             Box::pin(async move {
+                if let Some(m) = owned {
+                    let held = tx.get(&arca_lake_metadata::keys::restore_marker()).await?;
+                    if held.as_deref() != Some(m.as_bytes()) {
+                        return Ok(false);
+                    }
+                }
                 tx.clear_range(&arca_lake_metadata::keys::all_range());
-                Ok(())
+                Ok(true)
             })
         })
         .await?;
+        if !cleared {
+            return Err(refuse(
+                "the store no longer holds this restore's marker (abandoned?): nothing cleared",
+            ));
+        }
         j.record(path, Step::Cleared)?;
         restorer.restore(&j.source, j.version).await.map_err(|e| {
             refuse(format!(
@@ -846,7 +895,11 @@ pub async fn finish<S: KvStore>(
     wait: std::time::Duration,
     now: impl Fn() -> u64,
 ) -> Result<Journal, ControlError> {
+    let _lock = lock(path)?;
     let mut j = Journal::load(path).map_err(ControlError::Other)?;
+    if j.abandoned {
+        return Err(refuse("this restore was abandoned: plan a new one"));
+    }
     if !j.has(Step::Verified) {
         return Err(refuse(format!(
             "the restore is at step {}: run `admin restore run` first",
@@ -924,23 +977,61 @@ pub async fn finish<S: KvStore>(
     Ok(j)
 }
 
-/// Give up a managed restore before its clear: remove the marker that
-/// holds node lifecycle changes (`admin restore abandon`). The cluster
-/// stays read-only and its fence held until the operator activates it and
-/// releases the hold. Returns whether a marker was removed.
+/// Give up a managed restore before its clear (`admin restore abandon`):
+/// the journal is marked abandoned (never run or finished again), then its
+/// marker, which holds node changes, is removed if the store still holds
+/// it. Refused while another `admin restore` command runs on the journal,
+/// and once the clear may have committed (resume `run` instead). The
+/// cluster stays read-only and its fence held until the operator activates
+/// it and releases the hold. Returns whether a marker was removed.
 ///
 /// # Errors
 ///
-/// Metadata errors.
-pub async fn abandon<S: KvStore>(meta: &S) -> Result<bool, ControlError> {
-    Ok(arca_lake_metadata::transact(meta, (), |tx, ()| {
+/// Why it is refused; metadata or I/O errors.
+pub async fn abandon<S: KvStore>(meta: &S, path: &Path) -> Result<bool, ControlError> {
+    let _lock = lock(path)?;
+    let mut j = Journal::load(path).map_err(ControlError::Other)?;
+    if j.has(Step::Cleared) {
+        return Err(refuse(
+            "the store was cleared: resume `admin restore run` (the restore cannot be given up now)",
+        ));
+    }
+    let held = arca_lake_metadata::transact(meta, (), |tx, ()| {
         Box::pin(async move {
-            let had = tx
-                .get(&arca_lake_metadata::keys::restore_marker())
-                .await?
-                .is_some();
-            tx.clear(&arca_lake_metadata::keys::restore_marker());
-            Ok(had)
+            tx.get(&arca_lake_metadata::keys::restore_marker())
+                .await
+                .map_err(Into::into)
+        })
+    })
+    .await?;
+    let ours = j
+        .marker
+        .as_deref()
+        .is_some_and(|m| held.as_deref() == Some(m.as_bytes()));
+    if j.has(Step::Clearing) && !ours {
+        return Err(refuse(
+            "the clear may have committed (its marker is gone): resume `admin restore run`",
+        ));
+    }
+    j.abandoned = true;
+    j.save(path).map_err(ControlError::Other)?;
+    // Ours, or (no `Clearing` recorded, so no clear can have happened) one
+    // written by an attempt of this journal that died before recording
+    // it. One managed restore of a cluster at a time (RFC-013).
+    let Some(m) = held
+        .filter(|_| ours || !j.has(Step::Clearing))
+        .and_then(|h| String::from_utf8(h).ok())
+    else {
+        return Ok(false);
+    };
+    Ok(arca_lake_metadata::transact(meta, m, |tx, m| {
+        Box::pin(async move {
+            let held = tx.get(&arca_lake_metadata::keys::restore_marker()).await?;
+            if held.as_deref() == Some(m.as_bytes()) {
+                tx.clear(&arca_lake_metadata::keys::restore_marker());
+                return Ok(true);
+            }
+            Ok(false)
         })
     })
     .await?)
@@ -970,6 +1061,7 @@ mod tests {
             restored_incarnation: Some("0102".into()),
             new_incarnation: None,
             marker: Some("ab".into()),
+            abandoned: false,
         };
         j.save(&p).unwrap();
         assert_eq!(Journal::load(&p).unwrap(), j);
