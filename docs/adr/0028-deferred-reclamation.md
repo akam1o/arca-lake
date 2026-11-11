@@ -223,16 +223,22 @@ the argument reads a counter of the metadata store (invariant D).
   and nothing is reclaimed (`reclaim_damaged` in health) until the
   operator removes the file; the retained records are then deleted again
   by reconciliation and GC.
-- Metadata: none for the mechanism. `admin restore` adds the cluster uid
-  key (below).
+- Metadata: none for the mechanism. `admin restore` adds a cluster uid
+  key and a probe key (see the Phase 3.12 verification report).
 
 ### Protocol (additive)
 
 - `DeleteShardResponse.deferred` (the record is retained).
-- `ReclaimShard(key, sequence, observed_at_ms, fence, incarnation,
-  identity)`; `ListShardsRequest.only_pending`, `ShardInfo.retired_at_ms`.
-- `HealthResponse.reclaim_retention_ms` (0: an earlier release, or
-  retention off).
+- `ReclaimShard(key, sequence, store_epoch, observed_at_ms, group_epoch,
+  delete_fence, incarnation, node identity)` and `ListPending(after,
+  limit)` returning `(key, sequence, retired_at_ms, store_epoch)` and the
+  node's retention. Both are authorized for the controller and admin roles
+  only (ADR-0017 table), not gateways.
+- `HealthResponse.reclaim_retention_ms` (42; 0: an earlier release, or
+  retention off), `reclaim_pending` (43), `reclaim_damaged` (44),
+  `reclaim_skew_ms` (45).
+- An earlier release answers `UNIMPLEMENTED` to `ListPending`: the
+  reclaim pass counts it in `arca_controller_nodes_not_deferring`.
 
 ### Upgrade, rollback
 
@@ -272,5 +278,12 @@ immediate; each check removed makes its test fail.
   the restore takes. Older restores and skew beyond `ε` remain the
   residual.
 - Freed space arrives `R` later.
-- `admin restore` keeps its own checks; it additionally refuses a backup
-  older than `R − 2ε` unless the operator accepts the loss explicitly.
+- `admin restore` keeps its own checks; it additionally refuses (at plan,
+  and again right before the clear) a backup older than `R − 2ε`, of
+  unknown age, or with nodes that do not defer, unless the operator
+  accepts the loss explicitly (`--accept-unprotected-backup`, recorded in
+  the journal).
+- The node clock decides `retired_at` and bounds `observed_at`; RFC-008
+  §6.7 ("safety must not depend on clocks") no longer holds for this
+  mechanism. The dependence is explicit (H2) and confined to it: every
+  other delete check stays clock-free.
