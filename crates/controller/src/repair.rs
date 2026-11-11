@@ -86,9 +86,19 @@ pub enum RepairSource {
     Direct,
 }
 
+/// Wall clock, ms since the epoch.
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// Result of a repair.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepairReport {
+    /// Chunks this walk could not rebuild, queued for stripe repair
+    /// (Phase 3.12).
+    pub unrebuilt: usize,
     /// Epoch of the group during this repair.
     pub epoch: u64,
     /// Chunks whose shard was reconstructed and written.
@@ -324,7 +334,36 @@ pub async fn replace_member_with<S: KvStore>(
     hook(RepairStep::Reconstructed).await?;
 
     let completeness = check_completeness(meta, clients, &nodes, &group, index, opts).await?;
-    let complete = completeness.is_complete();
+    // A chunk a walk could not rebuild for this member is queued for
+    // stripe repair (above); while its task is open the member is not
+    // whole, whatever the listing shows (Phase 3.12: shards a node
+    // quarantined are not listed, so a later walk and this check would not
+    // see the chunk at all, and the group would become Active without it).
+    let member = u16::try_from(index).unwrap_or(u16::MAX);
+    let mut queued_for_member = false;
+    if let Some(target) = nodes.get(&group.members[index].node_id) {
+        for (cid, t) in arca_lake_metadata::ops::integrity::tasks_of_group(meta, group.id).await? {
+            if !t.hint_targets.contains(&member) {
+                continue;
+            }
+            let shard = ShardRef {
+                group_id: group.id,
+                chunk_id: cid,
+                shard_index: member,
+            };
+            // Still not on the new member (a task of a shard it holds
+            // now is stripe repair's to close).
+            if clients
+                .get_shard(&target.address, shard, 0, 1)
+                .await
+                .is_err()
+            {
+                queued_for_member = true;
+                break;
+            }
+        }
+    }
+    let complete = completeness.is_complete() && !queued_for_member;
     // Shards missing on the other members (a corrupt one quarantined when
     // the move read it, a member that lost one) are stripe repair's work:
     // queue it, so that the next check can pass (otherwise the group would
@@ -497,7 +536,9 @@ async fn reconstruct_member<S: KvStore>(
         epoch: group.epoch,
         ..RepairReport::default()
     };
-    let mut walker = GroupWalker::new(clients, nodes, group, cursor, opts.page_size);
+    let mut walker =
+        GroupWalker::new(clients, nodes, group, cursor, opts.page_size).retired_as_absent();
+    let mut first_unrebuilt: Option<ControlError> = None;
     while let Some(chunk) = walker.next().await? {
         let cid = chunk.chunk_id;
         if chunk.present[index].is_some() && !corrupt.contains(&cid) {
@@ -505,7 +546,7 @@ async fn reconstruct_member<S: KvStore>(
             persist_cursor(meta, group, index, cid).await?;
             continue;
         }
-        let Some((bytes, how)) = reconstruct_one(
+        let rebuilt = match reconstruct_one(
             meta,
             clients,
             nodes,
@@ -516,8 +557,36 @@ async fn reconstruct_member<S: KvStore>(
             params,
             opts,
         )
-        .await?
-        else {
+        .await
+        {
+            Ok(r) => r,
+            // A chunk this walk cannot rebuild (fewer than `k` shards, or
+            // what they give does not match its record) goes to the stripe
+            // repair queue, where it is retried with backoff and shown to
+            // the operator, and the walk goes on past it (Phase 3.12
+            // liveness audit: it was retried first on every pass, and the
+            // rest of the group waited behind it). The walk still ends in
+            // this error (below): the group stays `Repairing`, whatever
+            // completeness sees (shards a node hides are not listed).
+            Err(e @ (ControlError::Unrecoverable { .. } | ControlError::Corrupt(_))) => {
+                tracing::error!(group = group.id, chunk = %hex(&cid), error = %e, "member repair: chunk not rebuilt, queued for stripe repair");
+                arca_lake_metadata::ops::integrity::enqueue(
+                    meta,
+                    group.id,
+                    cid,
+                    arca_lake_metadata::ops::integrity::Finding::MissingShard,
+                    &[u16::try_from(index).unwrap_or(0)],
+                    now_unix_ms(),
+                )
+                .await?;
+                report.unrebuilt += 1;
+                first_unrebuilt.get_or_insert(e);
+                persist_cursor(meta, group, index, cid).await?;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let Some((bytes, how)) = rebuilt else {
             // Deleted meanwhile (no live generation accounts for it).
             report.skipped += 1;
             persist_cursor(meta, group, index, cid).await?;
@@ -536,7 +605,14 @@ async fn reconstruct_member<S: KvStore>(
                 group.epoch,
                 bytes,
                 256 << 10,
-                if opts.keep_client_reserve {
+                // A cache group's copies are written as cache (Phase 3.12
+                // review): the node learns its role from the class, and a
+                // repair write would make it durable for good, its
+                // evictions then retained for the reclaim retention. A
+                // discardable copy needs no reserve either.
+                if group.is_cache() {
+                    arca_lake_protocol::storage::v1::WriteClass::Cache
+                } else if opts.keep_client_reserve {
                     arca_lake_protocol::storage::v1::WriteClass::Migration
                 } else {
                     arca_lake_protocol::storage::v1::WriteClass::Repair
@@ -583,6 +659,11 @@ async fn reconstruct_member<S: KvStore>(
             report.budget_exhausted = true;
             return Ok(report);
         }
+    }
+    if let Some(e) = first_unrebuilt {
+        // Its task stays queued: completeness counts the member incomplete
+        // while it is (above), whatever later walks see.
+        return Err(e);
     }
     if walker.unavailable().contains(&index) {
         return Err(ControlError::Other(format!(
@@ -842,7 +923,8 @@ async fn check_completeness<S: KvStore>(
     opts: &RepairOptions,
 ) -> Result<Completeness, ControlError> {
     let mut c = Completeness::default();
-    let mut walker = GroupWalker::new(clients, nodes, group, None, opts.page_size);
+    let mut walker =
+        GroupWalker::new(clients, nodes, group, None, opts.page_size).retired_as_absent();
     while let Some(chunk) = walker.next().await? {
         c.chunks += 1;
         // A chunk that no live generation places in this group is an

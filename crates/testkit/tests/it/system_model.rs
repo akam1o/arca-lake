@@ -12,6 +12,16 @@
 //! cluster holds exactly the shards of the live objects (no referenced
 //! shard was deleted, every orphan converged) and no node holds capacity.
 //!
+//! Since Phase 3.12 the nodes defer reclamation (ADR-0028, retention
+//! `ARCA_MODEL_RETENTION_MS`, default 3000; 0 turns it off, which the
+//! direct restores below must then fail) and the model adds direct
+//! restores: a backup taken, everything going on (GC, reconciliation,
+//! moves, reclaim passes, an old leader's held deletes), then the metadata
+//! replaced with nothing fenced, the held deletes delivered after it, and
+//! the recovery after that. Every object of the backup must read back
+//! whole. At the end, once the retention has passed, the reclaim passes
+//! leave exactly the live objects' shards.
+//!
 //! Reproduction: each run's seed is printed on failure and appended to
 //! `$CARGO_TARGET_TMPDIR/system-model-failures.txt`; `ARCA_MODEL_SEED=<n>`
 //! replays one, `ARCA_MODEL_RUNS` and `ARCA_MODEL_STEPS` (default 8 and
@@ -101,10 +111,21 @@ enum Op {
     /// The spare node decommissioned, unregistered (a delete to it is
     /// refused), and rejoined (Phase 3.11, R-100).
     NodeRetireRejoin,
+    /// Take a backup for a direct restore (Phase 3.12): nothing is held
+    /// back while it is pending.
+    DirectSnapshot,
+    /// Restore it directly (`fdbrestore` with nothing fenced), the held
+    /// deletes delivered after it, then the recovery (Phase 3.12, ADR-0028).
+    DirectRestore,
+    /// A reclaim pass (Phase 3.12).
+    Reclaim,
 }
 
 fn pick(rng: &mut Rng) -> Op {
-    match rng.below(31) {
+    match rng.below(34) {
+        31 => return Op::DirectSnapshot,
+        32 => return Op::DirectRestore,
+        33 => return Op::Reclaim,
         20 => return Op::Snapshot,
         21 => return Op::Restore,
         22 => return Op::PhaseFlip,
@@ -510,11 +531,13 @@ async fn run<S: KvStore + 'static>(
     steps: usize,
 ) -> BTreeMap<String, usize> {
     let mut rng = Rng(seed | 1);
+    let retention = std::time::Duration::from_millis(env("ARCA_MODEL_RETENTION_MS", 3000));
     let mut c = start(ClusterOptions {
         groups: 2,
         multipart_min_part_bytes: CHUNK / 4,
         cache_nodes: 2,
         cache: Some(ClusterOptions::default_cache()),
+        reclaim_retention: retention,
         // Seven durable nodes for two groups of three: one spare.
         ..ClusterOptions::rs(7, 2, 1, CHUNK, 16 << 10)
     })
@@ -527,10 +550,23 @@ async fn run<S: KvStore + 'static>(
     // A pending backup (metadata, model) and the deletes decided but not
     // yet delivered (by a frozen controller each).
     let mut backup: Option<Snapshot> = None;
+    // A pending backup for a direct restore, with when it was taken.
+    let mut direct: Option<(Snapshot, Instant)> = None;
     let mut delayed: Vec<(NodeClients, Vec<Decided>)> = Vec::new();
     let mut token = 1000u64;
     for step in 0..steps {
         let mut op = pick(&mut rng);
+        // A pending direct backup is restored soon (one step in six):
+        // within the retention, as ADR-0028 H1 requires.
+        if direct.is_some() && rng.below(6) == 0 {
+            op = Op::DirectRestore;
+        }
+        // One pending backup at a time, of either kind.
+        if (matches!(op, Op::Snapshot) && direct.is_some())
+            || (matches!(op, Op::DirectSnapshot) && backup.is_some())
+        {
+            op = Op::Compact;
+        }
         // A pending backup is restored soon (one step in six).
         if backup.is_some() && rng.below(6) == 0 {
             // Either path, as often (Phase 3.11): the runbook by hand, or
@@ -565,7 +601,7 @@ async fn run<S: KvStore + 'static>(
         // holds unchanged half the time (Phase 3.11): what a stale delete
         // landing during a restore would destroy.
         if matches!(op, Op::Delete)
-            && let Some((_, at_backup)) = &backup
+            && let Some((_, at_backup)) = backup.as_ref().or(direct.as_ref().map(|(b, _)| b))
             && rng.below(2) == 0
         {
             let same: Vec<&String> = at_backup
@@ -601,11 +637,68 @@ async fn run<S: KvStore + 'static>(
                 // are held to be delivered late (or never).
                 // Always within a backup window (what a restore brings back
                 // is what a stale delete could destroy).
-                if model.contains_key(&key) && (backup.is_some() || rng.below(2) == 0) {
+                if model.contains_key(&key)
+                    && (backup.is_some() || direct.is_some() || rng.below(2) == 0)
+                {
                     delayed.push((frozen(&c), decided_deletes(&c, &key).await));
                 }
                 s3::delete(&c.backend, BUCKET, &key).await.unwrap();
                 model.remove(&key);
+            }
+            Op::DirectSnapshot => {
+                if direct.is_none() {
+                    direct = Some((
+                        (metadata_snapshot(c.meta.as_ref()).await, model.clone()),
+                        Instant::now(),
+                    ));
+                }
+            }
+            Op::DirectRestore => {
+                if let Some(((snap, before), taken)) = direct.take() {
+                    // Within the retention less a margin (the steps take
+                    // time); an older one is outside the protection and is
+                    // not restored (ADR-0028 H1).
+                    if taken.elapsed() + std::time::Duration::from_millis(500) < retention {
+                        // The leader running through the restore (R-94(b)):
+                        // what it decided on the metadata of before (GC of
+                        // what was deleted since the backup, reconciliation
+                        // of former placements) is applied, unfenced.
+                        // At least one object of the backup deleted since,
+                        // whose shards the leader's GC removes next.
+                        let unchanged: Vec<String> = before
+                            .iter()
+                            .filter(|(k, v)| model.get(*k) == Some(*v))
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        if !unchanged.is_empty() {
+                            let k = &unchanged[rng.below(unchanged.len() as u64) as usize];
+                            s3::delete(&c.backend, BUCKET, k).await.unwrap();
+                        }
+                        let far = now_ms() + 3_600_000;
+                        c.gc(far, 0).await;
+                        c.reconcile(far, 0).await;
+                        // `fdbrestore` with nothing fenced: the nodes keep the
+                        // open fence, and every delete decided before the
+                        // restore and held until now lands after it.
+                        metadata_restore(c.meta.as_ref(), &snap).await;
+                        for (who, deletes) in delayed.drain(..) {
+                            for (addr, shard, epoch) in deletes {
+                                let _ = who.delete_shard(&addr, shard, epoch).await;
+                            }
+                        }
+                        c.restart_backend().await.unwrap();
+                        let inc = model_recover(&c).await;
+                        c.clients.set_incarnation(Some(inc));
+                        c.restart_backend().await.unwrap();
+                        token += 1;
+                        leader_pass(&c, token).await;
+                        model = before;
+                        durable_intact(&c, &model, seed, step).await;
+                    }
+                }
+            }
+            Op::Reclaim => {
+                let _ = c.reclaim().await;
             }
             Op::Snapshot => {
                 if backup.is_none() {
@@ -1103,6 +1196,7 @@ async fn run<S: KvStore + 'static>(
     }
     // Converge: collect everything collectable (the fence as recorded).
     drop(backup);
+    drop(direct);
     c.sync_delete_fence().await;
     let far = now_ms() + 3_600_000;
     for _ in 0..3 {
@@ -1119,6 +1213,13 @@ async fn run<S: KvStore + 'static>(
     .unwrap();
     c.reconcile(far, 0).await;
     let _ = c.reconcile_cache().await;
+    // Deferred reclamation: what was retired is reclaimed once the
+    // retention has passed (twice: a pass may find the fence being pushed).
+    if !retention.is_zero() {
+        tokio::time::sleep(retention + std::time::Duration::from_millis(300)).await;
+        c.reclaim().await;
+        c.reclaim().await;
+    }
     check(&c, &model, seed, steps).await;
     // Exactly the live objects' shards on the durable groups.
     let mut expected = 0usize;
@@ -1236,6 +1337,29 @@ async fn random_operation_sequences_agree_with_the_model() {
         std::time::Duration::MAX,
     )
     .await;
+}
+
+/// Seeds that failed with deferred reclamation removed (Phase 3.12: the
+/// nodes deleting at once, `reclaim.rs` `defers` always false): each loses
+/// a backup's object in a direct restore. Replayed on every run; with the
+/// mechanism they must pass.
+const DIRECT_RESTORE_SEEDS: [u64; 6] = [
+    1_794_419_147_526_316_358,
+    1_794_419_165_897_044_481,
+    1_794_419_166_833_212_305,
+    1_794_419_168_937_232_238,
+    1_794_419_171_137_628_737,
+    1_794_419_173_615_883_789,
+];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recorded_direct_restore_seeds_agree_with_the_model() {
+    for seed in DIRECT_RESTORE_SEEDS {
+        let counts = tokio::spawn(run(arca_lake_testkit::mem_starter(), seed, 80))
+            .await
+            .unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
+        eprintln!("recorded seed {seed}: {counts:?}");
+    }
 }
 
 /// The same model on FoundationDB (Phase 3.10): every metadata

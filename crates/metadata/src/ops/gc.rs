@@ -49,7 +49,17 @@ pub async fn expire_pending<S: KvStore>(
                 if tx.get(k).await?.is_none() {
                     return Ok(false);
                 }
-                let header = generation_header(tx, generation).await?;
+                // An index entry without its generation (Phase 3.12 liveness
+                // audit): nothing to retire; the entry goes (it would
+                // otherwise fail every pass at the head of the range).
+                let header = match generation_header(tx, generation).await {
+                    Ok(h) => h,
+                    Err(crate::MetaError::NoSuchGeneration) => {
+                        tx.clear(k);
+                        return Ok(false);
+                    }
+                    Err(e) => return Err(e),
+                };
                 let GenState::Pending { lease_until_ms } = header.state else {
                     tx.clear(k);
                     return Ok(false);
@@ -67,9 +77,14 @@ pub async fn expire_pending<S: KvStore>(
                 Ok(true)
             })
         })
-        .await?;
-        if did {
-            retired.push(generation);
+        .await;
+        match did {
+            Ok(true) => retired.push(generation),
+            // Not due, gone, or a header that does not decode: this entry is
+            // skipped, the others go on (an undecodable header is reported
+            // wherever it is read, e.g. by the object's GET).
+            Ok(false) | Err(crate::MetaError::Codec(_)) => {}
+            Err(e) => return Err(e),
         }
     }
     Ok(retired)

@@ -437,6 +437,17 @@ fn lock(path: &Path) -> Result<std::fs::File, ControlError> {
     Ok(f)
 }
 
+fn unhex16(s: &str) -> Option<[u8; 16]> {
+    if s.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
 fn refuse(why: impl Into<String>) -> ControlError {
     ControlError::Other(why.into())
 }
@@ -465,6 +476,44 @@ async fn running_processes<S: KvStore>(
         .filter(|p| !stopped.contains(&p.id))
         .map(|p| format!("{:?} {}", p.kind, p.id))
         .collect())
+}
+
+/// Deferred reclamation's protection of a backup of point `backup_point_ms`
+/// (ADR-0028 H1, H3), from what the nodes report `(id, retention, skew)`:
+/// until when it holds (the shortest retention less twice the largest skew
+/// allowance after the point; `None`: unknown), and why the backup is
+/// outside it now, if it is.
+fn protection(
+    reported: &[(u64, u64, u64)],
+    backup_point_ms: Option<u64>,
+    now_ms: u64,
+) -> (Option<u64>, Vec<String>) {
+    let retention_ms = reported.iter().map(|r| r.1).min().unwrap_or(u64::MAX);
+    let skew_ms = reported.iter().map(|r| r.2).max().unwrap_or(0);
+    let not_deferring: Vec<u64> = reported.iter().filter(|r| r.1 == 0).map(|r| r.0).collect();
+    let protected_until_ms = backup_point_ms
+        .filter(|_| retention_ms != u64::MAX && not_deferring.is_empty())
+        .map(|b| {
+            b.saturating_add(retention_ms)
+                .saturating_sub(skew_ms.saturating_mul(2))
+        });
+    let mut outside = Vec::new();
+    if !not_deferring.is_empty() {
+        outside.push(format!(
+            "nodes {not_deferring:?} do not defer deletes (an earlier release, or --reclaim-retention-secs 0): what they deleted after the backup point is gone"
+        ));
+    }
+    if backup_point_ms.is_none() {
+        outside.push("the backup point is not given (--backup-point-ms): its age cannot be checked against the nodes' retention".into());
+    }
+    if let Some(until) = protected_until_ms
+        && now_ms > until
+    {
+        outside.push(format!(
+            "the backup is older than the nodes' retention ({retention_ms} ms) less twice their skew allowance ({skew_ms} ms): shards reclaimed since are gone"
+        ));
+    }
+    (protected_until_ms, outside)
 }
 
 /// Step 1: check the cluster (state, nodes, processes) and write the
@@ -518,11 +567,7 @@ pub async fn plan<S: KvStore>(
     let mut removed = Vec::new();
     let mut removed_at = Vec::new();
     let mut unreachable = Vec::new();
-    // Deferred reclamation (ADR-0028): the shortest retention less twice
-    // the largest skew allowance bounds the backup's age.
-    let mut retention_ms = u64::MAX;
-    let mut skew_ms = 0u64;
-    let mut not_deferring = Vec::new();
+    let mut reported = Vec::new();
     for n in cluster::list_nodes(meta).await? {
         if states.get(&n.id) == Some(&State::Removed) {
             removed.push(n.id);
@@ -531,13 +576,7 @@ pub async fn plan<S: KvStore>(
         }
         clients.note_node_id(&n.address, n.id);
         match clients.health(&n.address).await {
-            Ok(h) => {
-                if h.reclaim_retention_ms == 0 {
-                    not_deferring.push(n.id);
-                }
-                retention_ms = retention_ms.min(h.reclaim_retention_ms);
-                skew_ms = skew_ms.max(h.reclaim_skew_ms);
-            }
+            Ok(h) => reported.push((n.id, h.reclaim_retention_ms, h.reclaim_skew_ms)),
             Err(e) => unreachable.push(format!("node {} ({}): {}", n.id, n.address, e.code())),
         }
         nodes.push((n.id, n.address.clone()));
@@ -548,28 +587,7 @@ pub async fn plan<S: KvStore>(
             unreachable.join(", ")
         )));
     }
-    let protected_until_ms = backup_point_ms
-        .filter(|_| retention_ms != u64::MAX && not_deferring.is_empty())
-        .map(|b| {
-            b.saturating_add(retention_ms)
-                .saturating_sub(skew_ms.saturating_mul(2))
-        });
-    let mut outside = Vec::new();
-    if !not_deferring.is_empty() {
-        outside.push(format!(
-            "nodes {not_deferring:?} do not defer deletes (an earlier release, or --reclaim-retention-secs 0): what they deleted after the backup point is gone"
-        ));
-    }
-    if backup_point_ms.is_none() {
-        outside.push("the backup point is not given (--backup-point-ms): its age cannot be checked against the nodes' retention".into());
-    }
-    if let Some(until) = protected_until_ms
-        && now_ms > until
-    {
-        outside.push(format!(
-            "the backup is older than the nodes' retention ({retention_ms} ms) less twice their skew allowance ({skew_ms} ms): shards reclaimed since are gone"
-        ));
-    }
+    let (protected_until_ms, outside) = protection(&reported, backup_point_ms, now_ms);
     if !outside.is_empty() && !accept_unprotected {
         return Err(refuse(format!(
             "the backup is outside the protection of deferred reclamation (ADR-0028): {}; objects whose shards were reclaimed are lost (reported, not recovered). Accept this explicitly with --accept-unprotected-backup",
@@ -938,6 +956,29 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 "the backup left the protection of deferred reclamation at {until} (ms) since the plan: nothing cleared; plan again, accepting it explicitly"
             )));
         }
+        // And as the nodes are now (independent review): one restarted
+        // with a shorter retention, or rolled back, since the plan.
+        if !j.has(Step::Clearing) && j.unprotected.is_none() {
+            let mut reported = Vec::new();
+            for (id, addr) in &j.nodes {
+                match clients.health(addr).await {
+                    Ok(h) => reported.push((*id, h.reclaim_retention_ms, h.reclaim_skew_ms)),
+                    Err(e) => {
+                        return Err(refuse(format!(
+                            "node {id} does not answer ({}): its protection cannot be confirmed; nothing cleared",
+                            e.code()
+                        )));
+                    }
+                }
+            }
+            let (_, outside) = protection(&reported, j.backup_point_ms, now());
+            if !outside.is_empty() {
+                return Err(refuse(format!(
+                    "since the plan, the backup is outside the protection of deferred reclamation: {}; nothing cleared; plan again, accepting it explicitly",
+                    outside.join("; ")
+                )));
+            }
+        }
         // The restore tool's destination is this store (Phase 3.12): a
         // fresh probe written here must be read back there, whatever paths,
         // links, mounts or containers lie between. The clear removes it.
@@ -1123,6 +1164,12 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
             .await?
             .ok_or_else(|| refuse("cluster state missing after the mark"))?;
         clients.set_incarnation(Some(marked.incarnation));
+        // A backup that predates the cluster uid: the cluster's is put back
+        // (Phase 3.12 review), so that later restores of this cluster's
+        // backups are not taken for another cluster's.
+        if let Some(uid) = j.cluster_uid.as_deref().and_then(unhex16) {
+            compat::put_cluster_uid_if_absent(meta_ref, uid).await?;
+        }
         j.new_incarnation = Some(compat::hex(&marked.incarnation));
         j.record(path, Step::Marked)?;
     }

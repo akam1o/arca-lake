@@ -293,7 +293,11 @@ chunk record and reads fall back to the durable tier.
 ### 6.7 Clock skew
 
 Safety never depends on clocks agreeing: every decision is a transaction
-that reads the state it changes. Skew affects liveness only. A controller
+that reads the state it changes. Skew affects liveness only. One
+exception, explicit since Phase 3.12 (ADR-0028): deferred reclamation
+bounds the protection of restores by wall clocks, through the nodes'
+retention and an allowed skew `ε` (`--reclaim-skew-secs`); skew beyond
+`ε` narrows that protection. No other delete decision depends on clocks. A controller
 clock far ahead retires pending generations before their writers finish;
 those writers then fail at their next append or commit and the client
 retries, nothing becomes visible (`expiry_and_commit_exclude_each_other`,

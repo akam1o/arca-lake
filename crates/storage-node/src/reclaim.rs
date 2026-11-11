@@ -7,18 +7,28 @@
 //! with its CRC, fsynced before the change is acknowledged; rewritten by
 //! [`Deferred::compact`] through a temporary file and a rename):
 //!
-//! - `p GROUP CHUNK INDEX SEQUENCE RETIRED_MS`: a record retired;
+//! - `p GROUP CHUNK INDEX SEQUENCE RETIRED_MS INCARNATION`: a record
+//!   retired, by a delete of that cluster incarnation;
 //! - `x GROUP CHUNK INDEX SEQUENCE`: a retirement ended (reclaimed or
 //!   superseded by a new write);
 //! - `c GROUP` / `d GROUP`: the group was written with the cache class /
 //!   with a durable class. Durable is sticky: once a group is durable, it
 //!   stays durable.
 //!
+//! A retirement belongs to the cluster incarnation of the delete that made
+//! it, and only a reclaim of that incarnation may end it: a restore made
+//! current under a new incarnation (`recovery begin`, `admin restore`)
+//! makes every earlier retirement wait for a delete decided on the
+//! restored metadata, which restarts its clock. Without it a record needed
+//! again through the restore and unneeded again later could be reclaimed
+//! on its first retirement's age, before a second restore of a backup of
+//! the restored history that needs it (ADR-0028, consecutive restores).
+//!
 //! Damage fails closed: a line that does not check makes the state
 //! *damaged*, in which every group is durable, deletes are still retained,
 //! and nothing is reclaimed until an operator removes the file.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
@@ -35,6 +45,8 @@ pub struct Retired {
     pub sequence: u64,
     /// When the node retired it (its wall clock, ms).
     pub retired_ms: u64,
+    /// Incarnation of the delete that retired it (zeros: none carried).
+    pub incarnation: [u8; 16],
 }
 
 /// What [`Deferred::reclaim_check`] decided.
@@ -51,7 +63,7 @@ pub enum ReclaimCheck {
 pub struct Deferred {
     path: PathBuf,
     retention_ms: u64,
-    entries: HashMap<ShardKey, Retired>,
+    entries: BTreeMap<ShardKey, Retired>,
     cache_groups: HashMap<u64, bool>,
     damaged: bool,
     lines: usize,
@@ -95,13 +107,29 @@ impl Deferred {
         let mut d = Self {
             path: dir.join(FILE),
             retention_ms,
-            entries: HashMap::new(),
+            entries: BTreeMap::new(),
             cache_groups: HashMap::new(),
             damaged: false,
             lines: 0,
         };
         match std::fs::read_to_string(&d.path) {
-            Ok(text) => {
+            Ok(mut text) => {
+                // An unterminated last line is an append a crash cut short:
+                // never acknowledged (a line is acknowledged once written
+                // and synced whole). It goes; the rest is read (Phase 3.12
+                // review: it marked the whole log damaged).
+                if !text.is_empty() && !text.ends_with('\n') {
+                    let keep = text.rfind('\n').map_or(0, |i| i + 1);
+                    let cut = OpenOptions::new().write(true).open(&d.path).and_then(|f| {
+                        f.set_len(keep as u64)?;
+                        f.sync_all()
+                    });
+                    if let Err(e) = cut {
+                        tracing::error!(path = %d.path.display(), error = %e, "pending-reclaim log: a torn last line could not be cut: nothing is reclaimed");
+                        d.damaged = true;
+                    }
+                    text.truncate(keep);
+                }
                 for l in text.lines() {
                     d.lines += 1;
                     if !d.apply_line(l) {
@@ -141,9 +169,9 @@ impl Deferred {
             })
         };
         match f.first().copied() {
-            Some("p") if f.len() == 6 => {
-                let (Some(k), Ok(sequence), Ok(retired_ms)) =
-                    (key(&f[1..4]), f[4].parse(), f[5].parse())
+            Some("p") if f.len() == 7 => {
+                let (Some(k), Ok(sequence), Ok(retired_ms), Some(incarnation)) =
+                    (key(&f[1..4]), f[4].parse(), f[5].parse(), unhex(f[6]))
                 else {
                     return false;
                 };
@@ -151,12 +179,17 @@ impl Deferred {
                 // later does not move it forward); a retirement of another
                 // sequence replaces it, as `retire` does (a supersede that
                 // was not logged must not hide the newer retirement).
-                if self.entries.get(&k).is_none_or(|r| r.sequence != sequence) {
+                if self
+                    .entries
+                    .get(&k)
+                    .is_none_or(|r| r.sequence != sequence || r.incarnation != incarnation)
+                {
                     self.entries.insert(
                         k,
                         Retired {
                             sequence,
                             retired_ms,
+                            incarnation,
                         },
                     );
                 }
@@ -190,12 +223,26 @@ impl Deferred {
     }
 
     fn append(&mut self, body: &str) -> std::io::Result<()> {
+        let created = !self.path.exists();
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        f.write_all(line(body).as_bytes())?;
-        f.sync_all()?;
+        let before = f.metadata()?.len();
+        if let Err(e) = f
+            .write_all(line(body).as_bytes())
+            .and_then(|()| f.sync_all())
+        {
+            // Never leave part of a line for the next one to be glued to
+            // (Phase 3.12 review): back to where it was.
+            let _ = f.set_len(before).and_then(|()| f.sync_all());
+            return Err(e);
+        }
+        if created && let Some(dir) = self.path.parent() {
+            // The file's own entry, too (independent review): a crash must
+            // not lose a log whose lines were acknowledged.
+            File::open(dir)?.sync_all()?;
+        }
         self.lines += 1;
         Ok(())
     }
@@ -243,26 +290,39 @@ impl Deferred {
         }
     }
 
-    /// Retire `key` at `sequence` (the record stays). A record already
-    /// retired at that sequence keeps its first retirement time.
+    /// Retire `key` at `sequence` (the record stays), by a delete of
+    /// `incarnation`. A record already retired at that sequence by that
+    /// incarnation keeps its first retirement time; by another incarnation
+    /// its retirement starts again now.
     ///
     /// # Errors
     ///
     /// I/O errors (the delete must then fail: nothing was retired).
-    pub fn retire(&mut self, key: ShardKey, sequence: u64, now_ms: u64) -> std::io::Result<()> {
+    pub fn retire(
+        &mut self,
+        key: ShardKey,
+        sequence: u64,
+        now_ms: u64,
+        incarnation: [u8; 16],
+    ) -> std::io::Result<()> {
         if self
             .entries
             .get(&key)
-            .is_some_and(|r| r.sequence == sequence)
+            .is_some_and(|r| r.sequence == sequence && r.incarnation == incarnation)
         {
             return Ok(());
         }
-        self.append(&format!("p {} {sequence} {now_ms}", key_fields(&key)))?;
+        self.append(&format!(
+            "p {} {sequence} {now_ms} {}",
+            key_fields(&key),
+            hex(&incarnation)
+        ))?;
         self.entries.insert(
             key,
             Retired {
                 sequence,
                 retired_ms: now_ms,
+                incarnation,
             },
         );
         Ok(())
@@ -289,14 +349,17 @@ impl Deferred {
     }
 
     /// Whether `key` at `sequence`, whose newest record on the node is at
-    /// `newest`, may be reclaimed on an observation at `observed_ms`, the
-    /// node's clock being `now_ms` and `skew_ms` the allowed clock skew.
+    /// `newest`, may be reclaimed by a reclaim of `incarnation` on an
+    /// observation at `observed_ms`, the node's clock being `now_ms` and
+    /// `skew_ms` the allowed clock skew.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn reclaim_check(
         &self,
         key: &ShardKey,
         sequence: u64,
         newest: Option<u64>,
+        incarnation: [u8; 16],
         observed_ms: u64,
         now_ms: u64,
         skew_ms: u64,
@@ -312,6 +375,11 @@ impl Deferred {
         if newest != Some(sequence) {
             return ReclaimCheck::Refused(
                 "the record was written again since its retirement".into(),
+            );
+        }
+        if incarnation == [0; 16] || r.incarnation != incarnation {
+            return ReclaimCheck::Refused(
+                "retired under another cluster incarnation: a delete decided under this one must retire it again".into(),
             );
         }
         if observed_ms > now_ms.saturating_add(skew_ms) {
@@ -348,15 +416,13 @@ impl Deferred {
     /// Retired records in key order after `after`, at most `limit`.
     #[must_use]
     pub fn page(&self, after: Option<ShardKey>, limit: usize) -> Vec<(ShardKey, Retired)> {
-        let mut v: Vec<(ShardKey, Retired)> = self
-            .entries
-            .iter()
-            .filter(|(k, _)| after.is_none_or(|a| **k > a))
+        use std::ops::Bound::{Excluded, Unbounded};
+        let from = after.map_or(Unbounded, Excluded);
+        self.entries
+            .range((from, Unbounded))
+            .take(limit)
             .map(|(k, r)| (*k, *r))
-            .collect();
-        v.sort_by_key(|(k, _)| *k);
-        v.truncate(limit);
-        v
+            .collect()
     }
 
     /// Number of retired records.
@@ -421,10 +487,11 @@ impl Deferred {
         entries.sort_by_key(|(k, _)| **k);
         for (k, r) in entries {
             body.push_str(&line(&format!(
-                "p {} {} {}",
+                "p {} {} {} {}",
                 key_fields(k),
                 r.sequence,
-                r.retired_ms
+                r.retired_ms,
+                hex(&r.incarnation)
             )));
         }
         {
@@ -453,77 +520,157 @@ mod tests {
         }
     }
 
+    const I: [u8; 16] = [7; 16];
+    const J: [u8; 16] = [8; 16];
+
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn retire_reclaim_supersede_restart_and_damage() {
         let dir = tempfile::tempdir().unwrap();
         let mut d = Deferred::open(dir.path(), 1000);
         assert!(d.defers(1));
-        d.retire(key(1), 5, 100).unwrap();
-        d.retire(key(1), 5, 900).unwrap();
+        d.retire(key(1), 5, 100, I).unwrap();
+        d.retire(key(1), 5, 900, I).unwrap();
         assert_eq!(
             d.retired(&key(1)).unwrap().retired_ms,
             100,
-            "first time kept"
+            "first time kept within an incarnation"
         );
-        // Too early, another sequence, rewritten, ahead of the clock.
-        assert!(matches!(
-            d.reclaim_check(&key(1), 5, Some(5), 1099, 2000, 10),
-            ReclaimCheck::Refused(_)
-        ));
-        assert!(matches!(
-            d.reclaim_check(&key(1), 4, Some(5), 5000, 6000, 10),
-            ReclaimCheck::Refused(_)
-        ));
-        assert!(matches!(
-            d.reclaim_check(&key(1), 5, Some(6), 5000, 6000, 10),
-            ReclaimCheck::Refused(_)
-        ));
-        assert!(matches!(
-            d.reclaim_check(&key(1), 5, Some(5), 5000, 1000, 10),
-            ReclaimCheck::Refused(_)
-        ));
+        let refused = |r: ReclaimCheck| matches!(r, ReclaimCheck::Refused(_));
+        // Too early, another sequence, rewritten, ahead of the clock,
+        // another incarnation, none.
+        assert!(refused(d.reclaim_check(
+            &key(1),
+            5,
+            Some(5),
+            I,
+            1099,
+            2000,
+            10
+        )));
+        assert!(refused(d.reclaim_check(
+            &key(1),
+            4,
+            Some(5),
+            I,
+            5000,
+            6000,
+            10
+        )));
+        assert!(refused(d.reclaim_check(
+            &key(1),
+            5,
+            Some(6),
+            I,
+            5000,
+            6000,
+            10
+        )));
+        assert!(refused(d.reclaim_check(
+            &key(1),
+            5,
+            Some(5),
+            I,
+            5000,
+            1000,
+            10
+        )));
+        assert!(refused(d.reclaim_check(
+            &key(1),
+            5,
+            Some(5),
+            J,
+            5000,
+            6000,
+            10
+        )));
+        assert!(refused(d.reclaim_check(
+            &key(1),
+            5,
+            Some(5),
+            [0; 16],
+            5000,
+            6000,
+            10
+        )));
         assert_eq!(
-            d.reclaim_check(&key(1), 5, Some(5), 1100, 1100, 10),
+            d.reclaim_check(&key(1), 5, Some(5), I, 1100, 1100, 10),
             ReclaimCheck::Allowed
         );
-        d.retire(key(2), 7, 100).unwrap();
+        // A delete of another incarnation (decided on restored metadata)
+        // starts the retirement again: its age counts from now.
+        d.retire(key(4), 9, 100, I).unwrap();
+        d.retire(key(4), 9, 5000, J).unwrap();
+        assert!(refused(d.reclaim_check(
+            &key(4),
+            9,
+            Some(9),
+            I,
+            9000,
+            9000,
+            10
+        )));
+        assert!(refused(d.reclaim_check(
+            &key(4),
+            9,
+            Some(9),
+            J,
+            5999,
+            9000,
+            10
+        )));
+        assert_eq!(
+            d.reclaim_check(&key(4), 9, Some(9), J, 6000, 9000, 10),
+            ReclaimCheck::Allowed
+        );
+        d.retire(key(2), 7, 100, I).unwrap();
         d.supersede(&key(2)).unwrap();
         assert!(d.retired(&key(2)).is_none());
         // A newer retirement with no supersede logged between: it wins on
         // replay too.
-        d.retire(key(3), 7, 100).unwrap();
-        d.retire(key(3), 8, 300).unwrap();
+        d.retire(key(3), 7, 100, I).unwrap();
+        d.retire(key(3), 8, 300, I).unwrap();
         // Cache roles: sticky durable.
         d.note_write(9, true).unwrap();
         assert!(!d.defers(9));
         d.note_write(9, false).unwrap();
         d.note_write(9, true).unwrap();
         assert!(d.defers(9));
-        // Restart replays.
+        // Restart replays (the restarted retirement of key 4 included).
         let mut d2 = Deferred::open(dir.path(), 1000);
         assert_eq!(
             d2.retired(&key(1)).unwrap(),
             Retired {
                 sequence: 5,
-                retired_ms: 100
+                retired_ms: 100,
+                incarnation: I,
             }
         );
         assert!(d2.retired(&key(2)).is_none());
+        assert_eq!(d2.retired(&key(3)).unwrap().sequence, 8);
         assert_eq!(
-            d2.retired(&key(3)).unwrap(),
+            d2.retired(&key(4)).unwrap(),
             Retired {
-                sequence: 8,
-                retired_ms: 300
+                sequence: 9,
+                retired_ms: 5000,
+                incarnation: J,
             }
         );
         assert!(d2.defers(9));
+        d2.compact().unwrap();
+        assert_eq!(
+            Deferred::open(dir.path(), 1000)
+                .retired(&key(4))
+                .unwrap()
+                .incarnation,
+            J
+        );
         d2.prune(|_| Some(6)).unwrap();
         assert!(d2.is_empty(), "rewritten since: pruned");
-        d2.compact().unwrap();
         // Damage: fails closed.
         // A valid retirement, then a damaged line: the retirement is known,
         // but nothing is reclaimed while the log is damaged.
-        let good = line(&format!("p {} 5 100", key_fields(&key(1))));
+        let good = line(&format!("p {} 5 100 {}", key_fields(&key(1)), hex(&I)));
         std::fs::write(
             dir.path().join(FILE),
             format!("{good}p 1 zz 0 5 100 deadbeef\n"),
@@ -532,9 +679,29 @@ mod tests {
         let d3 = Deferred::open(dir.path(), 1000);
         assert!(d3.damaged());
         assert!(d3.defers(9));
-        assert!(matches!(
-            d3.reclaim_check(&key(1), 5, Some(5), 5000, 5000, 10),
-            ReclaimCheck::Refused(_)
-        ));
+        assert!(refused(d3.reclaim_check(
+            &key(1),
+            5,
+            Some(5),
+            I,
+            5000,
+            5000,
+            10
+        )));
+    }
+
+    #[test]
+    fn a_torn_last_line_is_cut_not_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = line(&format!("p {} 5 100 {}", key_fields(&key(1)), hex(&I)));
+        std::fs::write(dir.path().join(FILE), format!("{good}p 1 0101")).unwrap();
+        let d = Deferred::open(dir.path(), 1000);
+        assert!(!d.damaged());
+        assert_eq!(d.retired(&key(1)).unwrap().sequence, 5);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(FILE)).unwrap(),
+            good,
+            "the torn line is cut"
+        );
     }
 }

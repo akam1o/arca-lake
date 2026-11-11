@@ -823,6 +823,22 @@ What deletes stop never stops PUT or GET.
 
 There is deliberately no command that forces deletes open.
 
+### 10.13 Deferred reclamation (Phase 3.12, ADR-0028)
+
+- Space does not come back after deletes: it returns after the nodes'
+  retention (`reclaim_pending` in health); check
+  `arca_controller_reclaimed_total` grows and
+  `arca_controller_reclaim_errors_total` does not.
+- `arca_controller_nodes_not_deferring` above 0: a node of an earlier
+  release or with `--reclaim-retention-secs 0`; restores are not protected
+  on it.
+- `reclaim_damaged` on a node: stop it, move `pending-reclaim.log` aside,
+  start it (nothing was reclaimed meanwhile; what is unneeded is retired
+  again).
+- After any restore, `admin recovery begin` (or `admin restore`):
+  retirements of the earlier incarnation then wait for a delete under the
+  new one, and reconciliation re-issues those deletes.
+
 ## 11. Alternatives considered
 
 - A separate admin HTTP API instead of CLI-on-cluster-file: deferred

@@ -813,8 +813,10 @@ async fn pending(clients: &NodeClients, addrs: &[String]) -> Vec<u64> {
 ///    reclaimed;
 /// 4. gateway upgraded, then rolled back alone;
 /// 5. a node rolled back to the previous release with retirements pending:
-///    it deletes at once (its semantics) and `admin restore` refuses to plan
-///    while it does not defer (unless accepted); back on this release its
+///    a 3.11 node shows its identity and deletes at once (its semantics); a
+///    3.10 node cannot show it and is pushed no fence, so it deletes nothing
+///    (Phase 3.12 identity audit); `admin restore` refuses to plan while it
+///    does not defer (unless accepted); back on this release its
 ///    retirements are still there and are reclaimed;
 /// 6. every process rolled back, then forward again.
 async fn same_schema_matrix(var: &str) {
@@ -991,18 +993,30 @@ async fn same_schema_matrix(var: &str) {
     c.node(1, false).await;
     let h = clients.health(&c.addrs[1]).await.unwrap();
     assert_eq!(h.reclaim_retention_ms, 0, "{h:?}");
-    // A previous node deletes at once.
     let mid = live(&clients, &c.addrs).await;
     drop_key(&s3, &mut committed, "m3").await;
-    collected(
-        &clients,
-        &c.addrs,
-        &mid,
-        &[1],
-        3,
-        "the previous node deleting at once",
-    )
-    .await;
+    if h.identity_supported {
+        // Phase 3.11: it shows its identity, and deletes at once (its
+        // semantics).
+        collected(
+            &clients,
+            &c.addrs,
+            &mid,
+            &[1],
+            3,
+            "the previous node deleting at once",
+        )
+        .await;
+    } else {
+        // Phase 3.10: it cannot show it is the disk that acknowledged the
+        // identity; no fence is pushed to it, so it takes no delete.
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        assert_eq!(
+            live(&clients, &c.addrs).await[1],
+            mid[1],
+            "a delete reached an earlier release that cannot show its identity"
+        );
+    }
     // admin restore refuses to plan while a node does not defer.
     let journal = env.tmp.path().join("restore.journal");
     let now = || {

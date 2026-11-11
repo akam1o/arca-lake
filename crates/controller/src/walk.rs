@@ -56,6 +56,7 @@ pub struct GroupWalker<'a> {
     group_id: u64,
     page_size: u32,
     members: Vec<MemberCursor>,
+    retired_absent: bool,
 }
 
 impl<'a> GroupWalker<'a> {
@@ -88,7 +89,20 @@ impl<'a> GroupWalker<'a> {
             group_id: group.id,
             page_size,
             members,
+            retired_absent: false,
         }
+    }
+
+    /// Count a record its node retired (ADR-0028) as absent: for member
+    /// moves, which then write the shard again (Phase 3.12 review: a
+    /// former member made a member again would otherwise need its retired
+    /// record unchanged, and that record could be reclaimed on its first
+    /// retirement's age). Not for verification after a restore, where the
+    /// retired records are exactly what the restored metadata needs.
+    #[must_use]
+    pub fn retired_as_absent(mut self) -> Self {
+        self.retired_absent = true;
+        self
     }
 
     /// Members whose listing failed (presence unknown for the whole walk).
@@ -125,6 +139,7 @@ impl<'a> GroupWalker<'a> {
                 self.members[i].unavailable = true;
                 return;
             };
+            let retired_absent = self.retired_absent;
             let m = &mut self.members[i];
             m.next = page.next;
             // Only this member's own shard index counts as presence.
@@ -132,7 +147,8 @@ impl<'a> GroupWalker<'a> {
             m.page.extend(
                 page.entries
                     .into_iter()
-                    .filter(|(s, _)| s.shard_index == own),
+                    .filter(|(s, _)| s.shard_index == own)
+                    .filter(|(s, _)| !(retired_absent && page.retired_any.contains(s))),
             );
             if m.next.is_none() {
                 return;

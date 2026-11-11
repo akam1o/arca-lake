@@ -301,6 +301,28 @@ pub async fn cluster_uid<S: KvStore>(store: &S) -> Result<Option<[u8; 16]>> {
     .await
 }
 
+/// Set the cluster's uid to `uid` if the store has none (Phase 3.12:
+/// `admin restore` puts the cluster's uid back on restored metadata of a
+/// backup that predates it). Returns the uid the store holds afterwards.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn put_cluster_uid_if_absent<S: KvStore>(store: &S, uid: [u8; 16]) -> Result<[u8; 16]> {
+    transact(store, uid, |tx, uid| {
+        Box::pin(async move {
+            if let Some(v) = tx.get(&keys::cluster_uid()).await?
+                && let Ok(held) = <[u8; 16]>::try_from(v.as_slice())
+            {
+                return Ok(held);
+            }
+            tx.set(&keys::cluster_uid(), uid);
+            Ok(*uid)
+        })
+    })
+    .await
+}
+
 /// The cluster's uid, given one now if it has none (a cluster an earlier
 /// release initialised). Only on a store holding a cluster state: a
 /// cleared store is not given one (it would be another cluster's).

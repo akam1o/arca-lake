@@ -132,10 +132,14 @@ reclaims only on a confirmation whose metadata observation is at least
 1. **Retire (node).** On a 3.12 node with retention `R > 0`, a
    `DeleteShard` of a durable shard (all checks of today: incarnation,
    fence, epoch, identity, sequence token) does **not** remove the record.
-   The node appends `(key, sequence, retired_at = node clock)` to a
-   sidecar log (`pending-reclaim.log`, fsynced before the reply) and
-   keeps the record readable. This holds whatever sent the delete: an
-   earlier release's controller, a stale leader, a gateway.
+   The node appends `(key, sequence, retired_at = node clock,
+   incarnation of the delete)` to a sidecar log (`pending-reclaim.log`,
+   fsynced before the reply) and keeps the record readable. This holds
+   whatever sent the delete: an earlier release's controller, a stale
+   leader, a gateway. A record already retired at that sequence keeps its
+   first retirement time if the new delete carries the same incarnation;
+   under another incarnation its retirement starts again (time and
+   incarnation of the new delete).
 2. **Reclaim (controller → node).** A reclaim pass of the leader lists
    the pending records of every node. For each, it stamps `t_c` (its
    clock, *before* any metadata read), then checks in the metadata that
@@ -145,7 +149,9 @@ reclaims only on a confirmation whose metadata observation is at least
    fence, incarnation and identity checks as a delete.
 3. **Reclaim (node).** The node removes the record only if a pending entry
    with exactly that sequence exists, the newest record of the key is
-   still that sequence, and `observed_at ≥ retired_at + R`. Otherwise
+   still that sequence, the reclaim carries the incarnation the entry was
+   retired under (and the node's, as for any delete), and
+   `observed_at ≥ retired_at + R` with `observed_at ≤ now + ε`. Otherwise
    nothing changes.
 4. **A new write** of the key (a new sequence) supersedes the pending
    entry. A node restart replays the log and drops entries whose
@@ -167,43 +173,79 @@ Assumptions:
   at most `ε`.
 - **H3.** Every node holding durable shards runs this release with a
   retention of at least `R`.
-- **H4.** A key needed again after it became unneeded is written again
-  (a new sequence), except through a restore. (Migration, rebalance,
-  repair and gateway retries all write; this is what the sequence
-  condition relies on.)
+- **H4.** Within one cluster incarnation, a key needed again after it
+  became unneeded is written again (a new sequence). (Migration,
+  rebalance, repair and gateway retries all write; only a restore brings
+  back a need for the same record.) A member move that makes a former
+  member a member again counts its retired record as absent and writes
+  the shard again (`ShardEntry.retired_any`; Phase 3.12 review: it took
+  the retired record as present, needed it unchanged, and a later move
+  away let it be reclaimed on its first retirement's age).
+- **H5.** Restored metadata is used for deletes and reclaims only under a
+  new cluster incarnation (`recovery begin`, `admin restore`). New
+  leaders on restored metadata are held back until then by the
+  metadata-behind gate (ADR-0024), and a leader that observes the
+  restore stops by the trip wire (ADR-0025). A leader that has not yet
+  observed it is the exception (below).
 
 Claim: a reclaimed record `(k, s)` is not needed by any metadata that is
 current at or after the reclaim.
 
-Sketch. Let `t_p` be the retire time on the node and `t_u ≤ t_p` the time
-`k` stopped being needed in the history the deleting process saw (the
-delete was decided after that). The reclaim was confirmed by an
-observation at `t_c ≥ t_p + R` (step 3, within `ε`) that saw `k` unneeded.
+Sketch. A reclaim of `(k, s)` under incarnation `I` needs a retirement of
+`(k, s)` by a delete of `I` (step 3). Let `t_p` be that retirement's time
+(that of `I`'s first delete of it), `t_I` the time `I` began,
+and `t_u ≤ t_p` the time `k` stopped being needed in `I`'s history before
+the delete that retired it. The reclaim's observation at `t_c ≥ t_p + R`
+(within `ε`) saw `k` unneeded in `I`'s history.
 
-- If no restore happens after `t_c`: the history is live from `t_c` on,
-  and by H4 `k` at sequence `s` is not needed again without a new write,
-  which would supersede `(k, s)` (steps 3 and 4).
-- If a restore makes metadata of point `b` current at `t_x > t_c`: by H1,
-  `b ≥ t_x − R + 2ε > t_c − R + 2ε ≥ t_p + 2ε − ε ≥ t_u`. So `b` lies after
-  `k` became unneeded, and the restored metadata does not need `k`. By
-  induction the same holds over consecutive restores, since each
-  restored history is a prefix of one in which `k` was unneeded from
-  `t_u` on.
-- If the restore happened before `t_c`, the observation at `t_c` was of
-  the restored history: if that needs `k`, no confirmation is issued.
+- *Within `I`.* From `t_I` on, `I`'s history is one history (H5: a
+  restore starts a new incarnation). If `k` were needed again in it
+  between `t_u` and `t_c`, that would be through a write (H4), which
+  supersedes `(k, s)`; so `k` at `s` is unneeded in `I`'s history from
+  `t_u` on, and after `t_c` as well.
+- *A restore after the reclaim, of a backup of `I`'s history.* By H1,
+  `b ≥ t_x − R + 2ε > t_c − R + 2ε ≥ t_p + ε ≥ t_u`: the backup is of a
+  point where `k` at `s` was already unneeded.
+- *A restore after the reclaim, of a backup of an earlier incarnation's
+  history* (taken before `t_I`): `t_p ≥ t_I > b`, and
+  `t_x > t_c ≥ t_p + R > b + R`, so H1 does not hold: outside the
+  protection.
 
-A stale confirmation (decided before a restore, delivered after it) is
-covered by the second case. A leader that cannot read the store issues
-none. An earlier release's controller cannot reclaim (no RPC). Nothing in
-the argument reads a counter of the metadata store (invariant D).
+The earlier form of this sketch (before the Phase 3.12 review) let a
+retirement of one incarnation be reclaimed under another. It failed for
+consecutive restores: a record retired, needed again through a first
+restore at the same sequence, unneeded again later in the restored
+history, could be reclaimed on its first retirement's age before a
+second restore of a backup taken in between. Binding the retirement to
+its incarnation makes every reclaimable retirement start after the
+incarnation began. A delete decided on the restored metadata (GC,
+reconciliation) retires the record again under the new incarnation;
+reconciliation re-deletes what is retired under an earlier one
+(`ShardEntry.retired` flags only this incarnation's).
+
+A stale confirmation (decided before a restore, delivered after it)
+carries the earlier incarnation and is refused by the node like any
+delete of it. A leader that cannot read the store issues none. An
+earlier release's controller cannot reclaim (no RPC). Nothing in the
+argument reads a counter of the metadata store (invariant D).
 
 ### Not covered
 
 - Backups older than `R − 2ε` at the time they are restored (H1), and
   clock skew beyond `ε` (H2): the residual of R-94(b), now **bounded and
-  explicit**.
+  explicit**. `admin restore` refuses such a backup unless accepted.
 - Nodes of earlier releases (H3): they still delete physically. The
-  leader reports whether every node defers (metric and `admin status`).
+  leader reports whether every node defers
+  (`arca_controller_nodes_not_deferring`); `admin restore` refuses to plan
+  while one does not, unless accepted.
+- H5's exception: a leader that keeps running through a direct restore
+  without observing it, and operates on the restored metadata under the
+  old incarnation, followed by a second restore of a backup taken of that
+  restored history in between. A single direct restore is covered (its
+  shards are retained, whoever deletes them); the consecutive case needs
+  that leader's reclaim to fall between the two restores before its next
+  health pass observes the first. Run `recovery begin` (or use
+  `admin restore`) after any restore.
 - `admin node keep-removed` / `unregister` do not change this: a removed
   node gets no reclaims.
 

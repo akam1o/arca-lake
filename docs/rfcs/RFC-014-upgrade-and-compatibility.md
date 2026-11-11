@@ -267,6 +267,16 @@ record version or key space it does not understand; the format gate
 guarantees that no segment is written that a peer in the window cannot
 read; fencing guarantees that a migration runs once at a time.
 
+**Phase 3.12 (no schema or format change).** Nodes defer reclamation as
+soon as they run the release; an earlier controller's deletes are retained
+and wait for a controller of this release to reclaim them. Controllers of
+this release push no delete fence to an earlier release answering where a
+node acknowledged an identity (it would apply deletes whatever identity
+they carry): such a node deletes nothing until it runs this release again.
+Rolling a node back leaves its retired records live; back on this release
+they are retired and reclaimed again. Verified against the Phase 3.10 and
+3.11 binaries (`previous_release::same_schema_matrix_*`).
+
 ## 9. Performance considerations
 
 Negligible on the data path. Migrations are rate-limited background

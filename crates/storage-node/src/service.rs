@@ -79,6 +79,11 @@ impl NodeConfig {
     }
 }
 
+/// A request's incarnation (zeros: none, or not 16 bytes).
+fn incarnation_of(b: &[u8]) -> [u8; 16] {
+    <[u8; 16]>::try_from(b).unwrap_or([0; 16])
+}
+
 /// The node's wall clock (ms since the epoch; 0 before it).
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
@@ -744,6 +749,24 @@ impl StorageNode for StorageNodeService {
         self.check_epoch(key.group_id, header.group_epoch)?;
         self.stats.put_recv.observe(started.elapsed());
         let crc = crc32c_of(&payload);
+        // The group's role, noted before the record exists (independent
+        // review): a durable write makes its group durable first, so that
+        // no delete of the new record can see the group as cache; if that
+        // cannot be recorded, the write is refused.
+        {
+            let cache = class == pb::WriteClass::Cache;
+            let mut d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Err(e) = d.note_write(key.group_id, cache) {
+                if !cache && d.retention_ms() > 0 {
+                    return Err(tonic::Status::unavailable(format!(
+                        "pending-reclaim log not writable: {e}"
+                    )));
+                }
+                // A cache write not noted leaves the group unknown, which
+                // is durable: nothing is deleted at once that should not be.
+                tracing::warn!(error = %e, "pending-reclaim log: cache role not noted");
+            }
+        }
         let store = Arc::clone(&self.store);
         let queued = Instant::now();
         let (queue_wait, store_time, result) = tokio::task::spawn_blocking(move || {
@@ -758,15 +781,11 @@ impl StorageNode for StorageNodeService {
         self.stats.put_store.observe(store_time);
         let sequence = result.map_err(Self::storage_status)?;
         {
-            // The new record is live: a retirement of the key ends; the
-            // group's role is noted (ADR-0028). A failure here leaves a
-            // retirement of an older sequence, which is never reclaimed
-            // (the newest record differs).
+            // The new record is live: a retirement of the key ends
+            // (ADR-0028). A failure here leaves a retirement of an older
+            // sequence, which is never reclaimed (the newest record differs).
             let mut d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Err(e) = d
-                .supersede(&key)
-                .and_then(|()| d.note_write(key.group_id, class == pb::WriteClass::Cache))
-            {
+            if let Err(e) = d.supersede(&key) {
                 tracing::warn!(error = %e, "pending-reclaim log not updated after a write");
             }
         }
@@ -890,19 +909,23 @@ impl StorageNode for StorageNodeService {
             ));
         }
         let deferred = Arc::clone(&self.deferred);
+        let incarnation = incarnation_of(&req.incarnation);
         let (deleted, was_deferred) = tokio::task::spawn_blocking(move || {
             let _fence = fence;
             let mut d = deferred.lock().unwrap_or_else(PoisonError::into_inner);
-            if d.defers(key.group_id) {
+            // A key with no live record (gone, or quarantined: a corrupt
+            // copy is not protected data) is deleted at once, as before
+            // (Phase 3.12 review: its quarantine entry is released).
+            let live = store.locate(&key).map(|l| l.sequence);
+            if d.defers(key.group_id)
+                && let Some(newest) = live
+            {
                 // Retired, not removed (ADR-0028): the record stays readable
                 // until a reclaim proves it unneeded long enough.
-                let Some(newest) = store.locate(&key).map(|l| l.sequence) else {
-                    return Ok((true, false));
-                };
                 if if_sequence != 0 && newest != if_sequence {
                     return Ok((false, true));
                 }
-                d.retire(key, newest, now_unix_ms())
+                d.retire(key, newest, now_unix_ms(), incarnation)
                     .map_err(StorageError::Io)?;
                 return Ok((true, true));
             }
@@ -965,11 +988,27 @@ impl StorageNode for StorageNodeService {
         let deferred = Arc::clone(&self.deferred);
         let skew = self.reclaim_skew_ms;
         let (sequence, observed) = (req.sequence, req.observed_at_ms);
+        let incarnation = incarnation_of(&req.incarnation);
         let outcome = tokio::task::spawn_blocking(move || {
             let _fence = fence;
             let mut d = deferred.lock().unwrap_or_else(PoisonError::into_inner);
             let newest = store.locate(&key).map(|l| l.sequence);
-            match d.reclaim_check(&key, sequence, newest, observed, now_unix_ms(), skew) {
+            // The record is gone already (a reclaim whose log append
+            // failed, or a delete of an earlier release since): its
+            // retirement ends, nothing else changes.
+            if newest.is_none() && d.retired(&key).is_some_and(|r| r.sequence == sequence) {
+                d.reclaimed(&key, sequence).map_err(StorageError::Io)?;
+                return Ok(Ok(()));
+            }
+            match d.reclaim_check(
+                &key,
+                sequence,
+                newest,
+                incarnation,
+                observed,
+                now_unix_ms(),
+                skew,
+            ) {
                 crate::reclaim::ReclaimCheck::Refused(why) => Ok(Err(why)),
                 crate::reclaim::ReclaimCheck::Allowed => {
                     let removed = store.delete_if(key, sequence)?;
@@ -1067,6 +1106,12 @@ impl StorageNode for StorageNodeService {
             .then(|| page.last().map(|(k, _, _, _)| Self::pb_key(k)))
             .flatten();
         let store_epoch = self.store.store_epoch();
+        let held = self
+            .cluster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .incarnation;
+        let d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
         let entries = page
             .into_iter()
             .map(|(k, len, quarantined, sequence)| pb::ShardEntry {
@@ -1075,8 +1120,13 @@ impl StorageNode for StorageNodeService {
                 quarantined,
                 sequence,
                 store_epoch,
+                retired: d
+                    .retired(&k)
+                    .is_some_and(|r| r.sequence == sequence && Some(r.incarnation) == held),
+                retired_any: d.retired(&k).is_some_and(|r| r.sequence == sequence),
             })
             .collect();
+        drop(d);
         Ok(tonic::Response::new(pb::ListShardsResponse {
             entries,
             next,

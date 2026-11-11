@@ -330,6 +330,14 @@ rules, every unreadable object is marked and never served. Durable ACK
 holds for writes after the restore; writes between `T` and the failure
 are lost and that loss is reported, not hidden.
 
+**Phase 3.12 (ADR-0028).** Every restore, whatever its path, of a backup
+younger than the nodes' retention less twice the skew allowance finds
+the shards its metadata needs, also those deleted after the backup point
+by a process that decided on the metadata of before. Older backups lose
+what was reclaimed since; `admin restore` refuses them unless accepted
+and identifies its destination by content and the backup's cluster by
+its uid. R-94(b) is bounded, not closed (ADR-0028 §Not covered).
+
 ## 9. Performance considerations
 
 Verification reads every shard header and, with `--deep`, every byte;

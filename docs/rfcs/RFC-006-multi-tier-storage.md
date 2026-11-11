@@ -487,6 +487,12 @@ See §5.6 and RFC-008. Additionally:
   space is returned only once the fence opens again. Populations and
   hits are unaffected.
 
+**Cache groups and deferred reclamation (Phase 3.12, ADR-0028).** Cache
+copies are discardable: their deletes stay immediate. A node learns a
+group's role from the write class: a group written with the cache class
+is cache until a durable write, which makes it durable for good (noted
+before that write is stored); an unknown group is durable.
+
 ## 9. Performance considerations
 
 *Hypotheses* (not measured in this phase): a hit saves the `k` shard RPCs

@@ -1825,3 +1825,90 @@ async fn plan_refuses_a_backup_outside_the_retention_unless_accepted() {
     );
     c.shutdown().await;
 }
+
+/// Phase 3.12 (independent review): the protection is checked again right
+/// before the clear, as the nodes are then. A node restarted with
+/// retention 0 after the plan (it deletes at once from then on) makes the
+/// run refuse, nothing cleared.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_that_stopped_deferring_since_the_plan_stops_the_run() {
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        reclaim_retention: Duration::from_secs(3600),
+        ..ClusterOptions::rs(3, 2, 1, MIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    c.acknowledge_identities().await;
+    put(&c, "kept", 40).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = mr::plan(
+        c.meta.as_ref(),
+        &c.clients,
+        "snapshot://test",
+        1,
+        Some(now_ms()),
+        &backup.destination(),
+        &path,
+        false,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert!(p.journal.unprotected.is_none());
+    c.reclaim_retention = Duration::ZERO;
+    c.stop_node(0).await;
+    c.start_node(0).await;
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(
+        e.contains("since the plan") && e.contains("do not defer"),
+        "{e}"
+    );
+    assert!(
+        arca_lake_metadata::ops::compat::cluster_state(c.meta.as_ref())
+            .await
+            .unwrap()
+            .is_some(),
+        "cleared"
+    );
+    c.shutdown().await;
+}
+
+/// Phase 3.12 (review): a backup taken before the cluster had a uid (an
+/// earlier release's): after the restore the cluster's uid is put back,
+/// so that a later restore of this cluster's backups is not taken for
+/// another cluster's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_cluster_uid_is_kept_across_a_restore_of_a_backup_without_one() {
+    let c = cluster().await;
+    let kept = put(&c, "kept", 41).await;
+    let uid = arca_lake_metadata::ops::compat::ensure_cluster_uid(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut backup = Snapshot::take(&c.meta).await;
+    backup.data.retain(|(k, _)| *k != keys::cluster_uid());
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        arca_lake_metadata::ops::compat::cluster_uid(c.meta.as_ref())
+            .await
+            .unwrap(),
+        Some(uid)
+    );
+    let ctl = spawn(Arc::clone(&c.meta), controller("ctl-after"))
+        .await
+        .unwrap();
+    finish(&c, &path).await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    ctl.shutdown().await;
+    c.shutdown().await;
+}

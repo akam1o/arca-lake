@@ -249,10 +249,27 @@ async fn repair_reports_corruption_instead_of_writing_mismatched_bytes() {
         .unwrap_err();
     assert!(matches!(err, ControlError::Unrecoverable { .. }), "{err}");
     assert_eq!(c.groups().await[0].state, GroupState::Repairing);
-    assert_eq!(
-        c.shard_count(new_node, group.id),
-        0,
-        "nothing wrong was written"
+    // Nothing of the lost chunk was written; the walk went on past it
+    // (Phase 3.12: what it can rebuild is rebuilt, validated against its
+    // record) and queued it for stripe repair, where the operator sees it.
+    assert!(
+        c.shard_keys(new_node, group.id)
+            .iter()
+            .all(|k| k.chunk_id != chunk0),
+        "a shard of the lost chunk was written"
     );
+    let queued = arca_lake_metadata::ops::integrity::tasks_of_group(c.meta.as_ref(), group.id)
+        .await
+        .unwrap();
+    assert!(queued.iter().any(|(cid, _)| *cid == chunk0), "{queued:?}");
+    // The next walk does not see the chunk (its shards are quarantined, so
+    // listed nowhere): its queued task keeps the member incomplete, and the
+    // group never becomes Active with the chunk lost.
+    let again = c.repair_with(group.id, 0, new_node, async |_| Ok(())).await;
+    assert!(
+        again.as_ref().is_ok_and(|r| !r.complete) || again.is_err(),
+        "{again:?}"
+    );
+    assert_eq!(c.groups().await[0].state, GroupState::Repairing);
     c.shutdown().await;
 }

@@ -249,6 +249,15 @@ refuses every delete until an operator removes it (ADR-0027).
 - Not guaranteed: `SyncPolicy::Never`; anything after an I/O error that the
   caller ignored.
 
+**Deferred reclamation (Phase 3.12, ADR-0028).** A delete of a durable
+shard on a node with a retention does not write a tombstone: the record
+stays readable and is listed in `pending-reclaim.log`, a sidecar next to
+the store (CRC per line, fsynced before the delete is acknowledged, the
+directory synced when the file is created, compacted by rewrite and
+rename). The tombstone is written only by a reclaim. The segment format
+is unchanged; a node rolled back to an earlier release ignores the
+sidecar and keeps the records live.
+
 ## 9. Performance considerations
 
 Measured on a laptop (relative only; see `benchmarks/README.md`): sequential

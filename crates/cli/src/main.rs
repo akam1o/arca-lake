@@ -802,6 +802,10 @@ struct ControllerArgs {
     /// (0 = unlimited).
     #[arg(long, default_value_t = 512)]
     planned_move_chunks_per_pass: usize,
+    /// Chunks the repair of a failed member rebuilds per group per pass, so
+    /// that every group in repair progresses each pass (0 = unlimited).
+    #[arg(long, default_value_t = 4096)]
+    failure_repair_chunks_per_pass: usize,
     /// Scrub a group when its last pass finished this many seconds ago
     /// (RFC-008 §8.3); 0 disables background scrubbing.
     #[arg(long, default_value_t = 86_400)]
@@ -1671,6 +1675,14 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
     cfg.capacity_bytes = args.capacity_bytes;
     cfg.reserve_bytes = args.reserve_bytes;
     cfg.fence_lease = Duration::from_secs(args.fence_lease_secs.max(1));
+    if args.reclaim_retention_secs > 0
+        && args.reclaim_skew_secs.saturating_mul(2) >= args.reclaim_retention_secs
+    {
+        // ADR-0028: a backup is protected for the retention less twice the
+        // skew allowance; with nothing left, a reclaim could follow a
+        // retirement almost at once (Phase 3.12 review).
+        return fail("--reclaim-retention-secs must exceed twice --reclaim-skew-secs (or be 0)");
+    }
     cfg.reclaim_retention = Duration::from_secs(args.reclaim_retention_secs);
     cfg.reclaim_skew = Duration::from_secs(args.reclaim_skew_secs);
     if args.reclaim_retention_secs == 0 {
@@ -2004,6 +2016,7 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.rebalance_interval = Duration::from_secs(args.rebalance_interval_secs.max(1));
     cfg.cache_repair_chunks_per_pass = args.cache_repair_chunks_per_pass;
     cfg.planned_move_chunks_per_pass = args.planned_move_chunks_per_pass;
+    cfg.failure_repair_chunks_per_pass = args.failure_repair_chunks_per_pass;
     cfg.scrub = arca_lake_controller::integrity::ScrubOptions {
         page: args.scrub_page,
         page_bytes: args.scrub_page_mib << 20,
@@ -2732,6 +2745,22 @@ fn destination_of(cluster_file: &std::path::Path) -> String {
     format!("{} (cluster {id})", cluster_file.display())
 }
 
+/// A private copy of `from` at `to` (owner-only, synced), read by the
+/// restore tools of `admin restore run`.
+fn pin_cluster_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let text = std::fs::read(from)?;
+    let _ = std::fs::remove_file(to);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(to)?;
+    f.write_all(&text)?;
+    f.sync_all()
+}
+
 /// Runs `fdbrestore` into this command's cluster.
 struct FdbRestorer {
     prefix: Vec<String>,
@@ -2873,15 +2902,38 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
                 Ok(c) => c,
                 Err(e) => return fail(e),
             };
+            let prefix: Vec<String> = fdbrestore_cmd
+                .map(|c| c.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default();
+            // Run here on this command's cluster file: the probe and the
+            // restore both read a private copy of it, taken now (Phase 3.12
+            // review: a file replaced or relinked between the probe and
+            // `fdbrestore` cannot redirect the restore). With a command
+            // prefix (another file system) the tool reads its own file: the
+            // probe checks it, and the boundary is that file's owner.
+            let pinned = (prefix.is_empty() && fdbrestore_cluster_file.is_none())
+                .then(|| journal.with_extension("cluster"));
+            if let Some(p) = &pinned
+                && let Err(e) = pin_cluster_file(cluster_file, p)
+            {
+                return fail(format!(
+                    "cannot pin the cluster file to {}: {e}",
+                    p.display()
+                ));
+            }
             let restorer = FdbRestorer {
-                prefix: fdbrestore_cmd
-                    .map(|c| c.split_whitespace().map(str::to_string).collect())
-                    .unwrap_or_default(),
-                cluster_file: fdbrestore_cluster_file
-                    .unwrap_or_else(|| cluster_file.display().to_string()),
+                prefix,
+                cluster_file: pinned.as_ref().map_or_else(
+                    || {
+                        fdbrestore_cluster_file
+                            .clone()
+                            .unwrap_or_else(|| cluster_file.display().to_string())
+                    },
+                    |p| p.display().to_string(),
+                ),
                 destination: destination_of(cluster_file),
             };
-            match mr::run(
+            let result = mr::run(
                 meta,
                 &clients,
                 &restorer,
@@ -2891,8 +2943,11 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
                 &absent_node,
                 clock,
             )
-            .await
-            {
+            .await;
+            if let Some(p) = &pinned {
+                let _ = std::fs::remove_file(p);
+            }
+            match result {
                 Ok(j) => {
                     println!(
                         "restored and verified (new incarnation {}): review `admin recovery status`, then `admin restore finish`",

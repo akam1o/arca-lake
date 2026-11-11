@@ -6,6 +6,47 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Added (Phase 3.12)
+
+- Deferred reclamation (ADR-0028, R-94(b) bounded): storage nodes retire
+  deleted durable shards (`pending-reclaim.log`) and remove them only on a
+  `ReclaimShard` observed at least `--reclaim-retention-secs` (default
+  86 400) after the retirement, of the same sequence and cluster
+  incarnation; the controller's reclaim pass (`--reclaim-interval-secs`)
+  confirms in the metadata that the shard is unneeded. `ListPending`,
+  health fields 42–45, `ShardEntry.retired`. Metrics
+  `arca_controller_reclaimed_total`, `_reclaim_refused_total`,
+  `_reclaim_errors_total`, `_nodes_not_deferring`,
+  `_identity_unverifiable_total`.
+- `admin restore`: destination probe through `fdbcli`, the cluster file's
+  connection id in the destination, a cluster uid checked after the
+  restore, protection guard (`--accept-unprotected-backup`), `amend`.
+- Previous-release CI with the Phase 3.10 and 3.11 binaries (same-schema
+  matrix) besides 3.9.
+- System model: direct restores, reclaim passes, recorded failing seeds.
+- Controller `--failure-repair-chunks-per-pass` (4096).
+
+### Changed (Phase 3.12)
+
+- Rebalancing counts needs and moves per member (the unit of a group's
+  room) and counts what its moves give back as the source's room until it
+  shows; converges about `k` times faster and does not move data back
+  under deferred reclamation (simulator in `rebalance.rs`).
+- No delete fence is pushed to an earlier release answering where a node
+  acknowledged an identity; hold release stamped with identities and
+  limited to active nodes; `adopt-identity` checks incarnation and schema
+  floor.
+- Tiering stops at a target at its reserve; keeps the access record of a
+  generation none of whose moves settled.
+
+### Fixed (Phase 3.12)
+
+- Member repair: an unrebuildable chunk no longer pins the cursor (queued
+  for stripe repair); a group no longer becomes `Active` while a chunk
+  whose shards were quarantined is lost.
+- GC: a pending-generation index entry without its generation no longer
+  stops every pass.
+
 ### Added (Phase 3.11)
 
 - Restore trip wire (ADR-0025, R-94(b) mitigation; R-94(b) stays open):

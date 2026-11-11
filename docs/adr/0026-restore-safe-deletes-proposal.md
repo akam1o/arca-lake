@@ -1,8 +1,9 @@
 # ADR-0026: Restore-safe deletes (proposal to close R-94(b))
 
 Status: option D **accepted and implemented** (Phase 3.11, `admin
-restore`); option Q **proposed** for the next phase, not implemented and
-not verified. R-94(b) stays open (High). Option D does not close it.
+restore`); option Q **superseded** by ADR-0028 (Phase 3.12: deferred
+reclamation without history tokens, which roll back with the store).
+R-94(b) is bounded by ADR-0028, not closed.
 
 ## Problem
 

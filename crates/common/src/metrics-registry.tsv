@@ -69,8 +69,10 @@ arca_controller_rebalance_moved_chunks_total	counter	controller	chunks	-	chunks 
 arca_controller_incarnation_conflicts_total	counter	controller	passes	-	health-pass node reports of another incarnation at or above the cluster's incarnation sequence (such a node refuses the cluster's deletes until a recovery begin)
 arca_controller_nodes_quarantined_total	counter	controller	passes	-	health-pass findings of a node holding another identity than the one the cluster gave it, or none after acknowledging one (an emptied, foreign or swapped disk); the node is quarantined
 arca_controller_identity_unconfirmed_total	counter	controller	passes	-	health-pass findings of a node holding an identity the metadata does not know (metadata restored from before it): nothing is pushed to it until an operator confirms it with admin node adopt-identity
+arca_controller_identity_unverifiable_total	counter	controller	passes	-	an earlier release answered where a node acknowledged an identity: no delete fence pushed to it
 arca_controller_reclaimed_total	counter	controller	records	-	retired records reclaimed by the reclaim pass (ADR-0028)
 arca_controller_reclaim_refused_total	counter	controller	records	-	reclaims a node refused (retention, sequence, fence or identity checks)
+arca_controller_reclaim_errors_total	counter	controller	records	-	retired records or nodes a reclaim pass skipped on an error (retried next pass)
 arca_controller_nodes_not_deferring	gauge	controller	nodes	-	nodes that do not defer deletes (earlier release or retention 0): R-94(b) not bounded on them
 arca_controller_repair_group_errors_total	counter	controller	groups	-	group repairs that failed in a pass (an unrecoverable chunk, a node error) while the other groups were repaired
 arca_controller_rebalance_capacity_stops_total	counter	controller	passes	-	rebalance passes stopped before a chunk because a target member would have gone below the placement threshold, needed compaction first or did not report its device

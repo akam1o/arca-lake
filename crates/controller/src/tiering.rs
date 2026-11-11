@@ -127,6 +127,7 @@ pub async fn run_once<S: KvStore>(
             ) else {
                 continue;
             };
+            let mut settled = false;
             for (index, record) in &manifest {
                 let Some(source) = groups.get(&record.placement.group_id) else {
                     continue;
@@ -146,20 +147,42 @@ pub async fn run_once<S: KvStore>(
                 .await
                 {
                     Ok(MigrateOutcome::Switched { .. }) => {
+                        settled = true;
                         if promote {
                             report.promoted_chunks += 1;
                         } else {
                             report.demoted_chunks += 1;
                         }
                     }
-                    Ok(_) => report.skipped_chunks += 1,
+                    Ok(_) => {
+                        settled = true;
+                        report.skipped_chunks += 1;
+                    }
+                    // The target is at its reserve (Phase 3.12 liveness
+                    // audit): the pass stops, as rebalancing's does. Every
+                    // further attempt would write shards it cannot finish,
+                    // whose cleanup durable targets retain for their
+                    // reclaim retention.
+                    Err(arca_lake_tiering::TierError::Node { addr, status })
+                        if status.code() == tonic::Code::ResourceExhausted =>
+                    {
+                        tracing::info!(%addr, "tiering: target at its reserve, pass stopped");
+                        report.skipped_chunks += 1;
+                        return Ok(report);
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, index, "chunk migration failed");
                         report.skipped_chunks += 1;
                     }
                 }
             }
-            object::reset_access(meta, generation, now_ms).await?;
+            // Only once a chunk was settled (moved, or found there or
+            // changed; Phase 3.12 liveness audit): a generation whose every
+            // move failed keeps its access record and is tried again on the
+            // next pass.
+            if settled {
+                object::reset_access(meta, generation, now_ms).await?;
+            }
         }
         if page.len() < 256 {
             break;

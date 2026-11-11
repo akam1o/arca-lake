@@ -1273,6 +1273,12 @@ Still hypotheses (not measured):
   concurrency 4): avoid the copy between the shard frames and the HTTP
   body, and hash while decoding.
 
+**Phase 3.12 costs (not measured under load).** One fsynced sidecar
+append per durable delete (and per group role change); a reclaim pass
+per interval (a listing per node, one attribution read per due record,
+16 at a time); one facts-free health probe before each push to a node
+with an acknowledged identity. Freed space returns after the retention.
+
 ## 10. Open questions
 
 - Which workloads justify replication or EC cache protection given the

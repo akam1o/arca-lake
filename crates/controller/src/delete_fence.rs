@@ -179,7 +179,12 @@ pub async fn release_and_push<S: KvStore>(
         identity: None,
     };
     let mut held = Vec::new();
-    for n in cluster::list_nodes(meta).await? {
+    // As the close (Phase 3.12 identity audit): not removed nodes (held
+    // since they were unregistered; what answers at their address may be
+    // anything), and each release carries the identity the node
+    // acknowledged, so that a disk holding another one lifts nothing.
+    let identities = arca_lake_metadata::ops::node_lifecycle::identities(meta).await?;
+    for n in active_nodes(meta).await? {
         // The release names the recorded (closed) generation: a node lifts
         // its hold only at it or above, so a delayed release never lifts a
         // later close's hold.
@@ -196,6 +201,10 @@ pub async fn release_and_push<S: KvStore>(
                 false,
                 FencePush {
                     release_token: token,
+                    identity: identities
+                        .get(&n.id)
+                        .filter(|i| i.acknowledged)
+                        .map(|i| (n.id, i.token)),
                     ..how
                 },
             )

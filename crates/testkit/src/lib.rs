@@ -895,8 +895,19 @@ impl<S: KvStore + 'static> TestCluster<S> {
     /// On metadata or node errors.
     pub async fn reclaim(&self) -> gc::ReclaimReport {
         self.sync_delete_fence().await;
+        let retired: Vec<u64> =
+            arca_lake_metadata::ops::node_lifecycle::retirements(self.meta.as_ref())
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| r.node_id)
+                .collect();
         let mut total = gc::ReclaimReport::default();
-        for n in self.nodes.iter().filter(|n| n.handle.is_some()) {
+        for n in self
+            .nodes
+            .iter()
+            .filter(|n| n.handle.is_some() && !retired.contains(&n.id))
+        {
             let r = gc::reclaim_node(
                 self.meta.as_ref(),
                 &self.clients,
@@ -907,12 +918,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             )
             .await
             .unwrap();
-            total.listed += r.listed;
-            total.young += r.young;
-            total.needed += r.needed;
-            total.reclaimed += r.reclaimed;
-            total.refused += r.refused;
-            total.nodes_not_deferring += r.nodes_not_deferring;
+            total.add(&r);
         }
         total
     }

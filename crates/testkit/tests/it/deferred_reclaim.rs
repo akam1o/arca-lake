@@ -8,7 +8,7 @@
 //! backup. With deferral the restored object reads back whole; without it
 //! (retention 0, the same steps) its shards are gone.
 
-#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_lines, clippy::many_single_char_names)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -506,5 +506,224 @@ async fn the_controller_reclaims_after_the_retention_across_a_restart() {
     );
     assert_eq!(pending().await, 0);
     ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// `recovery begin` on restored metadata (close with the hold, mark a new
+/// incarnation, verify, finalize), then a leader's fence pass: deletes and
+/// reclaims go on under the new incarnation.
+async fn recover(c: &TestCluster, token: u64) {
+    use arca_lake_controller::recovery::{RecoveryOptions, recovery_pass};
+    use arca_lake_metadata::guard::{GuardedKv, OpClass};
+    use arca_lake_metadata::ops::compat;
+    let closed = arca_lake_controller::delete_fence::close_and_push(
+        c.meta.as_ref(),
+        &c.clients,
+        "recovery begin",
+        true,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed.not_acknowledged(), Vec::<u64>::new());
+    let (seq, _) =
+        arca_lake_controller::delete_fence::max_incarnation_seq(c.meta.as_ref(), &c.clients)
+            .await
+            .unwrap();
+    let marked = compat::mark_restoring_above(c.meta.as_ref(), None, None, "test", now_ms(), seq)
+        .await
+        .unwrap();
+    let admin = GuardedKv::new(
+        std::sync::Arc::clone(&c.meta),
+        marked.incarnation,
+        OpClass::Admin,
+    );
+    for _ in 0..30 {
+        if recovery_pass(
+            &admin,
+            &c.clients,
+            &RecoveryOptions::default(),
+            None,
+            "test",
+            now_ms(),
+        )
+        .await
+        .unwrap()
+        .finished
+        {
+            break;
+        }
+    }
+    let (v, _) = arca_lake_metadata::ops::recovery::finalize(
+        c.meta.as_ref(),
+        &arca_lake_metadata::ops::recovery::FinalizeRequest {
+            incarnation: marked.incarnation,
+            operator: "test".into(),
+            reason: "test restore".into(),
+            force: true,
+            now_ms: now_ms(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(v.refusal, None, "{v:?}");
+    c.clients.set_incarnation(Some(marked.incarnation));
+    let mut required = 0;
+    for n in &c.nodes {
+        if let Ok(h) = c.clients.health(&n.addr.to_string()).await {
+            required = required.max(h.delete_fence_generation + u64::from(!h.delete_fence_open));
+        }
+    }
+    let rec = arca_lake_metadata::ops::delete_fence::sync_for_term(
+        c.meta.as_ref(),
+        token,
+        marked.incarnation,
+        required,
+        now_ms(),
+    )
+    .await
+    .unwrap()
+    .record;
+    c.push_delete_fence(&rec).await;
+}
+
+/// Every chunk of `key` migrated to the other group (switched; the former
+/// placement left to reconciliation).
+async fn migrate_away(c: &TestCluster, key: &str) {
+    let m = c.manifest(BUCKET, key).await;
+    let groups = c.groups().await;
+    let source = groups
+        .iter()
+        .find(|g| g.id == m.chunks[0].1.placement.group_id)
+        .unwrap()
+        .clone();
+    let target = groups.iter().find(|g| g.id != source.id).unwrap().clone();
+    let nodes: std::collections::HashMap<u64, arca_lake_metadata::records::NodeRecord> =
+        arca_lake_metadata::ops::cluster::list_nodes(c.meta.as_ref())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.id, n))
+            .collect();
+    let addr_of = |id: u64| nodes.get(&id).map(|n| n.address.clone());
+    for (index, record) in &m.chunks {
+        let outcome = arca_lake_tiering::migrate::migrate_chunk(
+            c.meta.as_ref(),
+            &c.clients,
+            arca_lake_controller::integrity::coders().as_ref(),
+            &addr_of,
+            &source,
+            &target,
+            &m.pointer.generation,
+            *index,
+            record,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                arca_lake_tiering::migrate::MigrateOutcome::Switched { .. }
+            ),
+            "{outcome:?}"
+        );
+    }
+}
+
+/// Consecutive restores (Phase 3.12 review of ADR-0028): `x`'s shards
+/// retired in one history (deleted, collected); a restore brings `x` back
+/// (needed again, the same records); in the restored history a backup is
+/// taken, then `x` moves to the other group, and a reclaim pass runs after
+/// the retention but before reconciliation deletes the former placement.
+/// The first retirement is of the incarnation before the restore: it is not
+/// reclaimable, and the second restore (of the restored history's backup)
+/// finds `x` whole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retirement_of_an_earlier_incarnation_waits_for_a_new_delete() {
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 2,
+        reclaim_retention: RETENTION,
+        ..ClusterOptions::rs(6, 2, 1, MIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let data = put(&c, "x", 9).await;
+    let b1 = snapshot(&c).await;
+    s3::delete(&c.backend, BUCKET, "x").await.unwrap();
+    let r = c.gc(now_ms() + 3_600_000, 0).await;
+    assert!(r.collected >= 1, "{r:?}");
+    // The first restore, made current under a new incarnation.
+    restore(&c, &b1).await;
+    c.restart_backend().await.unwrap();
+    recover(&c, 5000).await;
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "x").await.unwrap().0, data);
+    // The restored history: a backup, then `x` moves away.
+    let b2 = snapshot(&c).await;
+    migrate_away(&c, "x").await;
+    tokio::time::sleep(RETENTION + Duration::from_millis(500)).await;
+    let r = c.reclaim().await;
+    assert_eq!(
+        r.reclaimed, 0,
+        "a retirement of the earlier incarnation was reclaimed: {r:?}"
+    );
+    assert!(r.refused >= 3, "{r:?}");
+    // The second restore: `x` in its former placement, whole.
+    restore(&c, &b2).await;
+    c.restart_backend().await.unwrap();
+    assert_eq!(
+        s3::get(&c.backend, BUCKET, "x").await.map(|(d, _)| d).ok(),
+        Some(data)
+    );
+    c.shutdown().await;
+}
+
+/// A member moved away and back (Phase 3.12 review of ADR-0028 H4): node
+/// A's shard of `x` is retired when A stops being a member; when A becomes
+/// a member again its retired record counts as absent and the move writes
+/// the shard again (a new sequence ends the retirement). After the
+/// retention A moves away again: the reclaim pass does not remove the
+/// shard that a backup taken while A was a member again needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_moved_away_and_back_writes_its_shard_again() {
+    let mut c = cluster(RETENTION).await;
+    let data = put(&c, "x", 10).await;
+    let g = c.groups().await.remove(0);
+    let a = c.node_index(&g.members[0]).unwrap();
+    let b = c.add_node().await;
+    let far = || now_ms() + 3_600_000;
+    let held_by_a = |c: &TestCluster| c.shard_count(a, g.id);
+    assert_eq!(held_by_a(&c), 1);
+    // A → B; A's copy retired by reconciliation.
+    c.repair_with(g.id, 0, b, async |_| Ok(())).await.unwrap();
+    c.reconcile(far(), 0).await;
+    let addr_a = c.nodes[a].addr.to_string();
+    let (pending, _, _) = c.clients.list_pending(&addr_a, None, 0).await.unwrap();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    // B → A: the retired record is not taken as present.
+    let r = c.repair_with(g.id, 0, a, async |_| Ok(())).await.unwrap();
+    assert_eq!(r.reconstructed, 1, "the shard was not written again: {r:?}");
+    let (pending, _, _) = c.clients.list_pending(&addr_a, None, 0).await.unwrap();
+    assert!(
+        pending.is_empty(),
+        "the write did not end the retirement: {pending:?}"
+    );
+    let backup = snapshot(&c).await;
+    // After the retention, A → B again, reconciled, and a reclaim pass.
+    tokio::time::sleep(RETENTION + Duration::from_millis(500)).await;
+    c.repair_with(g.id, 0, b, async |_| Ok(())).await.unwrap();
+    c.reconcile(far(), 0).await;
+    let r = c.reclaim().await;
+    assert_eq!(r.reclaimed, 0, "{r:?}");
+    assert_eq!(
+        held_by_a(&c),
+        1,
+        "A's shard was reclaimed on its first retirement's age"
+    );
+    // The backup of A as a member again: whole, from A among others.
+    restore(&c, &backup).await;
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "x").await.unwrap().0, data);
     c.shutdown().await;
 }

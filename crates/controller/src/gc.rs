@@ -151,6 +151,9 @@ pub struct ReconcileReport {
     /// node: a delete there could not be made conditional; reclaimed once
     /// the node is upgraded, Phase 3.5 audit CON-12).
     pub kept_no_sequence: usize,
+    /// Retired already under this incarnation: not deleted again (Phase
+    /// 3.12).
+    pub already_retired: usize,
 }
 
 impl ReconcileReport {
@@ -718,6 +721,12 @@ pub async fn reconcile_node<S: KvStore>(
                 status,
             })?;
         for (shard, _) in page.entries.iter().chain(&page.quarantined) {
+            // Retired already under this incarnation (Phase 3.12 liveness
+            // audit): another delete changes nothing; reclamation ends it.
+            if page.retired.contains(shard) {
+                report.already_retired += 1;
+                continue;
+            }
             reconcile_shard(
                 meta,
                 clients,
@@ -853,31 +862,44 @@ pub struct ReclaimReport {
     pub reclaimed: u64,
     /// Refused by the node (its checks), or fenced.
     pub refused: u64,
+    /// Records skipped on an error (metadata or node), retried next pass.
+    pub errors: u64,
     /// Nodes that do not defer (an earlier release, or retention 0).
     pub nodes_not_deferring: u64,
 }
 
-/// Whether the current metadata needs `shard` on `node_id`: the checks
-/// reconciliation makes before a delete, without its age guard (the
-/// retention exceeds it). A missing group needs nothing.
+impl ReclaimReport {
+    /// Add `other`'s counts.
+    pub fn add(&mut self, other: &Self) {
+        self.listed += other.listed;
+        self.young += other.young;
+        self.needed += other.needed;
+        self.reclaimed += other.reclaimed;
+        self.refused += other.refused;
+        self.errors += other.errors;
+        self.nodes_not_deferring += other.nodes_not_deferring;
+    }
+}
+
+/// Whether the current metadata needs `shard` on `node_id`, `group` being
+/// its group's record (`None`: the group is gone, nothing is needed): the
+/// checks reconciliation makes before a delete, without its age guard (the
+/// retention exceeds it).
 ///
 /// # Errors
 ///
 /// Metadata errors.
-pub async fn shard_needed<S: KvStore>(
+pub async fn shard_needed_in<S: KvStore>(
     meta: &S,
     node_id: u64,
     shard: ShardRef,
-) -> Result<(bool, Option<GroupRecord>), ControlError> {
-    let Some(group) = cluster::list_groups(meta)
-        .await?
-        .into_iter()
-        .find(|g| g.id == shard.group_id)
-    else {
-        return Ok((false, None));
+    group: Option<&GroupRecord>,
+) -> Result<bool, ControlError> {
+    let Some(group) = group else {
+        return Ok(false);
     };
     let position = group.members.iter().position(|m| m.node_id == node_id);
-    let needed = match position {
+    Ok(match position {
         // A former member: its shards are a repair source while the group
         // rebuilds.
         None => group.state == GroupState::Repairing,
@@ -889,33 +911,74 @@ pub async fn shard_needed<S: KvStore>(
                 gc::ShardAttribution::Referenced
             )
         }
-    };
-    Ok((needed, Some(group)))
+    })
 }
 
-/// Reclaim pass (Phase 3.12, ADR-0028): every retired record of `node`
-/// older than the node's retention that the current metadata does not
-/// need is reclaimed, each with an observation time taken (`now`) before
-/// the metadata reads that judged it. The node decides: it reclaims only
-/// a record retired at least its retention before that observation.
+/// [`shard_needed_in`], reading the group.
 ///
 /// # Errors
 ///
-/// Metadata errors; node errors listing.
+/// Metadata errors.
+pub async fn shard_needed<S: KvStore>(
+    meta: &S,
+    node_id: u64,
+    shard: ShardRef,
+) -> Result<(bool, Option<GroupRecord>), ControlError> {
+    let group = cluster::list_groups(meta)
+        .await?
+        .into_iter()
+        .find(|g| g.id == shard.group_id);
+    Ok((
+        shard_needed_in(meta, node_id, shard, group.as_ref()).await?,
+        group,
+    ))
+}
+
+/// Records of a node judged and reclaimed at once.
+const RECLAIM_CONCURRENCY: usize = 16;
+/// Consecutive node errors after which the rest of a node waits for the
+/// next pass.
+const RECLAIM_NODE_ERRORS: u64 = 8;
+
+/// Reclaim pass of one node (Phase 3.12, ADR-0028): every retired record
+/// older than the node's retention that the current metadata does not need
+/// is reclaimed, each with an observation time taken (`now`) before the
+/// metadata reads that judged it (one per page, before the page's group and
+/// attribution reads). The node decides: it reclaims only a record retired
+/// at least its retention before that observation, by a delete of the
+/// incarnation the reclaim carries.
+///
+/// A record whose judgement or reclaim fails is counted in `errors` and
+/// skipped (the next pass retries it); the node is left for the next pass
+/// only after [`RECLAIM_NODE_ERRORS`] consecutive node errors, or when its
+/// listing fails.
+///
+/// # Errors
+///
+/// Listing the node's retired records failed.
+#[allow(clippy::too_many_lines, clippy::implicit_hasher)]
 pub async fn reclaim_node<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
     node_id: u64,
     node_addr: &str,
     page: u32,
-    now: impl Fn() -> u64,
+    now: impl Fn() -> u64 + Sync,
 ) -> Result<ReclaimReport, ControlError> {
     let mut report = ReclaimReport::default();
+    if clients.delete_fence().is_none() {
+        // This process deletes nothing now: nothing to judge.
+        return Ok(report);
+    }
     let node_err = |status| ControlError::Node {
         addr: node_addr.to_string(),
         status,
     };
+    // Epochs the node holds, for records of groups the metadata no longer
+    // has (fetched once, when first needed).
+    let epochs: tokio::sync::OnceCell<HashMap<u64, u64>> = tokio::sync::OnceCell::new();
     let mut after = None;
+    let mut consecutive = 0u64;
     loop {
         let (entries, next, retention) = match clients.list_pending(node_addr, after, page).await {
             Ok(p) => p,
@@ -928,51 +991,125 @@ pub async fn reclaim_node<S: KvStore>(
         if retention == 0 {
             report.nodes_not_deferring += 1;
         }
-        for (shard, token, retired_ms) in entries {
-            report.listed += 1;
-            if now() < retired_ms.saturating_add(retention) {
-                report.young += 1;
-                continue;
+        let page_len = entries.len() as u64;
+        report.listed += page_len;
+        let due: Vec<_> = entries
+            .into_iter()
+            .filter(|(_, _, retired_ms)| now() >= retired_ms.saturating_add(retention))
+            .collect();
+        report.young += page_len - due.len() as u64;
+        // The observation, then every metadata read that judges this page
+        // (ADR-0028: the observation is no later than what it saw). The
+        // groups are read after it, once per page (independent review: a
+        // map read before the stamp could be of metadata older than the
+        // stamp claims).
+        let observed = now();
+        let groups: HashMap<u64, GroupRecord> = match cluster::list_groups(meta).await {
+            Ok(g) => g.into_iter().map(|g| (g.id, g)).collect(),
+            Err(e) => {
+                tracing::debug!(error = %e, "reclaim: groups not read, retried next pass");
+                report.errors += due.len() as u64;
+                return Ok(report);
             }
-            // Before any metadata read (ADR-0028: the observation is at
-            // least this late).
-            let observed = now();
-            let (needed, group) = shard_needed(meta, node_id, shard).await?;
-            if needed {
-                report.needed += 1;
-                continue;
-            }
-            let epoch = match group {
-                Some(g) => g.epoch,
-                None => clients
-                    .health(node_addr)
-                    .await
-                    .map_err(node_err)?
-                    .group_epochs
-                    .iter()
-                    .find(|e| e.group_id == shard.group_id)
-                    .map_or(0, |e| e.epoch),
-            };
-            match clients
-                .reclaim_shard(node_addr, shard, epoch, token, observed)
-                .await
-            {
-                Ok(()) => report.reclaimed += 1,
-                Err(s)
-                    if s.code() == tonic::Code::FailedPrecondition
-                        || s.code() == tonic::Code::Aborted
-                        || NodeClients::is_epoch_rejected(&s) =>
-                {
-                    report.refused += 1;
+        };
+        let groups = &groups;
+        let outcomes: Vec<ReclaimOutcome> = futures::stream::iter(due)
+            .map(|(shard, token, _)| {
+                let epochs = &epochs;
+                async move {
+                    let group = groups.get(&shard.group_id);
+                    match shard_needed_in(meta, node_id, shard, group).await {
+                        Ok(true) => return ReclaimOutcome::Needed,
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::debug!(error = %e, "reclaim: judgement failed, retried next pass");
+                            return ReclaimOutcome::MetaError;
+                        }
+                    }
+                    let epoch = match group {
+                        Some(g) => g.epoch,
+                        None => match epochs
+                            .get_or_try_init(|| async {
+                                clients.health(node_addr).await.map(|h| {
+                                    h.group_epochs
+                                        .iter()
+                                        .map(|e| (e.group_id, e.epoch))
+                                        .collect::<HashMap<u64, u64>>()
+                                })
+                            })
+                            .await
+                        {
+                            Ok(m) => m.get(&shard.group_id).copied().unwrap_or(0),
+                            Err(_) => return ReclaimOutcome::NodeError,
+                        },
+                    };
+                    if group.is_none() {
+                        // A group the metadata does not have: reconciliation
+                        // never walks it, so a retirement of an earlier
+                        // incarnation there would wait forever (Phase 3.12
+                        // review). The delete again, under this incarnation,
+                        // retires it anew (a no-op when it already is this
+                        // incarnation's); the reclaim then waits the
+                        // retention from it.
+                        let _ = clients.delete_shard_if(node_addr, shard, epoch, token).await;
+                    }
+                    match clients
+                        .reclaim_shard(node_addr, shard, epoch, token, observed)
+                        .await
+                    {
+                        Ok(()) => ReclaimOutcome::Reclaimed,
+                        Err(s)
+                            if s.code() == tonic::Code::FailedPrecondition
+                                || s.code() == tonic::Code::Aborted
+                                || NodeClients::is_epoch_rejected(&s) =>
+                        {
+                            ReclaimOutcome::Refused
+                        }
+                        Err(s) => {
+                            tracing::debug!(code = ?s.code(), "reclaim: node error, retried next pass");
+                            ReclaimOutcome::NodeError
+                        }
+                    }
                 }
-                Err(s) => return Err(node_err(s)),
+            })
+            .buffered(RECLAIM_CONCURRENCY)
+            .collect()
+            .await;
+        for o in outcomes {
+            match o {
+                ReclaimOutcome::Needed => report.needed += 1,
+                ReclaimOutcome::Reclaimed => report.reclaimed += 1,
+                ReclaimOutcome::Refused => report.refused += 1,
+                ReclaimOutcome::MetaError => report.errors += 1,
+                ReclaimOutcome::NodeError => {
+                    report.errors += 1;
+                    consecutive += 1;
+                    continue;
+                }
             }
+            consecutive = 0;
+        }
+        if consecutive >= RECLAIM_NODE_ERRORS {
+            tracing::debug!(
+                node = node_id,
+                "reclaim: node keeps failing, the rest waits for the next pass"
+            );
+            return Ok(report);
         }
         match next {
             Some(n) => after = Some(n),
             None => return Ok(report),
         }
     }
+}
+
+/// How one retired record ended in a reclaim pass.
+enum ReclaimOutcome {
+    Needed,
+    Reclaimed,
+    Refused,
+    MetaError,
+    NodeError,
 }
 
 async fn delete_one(

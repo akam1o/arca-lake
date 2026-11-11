@@ -207,6 +207,16 @@ message ShardEntry {
   uint64 sequence = 4;
   // The node store's epoch (see DeleteShardRequest.if_store_epoch).
   uint64 store_epoch = 5;
+  // Phase 3.12 (ADR-0028): retired at this sequence by a delete of the
+  // incarnation the node holds (deleting it again changes nothing; a
+  // retirement of an earlier incarnation is not flagged: a delete under
+  // this one restarts it). An earlier node answers false.
+  bool retired = 6;
+  // Phase 3.12 (review): retired at this sequence under any incarnation.
+  // A member move counts such a record as absent and writes the shard
+  // again (a new sequence ends the retirement): a former member made a
+  // member again must not need a retired record unchanged (ADR-0028 H4).
+  bool retired_any = 7;
 }
 
 message ListShardsResponse {

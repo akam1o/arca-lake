@@ -21,9 +21,30 @@ that the shards it names exist (RFC-015).
    `run` or `finish` after any failure. The guarantee covers restores
    done this way only, under its stated conditions (no controller or
    gateway running, nobody changing node fences by hand meanwhile, one
-   restore at a time; ADR-0026). A restore done any other way (a direct
-   `fdbrestore`, a DR switch, a snapshot rollback) is open risk R-94(b)
-   (High).
+   restore at a time; ADR-0026). Since Phase 3.12 `plan` also refuses a
+   backup outside deferred reclamation's protection (below) unless
+   `--accept-unprotected-backup` is given, and checks it again right
+   before the clear; the destination is identified by content (a probe
+   written through `admin restore`'s own connection must be read back by
+   `fdbcli` where `fdbrestore` runs), and the restored metadata must carry
+   this cluster's uid. If the restore was of another cluster's backup,
+   `admin restore amend --source ... --version ...` replaces it and `run`
+   resumes.
+
+   **Deferred reclamation (Phase 3.12, ADR-0028).** Storage nodes keep
+   every deleted durable shard readable for `--reclaim-retention-secs`
+   (default one day) and remove it only when a controller confirms, at
+   least that long later and under the same cluster incarnation, that the
+   metadata no longer needs it. Every restore, whatever its path (a direct
+   `fdbrestore`, a DR switch, a snapshot rollback, `admin restore`), of a
+   backup younger than the retention less twice `--reclaim-skew-secs` finds
+   the shards its metadata needs, even those deleted after the backup point
+   by a leader still running. Restore older backups only knowing that what
+   was reclaimed since is lost (the recovery pass reports it). Nodes of
+   earlier releases do not defer. Run `admin recovery begin` (or use
+   `admin restore`) after any restore: a restored history operated under
+   the old incarnation, followed by a second restore, is outside the
+   protection (ADR-0028 H5).
 4. When the current metadata is gone (`admin restore` then refuses to
    plan), the manual runbook: first `admin delete-fence close --reason restore --yes`
    (every storage node stops applying deletes decided on the current

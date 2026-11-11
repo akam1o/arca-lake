@@ -101,6 +101,11 @@ pub struct ControllerConfig {
     /// healthy node) may rebuild per pass before the pass yields to the
     /// repair of failed members (Phase 3.10 audit); 0 = unlimited.
     pub planned_move_chunks_per_pass: usize,
+    /// Chunks the repair of a failed member rebuilds per group per pass
+    /// (Phase 3.12 liveness audit): every group in repair progresses each
+    /// pass instead of the last one waiting for every earlier one's whole
+    /// rebuild; the walk resumes at its cursor. 0 = unlimited.
+    pub failure_repair_chunks_per_pass: usize,
     /// Background scrubbing (RFC-008 §8.3); `interval_ms = 0` disables it.
     pub scrub: crate::integrity::ScrubOptions,
     /// Interval between scrub scheduler invocations (each resumes or starts
@@ -163,6 +168,7 @@ impl ControllerConfig {
             rebalance_interval: Duration::from_mins(1),
             cache_repair_chunks_per_pass: 256,
             planned_move_chunks_per_pass: 512,
+            failure_repair_chunks_per_pass: 4096,
             scrub: crate::integrity::ScrubOptions::default(),
             scrub_tick: Duration::from_secs(60),
             stripe_repair: crate::integrity::RepairWorkerOptions::default(),
@@ -1119,6 +1125,7 @@ async fn reclaim_pass<S: KvStore>(
         .into_iter()
         .filter(|n| !retired.contains(&n.id))
     {
+        // One node's failure never stops the others (review).
         match crate::gc::reclaim_node(meta, clients, n.id, &n.address, cfg.page_size, now_ms).await
         {
             Ok(r) => {
@@ -1129,11 +1136,14 @@ async fn reclaim_pass<S: KvStore>(
                 metrics
                     .reclaim_refused_total
                     .fetch_add(r.refused, Ordering::Relaxed);
+                metrics
+                    .reclaim_errors_total
+                    .fetch_add(r.errors, Ordering::Relaxed);
             }
-            Err(ControlError::Node { addr, status }) => {
-                tracing::debug!(node = n.id, %addr, code = ?status.code(), "reclaim pass: node not reached");
+            Err(e) => {
+                metrics.reclaim_errors_total.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(node = n.id, error = %e, "reclaim pass: node skipped until the next pass");
             }
-            Err(e) => return Err(e),
         }
     }
     metrics
@@ -1414,6 +1424,40 @@ async fn health_pass<S: KvStore>(
                 continue;
             }
         }
+        // An earlier release at an address whose disk acknowledged an
+        // identity cannot show it is that disk, and would apply deletes
+        // whatever identity they carry (Phase 3.12 audit): it is asked
+        // first, facts-free, and gets no push (no open fence, no lease: it
+        // takes no delete) until this release answers there again. Asked
+        // before every push: a node rolled back restarts with no lease, and
+        // only a push would give it one. Reads and writes go on.
+        if ident.as_ref().is_some_and(|i| i.acknowledged) {
+            match clients.health(&n.address).await {
+                Ok(p) if !p.identity_supported => {
+                    warn!(node = n.id, address = %n.address, "an earlier release answers where this node acknowledged an identity: no delete fence is pushed to it until it runs this release again");
+                    metrics
+                        .identity_unverifiable_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    metrics.delete_fence.note_node(
+                        n.id,
+                        p.delete_fence_generation,
+                        p.delete_fence_open,
+                    );
+                    metrics
+                        .admission
+                        .note_device(crate::admission::device_of(n.id, &p, now_ms()));
+                    cluster::touch_node(meta, n.id, now).await?;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    if now.saturating_sub(n.last_seen_ms) > ms(cfg.unhealthy_after) {
+                        unhealthy += 1;
+                    }
+                    continue;
+                }
+            }
+        }
         // Deletes to this address carry the identity it acknowledged (a
         // disk that is not this node's refuses them); none while it has
         // not acknowledged one (review: no stale token after a rejoin).
@@ -1604,7 +1648,7 @@ async fn repair_pass<S: KvStore>(
     let opts = RepairOptions {
         page_size: cfg.page_size,
         verify_all_members: false,
-        max_chunks: 0,
+        max_chunks: cfg.failure_repair_chunks_per_pass,
         former: Vec::new(),
         source: cfg.repair_source,
         keep_client_reserve: false,

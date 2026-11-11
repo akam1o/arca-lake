@@ -79,6 +79,12 @@ pub struct ShardPage {
     pub next: Option<ShardRef>,
     /// The delete token of each listed shard (absent from an older node).
     pub sequences: std::collections::HashMap<ShardRef, RecordToken>,
+    /// Shards retired by a delete of the incarnation the node holds (Phase
+    /// 3.12): deleting them again changes nothing.
+    pub retired: std::collections::HashSet<ShardRef>,
+    /// Shards retired under any incarnation (Phase 3.12 review): a member
+    /// move writes them again.
+    pub retired_any: std::collections::HashSet<ShardRef>,
 }
 
 /// Classification of one shard by the node's deep verification
@@ -195,7 +201,9 @@ pub enum Rpc {
     GetShard,
     /// `DeleteShard`.
     DeleteShard,
-    /// `ListShards`.
+    /// `ReclaimShard` (Phase 3.12).
+    ReclaimShard,
+    /// `ListShards` (and `ListPending`).
     ListShards,
     /// `VerifyShards`.
     VerifyShards,
@@ -1407,7 +1415,7 @@ impl NodeClients {
     ) -> Result<(), tonic::Status> {
         let ctx = RpcContext {
             addr,
-            rpc: Rpc::DeleteShard,
+            rpc: Rpc::ReclaimShard,
             shard: Some(shard),
             group_id: Some(shard.group_id),
         };
@@ -1550,6 +1558,8 @@ impl NodeClients {
                 let mut entries = Vec::new();
                 let mut quarantined = Vec::new();
                 let mut sequences = std::collections::HashMap::new();
+                let mut retired = std::collections::HashSet::new();
+                let mut retired_any = std::collections::HashSet::new();
                 for e in resp.entries {
                     let Some(key) = e.key.as_ref().and_then(ShardRef::from_pb) else {
                         continue;
@@ -1563,6 +1573,12 @@ impl NodeClients {
                             },
                         );
                     }
+                    if e.retired {
+                        retired.insert(key);
+                    }
+                    if e.retired_any {
+                        retired_any.insert(key);
+                    }
                     if e.quarantined {
                         quarantined.push((key, e.payload_len));
                     } else {
@@ -1573,6 +1589,8 @@ impl NodeClients {
                     entries,
                     quarantined,
                     sequences,
+                    retired,
+                    retired_any,
                     next: resp
                         .next
                         .as_ref()

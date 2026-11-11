@@ -456,6 +456,32 @@ pub async fn adopt_identity<S: KvStore>(
     let h = clients.health(&node.address).await.map_err(|e| {
         ControlError::Other(format!("node {node_id} does not answer: {}", e.code()))
     })?;
+    // Another cluster's disk with the same numeric id, or one that served a
+    // later history, is not adopted (Phase 3.12 identity audit): the same
+    // checks as a rejoin.
+    let gate = compat::gate(meta).await?;
+    if let Some(c) = &gate.cluster {
+        let held = <[u8; 16]>::try_from(h.incarnation.as_ref()).ok();
+        if h.incarnation_seq > gate.incarnation_seq
+            || (h.incarnation_seq == gate.incarnation_seq
+                && held.is_some_and(|i| i != c.incarnation))
+        {
+            return Err(ControlError::Other(format!(
+                "node {node_id} holds incarnation sequence {} ({}) where the cluster is at {}: another cluster's disk, or a later history; not adopted",
+                h.incarnation_seq,
+                held.map_or_else(|| "none".into(), |i| compat::hex(&i)),
+                gate.incarnation_seq
+            )));
+        }
+    }
+    if let Some(schema) = gate.schema
+        && h.schema_floor > schema
+    {
+        return Err(ControlError::Other(format!(
+            "node {node_id} holds schema floor {} above the cluster's schema {schema}: it served a later metadata history; not adopted",
+            h.schema_floor
+        )));
+    }
     let token = <[u8; 16]>::try_from(h.identity_token.as_ref()).ok();
     match (h.identity_supported, h.identity_node_id, token) {
         // Only the unconfirmed case, checked with the write (third and

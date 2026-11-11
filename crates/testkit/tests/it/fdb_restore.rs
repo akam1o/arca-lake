@@ -1050,3 +1050,101 @@ async fn admin_restore_with_fdbrestore_resumes_after_a_failed_restore() {
     ctl.shutdown().await;
     c.shutdown().await;
 }
+
+/// R-94(b) with deferred reclamation (Phase 3.12, ADR-0028) on a real
+/// FoundationDB cluster: `fdbbackup`, then after the backup point an object
+/// deleted and collected and another migrated to the other group with its
+/// former placement reconciled (every delete applied, nothing fenced), then
+/// the keyspace cleared and `fdbrestore` of the backup. The nodes retained
+/// what was deleted: both objects read back whole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_direct_fdbrestore_after_deletes_and_a_move_finds_both_objects_whole() {
+    let Some(backup) = Backup::from_env() else {
+        eprintln!("ARCA_FDB_TESTS / ARCA_FDB_BACKUP_URL not set; skipping");
+        return;
+    };
+    let path = std::env::var("ARCA_FDB_CLUSTER_FILE").ok();
+    let kv = FdbKv::open_with_timeout(path.as_deref(), 10_000).expect("open FoundationDB");
+    kv.clear_range_blocking(&arca_lake_metadata::keys::all_range())
+        .await
+        .unwrap();
+    let meta = Arc::new(kv);
+    let mut c = TestCluster::start_with(
+        Arc::clone(&meta),
+        ClusterOptions {
+            groups: 2,
+            heartbeat: None,
+            reclaim_retention: Duration::from_secs(600),
+            ..ClusterOptions::rs(6, 2, 1, MIB, 0)
+        },
+    )
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let deleted = payload(usize::try_from(MIB).unwrap(), 41);
+    let moved = payload(usize::try_from(MIB).unwrap(), 42);
+    for (k, d) in [("deleted", &deleted), ("moved", &moved)] {
+        s3::put(&c.backend, BUCKET, k, d.clone(), &PutOptions::default())
+            .await
+            .unwrap();
+    }
+    let url = backup.backup();
+    let version = backup.min_restorable_version(&url);
+    // After the backup point: a delete collected ...
+    s3::delete(&c.backend, BUCKET, "deleted").await.unwrap();
+    let r = c.gc(now_ms() + 3_600_000, 0).await;
+    assert!(r.collected >= 1, "{r:?}");
+    // ... and a move, its former placement reconciled.
+    let m = c.manifest(BUCKET, "moved").await;
+    let groups = c.groups().await;
+    let source = groups
+        .iter()
+        .find(|g| g.id == m.chunks[0].1.placement.group_id)
+        .unwrap()
+        .clone();
+    let target = groups.iter().find(|g| g.id != source.id).unwrap().clone();
+    let nodes: std::collections::HashMap<u64, arca_lake_metadata::records::NodeRecord> =
+        arca_lake_metadata::ops::cluster::list_nodes(meta.as_ref())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.id, n))
+            .collect();
+    let addr_of = |id: u64| nodes.get(&id).map(|n| n.address.clone());
+    for (index, record) in &m.chunks {
+        let outcome = arca_lake_tiering::migrate::migrate_chunk(
+            meta.as_ref(),
+            &c.clients,
+            arca_lake_controller::integrity::coders().as_ref(),
+            &addr_of,
+            &source,
+            &target,
+            &m.pointer.generation,
+            *index,
+            record,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                arca_lake_tiering::migrate::MigrateOutcome::Switched { .. }
+            ),
+            "{outcome:?}"
+        );
+    }
+    let reconciled = c.reconcile(now_ms() + 3_600_000, 0).await;
+    assert!(reconciled >= 3, "{reconciled}");
+    // The direct restore: nothing fenced, the keyspace cleared, restored.
+    meta.clear_range_blocking(&arca_lake_metadata::keys::all_range())
+        .await
+        .unwrap();
+    backup.restore(&url, version);
+    c.restart_backend().await.unwrap();
+    assert_eq!(
+        s3::get(&c.backend, BUCKET, "deleted").await.unwrap().0,
+        deleted
+    );
+    assert_eq!(s3::get(&c.backend, BUCKET, "moved").await.unwrap().0, moved);
+    c.shutdown().await;
+}
