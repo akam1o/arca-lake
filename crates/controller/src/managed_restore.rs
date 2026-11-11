@@ -156,6 +156,9 @@ pub struct Journal {
     pub marker: Option<String>,
     /// Given up (`admin restore abandon`): never run or finished again.
     pub abandoned: bool,
+    /// A marker about to be written (recorded before it is, so that this
+    /// journal can always tell its markers from any other's).
+    pub pending_marker: Option<String>,
 }
 
 impl Journal {
@@ -204,6 +207,9 @@ impl Journal {
         if self.abandoned {
             let _ = writeln!(b, "abandoned");
         }
+        if let Some(m) = &self.pending_marker {
+            let _ = writeln!(b, "pending_marker {m}");
+        }
         for s in &self.done {
             let _ = writeln!(b, "done {}", s.name());
         }
@@ -245,6 +251,7 @@ impl Journal {
             new_incarnation: None,
             marker: None,
             abandoned: false,
+            pending_marker: None,
         };
         let num = |v: &str| v.parse::<u64>().map_err(|e| format!("{v}: {e}"));
         for l in &lines[1..] {
@@ -282,6 +289,7 @@ impl Journal {
                 "new_incarnation" => j.new_incarnation = Some(v.into()),
                 "marker" => j.marker = Some(v.into()),
                 "abandoned" => j.abandoned = true,
+                "pending_marker" => j.pending_marker = Some(v.into()),
                 "done" => j
                     .done
                     .push(Step::parse(v).ok_or_else(|| format!("unknown step {v}"))?),
@@ -406,6 +414,7 @@ pub async fn plan<S: KvStore>(
     path: &Path,
     now_ms: u64,
 ) -> Result<Plan, ControlError> {
+    let _lock = lock(path)?;
     if let Ok(j) = Journal::load(path)
         && !j.has(Step::Reopened)
         && !j.abandoned
@@ -477,6 +486,7 @@ pub async fn plan<S: KvStore>(
         new_incarnation: None,
         marker: None,
         abandoned: false,
+        pending_marker: None,
     };
     journal.save(path).map_err(ControlError::Other)?;
     let summary = vec![
@@ -650,8 +660,25 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
             }
             None => false,
         };
+        // Clearing recorded, its marker gone, not cleared: only a crash
+        // between the clear's commit and its record leaves that, with the
+        // store empty. A store still holding a cluster state was not
+        // cleared by this restore (its marker removed by hand, or another
+        // journal's abandon): refused, never cleared (re-review).
+        if j.has(Step::Clearing)
+            && !j.has(Step::Cleared)
+            && !still_planned
+            && compat::cluster_state(meta_ref).await?.is_some()
+        {
+            return Err(refuse(
+                "the store holds metadata but not this restore's marker: it was not cleared by this restore (its marker removed?); nothing cleared, plan again",
+            ));
+        }
         if !j.has(Step::Clearing) || still_planned {
             let marker = compat::hex(&arca_lake_metadata::records::new_gen_id());
+            // Ours before it exists anywhere (re-review).
+            j.pending_marker = Some(marker.clone());
+            j.save(path).map_err(ControlError::Other)?;
             arca_lake_metadata::transact(meta_ref, marker.clone(), |tx, marker| {
                 Box::pin(async move {
                     tx.set(
@@ -1015,13 +1042,11 @@ pub async fn abandon<S: KvStore>(meta: &S, path: &Path) -> Result<bool, ControlE
     }
     j.abandoned = true;
     j.save(path).map_err(ControlError::Other)?;
-    // Ours, or (no `Clearing` recorded, so no clear can have happened) one
-    // written by an attempt of this journal that died before recording
-    // it. One managed restore of a cluster at a time (RFC-013).
-    let Some(m) = held
-        .filter(|_| ours || !j.has(Step::Clearing))
-        .and_then(|h| String::from_utf8(h).ok())
-    else {
+    // Only a marker this journal names (its recorded or pending one):
+    // never another journal's (re-review).
+    let Some(m) = held.and_then(|h| String::from_utf8(h).ok()).filter(|h| {
+        j.marker.as_deref() == Some(h.as_str()) || j.pending_marker.as_deref() == Some(h.as_str())
+    }) else {
         return Ok(false);
     };
     Ok(arca_lake_metadata::transact(meta, m, |tx, m| {
@@ -1062,6 +1087,7 @@ mod tests {
             new_incarnation: None,
             marker: Some("ab".into()),
             abandoned: false,
+            pending_marker: Some("cd".into()),
         };
         j.save(&p).unwrap();
         assert_eq!(Journal::load(&p).unwrap(), j);

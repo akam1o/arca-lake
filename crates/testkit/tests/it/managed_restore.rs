@@ -874,7 +874,8 @@ async fn a_restored_copy_with_the_planned_incarnation_is_not_taken_for_the_plann
     run(&c, &backup, &path, &p.journal.token, &[])
         .await
         .unwrap_err();
-    // Restored, but the journal says `Clearing` (died before recording).
+    // Restored, but the journal says `Cleared` (died before recording
+    // `Restored`; `Cleared` is always recorded before the restore).
     // The copy even holds a marker: an earlier attempt's, captured by the
     // backup (re-review).
     let mut data = backup.data.clone();
@@ -887,7 +888,7 @@ async fn a_restored_copy_with_the_planned_incarnation_is_not_taken_for_the_plann
     };
     copy.restore("snapshot://test", 1).await.unwrap();
     let mut j = mr::Journal::load(&path).unwrap();
-    j.done.retain(|s| *s <= Step::Clearing);
+    j.done.retain(|s| *s <= Step::Cleared);
     j.save(&path).unwrap();
     run(&c, &backup, &path, &p.journal.token, &[])
         .await
@@ -984,5 +985,67 @@ async fn abandon_gives_up_a_restore_before_its_clear_only() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("cleared"), "{e}");
+    c.shutdown().await;
+}
+
+/// Re-review (Phase 3.11): `Clearing` recorded, the marker gone (removed by
+/// hand, or another journal's abandon), the planned store live: the
+/// resume clears nothing. Another journal's abandon leaves this
+/// restore's marker in place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_live_store_without_this_restores_marker_is_never_cleared() {
+    let c = cluster().await;
+    put(&c, "kept", 16).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    // Journal B, another plan elsewhere, and A paused before its clear.
+    let other = dir.path().join("other.journal");
+    let mut b = p.journal.clone();
+    b.done = vec![Step::Planned];
+    b.marker = None;
+    b.save(&other).unwrap();
+    let mut j = p.journal.clone();
+    j.done = vec![Step::Planned, Step::Frozen, Step::Fenced, Step::Clearing];
+    j.marker = Some("attempt-a".into());
+    j.save(&path).unwrap();
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.set(&keys::restore_marker(), b"attempt-a");
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    // B's abandon leaves A's marker.
+    assert!(!mr::abandon(c.meta.as_ref(), &other).await.unwrap());
+    let held = transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move { Ok(tx.get(&keys::restore_marker()).await?) })
+    })
+    .await
+    .unwrap();
+    assert_eq!(held.as_deref(), Some(&b"attempt-a"[..]));
+    // Removed by hand: A's resume clears nothing.
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.clear(&keys::restore_marker());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("not this restore's marker"), "{e}");
+    assert!(
+        arca_lake_metadata::ops::compat::cluster_state(c.meta.as_ref())
+            .await
+            .unwrap()
+            .is_some(),
+        "the live store was cleared"
+    );
+    assert_eq!(backup.restores.load(Ordering::SeqCst), 0);
     c.shutdown().await;
 }

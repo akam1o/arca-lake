@@ -203,8 +203,14 @@ Review fixes (Phase 3.11):
   (`J.lock`), so `abandon` cannot race a live run. Abandon is refused
   once the clear may have committed; resume `run` instead. The cluster
   stays read-only and held until the operator activates it and releases
-  the hold. One managed restore of a cluster at a time, from one journal
-  (re-reviews).
+  the hold. A marker is recorded in its journal (as pending) before it is
+  written, and abandon removes only a marker its journal names, never
+  another journal's. `plan` takes the lock too. A resume with `Clearing`
+  recorded but not `Cleared`, and the marker gone, proceeds only on an
+  empty store: the crash between the clear's commit and its record. A
+  store still holding a cluster state was not cleared by this restore
+  and is never cleared; plan again. One managed restore of a cluster at
+  a time, from one journal (re-reviews).
 - **Removed nodes' addresses.** The plan records them. A restored record
   of a removed id at another address is refused, and the restore's fence
   and floor RPCs skip removed nodes.

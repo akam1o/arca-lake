@@ -968,10 +968,12 @@ pub async fn repair_pass<S: KvStore>(
     }
     drop(stream);
     if let Some(m) = metrics {
-        // The whole queue counted (paged), at most every 30 s: with a large
-        // queue a count per pass would cost more than the pass.
+        // The whole queue counted (paged): every pass while it fits in one
+        // page (one read), otherwise at most every 30 s, where a count per
+        // pass would cost more than the pass.
         let last = m.repair_queue_counted_ms.load(Ordering::Relaxed);
-        if last != 0 && now_ms.saturating_sub(last) < 30_000 {
+        let small = m.repair_queue_depth.load(Ordering::Relaxed) <= integrity::TASK_PAGE_MAX as u64;
+        if !small && last != 0 && now_ms.saturating_sub(last) < 30_000 {
             return Ok(report);
         }
         m.repair_queue_counted_ms
