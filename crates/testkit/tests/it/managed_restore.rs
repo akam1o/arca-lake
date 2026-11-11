@@ -480,15 +480,16 @@ async fn a_failed_restore_and_a_node_restart_resume_without_reopening_deletes() 
     })
     .await
     .unwrap();
-    // A node down at the mark: the mark waits for it.
+    // A node down at the retry: its hold cannot be verified, nothing is
+    // cleared again until it is back (re-review).
     c.stop_node(0).await;
     let e = run(&c, &backup, &path, &p.journal.token, &[])
         .await
         .unwrap_err();
-    assert!(e.contains("did not acknowledge"), "{e}");
+    assert!(e.contains("stopped answering"), "{e}");
     assert_eq!(
         mr::Journal::load(&path).unwrap().last(),
-        Some(Step::Restored)
+        Some(Step::Cleared)
     );
     c.start_node_quiet(0).await;
     let j = run(&c, &backup, &path, &p.journal.token, &[])
@@ -1312,5 +1313,80 @@ async fn a_fence_reopened_between_runs_is_closed_again_before_the_clear() {
         j.closed_generation > closed.record.generation,
         "fenced again"
     );
+    c.shutdown().await;
+}
+
+/// Re-review (Phase 3.11): the restore was written back and the run died
+/// before recording `Restored`; the restored copy was then put to use and
+/// every node's fence reopened by hand (the copy's own leader would find
+/// the nodes ahead of its record and hold the fence; ADR-0024). A retry,
+/// which would clear and restore again, finds the nodes no longer held
+/// and clears nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retry_after_the_clear_refuses_once_the_fence_was_reopened() {
+    use arca_lake_protocol::client::FencePush;
+    let c = cluster().await;
+    put(&c, "kept", 20).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    backup.fail.store(1, Ordering::SeqCst);
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        mr::Journal::load(&path).unwrap().last(),
+        Some(Step::Cleared)
+    );
+    // Written back; the run died.
+    backup.restore("snapshot://test", 1).await.unwrap();
+    let inc = arca_lake_metadata::ops::compat::cluster_state(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap()
+        .incarnation;
+    let ids = arca_lake_metadata::ops::node_lifecycle::identities(c.meta.as_ref())
+        .await
+        .unwrap();
+    for n in &c.nodes {
+        let addr = n.addr.to_string();
+        let identity = ids.get(&n.id).map(|i| (n.id, i.token));
+        let h = c.clients.health(&addr).await.unwrap();
+        c.clients
+            .push_delete_fence_with(
+                &addr,
+                h.delete_fence_generation,
+                false,
+                FencePush {
+                    release: true,
+                    incarnation: Some(inc),
+                    identity,
+                    ..FencePush::default()
+                },
+            )
+            .await
+            .unwrap();
+        c.clients
+            .push_delete_fence_with(
+                &addr,
+                h.delete_fence_generation + 1,
+                true,
+                FencePush {
+                    incarnation: Some(inc),
+                    opener: 7,
+                    identity,
+                    ..FencePush::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(c.clients.health(&addr).await.unwrap().delete_fence_open);
+    }
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("no longer hold the restore's fence"), "{e}");
+    assert_eq!(backup.restores.load(Ordering::SeqCst), 1, "restored again");
     c.shutdown().await;
 }

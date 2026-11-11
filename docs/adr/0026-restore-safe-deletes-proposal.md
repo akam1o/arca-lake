@@ -182,6 +182,12 @@ Review fixes (Phase 3.11):
   and fences again, and the new close refuses deletes of any generation
   opened meanwhile (re-review; test: without it, 3 such deletes applied
   during the restore).
+  A retry after `Cleared` (the store partly or wholly restored, possibly
+  put to use since) clears again only while every planned node still
+  holds the fence closed at the recorded generation or above, on its own
+  disk (by the identities captured before the clear); otherwise nothing
+  is cleared and a new restore is planned. A node that does not answer
+  stops the retry until it is back.
 - **Accepted (re-review).** The close reaches a node without an
   acknowledged identity unstamped, so another disk at that address can
   take it. That can only close or hold that disk's fence (the fail-safe

@@ -518,38 +518,50 @@ async fn verify_held<S: KvStore>(
     nodes: &[(u64, String)],
     generation: u64,
 ) -> Result<Result<(), String>, ControlError> {
+    let identities: std::collections::HashMap<u64, [u8; 16]> = node_lifecycle::identities(meta)
+        .await?
+        .into_values()
+        .filter(|i| i.acknowledged)
+        .map(|i| (i.node_id, i.token))
+        .collect();
+    Ok(verify_held_as(clients, nodes, &identities, generation).await)
+}
+
+/// [`verify_held`] against given identities (acknowledged tokens by node).
+async fn verify_held_as(
+    clients: &NodeClients,
+    nodes: &[(u64, String)],
+    identities: &std::collections::HashMap<u64, [u8; 16]>,
+    generation: u64,
+) -> Result<(), String> {
     // Each node's own disk, by the identity this cluster acknowledged
     // for it (re-review: another disk at its address could otherwise
     // acknowledge the hold for it); one that cannot be verified stops
     // the restore.
-    let identities = node_lifecycle::identities(meta).await?;
     for (id, addr) in nodes {
         let h = match clients.health(addr).await {
             Ok(h) => h,
-            Err(e) => return Ok(Err(format!("node {id} stopped answering: {}", e.code()))),
+            Err(e) => return Err(format!("node {id} stopped answering: {}", e.code())),
         };
-        let verified = identities
-            .get(id)
-            .filter(|i| i.acknowledged)
-            .is_some_and(|i| {
-                h.identity_supported
-                    && h.identity_node_id == *id
-                    && h.identity_token.as_ref() == i.token.as_slice()
-            });
+        let verified = identities.get(id).is_some_and(|t| {
+            h.identity_supported
+                && h.identity_node_id == *id
+                && h.identity_token.as_ref() == t.as_slice()
+        });
         if !verified {
-            return Ok(Err(format!(
+            return Err(format!(
                 "node {id}'s disk cannot be verified (no acknowledged identity, an earlier release, or another disk at its address, which holds node {}'s): the restore does not start; let a leader give it its identity, or decommission and unregister it",
                 h.identity_node_id
-            )));
+            ));
         }
         if h.delete_fence_open || !h.delete_fence_hold || h.delete_fence_generation < generation {
-            return Ok(Err(format!(
+            return Err(format!(
                 "node {id} reports generation {} open {} hold {}: not held at {}",
                 h.delete_fence_generation, h.delete_fence_open, h.delete_fence_hold, generation
-            )));
+            ));
         }
     }
-    Ok(Ok(()))
+    Ok(())
 }
 
 /// Steps 2 to 8. Resumes from the journal. `stopped` names processes the
@@ -764,6 +776,21 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
             j.marker = Some(marker);
         }
         let planned_here = !j.has(Step::Clearing) || still_planned;
+        // A retry after the clear: the store holds a partial or a whole
+        // restored copy, which may have been put to use since (its fence
+        // reopened; re-review). Every planned node must still hold the
+        // fence closed at the recorded generation or above, on its own disk
+        // (by the identities captured before the clear); otherwise nothing
+        // is cleared.
+        if j.has(Step::Cleared) {
+            let ids: std::collections::HashMap<u64, [u8; 16]> =
+                j.identities.iter().copied().collect();
+            if let Err(why) = verify_held_as(clients, &j.nodes, &ids, j.closed_generation).await {
+                return Err(refuse(format!(
+                    "the nodes no longer hold the restore's fence since the clear ({why}): the restored store may have been put to use; nothing cleared, plan a new restore"
+                )));
+            }
+        }
         j.record(path, Step::Clearing)?;
         // On the planned store, only while it still holds this attempt's
         // marker, in the clear's own transaction (re-review: a marker
