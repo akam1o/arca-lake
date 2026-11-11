@@ -776,13 +776,14 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
             j.marker = Some(marker);
         }
         let planned_here = !j.has(Step::Clearing) || still_planned;
-        // A retry after the clear: the store holds a partial or a whole
-        // restored copy, which may have been put to use since (its fence
-        // reopened; re-review). Every planned node must still hold the
+        // Not the planned store (a retry after the clear, or after a clear
+        // that committed before its record: the store empty, partly or
+        // wholly restored, possibly put to use since and its fence
+        // reopened; re-reviews): every planned node must still hold the
         // fence closed at the recorded generation or above, on its own disk
         // (by the identities captured before the clear); otherwise nothing
         // is cleared.
-        if j.has(Step::Cleared) {
+        if !planned_here {
             let ids: std::collections::HashMap<u64, [u8; 16]> =
                 j.identities.iter().copied().collect();
             if let Err(why) = verify_held_as(clients, &j.nodes, &ids, j.closed_generation).await {

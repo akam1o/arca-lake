@@ -1390,3 +1390,88 @@ async fn a_retry_after_the_clear_refuses_once_the_fence_was_reopened() {
     assert_eq!(backup.restores.load(Ordering::SeqCst), 1, "restored again");
     c.shutdown().await;
 }
+
+/// Re-review (Phase 3.11): the clear committed and the run died before
+/// recording it (the journal says `Clearing`, the store is empty); every
+/// node's fence was then reopened by hand. The retry finds the nodes no
+/// longer held and restores nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clear_committed_before_its_record_refuses_once_the_fence_was_reopened() {
+    use arca_lake_protocol::client::FencePush;
+    let c = cluster().await;
+    put(&c, "kept", 20).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    backup.fail.store(1, Ordering::SeqCst);
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        mr::Journal::load(&path).unwrap().last(),
+        Some(Step::Cleared)
+    );
+    // As if it died between the clear's commit and its record.
+    let mut j = mr::Journal::load(&path).unwrap();
+    j.done.retain(|s| *s <= Step::Clearing);
+    j.save(&path).unwrap();
+    let ids: std::collections::HashMap<
+        u64,
+        arca_lake_metadata::ops::node_lifecycle::NodeIdentityRecord,
+    > = j
+        .identities
+        .iter()
+        .map(|(id, t)| {
+            (
+                *id,
+                arca_lake_metadata::ops::node_lifecycle::NodeIdentityRecord {
+                    node_id: *id,
+                    token: *t,
+                    acknowledged: true,
+                },
+            )
+        })
+        .collect();
+    for n in &c.nodes {
+        let addr = n.addr.to_string();
+        let identity = ids.get(&n.id).map(|i| (n.id, i.token));
+        let h = c.clients.health(&addr).await.unwrap();
+        let inc = <[u8; 16]>::try_from(h.incarnation.as_ref()).unwrap();
+        c.clients
+            .push_delete_fence_with(
+                &addr,
+                h.delete_fence_generation,
+                false,
+                FencePush {
+                    release: true,
+                    incarnation: Some(inc),
+                    identity,
+                    ..FencePush::default()
+                },
+            )
+            .await
+            .unwrap();
+        c.clients
+            .push_delete_fence_with(
+                &addr,
+                h.delete_fence_generation + 1,
+                true,
+                FencePush {
+                    incarnation: Some(inc),
+                    opener: 7,
+                    identity,
+                    ..FencePush::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(c.clients.health(&addr).await.unwrap().delete_fence_open);
+    }
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("no longer hold the restore's fence"), "{e}");
+    assert_eq!(backup.restores.load(Ordering::SeqCst), 0, "restored");
+    c.shutdown().await;
+}

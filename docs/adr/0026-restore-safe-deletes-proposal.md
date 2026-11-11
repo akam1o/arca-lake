@@ -182,12 +182,20 @@ Review fixes (Phase 3.11):
   and fences again, and the new close refuses deletes of any generation
   opened meanwhile (re-review; test: without it, 3 such deletes applied
   during the restore).
-  A retry after `Cleared` (the store partly or wholly restored, possibly
-  put to use since) clears again only while every planned node still
-  holds the fence closed at the recorded generation or above, on its own
-  disk (by the identities captured before the clear); otherwise nothing
-  is cleared and a new restore is planned. A node that does not answer
-  stops the retry until it is back.
+  Any clear of a store that is not verifiably the planned one clears
+  again only while every planned node still holds the fence closed at
+  the recorded generation or above, on its own disk (by the identities
+  captured before the clear). Such a store is a retry after `Cleared`
+  (partly or wholly restored, possibly put to use since), or `Clearing`
+  recorded with the store empty because the clear committed before its
+  record. Otherwise nothing is cleared and a new restore is planned. A
+  node that does not answer stops the retry until it is back.
+- **Point-in-time checks (re-review).** The holds are verified, not
+  locked: a privileged fence release sent by hand to a node after the
+  verification (`admin delete-fence release`, a direct RPC) is not
+  excluded. The guarantee therefore assumes that nobody changes node
+  fences while `admin restore` runs, as it assumes that no controller
+  or gateway runs.
 - **Accepted (re-review).** The close reaches a node without an
   acknowledged identity unstamped, so another disk at that address can
   take it. That can only close or hold that disk's fence (the fail-safe
