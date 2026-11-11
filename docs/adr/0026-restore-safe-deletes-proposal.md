@@ -180,10 +180,14 @@ Review fixes (Phase 3.11):
 - **When identities are taken.** Right before the clear, after the
   freeze, and again on a resume while the planned store is still there
   (the clear did not commit), so that a fresh rejoin since the plan is
-  not undone (confirmation review). "Still there" is a marker key with
-  the journal's token, written right before the clear: the clear removes
-  it and no backup holds it. Incarnation equality cannot tell, since a
-  backup of the same incarnation restores it (re-review).
+  not undone (confirmation review). "Still there" is a marker key,
+  random and new for each clear attempt, recorded in the journal and
+  written into the store right before the clear. Incarnation equality
+  cannot tell, since a backup of the same incarnation restores it; a
+  fixed marker could be in a backup taken while an attempt was paused.
+  A store holding the current attempt's marker is the planned store, or
+  a copy of it taken between that write and the clear, which is the
+  same frozen store (re-reviews).
 - **Removed nodes' addresses.** The plan records them. A restored record
   of a removed id at another address is refused, and the restore's fence
   and floor RPCs skip removed nodes.

@@ -817,10 +817,10 @@ async fn a_resume_before_the_clear_takes_the_identities_again() {
     // The planned store is back (the clear did not commit): it still
     // holds the marker written right before the clear.
     backup.restore("snapshot://test", 1).await.ok();
-    let token = p.journal.token.clone();
-    transact(c.meta.as_ref(), token, |tx, token| {
+    let marker = j.marker.clone().expect("the attempt's marker");
+    transact(c.meta.as_ref(), marker, |tx, marker| {
         Box::pin(async move {
-            tx.set(&keys::restore_marker(), token.as_bytes());
+            tx.set(&keys::restore_marker(), marker.as_bytes());
             Ok(())
         })
     })
@@ -875,7 +875,17 @@ async fn a_restored_copy_with_the_planned_incarnation_is_not_taken_for_the_plann
         .await
         .unwrap_err();
     // Restored, but the journal says `Clearing` (died before recording).
-    backup.restore("snapshot://test", 1).await.unwrap();
+    // The copy even holds a marker: an earlier attempt's, captured by the
+    // backup (re-review).
+    let mut data = backup.data.clone();
+    data.push((keys::restore_marker(), b"an-earlier-attempt".to_vec()));
+    let copy = Snapshot {
+        meta: Arc::clone(&c.meta),
+        data,
+        fail: AtomicUsize::new(0),
+        restores: AtomicUsize::new(0),
+    };
+    copy.restore("snapshot://test", 1).await.unwrap();
     let mut j = mr::Journal::load(&path).unwrap();
     j.done.retain(|s| *s <= Step::Clearing);
     j.save(&path).unwrap();

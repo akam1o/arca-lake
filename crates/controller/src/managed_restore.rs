@@ -151,6 +151,9 @@ pub struct Journal {
     pub restored_incarnation: Option<String>,
     /// Incarnation marked on the restored metadata (hex).
     pub new_incarnation: Option<String>,
+    /// The marker of the current clear attempt (random, new each attempt),
+    /// written into the store right before the clear.
+    pub marker: Option<String>,
 }
 
 impl Journal {
@@ -193,6 +196,9 @@ impl Journal {
         if let Some(i) = &self.new_incarnation {
             let _ = writeln!(b, "new_incarnation {i}");
         }
+        if let Some(m) = &self.marker {
+            let _ = writeln!(b, "marker {m}");
+        }
         for s in &self.done {
             let _ = writeln!(b, "done {}", s.name());
         }
@@ -232,6 +238,7 @@ impl Journal {
             identities: Vec::new(),
             restored_incarnation: None,
             new_incarnation: None,
+            marker: None,
         };
         let num = |v: &str| v.parse::<u64>().map_err(|e| format!("{v}: {e}"));
         for l in &lines[1..] {
@@ -267,6 +274,7 @@ impl Journal {
                 }
                 "restored_incarnation" => j.restored_incarnation = Some(v.into()),
                 "new_incarnation" => j.new_incarnation = Some(v.into()),
+                "marker" => j.marker = Some(v.into()),
                 "done" => j
                     .done
                     .push(Step::parse(v).ok_or_else(|| format!("unknown step {v}"))?),
@@ -439,6 +447,7 @@ pub async fn plan<S: KvStore>(
             .collect(),
         restored_incarnation: None,
         new_incarnation: None,
+        marker: None,
     };
     journal.save(path).map_err(ControlError::Other)?;
     let summary = vec![
@@ -590,20 +599,24 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
         // rejoined with a fresh identity since the plan).
         // On a resume too, while the planned store is still there (the
         // clear did not commit; confirmation review).
-        // The marker written below, still there with this journal's token:
-        // the clear did not commit (incarnation equality does not tell the
-        // planned store from a restored copy of it; re-review).
-        let still_planned = {
-            let token = j.token.clone();
-            arca_lake_metadata::transact(meta_ref, token, |tx, token| {
-                Box::pin(async move {
-                    Ok(tx
-                        .get(&arca_lake_metadata::keys::restore_marker())
-                        .await?
-                        .is_some_and(|v| v == token.as_bytes()))
+        // The current attempt's marker (written below, new each attempt)
+        // still there: the store is the planned one, or a copy of it taken
+        // after the marker and before the clear (the same frozen store).
+        // Incarnation equality cannot tell the planned store from a
+        // restored copy; a fixed marker could be in a backup (re-reviews).
+        let still_planned = match j.marker.clone() {
+            Some(marker) => {
+                arca_lake_metadata::transact(meta_ref, marker, |tx, marker| {
+                    Box::pin(async move {
+                        Ok(tx
+                            .get(&arca_lake_metadata::keys::restore_marker())
+                            .await?
+                            .is_some_and(|v| v == marker.as_bytes()))
+                    })
                 })
-            })
-            .await?
+                .await?
+            }
+            None => false,
         };
         if !j.has(Step::Clearing) || still_planned {
             j.identities = node_lifecycle::identities(meta_ref)
@@ -621,20 +634,22 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 .collect();
             j.removed = j.removed_at.iter().map(|(id, _)| *id).collect();
         }
-        if !j.has(Step::Clearing) {
-            let token = j.token.clone();
-            arca_lake_metadata::transact(meta_ref, token, |tx, token| {
-                Box::pin(async move {
-                    tx.set(
-                        &arca_lake_metadata::keys::restore_marker(),
-                        token.as_bytes(),
-                    );
-                    Ok(())
-                })
-            })
-            .await?;
-        }
+        // A new marker for this attempt: recorded first, then written. A
+        // crash between the two leaves the store without it; the resume
+        // keeps what the previous attempt captured from the same store.
+        let marker = compat::hex(&arca_lake_metadata::records::new_gen_id());
+        j.marker = Some(marker.clone());
         j.record(path, Step::Clearing)?;
+        arca_lake_metadata::transact(meta_ref, marker, |tx, marker| {
+            Box::pin(async move {
+                tx.set(
+                    &arca_lake_metadata::keys::restore_marker(),
+                    marker.as_bytes(),
+                );
+                Ok(())
+            })
+        })
+        .await?;
         arca_lake_metadata::transact(meta_ref, (), |tx, ()| {
             Box::pin(async move {
                 tx.clear_range(&arca_lake_metadata::keys::all_range());
@@ -927,6 +942,7 @@ mod tests {
             identities: vec![(1, [7; 16])],
             restored_incarnation: Some("0102".into()),
             new_incarnation: None,
+            marker: Some("ab".into()),
         };
         j.save(&p).unwrap();
         assert_eq!(Journal::load(&p).unwrap(), j);

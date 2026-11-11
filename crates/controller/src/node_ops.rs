@@ -70,11 +70,12 @@ pub async fn unregister<S: KvStore>(
 /// (`false`: the operator states its disk never serves again unwiped).
 ///
 /// The hold must be one the cluster's current incarnation cannot lift
-/// (confirmation review): tied to it, unknown (facts lost), or set before
-/// the node had an incarnation. A hold tied to an earlier incarnation,
-/// which an open of the current one would lift, is released and set again
-/// at the same generation; the node is read back, and anything that
-/// opened it meanwhile stops the procedure.
+/// (confirmation review): tied to it, or unknown (facts lost). A hold
+/// tied to an earlier incarnation, or set before the node had one, which
+/// an open of the current one would lift, is released and set again at
+/// the same generation; the node is read back, and anything that opened
+/// it meanwhile stops the procedure. A node that does not report its
+/// hold's incarnation (an earlier release) is refused.
 async fn fence_and_hold<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -114,16 +115,25 @@ async fn fence_and_hold<S: KvStore>(
     for attempt in 0..2 {
         let h = clients.health(&node.address).await.map_err(node_err)?;
         let tied = h.delete_fence_hold_incarnation.as_ref();
-        let unliftable = tied.is_empty()
-            || incarnation.is_none_or(|i| tied == i.as_slice())
-            || tied == [0xff; 16].as_slice()
-            || tied == [0u8; 16].as_slice();
         if h.delete_fence_open || !h.delete_fence_hold {
             return Err(ControlError::Other(format!(
                 "node {node_id} did not keep the closed, held fence (open {}, hold {}): not removed",
                 h.delete_fence_open, h.delete_fence_hold
             )));
         }
+        // Not reported (an earlier release): the hold cannot be checked
+        // (re-review: not proven safe).
+        if tied.is_empty() {
+            return Err(ControlError::Other(format!(
+                "node {node_id} does not report the incarnation of its hold (an earlier release): upgrade it, or stop it for good and re-run with --unreachable"
+            )));
+        }
+        // Unliftable by the current incarnation: tied to it, or unknown
+        // (only an explicit release lifts that). A hold set before the
+        // node had an incarnation (zeros) is lifted by any it adopts
+        // later: re-tied like an earlier one, unless the node still has
+        // none (then no open can lift it; re-review).
+        let unliftable = hold_is_unliftable(tied, incarnation, &h.incarnation);
         if unliftable {
             return Ok(true);
         }
@@ -155,6 +165,17 @@ async fn fence_and_hold<S: KvStore>(
     Err(ControlError::Other(format!(
         "node {node_id} holds its fence under an earlier incarnation and did not take this one's: not removed"
     )))
+}
+
+/// Whether a hold tied to `tied` stays in place against opens of the
+/// cluster's `current` incarnation, on a node holding `node_incarnation`:
+/// tied to the current one; unknown (only a release lifts it); or set
+/// before the node had an incarnation while it still has none (a zero
+/// hold is lifted by any incarnation adopted later).
+fn hold_is_unliftable(tied: &[u8], current: Option<[u8; 16]>, node_incarnation: &[u8]) -> bool {
+    current.is_none_or(|i| tied == i.as_slice())
+        || tied == [0xff; 16].as_slice()
+        || (tied == [0u8; 16].as_slice() && node_incarnation.is_empty())
 }
 
 /// `admin node keep-removed` (Phase 3.11): after a manual restore of
@@ -366,5 +387,30 @@ pub async fn adopt_identity<S: KvStore>(
         (true, id, _) => Err(ControlError::Other(format!(
             "node {node_id}'s address answers with node {id}'s identity: not adopted"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hold_is_unliftable;
+
+    #[test]
+    fn only_holds_the_current_incarnation_cannot_lift_are_accepted() {
+        let cur = Some([5u8; 16]);
+        assert!(hold_is_unliftable(&[5; 16], cur, &[5; 16]));
+        assert!(hold_is_unliftable(&[0xff; 16], cur, &[5; 16]), "unknown");
+        assert!(!hold_is_unliftable(&[4; 16], cur, &[5; 16]), "earlier");
+        assert!(
+            !hold_is_unliftable(&[0; 16], cur, &[5; 16]),
+            "zeros, node adopted one"
+        );
+        assert!(
+            hold_is_unliftable(&[0; 16], cur, &[]),
+            "zeros, node has none"
+        );
+        assert!(
+            hold_is_unliftable(&[4; 16], None, &[]),
+            "no cluster incarnation"
+        );
     }
 }

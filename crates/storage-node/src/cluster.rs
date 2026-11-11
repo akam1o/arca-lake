@@ -737,6 +737,38 @@ fn parse_floors(text: &str) -> Option<Floors> {
 mod tests {
     use super::*;
 
+    /// Phase 3.11 re-review: a hold set before the node had an incarnation
+    /// (zeros) is lifted by an open of any incarnation it adopts later;
+    /// one tied to that incarnation is not.
+    #[test]
+    fn a_hold_set_before_an_incarnation_is_lifted_by_a_later_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = ClusterFacts::open(dir.path());
+        assert!(
+            f.adopt_fence_held(1, false, Some([0; 16]), false, None, 0)
+                .unwrap()
+        );
+        assert_eq!(f.fence_hold, Some([0; 16]));
+        // No incarnation yet: an open has no caller of the node's, lifts nothing.
+        assert!(!f.adopt_fence_held(2, true, None, false, None, 0).unwrap());
+        assert!(f.adopt_incarnation([5; 16], 100).unwrap());
+        assert!(
+            f.adopt_fence_held(2, true, None, false, Some([5; 16]), 0)
+                .unwrap()
+        );
+        assert!(f.fence_open && f.fence_hold.is_none(), "zero hold lifted");
+        // Tied to the incarnation: its opens do not lift it.
+        assert!(
+            f.adopt_fence_held(3, false, Some([5; 16]), false, None, 0)
+                .unwrap()
+        );
+        assert!(
+            !f.adopt_fence_held(4, true, None, false, Some([5; 16]), 0)
+                .unwrap()
+        );
+        assert_eq!((f.fence_open, f.fence_hold), (false, Some([5; 16])));
+    }
+
     #[test]
     fn adopts_newer_incarnations_only_and_persists() {
         let dir = tempfile::tempdir().unwrap();

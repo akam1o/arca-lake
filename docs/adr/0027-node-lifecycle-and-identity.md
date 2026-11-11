@@ -174,11 +174,13 @@ at any step.
     (confirmation review: a removed node is trusted to be fenced).
     `unregister` and `keep-removed` accept only a hold the current
     incarnation cannot lift: tied to it, unknown, or set before the node
-    had an incarnation. A hold tied to an earlier incarnation (which an
-    open of the current one would lift) is released and set again at the
-    same generation, then read back (`HealthResponse.
-    delete_fence_hold_incarnation`, field 41, additive). Nodes of earlier
-    releases do not report it and are taken as before;
+    had an incarnation while it still has none. A hold tied to an earlier
+    incarnation, or a zero one on a node that adopted an incarnation since
+    (either is lifted by an open of the current one), is released and set
+    again at the same generation, then read back (`HealthResponse.
+    delete_fence_hold_incarnation`, field 41, additive). A held node that
+    does not report it (an earlier release) is refused: upgrade it, or stop
+    it for good and use `--unreachable` (re-reviews);
   - once a leader of this release gave the nodes identities, controllers
     of earlier releases (a failover to one during a rolling upgrade, or a
     rollback) have every delete refused, so GC and reconciliation stall
