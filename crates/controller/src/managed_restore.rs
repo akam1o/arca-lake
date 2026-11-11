@@ -588,7 +588,12 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
         // What the restored metadata gets back is taken now, after the
         // freeze and right before the clear (third review: a node
         // rejoined with a fresh identity since the plan).
-        if !j.has(Step::Clearing) {
+        // On a resume too, while the planned store is still there (the
+        // clear did not commit; confirmation review).
+        let still_planned = compat::cluster_state(meta_ref)
+            .await?
+            .is_some_and(|c| compat::hex(&c.incarnation) == j.incarnation);
+        if !j.has(Step::Clearing) || still_planned {
             j.identities = node_lifecycle::identities(meta_ref)
                 .await?
                 .into_values()

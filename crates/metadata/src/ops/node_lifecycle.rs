@@ -473,6 +473,40 @@ pub async fn set_identity<S: KvStore>(store: &S, node_id: u64, token: [u8; 16]) 
     .await
 }
 
+/// Take `token` as the node's identity only if it has no record and is
+/// not quarantined, in one transaction. Returns whether it was taken.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn adopt_if_unconfirmed<S: KvStore>(
+    store: &S,
+    node_id: u64,
+    token: [u8; 16],
+) -> Result<bool> {
+    transact(store, (node_id, token), |tx, env| {
+        Box::pin(async move {
+            let (node_id, token) = *env;
+            if tx.get(&keys::node_identity(node_id)).await?.is_some()
+                || read_state(tx, node_id).await? == State::Quarantined
+            {
+                return Ok(false);
+            }
+            write(
+                tx,
+                &keys::node_identity(node_id),
+                &NodeIdentityRecord {
+                    node_id,
+                    token,
+                    acknowledged: true,
+                },
+            )?;
+            Ok(true)
+        })
+    })
+    .await
+}
+
 /// In a transaction: give a newly registered node its identity (not
 /// acknowledged yet), so that a disk at its address adopts it or, holding
 /// another, is quarantined (Phase 3.11 review: never imported).

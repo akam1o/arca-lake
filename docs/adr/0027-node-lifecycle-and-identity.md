@@ -167,7 +167,11 @@ at any step.
     from before an unregister names the node active again; its hold is
     lifted by the new incarnation. Only `admin restore` keeps removed
     nodes removed. After a manual restore, run `admin node keep-removed
-    --node N --yes` for each before starting controllers (third review);
+    --node N --yes` for each before starting controllers (third review).
+    It closes and holds the node's fence first, as `unregister` does,
+    and refuses a node that does not answer unless `--unreachable`
+    states that its disk will never be started again unwiped
+    (confirmation review: a removed node is trusted to be fenced);
   - once a leader of this release gave the nodes identities, controllers
     of earlier releases (a failover to one during a rolling upgrade, or a
     rollback) have every delete refused, so GC and reconciliation stall
@@ -175,7 +179,8 @@ at any step.
     leader of this release (third review);
   - `admin node adopt-identity` applies only to an unconfirmed node: no
     record, the node holding its own id; never over a record or for a
-    quarantined node (third review);
+    quarantined node, checked in the transaction that writes it (third
+    and confirmation reviews);
   - a node unregistered with `--unreachable` relies on the operator's
     statement;
   - nodes of earlier releases are not checked by identity;

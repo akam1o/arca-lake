@@ -177,6 +177,10 @@ Review fixes (Phase 3.11):
 - **Identities.** The plan records the identities the nodes
   acknowledged, and the mark puts them back on the restored metadata.
   Nothing is imported from the nodes.
+- **When identities are taken.** Right before the clear, after the
+  freeze, and again on a resume while the planned store is still there
+  (the clear did not commit), so that a fresh rejoin since the plan is
+  not undone (confirmation review).
 - **Removed nodes' addresses.** The plan records them. A restored record
   of a removed id at another address is refused, and the restore's fence
   and floor RPCs skip removed nodes.

@@ -57,6 +57,24 @@ pub async fn unregister<S: KvStore>(
             state.name()
         )));
     }
+    let fenced = fence_and_hold(meta, clients, &node, unreachable_ok).await?;
+    node_lifecycle::unregister(meta, node_id, by, reason, now_ms).await?;
+    Ok(Unregistered {
+        already: false,
+        fenced,
+    })
+}
+
+/// Close the node's delete fence with an operator hold on the node itself
+/// (`true`), or, with `unreachable_ok`, accept that it does not answer
+/// (`false`: the operator states its disk never serves again unwiped).
+async fn fence_and_hold<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    node: &arca_lake_metadata::records::NodeRecord,
+    unreachable_ok: bool,
+) -> Result<bool, ControlError> {
+    let node_id = node.id;
     let incarnation = compat::cluster_state(meta).await?.map(|c| c.incarnation);
     clients.note_node_id(&node.address, node.id);
     let fenced = match clients.health(&node.address).await {
@@ -81,12 +99,12 @@ pub async fn unregister<S: KvStore>(
                     Ok(true)
                 } else {
                     Err(ControlError::Other(format!(
-                        "node {node_id} did not take the closed, held fence (open {open}, hold {hold}): not unregistered"
+                        "node {node_id} did not take the closed, held fence (open {open}, hold {hold}): not removed"
                     )))
                 }
             })?,
         Err(e) if unreachable_ok => {
-            tracing::warn!(node = node_id, error = %e, "unregistering an unreachable node: its disk must not be started again unwiped");
+            tracing::warn!(node = node_id, error = %e, "removing an unreachable node: its disk must not be started again unwiped");
             false
         }
         Err(e) => {
@@ -96,11 +114,33 @@ pub async fn unregister<S: KvStore>(
             )));
         }
     };
-    node_lifecycle::unregister(meta, node_id, by, reason, now_ms).await?;
-    Ok(Unregistered {
-        already: false,
-        fenced,
-    })
+    Ok(fenced)
+}
+
+/// `admin node keep-removed` (Phase 3.11): after a manual restore of
+/// metadata from before a node was unregistered, mark it removed again,
+/// its fence closed and held on the node first (confirmation review: a
+/// removed node is trusted to be fenced). No state or membership check:
+/// its members are repaired away.
+///
+/// # Errors
+///
+/// As [`unregister`].
+pub async fn keep_removed<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    node_id: u64,
+    unreachable_ok: bool,
+    now_ms: u64,
+) -> Result<bool, ControlError> {
+    let node = cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .find(|n| n.id == node_id)
+        .ok_or_else(|| ControlError::Other(format!("node {node_id} unknown")))?;
+    let fenced = fence_and_hold(meta, clients, &node, unreachable_ok).await?;
+    node_lifecycle::keep_removed(meta, node_id, now_ms).await?;
+    Ok(fenced)
 }
 
 /// The result of the rejoin checks.
@@ -264,23 +304,18 @@ pub async fn adopt_identity<S: KvStore>(
     let h = clients.health(&node.address).await.map_err(|e| {
         ControlError::Other(format!("node {node_id} does not answer: {}", e.code()))
     })?;
-    // Only the unconfirmed case (third review): no record, the node holding
-    // its own id; never over a record, never for a quarantined node.
-    if node_lifecycle::identity(meta, node_id).await?.is_some() {
-        return Err(ControlError::Other(format!(
-            "node {node_id} has an identity record: nothing to adopt (a mismatch is a quarantine; `admin node rejoin` decides)"
-        )));
-    }
-    if node_lifecycle::state(meta, node_id).await? == State::Quarantined {
-        return Err(ControlError::Other(format!(
-            "node {node_id} is quarantined: `admin node rejoin` decides"
-        )));
-    }
     let token = <[u8; 16]>::try_from(h.identity_token.as_ref()).ok();
     match (h.identity_supported, h.identity_node_id, token) {
+        // Only the unconfirmed case, checked with the write (third and
+        // confirmation reviews): no record, not quarantined.
         (true, id, Some(t)) if id == node_id => {
-            node_lifecycle::set_identity(meta, node_id, t).await?;
-            Ok(t)
+            if node_lifecycle::adopt_if_unconfirmed(meta, node_id, t).await? {
+                Ok(t)
+            } else {
+                Err(ControlError::Other(format!(
+                    "node {node_id} has an identity record or is quarantined: nothing to adopt (`admin node rejoin` decides)"
+                )))
+            }
         }
         (false, _, _) => Err(ControlError::Other(format!(
             "node {node_id} runs an earlier release: no identity to adopt"

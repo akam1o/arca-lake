@@ -720,7 +720,9 @@ async fn a_damaged_identity_file_refuses_every_delete() {
         chunk_id: [0xdd; 16],
         shard_index: 0,
     };
+    // Its fence still open: only the identity can refuse.
     let h = c.clients.health(&addr).await.unwrap();
+    assert!(h.delete_fence_open, "{h:?}");
     for stamp in [None, Some((n, token))] {
         let any = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
         any.set_incarnation(c.clients.incarnation());
@@ -728,12 +730,134 @@ async fn a_damaged_identity_file_refuses_every_delete() {
         any.note_identity(&addr, stamp);
         let r = any.delete_shard(&addr, shard, g.epoch).await;
         assert!(
-            r.as_ref().is_err_and(
-                |e| e.message().contains("identity rejected") || NodeClients::is_fenced(e)
-            ),
+            r.as_ref()
+                .is_err_and(|e| e.message().contains("identity rejected")),
             "a node with a damaged identity took a delete ({stamp:?}): {r:?}"
         );
     }
     ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Confirmation review (Phase 3.11): `admin node keep-removed` on a node
+/// still serving with its fence open closes and holds the fence on the
+/// node before marking it removed: a delete stamped for it, carrying the
+/// open generation, is refused afterwards (a later restore trusts a
+/// removed node to be fenced).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keep_removed_closes_and_holds_the_fence_before_marking_removed() {
+    let c = cluster().await;
+    let objects = put_objects(&c, 2).await;
+    let ctl = leader(&c).await;
+    identities_acknowledged(&c).await;
+    let g = c.groups().await.remove(0);
+    let id = g.members[0].node_id;
+    let i = c.node_index(&g.members[0]).unwrap();
+    let addr = c.nodes[i].addr.to_string();
+    let fence = arca_lake_metadata::ops::delete_fence::current(c.meta.as_ref())
+        .await
+        .unwrap();
+    assert!(fence.open);
+    let token = node_lifecycle::identity(c.meta.as_ref(), id)
+        .await
+        .unwrap()
+        .unwrap()
+        .token;
+    let late = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
+    late.set_incarnation(c.clients.incarnation());
+    late.set_delete_fence(Some(fence.generation));
+    late.note_identity(&addr, Some((id, token)));
+    ctl.abort();
+    let fenced = node_ops::keep_removed(c.meta.as_ref(), &c.clients, id, false, now_ms())
+        .await
+        .unwrap();
+    assert!(fenced);
+    assert_eq!(
+        node_lifecycle::state(c.meta.as_ref(), id).await.unwrap(),
+        State::Removed
+    );
+    let h = c.clients.health(&addr).await.unwrap();
+    assert!(!h.delete_fence_open && h.delete_fence_hold, "{h:?}");
+    let shard = ShardRef {
+        group_id: g.id,
+        chunk_id: c.manifest(BUCKET, "o0").await.chunks[0].1.chunk_id,
+        shard_index: 0,
+    };
+    let before = c.shard_count(i, g.id);
+    let r = late.delete_shard(&addr, shard, g.epoch).await;
+    assert!(
+        r.as_ref().is_err_and(NodeClients::is_fenced),
+        "a node marked removed took a late delete: {r:?}"
+    );
+    assert_eq!(c.shard_count(i, g.id), before);
+    all_read_back(&c, &objects).await;
+    // Not answering: refused unless declared unreachable.
+    let mut c = c;
+    let j = c.node_index(&g.members[1]).unwrap();
+    let jid = c.nodes[j].id;
+    c.stop_node(j).await;
+    let e = node_ops::keep_removed(c.meta.as_ref(), &c.clients, jid, false, now_ms())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("--unreachable"), "{e}");
+    assert_eq!(
+        node_lifecycle::state(c.meta.as_ref(), jid).await.unwrap(),
+        State::Active,
+        "not marked removed without its fence"
+    );
+    c.shutdown().await;
+}
+
+/// Confirmation review (Phase 3.11): adoption is conditional in the same
+/// transaction: never over an identity record, never for a quarantined
+/// node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adopt_if_unconfirmed_takes_only_the_unconfirmed_case() {
+    let c = cluster().await;
+    let n = c.nodes[0].id;
+    // Registration gave a record: refused.
+    assert!(
+        !node_lifecycle::adopt_if_unconfirmed(c.meta.as_ref(), n, [1; 16])
+            .await
+            .unwrap()
+    );
+    let clear = async |id: u64| {
+        arca_lake_metadata::transact(c.meta.as_ref(), id, |tx, id| {
+            Box::pin(async move {
+                tx.clear(&arca_lake_metadata::keys::node_identity(*id));
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    };
+    clear(n).await;
+    node_lifecycle::quarantine(c.meta.as_ref(), n, "test", now_ms())
+        .await
+        .unwrap();
+    assert!(
+        !node_lifecycle::adopt_if_unconfirmed(c.meta.as_ref(), n, [2; 16])
+            .await
+            .unwrap(),
+        "adopted for a quarantined node"
+    );
+    assert!(
+        node_lifecycle::identity(c.meta.as_ref(), n)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let m = c.nodes[1].id;
+    clear(m).await;
+    assert!(
+        node_lifecycle::adopt_if_unconfirmed(c.meta.as_ref(), m, [3; 16])
+            .await
+            .unwrap()
+    );
+    let rec = node_lifecycle::identity(c.meta.as_ref(), m)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rec.acknowledged && rec.token == [3; 16]);
     c.shutdown().await;
 }

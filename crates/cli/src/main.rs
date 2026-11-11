@@ -2962,9 +2962,15 @@ enum NodeCommand {
         /// Node id.
         #[arg(long)]
         node: u64,
+        /// The node does not answer and its disk will never be started
+        /// again unwiped.
+        #[arg(long)]
+        unreachable: bool,
         /// Confirm.
         #[arg(long)]
         yes: bool,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
     },
     /// Confirm that the identity the node holds is this cluster's (after
     /// metadata restored from before the node had one, nothing is pushed to
@@ -3143,13 +3149,37 @@ async fn node_command<S: arca_lake_metadata::KvStore>(
                 Err(e) => fail(e),
             }
         }
-        NodeCommand::KeepRemoved { node, yes } => {
+        NodeCommand::KeepRemoved {
+            node,
+            unreachable,
+            yes,
+            rpc,
+        } => {
             if !yes {
                 return fail("keep-removed takes the node out again; re-run with --yes");
             }
-            match node_lifecycle::keep_removed(meta, node, now).await {
-                Ok(()) => {
-                    println!("node {node} removed again; start the controllers now");
+            let clients = match admin_node_clients(&rpc) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            match arca_lake_controller::node_ops::keep_removed(
+                meta,
+                &clients,
+                node,
+                unreachable,
+                now,
+            )
+            .await
+            {
+                Ok(fenced) => {
+                    println!(
+                        "node {node} removed again{}; start the controllers now",
+                        if fenced {
+                            ", its delete fence closed and held"
+                        } else {
+                            " while unreachable: its disk must never be started again unwiped"
+                        }
+                    );
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(e),

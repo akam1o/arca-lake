@@ -770,3 +770,64 @@ async fn a_node_unregistered_after_the_backup_stays_removed() {
     );
     c.shutdown().await;
 }
+
+/// Confirmation review (Phase 3.11): the run stopped after recording
+/// `Clearing` but before the clear committed; meanwhile a node's identity
+/// changed (a fresh rejoin). The resume, finding the planned store still
+/// there, takes the identities again: the restored metadata gets the
+/// current one, not the one captured before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resume_before_the_clear_takes_the_identities_again() {
+    use arca_lake_metadata::ops::node_lifecycle;
+    let c = cluster().await;
+    put(&c, "kept", 13).await;
+    let ctl = leading(&c, "ctl-0").await;
+    wait_until(
+        "identities acknowledged",
+        Duration::from_secs(20),
+        async || {
+            let ids = node_lifecycle::identities(c.meta.as_ref()).await.unwrap();
+            c.nodes
+                .iter()
+                .all(|n| ids.get(&n.id).is_some_and(|i| i.acknowledged))
+        },
+    )
+    .await;
+    ctl.shutdown().await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    // A run up to the fence; then the journal as if it died after
+    // recording `Clearing`, with a stale identity captured.
+    backup.fail.store(1, Ordering::SeqCst);
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    let n = c.nodes[0].id;
+    let mut j = mr::Journal::load(&path).unwrap();
+    j.done.retain(|s| *s <= Step::Fenced);
+    j.done.push(Step::Clearing);
+    for (id, t) in &mut j.identities {
+        if *id == n {
+            *t = [0x5a; 16];
+        }
+    }
+    j.save(&path).unwrap();
+    // The planned store is back (the clear did not commit).
+    backup.restore("snapshot://test", 1).await.ok();
+    let current = node_lifecycle::identity(c.meta.as_ref(), n)
+        .await
+        .unwrap()
+        .unwrap()
+        .token;
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    let restored = node_lifecycle::identity(c.meta.as_ref(), n)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.token, current, "the stale identity was put back");
+    c.shutdown().await;
+}

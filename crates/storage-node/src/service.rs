@@ -803,10 +803,10 @@ impl StorageNode for StorageNodeService {
         self.check_delete_fence(req.protocol_version, req.delete_fence)?;
         self.check_epoch(key.group_id, req.group_epoch)?;
         // A delete for another node's identity never runs here (Phase 3.11,
-        // R-100): another disk at the address it was decided for.
-        // A node holding an identity takes only deletes carrying it
-        // (review: an unstamped one, from an earlier controller or any other
-        // client, could have been decided for another disk at this address).
+        // R-100): another disk at the address it was decided for. A node
+        // holding an identity takes only deletes carrying it (an unstamped
+        // one could have been decided for another disk at this address); a
+        // damaged identity file takes none.
         {
             let (held, damaged) = {
                 let id = self.identity.lock().unwrap_or_else(PoisonError::into_inner);
