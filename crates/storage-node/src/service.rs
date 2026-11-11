@@ -499,6 +499,14 @@ impl StorageNodeService {
             .is_some()
     }
 
+    /// The incarnation the operator hold is tied to (`None`: no hold).
+    pub fn delete_fence_hold_incarnation(&self) -> Option<[u8; 16]> {
+        self.cluster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .fence_hold
+    }
+
     /// The delete fence held: generation and whether open.
     #[must_use]
     pub fn delete_fence(&self) -> (u64, bool) {
@@ -1384,6 +1392,10 @@ impl StorageNode for StorageNodeService {
             delete_fence_generation: fence_generation,
             delete_fence_open: fence_open,
             delete_fence_hold: self.delete_fence_held(),
+            delete_fence_hold_incarnation: self
+                .delete_fence_hold_incarnation()
+                .map(|h| Bytes::copy_from_slice(&h))
+                .unwrap_or_default(),
             delete_fence_unknown_token: unknown_token,
             delete_fence_lease_ms: lease_ms,
             incarnation_seq: incarnation_seq_held,

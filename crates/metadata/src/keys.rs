@@ -294,6 +294,14 @@ pub fn repair_tasks_range() -> KeyRange {
     KeyRange::prefix(&pack(&(ROOT, "repair")))
 }
 
+/// A managed restore's marker in the store it is about to clear (Phase
+/// 3.11): the clear removes it and no backup holds it, so finding it with
+/// the journal's token means the clear did not commit.
+#[must_use]
+pub fn restore_marker() -> Key {
+    pack(&(ROOT, "restoreop"))
+}
+
 /// Where the repair scheduler's next scan of the queue starts (Phase
 /// 3.11, M4). Outside the queue's range.
 #[must_use]

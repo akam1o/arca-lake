@@ -171,7 +171,14 @@ at any step.
     It closes and holds the node's fence first, as `unregister` does,
     and refuses a node that does not answer unless `--unreachable`
     states that its disk will never be started again unwiped
-    (confirmation review: a removed node is trusted to be fenced);
+    (confirmation review: a removed node is trusted to be fenced).
+    `unregister` and `keep-removed` accept only a hold the current
+    incarnation cannot lift: tied to it, unknown, or set before the node
+    had an incarnation. A hold tied to an earlier incarnation (which an
+    open of the current one would lift) is released and set again at the
+    same generation, then read back (`HealthResponse.
+    delete_fence_hold_incarnation`, field 41, additive). Nodes of earlier
+    releases do not report it and are taken as before;
   - once a leader of this release gave the nodes identities, controllers
     of earlier releases (a failover to one during a rolling upgrade, or a
     rollback) have every delete refused, so GC and reconciliation stall

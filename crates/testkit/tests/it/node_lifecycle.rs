@@ -861,3 +861,101 @@ async fn adopt_if_unconfirmed_takes_only_the_unconfirmed_case() {
     assert!(rec.acknowledged && rec.token == [3; 16]);
     c.shutdown().await;
 }
+
+/// Confirmation re-review (Phase 3.11): a node holding its fence under an
+/// earlier incarnation, which an open of the current one would lift.
+/// `keep-removed` (and `unregister`, the same step) re-ties the hold to
+/// the current incarnation; an open of it at a higher generation is then
+/// refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removal_re_ties_an_earlier_incarnations_hold() {
+    use arca_lake_protocol::client::FencePush;
+    let c = cluster().await;
+    put_objects(&c, 1).await;
+    let ctl = leader(&c).await;
+    identities_acknowledged(&c).await;
+    ctl.shutdown().await;
+    let n = &c.nodes[0];
+    let addr = n.addr.to_string();
+    let old = compat::cluster_state(c.meta.as_ref())
+        .await
+        .unwrap()
+        .unwrap()
+        .incarnation;
+    // Held under the old incarnation.
+    let h = c.clients.health(&addr).await.unwrap();
+    c.clients
+        .push_delete_fence_with(
+            &addr,
+            h.delete_fence_generation.max(1),
+            false,
+            FencePush {
+                hold: true,
+                incarnation: Some(old),
+                ..FencePush::default()
+            },
+        )
+        .await
+        .unwrap();
+    // A new incarnation, adopted by the node (as recovery pushes it).
+    let marked = compat::mark_restoring_above(c.meta.as_ref(), None, None, "t", now_ms(), 0)
+        .await
+        .unwrap();
+    let gate = compat::gate(c.meta.as_ref()).await.unwrap();
+    c.clients
+        .health_with(
+            &addr,
+            arca_lake_protocol::storage::v1::HealthRequest {
+                format_write: gate.format_write.unwrap_or(0),
+                incarnation: Bytes::copy_from_slice(&marked.incarnation),
+                incarnation_changed_ms: marked.changed_ms,
+                incarnation_seq: gate.incarnation_seq,
+                schema_floor: gate.schema.unwrap_or(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let h = c.clients.health(&addr).await.unwrap();
+    assert_eq!(
+        h.incarnation.as_ref(),
+        marked.incarnation.as_slice(),
+        "adopted"
+    );
+    assert_eq!(
+        h.delete_fence_hold_incarnation.as_ref(),
+        old.as_slice(),
+        "set-up: the hold is the old incarnation's"
+    );
+    let fenced = node_ops::keep_removed(c.meta.as_ref(), &c.clients, n.id, false, now_ms())
+        .await
+        .unwrap();
+    assert!(fenced);
+    let h = c.clients.health(&addr).await.unwrap();
+    assert!(!h.delete_fence_open && h.delete_fence_hold, "{h:?}");
+    assert_eq!(
+        h.delete_fence_hold_incarnation.as_ref(),
+        marked.incarnation.as_slice(),
+        "the hold was not re-tied to the current incarnation"
+    );
+    // A delayed open of the current incarnation, a generation above: refused.
+    let cur = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
+    cur.set_incarnation(Some(marked.incarnation));
+    let _ = cur
+        .push_delete_fence_with(
+            &addr,
+            h.delete_fence_generation + 1,
+            true,
+            FencePush {
+                incarnation: Some(marked.incarnation),
+                ..FencePush::default()
+            },
+        )
+        .await;
+    let after = c.clients.health(&addr).await.unwrap();
+    assert!(
+        !after.delete_fence_open && after.delete_fence_hold,
+        "the removed node was opened: {after:?}"
+    );
+    c.shutdown().await;
+}

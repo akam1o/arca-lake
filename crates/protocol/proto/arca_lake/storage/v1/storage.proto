@@ -381,6 +381,12 @@ message HealthResponse {
   uint64 identity_node_id = 38;
   bytes identity_token = 39;
   bool identity_mismatch = 40;
+  // The incarnation the operator hold is tied to (Phase 3.11): only a
+  // caller of a later incarnation the node adopted lifts it. 16 bytes of
+  // 0xff: unknown (facts lost; only a release lifts it); zeros: set
+  // before the node had an incarnation; empty: no hold, or an earlier
+  // release that does not report it.
+  bytes delete_fence_hold_incarnation = 41;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").

@@ -590,9 +590,21 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
         // rejoined with a fresh identity since the plan).
         // On a resume too, while the planned store is still there (the
         // clear did not commit; confirmation review).
-        let still_planned = compat::cluster_state(meta_ref)
+        // The marker written below, still there with this journal's token:
+        // the clear did not commit (incarnation equality does not tell the
+        // planned store from a restored copy of it; re-review).
+        let still_planned = {
+            let token = j.token.clone();
+            arca_lake_metadata::transact(meta_ref, token, |tx, token| {
+                Box::pin(async move {
+                    Ok(tx
+                        .get(&arca_lake_metadata::keys::restore_marker())
+                        .await?
+                        .is_some_and(|v| v == token.as_bytes()))
+                })
+            })
             .await?
-            .is_some_and(|c| compat::hex(&c.incarnation) == j.incarnation);
+        };
         if !j.has(Step::Clearing) || still_planned {
             j.identities = node_lifecycle::identities(meta_ref)
                 .await?
@@ -608,6 +620,19 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 .map(|n| (n.id, n.address))
                 .collect();
             j.removed = j.removed_at.iter().map(|(id, _)| *id).collect();
+        }
+        if !j.has(Step::Clearing) {
+            let token = j.token.clone();
+            arca_lake_metadata::transact(meta_ref, token, |tx, token| {
+                Box::pin(async move {
+                    tx.set(
+                        &arca_lake_metadata::keys::restore_marker(),
+                        token.as_bytes(),
+                    );
+                    Ok(())
+                })
+            })
+            .await?;
         }
         j.record(path, Step::Clearing)?;
         arca_lake_metadata::transact(meta_ref, (), |tx, ()| {

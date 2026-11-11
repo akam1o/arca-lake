@@ -814,8 +814,18 @@ async fn a_resume_before_the_clear_takes_the_identities_again() {
         }
     }
     j.save(&path).unwrap();
-    // The planned store is back (the clear did not commit).
+    // The planned store is back (the clear did not commit): it still
+    // holds the marker written right before the clear.
     backup.restore("snapshot://test", 1).await.ok();
+    let token = p.journal.token.clone();
+    transact(c.meta.as_ref(), token, |tx, token| {
+        Box::pin(async move {
+            tx.set(&keys::restore_marker(), token.as_bytes());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
     let current = node_lifecycle::identity(c.meta.as_ref(), n)
         .await
         .unwrap()
@@ -829,5 +839,59 @@ async fn a_resume_before_the_clear_takes_the_identities_again() {
         .unwrap()
         .unwrap();
     assert_eq!(restored.token, current, "the stale identity was put back");
+    c.shutdown().await;
+}
+
+/// Confirmation re-review (Phase 3.11): the clear and the restore committed
+/// and the run died before recording them; the restored copy has the
+/// planned incarnation but no marker: the resume keeps the snapshot taken
+/// before the clear (not the backup's older identities).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restored_copy_with_the_planned_incarnation_is_not_taken_for_the_planned_store() {
+    use arca_lake_metadata::ops::node_lifecycle;
+    let c = cluster().await;
+    put(&c, "kept", 14).await;
+    // The backup: identities given at registration, not acknowledged yet.
+    let backup = Snapshot::take(&c.meta).await;
+    let ctl = leading(&c, "ctl-0").await;
+    wait_until(
+        "identities acknowledged",
+        Duration::from_secs(20),
+        async || {
+            let ids = node_lifecycle::identities(c.meta.as_ref()).await.unwrap();
+            c.nodes
+                .iter()
+                .all(|n| ids.get(&n.id).is_some_and(|i| i.acknowledged))
+        },
+    )
+    .await;
+    ctl.shutdown().await;
+    let before = node_lifecycle::identities(c.meta.as_ref()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    backup.fail.store(1, Ordering::SeqCst);
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    // Restored, but the journal says `Clearing` (died before recording).
+    backup.restore("snapshot://test", 1).await.unwrap();
+    let mut j = mr::Journal::load(&path).unwrap();
+    j.done.retain(|s| *s <= Step::Clearing);
+    j.save(&path).unwrap();
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    for n in &c.nodes {
+        assert_eq!(
+            node_lifecycle::identity(c.meta.as_ref(), n.id)
+                .await
+                .unwrap()
+                .map(|i| (i.token, i.acknowledged)),
+            before.get(&n.id).map(|i| (i.token, i.acknowledged)),
+            "node {}: the snapshot from before the clear was replaced",
+            n.id
+        );
+    }
     c.shutdown().await;
 }

@@ -68,6 +68,13 @@ pub async fn unregister<S: KvStore>(
 /// Close the node's delete fence with an operator hold on the node itself
 /// (`true`), or, with `unreachable_ok`, accept that it does not answer
 /// (`false`: the operator states its disk never serves again unwiped).
+///
+/// The hold must be one the cluster's current incarnation cannot lift
+/// (confirmation review): tied to it, unknown (facts lost), or set before
+/// the node had an incarnation. A hold tied to an earlier incarnation,
+/// which an open of the current one would lift, is released and set again
+/// at the same generation; the node is read back, and anything that
+/// opened it meanwhile stops the procedure.
 async fn fence_and_hold<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -77,35 +84,11 @@ async fn fence_and_hold<S: KvStore>(
     let node_id = node.id;
     let incarnation = compat::cluster_state(meta).await?.map(|c| c.incarnation);
     clients.note_node_id(&node.address, node.id);
-    let fenced = match clients.health(&node.address).await {
-        Ok(h) => clients
-            .push_delete_fence_with(
-                &node.address,
-                h.delete_fence_generation.max(1),
-                false,
-                FencePush {
-                    hold: true,
-                    incarnation,
-                    ..FencePush::default()
-                },
-            )
-            .await
-            .map_err(|status| ControlError::Node {
-                addr: node.address.clone(),
-                status,
-            })
-            .and_then(|(_, open, hold)| {
-                if !open && hold {
-                    Ok(true)
-                } else {
-                    Err(ControlError::Other(format!(
-                        "node {node_id} did not take the closed, held fence (open {open}, hold {hold}): not removed"
-                    )))
-                }
-            })?,
+    let h = match clients.health(&node.address).await {
+        Ok(h) => h,
         Err(e) if unreachable_ok => {
             tracing::warn!(node = node_id, error = %e, "removing an unreachable node: its disk must not be started again unwiped");
-            false
+            return Ok(false);
         }
         Err(e) => {
             return Err(ControlError::Other(format!(
@@ -114,7 +97,64 @@ async fn fence_and_hold<S: KvStore>(
             )));
         }
     };
-    Ok(fenced)
+    let node_err = |status| ControlError::Node {
+        addr: node.address.clone(),
+        status,
+    };
+    let generation = h.delete_fence_generation.max(1);
+    let close = FencePush {
+        hold: true,
+        incarnation,
+        ..FencePush::default()
+    };
+    clients
+        .push_delete_fence_with(&node.address, generation, false, close)
+        .await
+        .map_err(node_err)?;
+    for attempt in 0..2 {
+        let h = clients.health(&node.address).await.map_err(node_err)?;
+        let tied = h.delete_fence_hold_incarnation.as_ref();
+        let unliftable = tied.is_empty()
+            || incarnation.is_none_or(|i| tied == i.as_slice())
+            || tied == [0xff; 16].as_slice()
+            || tied == [0u8; 16].as_slice();
+        if h.delete_fence_open || !h.delete_fence_hold {
+            return Err(ControlError::Other(format!(
+                "node {node_id} did not keep the closed, held fence (open {}, hold {}): not removed",
+                h.delete_fence_open, h.delete_fence_hold
+            )));
+        }
+        if unliftable {
+            return Ok(true);
+        }
+        if attempt == 1 {
+            break;
+        }
+        // An earlier incarnation's hold: released and set again at the
+        // node's generation (a release never opens; an open needs a higher
+        // generation, which the read-back would see).
+        let g = h.delete_fence_generation;
+        clients
+            .push_delete_fence_with(
+                &node.address,
+                g,
+                false,
+                FencePush {
+                    release: true,
+                    incarnation,
+                    ..FencePush::default()
+                },
+            )
+            .await
+            .map_err(node_err)?;
+        clients
+            .push_delete_fence_with(&node.address, g, false, close)
+            .await
+            .map_err(node_err)?;
+    }
+    Err(ControlError::Other(format!(
+        "node {node_id} holds its fence under an earlier incarnation and did not take this one's: not removed"
+    )))
 }
 
 /// `admin node keep-removed` (Phase 3.11): after a manual restore of
