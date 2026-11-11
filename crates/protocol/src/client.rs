@@ -523,6 +523,9 @@ pub struct FencePush {
     pub release_token: u64,
     /// With an open generation: who opened it (Phase 3.10; 0 = unknown).
     pub opener: u64,
+    /// The node's identity, carried: a disk holding another adopts
+    /// nothing (Phase 3.11; `None`: not carried).
+    pub identity: Option<(u64, [u8; 16])>,
 }
 
 impl std::fmt::Debug for NodeClients {
@@ -1716,10 +1719,20 @@ impl NodeClients {
                         .incarnation
                         .map(|i| Bytes::copy_from_slice(&i))
                         .unwrap_or_default(),
+                    node_id: how.identity.map_or(0, |i| i.0),
+                    node_identity: how
+                        .identity
+                        .map(|i| Bytes::copy_from_slice(&i.1))
+                        .unwrap_or_default(),
                     ..Default::default()
                 },
             )
             .await?;
+        if h.identity_mismatch {
+            return Err(tonic::Status::failed_precondition(
+                "identity rejected: the disk at this address holds another identity; nothing adopted",
+            ));
+        }
         Ok((
             h.delete_fence_generation,
             h.delete_fence_open,

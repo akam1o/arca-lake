@@ -520,6 +520,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                         incarnation,
                         release_token: 0,
                         opener,
+                        identity: None,
                     },
                 )
                 .await;

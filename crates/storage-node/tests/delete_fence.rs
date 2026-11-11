@@ -815,6 +815,7 @@ async fn only_a_later_incarnation_or_a_release_lifts_the_hold() {
                     incarnation: Some([inc; 16]),
                     release_token: 0,
                     opener: 0,
+                    identity: None,
                 },
             )
             .await

@@ -71,16 +71,23 @@ async fn verified_identity<S: KvStore>(
     meta: &S,
     node_id: u64,
     h: &arca_lake_protocol::storage::v1::HealthResponse,
-) -> Result<Option<node_lifecycle::NodeIdentityRecord>, ControlError> {
+) -> Result<Result<Option<node_lifecycle::NodeIdentityRecord>, String>, ControlError> {
     // What answers must be this node's disk before anything is pushed
     // (re-review: another cluster's node at the address would have its own
     // hold released and re-tied to this cluster). Not verifiable (no
     // record, or one never acknowledged that the node does not hold):
     // refused; a node that does not answer as this one is stopped for good
     // and removed with `--unreachable`.
+    // An earlier release reports neither identity nor its hold's
+    // incarnation: refused before anything is pushed (re-review).
+    if !h.identity_supported {
+        return Ok(Err(format!(
+            "node {node_id} runs an earlier release (no identity, no hold incarnation): upgrade it, or stop it for good and re-run with --unreachable"
+        )));
+    }
     let rec = node_lifecycle::identity(meta, node_id).await?;
     let held = <[u8; 16]>::try_from(h.identity_token.as_ref()).ok();
-    if h.identity_supported {
+    {
         let ours = match &rec {
             Some(r) if r.acknowledged => h.identity_node_id == node_id && held == Some(r.token),
             Some(r) => {
@@ -89,13 +96,13 @@ async fn verified_identity<S: KvStore>(
             None => h.identity_node_id == 0,
         };
         if !ours {
-            return Err(ControlError::Other(format!(
+            return Ok(Err(format!(
                 "the disk at node {node_id}'s address is not verifiably this node's (it holds the identity of node {}): nothing pushed; if this node's own disk will never be started again unwiped, re-run with --unreachable",
                 h.identity_node_id
             )));
         }
     }
-    Ok(rec.filter(|r| r.acknowledged))
+    Ok(Ok(rec.filter(|r| r.acknowledged)))
 }
 
 /// Close the node's delete fence with an operator hold on the node itself
@@ -109,6 +116,7 @@ async fn verified_identity<S: KvStore>(
 /// the same generation; the node is read back, and anything that opened
 /// it meanwhile stops the procedure. A node that does not report its
 /// hold's incarnation (an earlier release) is refused.
+#[allow(clippy::too_many_lines)]
 async fn fence_and_hold<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -135,7 +143,21 @@ async fn fence_and_hold<S: KvStore>(
         addr: node.address.clone(),
         status,
     };
-    let identity = verified_identity(meta, node_id, &h).await?;
+    // Not verifiably the node's disk: nothing is pushed to it; with
+    // `--unreachable` the operator states the node's own disk is gone for
+    // good (re-review: the override also applies to an answering disk).
+    let identity = match verified_identity(meta, node_id, &h).await? {
+        Ok(i) => i,
+        Err(why) if unreachable_ok => {
+            tracing::warn!(node = node_id, %why, "removing a node whose address answers with another disk: nothing pushed to it");
+            return Ok(false);
+        }
+        Err(why) => return Err(ControlError::Other(why)),
+    };
+    // Every push and the read-back carry the identity (re-review: a disk
+    // swapped in at the address meanwhile adopts nothing and is refused).
+    let stamp = identity.as_ref().map(|r| (node_id, r.token));
+    let reported = (h.identity_node_id, h.identity_token.clone());
     // The node first takes the cluster's incarnation (with its sequence,
     // as recovery pushes it, and the node's identity: a disk holding
     // another adopts nothing), so that the hold is tied to it.
@@ -164,6 +186,7 @@ async fn fence_and_hold<S: KvStore>(
     let close = FencePush {
         hold: true,
         incarnation,
+        identity: stamp,
         ..FencePush::default()
     };
     clients
@@ -172,6 +195,13 @@ async fn fence_and_hold<S: KvStore>(
         .map_err(node_err)?;
     for attempt in 0..2 {
         let h = clients.health(&node.address).await.map_err(node_err)?;
+        // Still the disk verified at the start.
+        if (h.identity_node_id, h.identity_token.clone()) != reported {
+            return Err(ControlError::Other(format!(
+                "the disk at node {node_id}'s address changed during the removal (it now holds the identity of node {}): not removed",
+                h.identity_node_id
+            )));
+        }
         let tied = h.delete_fence_hold_incarnation.as_ref();
         if h.delete_fence_open || !h.delete_fence_hold {
             return Err(ControlError::Other(format!(
@@ -210,6 +240,7 @@ async fn fence_and_hold<S: KvStore>(
                 FencePush {
                     release: true,
                     incarnation,
+                    identity: stamp,
                     ..FencePush::default()
                 },
             )

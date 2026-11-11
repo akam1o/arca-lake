@@ -176,7 +176,13 @@ at any step.
     verifiably the node's disk: it holds the identity this cluster
     acknowledged for it, or none where none was acknowledged. Otherwise
     nothing is pushed, so another cluster's node keeps its own hold and
-    facts, and the node is removed only with `--unreachable`.
+    facts, and the node is removed only with `--unreachable` (the
+    operator's statement that its own disk is gone for good; nothing is
+    pushed to the disk that answers). Every push of the removal (facts,
+    close, release) carries the acknowledged identity, so a disk swapped in
+    at the address meanwhile adopts nothing and the push is refused, and
+    the read-back requires the identity verified at the start. A node of
+    an earlier release is refused before anything is pushed.
     `unregister` and `keep-removed` then push the cluster's incarnation
     (with its sequence) to the node, then accept only a hold the current
     incarnation cannot lift: unknown, or tied to the current incarnation
