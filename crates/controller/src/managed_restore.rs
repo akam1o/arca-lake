@@ -783,7 +783,9 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
         // fence closed at the recorded generation or above, on its own disk
         // (by the identities captured before the clear); otherwise nothing
         // is cleared.
-        if !planned_here {
+        // Also after `Cleared` whatever the marker: a restored copy can
+        // carry this attempt's marker (exhaustive review).
+        if !planned_here || j.has(Step::Cleared) {
             let ids: std::collections::HashMap<u64, [u8; 16]> =
                 j.identities.iter().copied().collect();
             if let Err(why) = verify_held_as(clients, &j.nodes, &ids, j.closed_generation).await {

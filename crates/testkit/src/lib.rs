@@ -540,7 +540,30 @@ impl<S: KvStore + 'static> TestCluster<S> {
             .await
             .unwrap();
         self.push_delete_fence(&rec).await;
+        self.acknowledge_held_identities().await;
         self.stamp_identities().await;
+    }
+
+    /// As a leader's health pass does: a record not acknowledged yet whose
+    /// token the node reports holding is acknowledged (metadata restored
+    /// from before the acknowledgement, Phase 3.11). Nothing is adopted.
+    pub async fn acknowledge_held_identities(&self) {
+        use arca_lake_metadata::ops::node_lifecycle;
+        let Ok(ids) = node_lifecycle::identities(self.meta.as_ref()).await else {
+            return;
+        };
+        for n in self.nodes.iter().filter(|n| n.handle.is_some()) {
+            let Some(rec) = ids.get(&n.id).filter(|r| !r.acknowledged) else {
+                continue;
+            };
+            let Ok(h) = self.clients.health(&n.addr.to_string()).await else {
+                continue;
+            };
+            if h.identity_node_id == n.id && h.identity_token.as_ref() == rec.token.as_slice() {
+                let _ =
+                    node_lifecycle::acknowledge_identity(self.meta.as_ref(), n.id, rec.token).await;
+            }
+        }
     }
 
     /// Every running node adopts its identity and it is recorded
