@@ -206,6 +206,14 @@ ADR-0024):
   `cluster.floors` marks that it has existed: a missing or damaged
   floors file then fails closed (fence held, strictest schema floor).
 
+### 5.9 Node identity file (Phase 3.11)
+
+Next to the segments, a node keeps `node-identity.txt`: its node id and
+the random token the cluster gave it, with a CRC. It is not part of the
+segment format (format 2 is unchanged) and earlier releases neither read
+nor rewrite it. A damaged file is never replaced by an adoption: the node
+refuses every delete until an operator removes it (ADR-0027).
+
 ## 6. Alternatives considered
 
 | Alternative | Why not |

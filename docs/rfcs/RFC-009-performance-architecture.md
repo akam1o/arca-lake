@@ -1082,6 +1082,14 @@ larger than the differences: no regression attributable to the code
 (R-48). The P2 optimizations were not attempted (a High residual
 remains, see the Phase 3.10 report).
 
+### 6.25 Phase 3.11: rebalancing A/B against 3.9 and 3.10
+
+Phase 3.11 adds nothing to PUT or GET; `DeleteShard` carries the node's
+identity (two additive fields) and the node compares it under the lock
+it already takes. The rebalancing A/B (off, 3.9, 3.10, 3.11; two rounds,
+the second in reverse order; hosts A+B) and its results are in
+`docs/verification/phase-3.11-restore-safety.md`.
+
 ## 7. Interpretation
 
 *Verified on this environment* (one run each; see §4 for the error

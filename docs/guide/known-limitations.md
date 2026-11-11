@@ -22,6 +22,9 @@ The full register is [risks.md](../architecture/risks.md).
 | Capacity rebalancing between the groups of a tier (`--rebalance`) | Experimental: verified by in-process tests (concurrent reads, writes, deletes and GC; crash and leader-change resume; repair first; target reserve); off by default; not run on the validation hosts under load |
 | Shared file system detection | Experimental; overlay, FUSE and network file systems cannot be checked: nodes on them need `--capacity-bytes` allotments (else refused like shared ones), and their sum is then the operator's responsibility |
 | Rolling upgrades, cluster recovery, backup verification | Verified within one compatibility window (RFC-014, RFC-015) |
+| Managed metadata restore (`admin restore`) | Verified in process and on real FoundationDB with `fdbrestore` (Phase 3.11), under its stated conditions (ADR-0026) |
+| Restores done outside `admin restore` | **Not safe**: deletes decided before the restore can still apply (R-94(b), High); the trip wire (ADR-0025) and the rejoin lease only narrow it |
+| Node lifecycle and identity (`admin node ...`) | Verified by in-process tests (Phase 3.11, ADR-0027) |
 | mTLS for node RPCs, FoundationDB TLS, SigV4, bucket policy subset | Verified |
 
 ## Not verified

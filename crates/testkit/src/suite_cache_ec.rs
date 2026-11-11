@@ -357,7 +357,9 @@ pub async fn population_with_a_member_down_records_nothing<S: KvStore + 'static>
     c.stop_node(lost).await;
     let (got, _) = s3::get(&c.backend, BUCKET, "o").await.unwrap();
     assert_eq!(got, data);
-    wait_until("population failures", Duration::from_secs(10), async || {
+    // Background population attempts against the stopped member: a loaded
+    // runner has taken over 10 s (CI); 24/24 under eight-way load on a host.
+    wait_until("population failures", Duration::from_secs(30), async || {
         c.backend.cache_stats().population_failures >= 2
     })
     .await;

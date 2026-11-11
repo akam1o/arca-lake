@@ -879,6 +879,27 @@ From the background-operations audit (`docs/verification/phase-3.10-recovery.md`
   no durable group being repaired; rebalancing also yields to tiering
   and to a GC backlog above `--rebalance-gc-backlog-pause-mib`.
 
+### 8.11 Phase 3.11: restore trip wire, epoch intents, queue paging
+
+- **Trip wire (ADR-0025).** A running leader that observes its store
+  replaced or locked (a missing leader record or cluster state,
+  `database_locked`) latches its deletes off, closes the generation above
+  the one in use on the nodes and ends its term; a store watch checks
+  every 250 ms. It limits damage once a restore is observed; it does not
+  make an unmanaged restore safe (R-94(b)).
+- **Deletes bound to the node's disk (ADR-0027).** Every delete carries
+  the identity the node acknowledged; reconciliation, fence closes and
+  floors skip removed and quarantined nodes.
+- **Epoch change intents (M2).** A member move records its intent
+  before raising node epochs; any leader resumes it or settles the
+  epoch (membership unchanged), so nodes are never left ahead of the
+  metadata; a stuck intent holds only its own group.
+- **Planned moves keep the client reserve (M3).** Their writes use the
+  `Migration` class; failure repairs keep the repair floor.
+- **Repair queue paging (M4).** At most 512 entries per transaction, a
+  scan window from a persisted, wrapping cursor; priority applies within
+  the window.
+
 ## 9. Alternatives considered
 
 | Alternative | Why not |

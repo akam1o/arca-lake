@@ -10,7 +10,22 @@ that the shards it names exist (RFC-015).
 2. Verify backups continuously: `admin backup verify-restored` and
    `admin backup key-range`, or `deploy/backup/verify-backup.sh`, which
    exports metrics (`arca_backup_*`) for the alert rules.
-3. Restore: first `admin delete-fence close --reason restore --yes`
+3. Restore with `admin restore` (Phase 3.11, the supported procedure):
+   `plan` checks the cluster and every node and prints the target
+   cluster, the source and the destination with a confirmation token;
+   `run --confirm TOKEN` freezes the cluster, closes and holds the delete
+   fence on every node (each verified on its own disk), clears the
+   destination, runs `fdbrestore`, marks the restored metadata and
+   verifies it; `finish` finalizes and waits for a new fence generation
+   on every node. Every step is recorded in a local journal: re-run
+   `run` or `finish` after any failure. The guarantee covers restores
+   done this way only, under its stated conditions (no controller or
+   gateway running, nobody changing node fences by hand meanwhile, one
+   restore at a time; ADR-0026). A restore done any other way (a direct
+   `fdbrestore`, a DR switch, a snapshot rollback) is open risk R-94(b)
+   (High).
+4. When the current metadata is gone (`admin restore` then refuses to
+   plan), the manual runbook: first `admin delete-fence close --reason restore --yes`
    (every storage node stops applying deletes decided on the current
    metadata; ADR-0023), then stop gateways and controllers,
    `fdbrestore` into an empty database, then follow `admin recovery`

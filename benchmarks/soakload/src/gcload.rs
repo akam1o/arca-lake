@@ -10,7 +10,9 @@
 //! by two-part multipart uploads: a root and two parts retired each).
 //! `--get-pct` adds GETs (cache population and eviction on a cluster with
 //! a cache tier). `drain` deletes every object of the bucket under
-//! `--prefix` and exits (capacity tests: give the space back). One JSON line per step: target and achieved rate,
+//! `--prefix` and exits (capacity tests: give the space back); `verify`
+//! reads back every object listed under `--prefix` (`--size` bytes) and
+//! exits. One JSON line per step: target and achieved rate,
 //! errors (those answered `SlowDown`, the capacity admission's refusal,
 //! counted apart), write and read p50/p95/p99. `--verify` reads every key
 //! whose write was acknowledged after the last step and checks its bytes
@@ -47,7 +49,7 @@ struct Args {
     secret_key: String,
     #[arg(long, default_value = "gcload")]
     bucket: String,
-    #[arg(long, value_parser = ["put-only", "overwrite", "put-delete", "versioned", "multipart", "drain"])]
+    #[arg(long, value_parser = ["put-only", "overwrite", "put-delete", "versioned", "multipart", "drain", "verify"])]
     mode: String,
     /// Working set of keys.
     #[arg(long, default_value_t = 2000)]
@@ -239,6 +241,35 @@ async fn main() {
             .send()
             .await
             .expect("enable versioning");
+    }
+    if a.mode == "verify" {
+        let mut keys = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let page = c
+                .list_objects_v2()
+                .bucket(&a.bucket)
+                .prefix(&a.prefix)
+                .set_continuation_token(token.clone())
+                .send()
+                .await
+                .expect("list");
+            keys.extend(
+                page.contents()
+                    .iter()
+                    .filter_map(|o| o.key().map(str::to_string)),
+            );
+            token = page.next_continuation_token().map(str::to_string);
+            if token.is_none() {
+                break;
+            }
+        }
+        let (checked, missing, wrong) = verify(&c, &a, &keys).await;
+        println!(
+            "{}",
+            serde_json::json!({"mode": "verify", "listed": keys.len(), "verify": {"checked": checked, "missing": missing, "wrong": wrong}})
+        );
+        std::process::exit(i32::from(missing + wrong > 0));
     }
     if a.mode == "drain" {
         let (mut deleted, mut failed) = (0u64, 0u64);

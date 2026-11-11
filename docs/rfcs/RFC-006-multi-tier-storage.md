@@ -360,6 +360,12 @@ in Phase 3.10) moves chunks through the same migration path. Since Phase
   in-flight writes) after it, and none needs compaction first. Otherwise
   the pass stops (`arca_controller_rebalance_capacity_stops_total`).
 
+Phase 3.11 (M3): a planned member move (a drain, a replacement request,
+a move whose former member still answers) checks the target's room above
+its client reserve and writes with the `Migration` class, as tiering and
+rebalancing do; only a failure repair may use the space down to the
+repair floor.
+
 ### 5.9 Cache protection (Phase 2.1)
 
 A cache tier chooses one *protection mode* for its groups. The mode is

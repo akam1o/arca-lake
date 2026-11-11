@@ -267,6 +267,16 @@ do_fault() { # index
         fault "controller-restart (standby) $o"; stop "$o" TERM; wait_s 10; start_controller "$o" ;;
   esac
 }
+# One fault of the schedule by its index (Phase 3.11, capacity-tests.sh
+# E): the same fault, then anything left down restarted.
+cmd_fault() { # index
+  set +e +o pipefail
+  do_fault "${1:?fault index}" || fault "fault $1 failed"
+  for n in $NODES; do pid_ok "$n" || { fault "restart-missing $n"; start_node "$n"; }; done
+  for g in gw-a gw-b; do pid_ok "$g" || { fault "restart-missing $g"; start_gateway "$g"; }; done
+  for c in ctl-a ctl-b; do pid_ok "$c" || { fault "restart-missing $c"; start_controller "$c"; }; done
+}
+
 cmd__faults() {
   # One fault failing (e.g. no leader at that moment) is logged, not fatal.
   set +e +o pipefail
@@ -386,13 +396,14 @@ cmd__shutdown_test() {
   log "shutdown test: $(grep -c 'rc=0 ' "$out") clean of $(wc -l < "$out")"
 }
 
-cmd="${1:?setup|start|status|finish|teardown}"
+cmd="${1:?setup|start|status|finish|teardown|fault N}"
 case "$cmd" in
   setup) cmd_setup ;;
   start) cmd_start ;;
   status) cmd_status ;;
   finish) cmd_finish ;;
   teardown) cmd_teardown ;;
+  fault) cmd_fault "${2:-}" ;;
   _sampler) cmd__sampler ;;
   _faults) cmd__faults ;;
   _shutdown_test) cmd__shutdown_test ;;

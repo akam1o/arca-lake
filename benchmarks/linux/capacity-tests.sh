@@ -19,6 +19,13 @@
 #   D  Failure injection: the soak workload (acknowledged-write ledger) with
 #      soak24.sh's fault schedule every FAULT_GAP_SECS on capacity-capped
 #      nodes, then soak24.sh's final checks.
+#   E  Capacity state x failover with real processes (Phase 3.11): durable
+#      nodes capped at E_CAP_BYTES are filled until the leader publishes
+#      write_rejected or recovery_only; then a leader kill, a gateway kill
+#      and a node restart (soak24.sh fault 2, 1, 0), each followed by a
+#      verified read of every acknowledged object and a probe write; the
+#      state after each fault must not be less strict than before it;
+#      then the data is deleted and writes must come back on their own.
 #
 #   RUN=~/arca-p36 OUT=~/arca-p36-out NODE_DATA_DIR=/data/p36 capacity-tests.sh A B C D
 #
@@ -198,6 +205,49 @@ test_D() {
   grep -h '"violation":' "$RUN/logs/soakload.log" > "$d/violations.log" 2>/dev/null
   grep -h '"t_s"' "$RUN/logs/soakload.log" | tail -n 3 > "$d/soakload-last.jsonl" 2>/dev/null
   NODE_EXTRA_ARGS="--capacity-bytes $CAP" end "$d"
+}
+
+# The leader's published admission state (0 normal .. 4 recovery_only).
+state() { leader_metrics | metric arca_controller_backpressure_state; }
+
+test_E() {
+  local d="$OUT/E"; mkdir -p "$d"
+  local ecap="${E_CAP_BYTES:-$((1536 << 20))}"
+  NODE_EXTRA_ARGS="--capacity-bytes $ecap" begin "$d" || return
+  say "E: fill until write_rejected"
+  local t0; t0="$(date +%s)"
+  gcload --bucket gce --prefix fill/ --mode put-only --size $((1 << 20)) --workers 16 \
+    --rates 20,20,20,20,20,20 --step-secs 60 --get-pct 10 --verify > "$d/fill.jsonl" 2> "$d/fill.err" &
+  local fill=$!
+  while :; do
+    local s; s="$(state)"
+    [ "${s:-0}" -ge 3 ] && break
+    [ $(( $(date +%s) - t0 )) -ge 900 ] && break
+    sleep 10
+  done
+  wait "$fill"
+  say "E: fill verify exit $? state $(state)"
+  for k in 2 1 0; do
+    local before; before="$(state)"
+    say "E: fault $k (state before ${before:-none})"
+    bash "$SOAK" fault "$k" >> "$d/faults.log" 2>&1
+    sleep 60
+    local after; after="$(state)"
+    echo "{\"fault\":$k,\"before\":${before:-null},\"after\":${after:-null}}" >> "$d/fault-states.jsonl"
+    gcload --bucket gce --prefix fill/ --mode verify --size $((1 << 20)) > "$d/verify-$k.jsonl" 2> "$d/verify-$k.err"
+    say "E: after fault $k state ${after:-none}, read-back exit $?"
+    gcload --bucket gce --prefix probe$k/ --mode put-only --size $((1 << 20)) --workers 2 \
+      --rates 2 --step-secs 20 > "$d/probe-$k.jsonl" 2> "$d/probe-$k.err"
+  done
+  say "E: drain"
+  gcload --bucket gce --prefix fill/ --mode drain > "$d/drain.jsonl" 2> "$d/drain.err"
+  drain_wait "$d" 900
+  say "E: recovery"
+  gcload --bucket gce --prefix again/ --mode put-only --size $((1 << 20)) --workers 8 \
+    --rates 5,5,5,5,5 --step-secs 120 --verify > "$d/recovery.jsonl" 2> "$d/recovery.err"
+  say "E: recovery verify exit $? state $(state)"
+  cp "$RUN/faults.log" "$d/soak-faults.log" 2>/dev/null
+  end "$d"
 }
 
 mkdir -p "$OUT"

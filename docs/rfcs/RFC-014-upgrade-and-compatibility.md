@@ -211,6 +211,15 @@ bumped build.
    conformance smoke test passes.
 6. Finalize (§5.5) when satisfied; this is the downgrade cut-off.
 
+Phase 3.11 (ADR-0027): upgrade **every controller** before a leader of
+3.11 runs. A 3.11 leader gives the nodes identities, after which nodes
+refuse deletes that carry none, which is what earlier controllers send:
+a failover to an earlier controller, or a rollback of the controllers,
+stalls GC and reconciliation (no data at risk; used space grows). The
+new protocol fields are additive (`HealthRequest` 12–14,
+`HealthResponse` 37–41, `DeleteShardRequest` 8–9); schema, protocol and
+segment format versions are unchanged.
+
 Why this order: nodes must understand the newest protocol before any
 client speaks it (clients negotiate down, nodes cannot negotiate up);
 the controller must be newest before a migration runs; gateways last so

@@ -362,6 +362,40 @@ unresolved findings) and the alerts `ArcaBackupVerificationFailed` and
 `ArcaBackupVerificationStale` fire on them. It verifies metadata only: a
 metadata backup holds no shard data.
 
+### 5.10 Node lifecycle (Phase 3.11, ADR-0027)
+
+A storage node is `Active`, `Decommissioned` (drained, no members),
+`Quarantined` (its disk is not the one registered) or `Removed`.
+
+```
+admin node list | status --node N
+admin node decommission --node N            # alias drain: members move away
+admin node unregister --node N --reason R --yes [--unreachable]
+admin node rejoin --node N [--fresh-identity]
+admin node adopt-identity --node N --yes     # an unconfirmed node only
+admin node keep-removed --node N --yes [--unreachable]   # after a manual restore
+```
+
+- Registration gives a node an identity (a random token, written once on
+  its disk as `node-identity.txt`); the leader records it acknowledged
+  once the node holds it. Deletes and removal pushes carry it; a disk
+  holding another identity, or a damaged identity file, refuses them.
+- `unregister` and `keep-removed` close the node's delete fence with an
+  operator hold on its own disk before recording it removed. A node
+  that still answers is removed only once it holds an acknowledged
+  identity; `--unreachable` is the operator's statement that its disk
+  will never be started again unwiped (nothing is pushed to it).
+- A node holding another identity is quarantined and its members are
+  repaired; `admin node rejoin` checks it before it comes back (an
+  emptied disk only with `--fresh-identity`).
+- Metadata restored from before a node had an identity leaves the node
+  *unconfirmed* (nothing pushed to it, metric
+  `arca_controller_identity_unconfirmed_total`) until `adopt-identity`;
+  `admin restore` puts the identities back itself.
+- Upgrade rule: upgrade every controller before a leader of this release
+  runs; earlier controllers' deletes carry no identity and are refused
+  once nodes hold one.
+
 ## 6. Capacity and quotas
 
 - Durable capacity (Phase 3.6, RFC-008 §6.8, ADR-0020): every storage

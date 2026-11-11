@@ -144,6 +144,16 @@ incarnation mismatch.
 
 ### 5.3.1 Restore procedure
 
+**Phase 3.11: `admin restore` (ADR-0026 option D) is the supported
+procedure** (RFC-013 §5.9): the steps below as one resumable command,
+which refuses to start, or to clear, while any node's safety cannot be
+verified. Its guarantee holds under its stated conditions only. A
+restore done any other way (a direct `fdbrestore`, a DR switch, a
+snapshot rollback of the store) is R-94(b), open (High): the trip wire
+(ADR-0025) and the rejoin lease (ADR-0024) narrow it, and option Q
+(ADR-0026) is a candidate for the next phase, not implemented. The
+manual procedure below remains for when the current metadata is gone.
+
 0. **Close the delete fence** (Phase 3.9, ADR-0023): `admin delete-fence
    close --reason R --yes` while the current metadata is reachable; every
    storage node acknowledges a closed generation with an operator hold,
