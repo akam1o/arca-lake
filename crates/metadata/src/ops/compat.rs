@@ -475,7 +475,15 @@ impl VersionKey {
 /// Backend errors.
 pub async fn heartbeat<S: KvStore>(store: &S, rec: &ProcRecord) -> Result<()> {
     transact(store, rec, |tx, rec| {
-        Box::pin(async move { write(tx, &keys::proc(&rec.id), *rec) })
+        Box::pin(async move {
+            // Not into a store without a cluster state (Phase 3.11 review): a
+            // keyspace cleared for a restore stays empty, as `fdbrestore`
+            // requires, under processes left running.
+            if tx.get(&keys::cluster_state()).await?.is_none() {
+                return Ok(());
+            }
+            write(tx, &keys::proc(&rec.id), *rec)
+        })
     })
     .await
 }

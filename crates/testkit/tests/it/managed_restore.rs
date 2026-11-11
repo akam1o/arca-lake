@@ -238,7 +238,7 @@ async fn run(
     token: &str,
     stopped: &[String],
 ) -> Result<mr::Journal, String> {
-    mr::run(&c.meta, &c.clients, r, path, token, stopped, now_ms)
+    mr::run(&c.meta, &c.clients, r, path, token, stopped, &[], now_ms)
         .await
         .map_err(|e| e.to_string())
 }
@@ -251,6 +251,7 @@ async fn finish(c: &TestCluster, path: &std::path::Path) -> Result<mr::Journal, 
         "op",
         "drill",
         true,
+        &[],
         Duration::from_secs(30),
         now_ms,
     )
@@ -562,5 +563,210 @@ async fn two_restores_in_a_row() {
     let deletes1 = decided_deletes(&c, "kept").await;
     assert_eq!(deliver(&old1, &deletes1).await, 0, "second era");
     ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// A restorer that, after restoring, writes a process heartbeat there.
+struct Then<'a>(&'a Snapshot, arca_lake_metadata::records::ProcRecord);
+impl Restorer for Then<'_> {
+    fn destination(&self) -> String {
+        self.0.destination()
+    }
+    async fn restore(&self, source: &str, version: u64) -> Result<(), String> {
+        self.0.restore(source, version).await?;
+        arca_lake_metadata::ops::compat::heartbeat(self.0.meta.as_ref(), &self.1)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Review (Phase 3.11): the clear committed and the run died before
+/// recording it (the journal says `Clearing`): the re-run resumes, though
+/// the cluster state is gone. A process heartbeating on the restored
+/// metadata stops the mark until it is stopped (or declared so).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crash_after_the_clear_resumes_and_a_process_on_the_restored_metadata_stops_the_mark() {
+    let c = cluster().await;
+    put(&c, "kept", 9).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    backup.fail.store(1, Ordering::SeqCst);
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    let mut j = mr::Journal::load(&path).unwrap();
+    assert_eq!(j.last(), Some(Step::Cleared));
+    // As if the run died between the clear's commit and its record.
+    j.done.retain(|s| *s < Step::Cleared);
+    assert_eq!(j.last(), Some(Step::Clearing));
+    j.save(&path).unwrap();
+    // A gateway starts on what is restored: its heartbeat there.
+    let gw = arca_lake_metadata::records::ProcRecord {
+        id: "gw-late".into(),
+        kind: arca_lake_metadata::records::ProcKind::Gateway,
+        software: "test".into(),
+        caps: arca_lake_controller::capabilities(),
+        incarnation: [0; 16],
+        last_ms: now_ms(),
+    };
+    let then = Then(&backup, gw);
+    let e = mr::run(
+        &c.meta,
+        &c.clients,
+        &then,
+        &path,
+        &p.journal.token,
+        &[],
+        &[],
+        now_ms,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        e.contains("processes running on the restored metadata"),
+        "{e}"
+    );
+    assert_eq!(
+        mr::Journal::load(&path).unwrap().last(),
+        Some(Step::Restored)
+    );
+    let j = mr::run(
+        &c.meta,
+        &c.clients,
+        &then,
+        &path,
+        &p.journal.token,
+        &["gw-late".into()],
+        &[],
+        now_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(j.last(), Some(Step::Verified));
+    c.shutdown().await;
+}
+
+/// Review #1 (Phase 3.11): a backup from before the nodes held an
+/// identity, restored once they acknowledged one: the leader on the
+/// restored metadata takes each node's own identity, quarantines none,
+/// and the restore finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_from_before_node_identities_quarantines_no_node() {
+    use arca_lake_metadata::ops::node_lifecycle;
+    let c = cluster().await;
+    put(&c, "kept", 10).await;
+    // No controller has run: no identity records in the backup.
+    let backup = Snapshot::take(&c.meta).await;
+    let ctl = leading(&c, "ctl-0").await;
+    wait_until(
+        "identities acknowledged",
+        Duration::from_secs(20),
+        async || {
+            let ids = node_lifecycle::identities(c.meta.as_ref()).await.unwrap();
+            c.nodes
+                .iter()
+                .all(|n| ids.get(&n.id).is_some_and(|i| i.acknowledged))
+        },
+    )
+    .await;
+    ctl.shutdown().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    let ctl = spawn(Arc::clone(&c.meta), controller("ctl-1"))
+        .await
+        .unwrap();
+    finish(&c, &path).await.unwrap();
+    for n in &c.nodes {
+        assert_eq!(
+            node_lifecycle::state(c.meta.as_ref(), n.id).await.unwrap(),
+            node_lifecycle::State::Active,
+            "node {} quarantined after the restore",
+            n.id
+        );
+    }
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Review #3 (Phase 3.11): another cluster's backup (a wrong `--source`)
+/// is refused before the mark: no fence or incarnation of this cluster
+/// reaches its nodes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_clusters_backup_is_refused_before_the_mark() {
+    let c = cluster().await;
+    put(&c, "kept", 11).await;
+    let other = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(3, 2, 1, MIB, 0)
+    })
+    .await;
+    let theirs = Snapshot::take(&other.meta).await;
+    let wrong = Snapshot {
+        meta: Arc::clone(&c.meta),
+        data: theirs.data.clone(),
+        fail: AtomicUsize::new(0),
+        restores: AtomicUsize::new(0),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &wrong, &path).await.unwrap();
+    let e = run(&c, &wrong, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("not this cluster's backup"), "{e}");
+    assert_eq!(
+        mr::Journal::load(&path).unwrap().last(),
+        Some(Step::Restored)
+    );
+    other.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Review #4 (Phase 3.11): a backup from before a node was unregistered:
+/// the node stays removed on the restored metadata.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_unregistered_after_the_backup_stays_removed() {
+    use arca_lake_metadata::ops::{membership, node_lifecycle};
+    let mut c = cluster().await;
+    put(&c, "kept", 12).await;
+    let spare = c.add_node().await;
+    let spare_id = c.nodes[spare].id;
+    let backup = Snapshot::take(&c.meta).await;
+    membership::drain_node(c.meta.as_ref(), spare_id, "t", now_ms())
+        .await
+        .unwrap();
+    membership::update_drain(c.meta.as_ref(), spare_id, Some(now_ms()), None)
+        .await
+        .unwrap();
+    arca_lake_controller::node_ops::unregister(
+        c.meta.as_ref(),
+        &c.clients,
+        spare_id,
+        "t",
+        "retired",
+        false,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        node_lifecycle::state(c.meta.as_ref(), spare_id)
+            .await
+            .unwrap(),
+        node_lifecycle::State::Removed
+    );
     c.shutdown().await;
 }

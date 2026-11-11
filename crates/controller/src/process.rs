@@ -370,30 +370,18 @@ async fn run<S: KvStore + 'static>(
         let fenced = Arc::new(FencedKv::new(Arc::clone(&meta), leadership.clone()));
         let (stop_tx, stop_rx) = watch::channel(false);
         let (tasks, trip) = start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx, incarnation);
-        let lost = loop {
-            tokio::select! {
-                () = tokio::time::sleep(renew_every) => {}
-                () = trip.stepped_down() => {
-                    warn!(controller = %cfg.id, "stepping down: the store was replaced or another leader took over");
-                    break true;
-                }
-                _ = shutdown.changed() => break false,
-            }
-            match leader::renew(meta.as_ref(), &leadership, now_ms(), ms(cfg.lease)).await {
-                Ok(true) => {}
-                Ok(false) => break true,
-                Err(e) => {
-                    renewal_failed(&trip, &e);
-                    warn!(controller = %cfg.id, error = %e, "lease renewal failed; retrying");
-                    // Keep going until the lease would have expired: a
-                    // transient store error must not flap leadership. The
-                    // fence on every transaction keeps this safe regardless.
-                }
-            }
-        };
+        let lost = hold_term(
+            meta.as_ref(),
+            &cfg,
+            &leadership,
+            &trip,
+            &mut shutdown,
+            renew_every,
+        )
+        .await;
         // Deletes stop now, not when the tasks have finished their passes
         // (Phase 3.11: a batch would go on sending).
-        trip.stop(true, true);
+        trip.stop(true, true, false);
         let _ = stop_tx.send(true);
         for t in tasks {
             let _ = t.await;
@@ -411,6 +399,54 @@ async fn run<S: KvStore + 'static>(
     }
 }
 
+/// Renew the lease until it is lost (`true`), the term is tripped, or a
+/// shutdown is asked (`false`).
+async fn hold_term<S: KvStore>(
+    meta: &S,
+    cfg: &ControllerConfig,
+    leadership: &leader::Leadership,
+    trip: &crate::trip::Trip,
+    shutdown: &mut watch::Receiver<bool>,
+    renew_every: Duration,
+) -> bool {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(renew_every) => {}
+            () = trip.stepped_down() => {
+                warn!(controller = %cfg.id, "stepping down: the store was replaced or another leader took over");
+                break true;
+            }
+            _ = shutdown.changed() => break false,
+        }
+        match leader::renew(meta, leadership, now_ms(), ms(cfg.lease)).await {
+            Ok(true) => {}
+            Ok(false) => {
+                lost_lease(meta, leadership, trip).await;
+                break true;
+            }
+            Err(e) => {
+                renewal_failed(trip, &e);
+                warn!(controller = %cfg.id, error = %e, "lease renewal failed; retrying");
+                // Keep going until the lease would have expired: a
+                // transient store error must not flap leadership. The
+                // fence on every transaction keeps this safe regardless.
+            }
+        }
+    }
+}
+
+/// The lease is lost: if the record is gone or another term's, the trip
+/// learns why, so that a replaced store is remembered (Phase 3.11 review).
+async fn lost_lease<S: KvStore>(
+    meta: &S,
+    leadership: &leader::Leadership,
+    trip: &crate::trip::Trip,
+) {
+    if let Some(e) = crate::trip::probe(meta, leadership).await {
+        trip.observe(&e);
+    }
+}
+
 /// A failed lease renewal (Phase 3.11): a locked or replaced store ends
 /// the term at once; any other failure stops the deletes until a health
 /// pass succeeds again (a leader that cannot show its lease does not
@@ -419,7 +455,7 @@ fn renewal_failed(trip: &crate::trip::Trip, e: &arca_lake_metadata::MetaError) {
     if let arca_lake_metadata::MetaError::Kv(k) = e {
         trip.observe(k);
     }
-    trip.stop(false, false);
+    trip.stop(false, false, false);
 }
 
 /// The leader's store watch (Phase 3.11): a probe of the store every
@@ -485,14 +521,22 @@ fn start_leader_tasks<S: KvStore + 'static>(
             stop.clone(),
         ))
     });
+    let inner = Arc::clone(fenced);
     let fenced = &Arc::new(crate::trip::TripKv::new(
         Arc::clone(fenced),
         Arc::clone(&trip),
     ));
     let coders = crate::integrity::coders();
     // One guarded store per operation class (RFC-015 §5.6, ADR-0016): every
-    // write of a task is checked against the cluster state at commit.
-    let guarded = |class: OpClass| Arc::new(GuardedKv::new(Arc::clone(fenced), incarnation, class));
+    // write of a task is checked against the cluster state at commit. The
+    // trip wraps the guard (review): the guard's own refusals (a cluster
+    // state gone or changed) trip too.
+    let guarded = |class: OpClass| {
+        Arc::new(crate::trip::TripKv::new(
+            Arc::new(GuardedKv::new(Arc::clone(&inner), incarnation, class)),
+            Arc::clone(&trip),
+        ))
+    };
     let meta_delete = guarded(OpClass::Delete);
     let meta_repair = guarded(OpClass::Repair);
     let meta_book = guarded(OpClass::Bookkeeping);
@@ -1002,7 +1046,18 @@ async fn reconcile_pass<S: KvStore>(
     cfg: &ControllerConfig,
     metrics: &Metrics,
 ) -> Result<(), ControlError> {
-    let nodes = cluster::list_nodes(meta).await?;
+    // Not removed or quarantined nodes (Phase 3.11, review): what answers
+    // there may be another disk.
+    let retired: BTreeSet<u64> = node_lifecycle::retirements(meta)
+        .await?
+        .into_iter()
+        .map(|r| r.node_id)
+        .collect();
+    let nodes: Vec<NodeRecord> = cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .filter(|n| !retired.contains(&n.id))
+        .collect();
     let groups = cluster::list_groups(meta).await?;
     let mut deleted = 0usize;
     let mut unreachable = 0usize;
@@ -1204,30 +1259,80 @@ async fn health_pass<S: KvStore>(
             unhealthy += 1;
             continue;
         }
-        let ident = match identities.remove(&n.id) {
-            Some(i) => i,
-            None => node_lifecycle::ensure_identity(meta, n.id).await?,
-        };
+        // No record (a new node, or metadata restored from before this
+        // node had one): nothing is carried this pass; what the node holds
+        // decides below (review: replacing it would quarantine every node
+        // after such a restore).
+        let ident = identities.remove(&n.id);
+        // Deletes to this address carry the identity it acknowledged: a
+        // disk that is not this node's refuses them (Phase 3.11).
+        if let Some(i) = ident.as_ref().filter(|i| i.acknowledged) {
+            clients.note_identity(&n.address, Some((n.id, i.token)));
+        }
         let mut node_req = req.clone();
-        node_req.node_id = n.id;
-        node_req.node_identity = bytes::Bytes::copy_from_slice(&ident.token);
-        node_req.adopt_identity = !ident.acknowledged;
+        if let Some(i) = &ident {
+            node_req.node_id = n.id;
+            node_req.node_identity = bytes::Bytes::copy_from_slice(&i.token);
+            node_req.adopt_identity = !i.acknowledged;
+        }
         match clients.health_with(&n.address, node_req).await {
             Ok(h) => {
+                // Its fence counts whatever its identity (review).
+                metrics.delete_fence.note_node(
+                    n.id,
+                    h.delete_fence_generation,
+                    h.delete_fence_open,
+                );
                 if h.identity_supported {
-                    let holds = h.identity_node_id == n.id
-                        && h.identity_token.as_ref() == ident.token.as_slice();
-                    if h.identity_mismatch || !holds {
-                        let reason = if h.identity_node_id == 0 {
-                            "the node holds no identity although it acknowledged one: an emptied or replaced disk".to_string()
-                        } else if h.identity_node_id == n.id {
-                            "the node holds another identity token for its id: another cluster's disk, or a re-registered id".to_string()
-                        } else {
-                            format!(
-                                "the node holds the identity of node {}: a disk moved or an id reused",
-                                h.identity_node_id
-                            )
-                        };
+                    let held = <[u8; 16]>::try_from(h.identity_token.as_ref()).ok();
+                    let verdict: Option<String> = match &ident {
+                        None if h.identity_node_id == 0 => {
+                            // A disk without one: given one, adopted next pass.
+                            node_lifecycle::ensure_identity(meta, n.id).await?;
+                            None
+                        }
+                        None if h.identity_node_id == n.id
+                            && held.is_some()
+                            && h.incarnation_seq <= gate.incarnation_seq =>
+                        {
+                            // This node's own, from this cluster's history:
+                            // taken into the metadata.
+                            let token = held.unwrap_or_default();
+                            node_lifecycle::import_identity(meta, n.id, token).await?;
+                            clients.note_identity(&n.address, Some((n.id, token)));
+                            None
+                        }
+                        // Held for this id, but of a later history: left to
+                        // `recovery begin` (the incarnation warning below).
+                        None if h.identity_node_id == n.id => None,
+                        None => Some(format!(
+                            "the node holds the identity of node {}: a disk moved or an id reused",
+                            h.identity_node_id
+                        )),
+                        Some(i) => {
+                            let holds = h.identity_node_id == n.id && held == Some(i.token);
+                            if !h.identity_mismatch && holds {
+                                if !i.acknowledged {
+                                    node_lifecycle::acknowledge_identity(meta, n.id, i.token)
+                                        .await?;
+                                    clients.note_identity(&n.address, Some((n.id, i.token)));
+                                }
+                                None
+                            } else if h.identity_node_id == 0 && i.acknowledged {
+                                Some("the node holds no identity although it acknowledged one: an emptied or replaced disk".to_string())
+                            } else if h.identity_node_id == 0 {
+                                Some("the node did not adopt its identity: a damaged identity file (remove it, then `admin node rejoin --fresh-identity`)".to_string())
+                            } else if h.identity_node_id == n.id {
+                                Some("the node holds another identity token for its id: another cluster's disk, or a re-registered id".to_string())
+                            } else {
+                                Some(format!(
+                                    "the node holds the identity of node {}: a disk moved or an id reused",
+                                    h.identity_node_id
+                                ))
+                            }
+                        }
+                    };
+                    if let Some(reason) = verdict {
                         if node_lifecycle::quarantine(meta, n.id, &reason, now).await? {
                             tracing::error!(node = n.id, address = %n.address, %reason, "storage node quarantined");
                         }
@@ -1237,15 +1342,7 @@ async fn health_pass<S: KvStore>(
                         unhealthy += 1;
                         continue;
                     }
-                    if !ident.acknowledged {
-                        node_lifecycle::acknowledge_identity(meta, n.id, ident.token).await?;
-                    }
                 }
-                metrics.delete_fence.note_node(
-                    n.id,
-                    h.delete_fence_generation,
-                    h.delete_fence_open,
-                );
                 // A node at this incarnation's sequence with another
                 // incarnation, or above it, refuses this cluster's opens
                 // and deletes until a `recovery begin` marks one above it
@@ -1381,6 +1478,9 @@ async fn repair_pass<S: KvStore>(
     // unchanged), so that the group takes writes again. Finished or
     // overtaken intents are removed.
     let mut settled_any = false;
+    // Groups whose intent could not be resumed this pass: skipped below
+    // (review: one stuck intent must not stop every other repair).
+    let mut held_groups: BTreeSet<u64> = BTreeSet::new();
     for intent in epoch_intent::open(meta).await? {
         let Some(g) = all_groups.iter().find(|g| g.id == intent.group) else {
             epoch_intent::discard(meta, intent.group).await?;
@@ -1390,7 +1490,6 @@ async fn repair_pass<S: KvStore>(
             epoch_intent::discard(meta, intent.group).await?;
             continue;
         }
-        settled_any = true;
         let target = intent.replacement.node_id;
         // Still wanted: the target can host it, and the slot still holds
         // another member that is to leave (unhealthy, draining, or named
@@ -1403,7 +1502,9 @@ async fn repair_pass<S: KvStore>(
                     .get(&g.id)
                     .is_some_and(|r| r.index == intent.index)
         };
-        let wanted = healthy(target)
+        // A resume that keeps failing is settled after ten minutes.
+        let wanted = now.saturating_sub(intent.since_ms) < 600_000
+            && healthy(target)
             && intents.may_host(target)
             && g.members
                 .get(usize::from(intent.index))
@@ -1415,18 +1516,32 @@ async fn repair_pass<S: KvStore>(
                 node = target,
                 "resuming an interrupted epoch change"
             );
-            if let Err(e) = crate::repair::replace_member_with(
+            let leaving = g.members[usize::from(intent.index)].node_id;
+            let resume_opts = RepairOptions {
+                former: if healthy(leaving) {
+                    vec![leaving]
+                } else {
+                    Vec::new()
+                },
+                keep_client_reserve: healthy(leaving),
+                ..opts.clone()
+            };
+            match crate::repair::replace_member_with(
                 meta,
                 clients,
                 g.id,
                 usize::from(intent.index),
                 intent.replacement,
-                &opts,
+                &resume_opts,
                 async |_| Ok(()),
             )
             .await
             {
-                warn!(group = g.id, error = %e, "resumed epoch change failed; retried next pass");
+                Ok(_) => settled_any = true,
+                Err(e) => {
+                    warn!(group = g.id, error = %e, "resumed epoch change failed; retried next pass");
+                    held_groups.insert(g.id);
+                }
             }
         } else {
             for m in &g.members {
@@ -1442,6 +1557,7 @@ async fn repair_pass<S: KvStore>(
                 epoch = after.epoch,
                 "settled an interrupted epoch change: membership unchanged"
             );
+            settled_any = true;
         }
     }
     if settled_any {
@@ -1515,6 +1631,9 @@ async fn repair_pass<S: KvStore>(
     };
     let mut durable_busy = false;
     for g in durable {
+        if held_groups.contains(&g.id) {
+            continue;
+        }
         let is_planned = planned(g);
         if g.state == GroupState::Active {
             let mut pm = metrics
@@ -1561,7 +1680,10 @@ async fn repair_pass<S: KvStore>(
         max_chunks: cfg.cache_repair_chunks_per_pass,
         ..opts
     };
-    for g in all_groups.iter().filter(|g| g.is_cache()) {
+    for g in all_groups
+        .iter()
+        .filter(|g| g.is_cache() && !held_groups.contains(&g.id))
+    {
         match repair_one(
             meta,
             clients,

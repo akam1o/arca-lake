@@ -708,6 +708,7 @@ async fn run<S: KvStore + 'static>(
                         &journal,
                         &plan.journal.token,
                         &[],
+                        &[],
                         now_ms,
                     )
                     .await
@@ -720,6 +721,7 @@ async fn run<S: KvStore + 'static>(
                         "model",
                         "model",
                         true,
+                        &[],
                         std::time::Duration::ZERO,
                         now_ms,
                     )
@@ -740,6 +742,7 @@ async fn run<S: KvStore + 'static>(
                         "model",
                         "model",
                         true,
+                        &[],
                         std::time::Duration::from_secs(5),
                         now_ms,
                     )

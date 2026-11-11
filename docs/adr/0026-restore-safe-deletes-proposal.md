@@ -160,6 +160,28 @@ verification pass and `finalize`.
    critical findings need `--force --reason`), then waits until a leader
    opened a generation above the closed one on every node.
 
+Review fixes (Phase 3.11):
+
+- **Clearing step.** A step is recorded before the clear commits, so a
+  crash between the two resumes. Processes are checked before every
+  clear, and again on the restored metadata before the mark, where a
+  running process refreshes its heartbeat.
+- **Node check.** Before the mark, the restored metadata must name only
+  this cluster's nodes, at their addresses. Another cluster's backup is
+  refused.
+- **Removed nodes.** Nodes removed before the restore are marked removed
+  again.
+- **Declared absences.** The mark and `finish` take `--absent-node`
+  (the operator's statement, as for `recovery begin`).
+- **What `finish` waits for.** The restored metadata's nodes in service.
+- **Identities.** A leader on the restored metadata takes each node's own
+  identity into it, when the metadata predates it.
+- **Destination.** It is compared as the cluster file's path, not its
+  contents. A command prefix (`--fdbrestore-cmd`) that resolves the same
+  path to another cluster is not detected; the nodes stay held, so
+  nothing is deleted, but the planned cluster stays cleared until the
+  run is repeated correctly. This is a known limitation.
+
 Guaranteed under these conditions (tests: `it/managed_restore.rs`,
 `it/fdb_restore.rs::admin_restore_with_fdbrestore_resumes_after_a_failed_restore`
 on real FoundationDB, each check failing its test when removed):

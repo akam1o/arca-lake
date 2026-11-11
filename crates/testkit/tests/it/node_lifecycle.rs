@@ -486,3 +486,76 @@ async fn ignore_absent_takes_only_decommissioned_nodes_and_removed_ones_are_not_
     );
     c.shutdown().await;
 }
+
+/// Review (Phase 3.11): two members' disks swapped (or another disk at a
+/// node's address): what answers at node X's address is node Z's disk,
+/// holding Z's shards. A delete decided for X there (reconciliation sees
+/// Z's shard under another index than X's: a misdirected copy) would
+/// remove a shard Z's member needs. Deletes carry the identity X
+/// acknowledged: Z's disk refuses it. Reconciliation also skips
+/// quarantined nodes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_decided_for_one_node_is_refused_by_another_disk_at_its_address() {
+    let mut c = cluster().await;
+    let objects = put_objects(&c, 3).await;
+    let ctl = leader(&c).await;
+    identities_acknowledged(&c).await;
+    // The leader keeps running (a shutdown closes its generation on the
+    // nodes, which would refuse the delete below for another reason).
+    let g = c.groups().await.remove(0);
+    let (x, z) = (
+        c.node_index(&g.members[0]).unwrap(),
+        c.node_index(&g.members[2]).unwrap(),
+    );
+    let xid = c.nodes[x].id;
+    let xtoken = node_lifecycle::identity(c.meta.as_ref(), xid)
+        .await
+        .unwrap()
+        .unwrap()
+        .token;
+    let xaddr = c.nodes[x].addr.to_string();
+    // Swap the two disks.
+    c.stop_node(x).await;
+    c.stop_node(z).await;
+    let tmp = c.nodes[x].dir.with_extension("swap");
+    std::fs::rename(&c.nodes[x].dir, &tmp).unwrap();
+    std::fs::rename(&c.nodes[z].dir, &c.nodes[x].dir).unwrap();
+    std::fs::rename(&tmp, &c.nodes[z].dir).unwrap();
+    c.start_node(x).await;
+    c.start_node(z).await;
+    // A delete decided for X, of Z's shard (index 2), sent to X's address.
+    let m = c.manifest(BUCKET, "o0").await;
+    let shard = ShardRef {
+        group_id: g.id,
+        chunk_id: m.chunks[0].1.chunk_id,
+        shard_index: 2,
+    };
+    let old = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
+    old.set_incarnation(c.clients.incarnation());
+    // The generation Z's disk holds open (its own leader's, still open
+    // there: the leader's pushes carry X's identity and are not adopted).
+    let held = c.clients.health(&xaddr).await.unwrap();
+    assert!(held.delete_fence_open, "{held:?}");
+    old.set_delete_fence(Some(held.delete_fence_generation));
+    old.note_identity(&xaddr, Some((xid, xtoken)));
+    let before = c.shard_count(x, g.id);
+    let r = old.delete_shard(&xaddr, shard, g.epoch).await;
+    assert!(
+        r.as_ref()
+            .is_err_and(|e| e.message().contains("identity rejected")),
+        "another disk at the address took the delete: {r:?}"
+    );
+    assert_eq!(c.shard_count(x, g.id), before, "nothing deleted");
+    // Swapped back, everything reads.
+    c.stop_node(x).await;
+    c.stop_node(z).await;
+    let tmp = c.nodes[x].dir.with_extension("swap");
+    std::fs::rename(&c.nodes[x].dir, &tmp).unwrap();
+    std::fs::rename(&c.nodes[z].dir, &c.nodes[x].dir).unwrap();
+    std::fs::rename(&tmp, &c.nodes[z].dir).unwrap();
+    c.start_node(x).await;
+    c.start_node(z).await;
+    all_read_back(&c, &objects).await;
+    ctl.shutdown().await;
+    c.shutdown().await;
+}

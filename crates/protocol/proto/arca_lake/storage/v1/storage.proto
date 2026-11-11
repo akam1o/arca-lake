@@ -129,6 +129,12 @@ message DeleteShardRequest {
   // open at exactly this generation, checked under the same lock as the
   // store's delete; 0 (absent) is refused.
   uint64 delete_fence = 7;
+  // The identity the caller expects at this address (Phase 3.11, R-100):
+  // the node id and the token the node acknowledged (empty = not
+  // carried). A node holding another identity, or none, refuses: a delete
+  // decided for one node never runs on another disk at its address.
+  uint64 node_id = 8;
+  bytes node_identity = 9;
 }
 
 message DeleteShardResponse {}

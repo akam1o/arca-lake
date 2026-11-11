@@ -802,6 +802,21 @@ impl StorageNode for StorageNodeService {
         self.check_incarnation(&req.incarnation)?;
         self.check_delete_fence(req.protocol_version, req.delete_fence)?;
         self.check_epoch(key.group_id, req.group_epoch)?;
+        // A delete for another node's identity never runs here (Phase 3.11,
+        // R-100): another disk at the address it was decided for.
+        if req.node_identity.len() == 16 {
+            let held = self
+                .identity
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .held();
+            if held.is_none_or(|h| h.node_id != req.node_id || h.token[..] != req.node_identity[..])
+            {
+                return Err(tonic::Status::failed_precondition(
+                    "identity rejected: the delete was decided for another node's disk",
+                ));
+            }
+        }
         let store = Arc::clone(&self.store);
         let if_sequence = req.if_sequence;
         // A token of another store epoch names a sequence this store may

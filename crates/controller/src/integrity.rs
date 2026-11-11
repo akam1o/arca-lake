@@ -996,14 +996,16 @@ pub async fn repair_pass<S: KvStore>(
 }
 
 /// Priority of a task: recoverable damage first, then unexpected shards
-/// and stale placements, unrecoverable re-checks last; oldest first.
+/// and stale placements, unrecoverable re-checks last; within a class the
+/// least recently touched first (a task re-planned at once goes behind
+/// the others, so that none is starved; review).
 fn priority(t: &RepairTask) -> (u8, u64) {
     let class = match t.reason {
         Finding::UnrecoverableStripe => 2,
         Finding::UnexpectedShard | Finding::StalePlacementEpoch => 1,
         _ => 0,
     };
-    (class, t.created_ms)
+    (class, t.updated_ms.max(t.created_ms))
 }
 
 /// One pass's tasks (Phase 3.11, M4): scan up to `opts.scan_window`

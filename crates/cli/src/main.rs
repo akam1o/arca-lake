@@ -2600,6 +2600,11 @@ enum RestoreCommand {
         /// A process whose heartbeat is fresh but which is stopped.
         #[arg(long)]
         stopped: Vec<String>,
+        /// A node stopped for good that need not acknowledge the fence on
+        /// the restored metadata (the operator's statement, as for
+        /// `recovery begin`).
+        #[arg(long)]
+        absent_node: Vec<u64>,
         /// Command prefix running `fdbrestore` where the backup agent
         /// lives (e.g. `docker exec NAME`).
         #[arg(long)]
@@ -2628,6 +2633,9 @@ enum RestoreCommand {
         /// How long to wait for the new generation, s.
         #[arg(long, default_value_t = 120)]
         wait_secs: u64,
+        /// A node stopped for good, not waited for.
+        #[arg(long)]
+        absent_node: Vec<u64>,
         /// Confirm.
         #[arg(long)]
         yes: bool,
@@ -2738,6 +2746,7 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
             journal,
             confirm,
             stopped,
+            absent_node,
             fdbrestore_cmd,
             fdbrestore_cluster_file,
             rpc,
@@ -2754,7 +2763,14 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
                     .unwrap_or_else(|| cluster_file.display().to_string()),
             };
             match mr::run(
-                meta, &clients, &restorer, &journal, &confirm, &stopped, clock,
+                meta,
+                &clients,
+                &restorer,
+                &journal,
+                &confirm,
+                &stopped,
+                &absent_node,
+                clock,
             )
             .await
             {
@@ -2777,6 +2793,7 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
             force,
             reason,
             wait_secs,
+            absent_node,
             yes,
             rpc,
         } => {
@@ -2797,6 +2814,7 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
                 &operator,
                 &reason,
                 force,
+                &absent_node,
                 std::time::Duration::from_secs(wait_secs),
                 clock,
             )

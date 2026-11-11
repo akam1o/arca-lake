@@ -490,14 +490,24 @@ pub struct NodeClients {
     /// Deletes stopped for good (Phase 3.11, [`NodeClients::stop_deletes`]):
     /// no later [`NodeClients::set_delete_fence`] reopens them.
     deletes_latched: Arc<AtomicBool>,
+    /// The last generation deletes carried (kept when they stop): what a
+    /// latched stop closes on the nodes even after an earlier stop took it
+    /// (Phase 3.11 review).
+    last_delete_fence: Arc<AtomicU64>,
     /// Mutual TLS (ADR-0017); `None` = explicitly plaintext.
     tls: Option<Arc<crate::tls::TlsContext>>,
     /// Node id per address: the identity a node must present.
     node_ids: Arc<Mutex<HashMap<String, u64>>>,
+    /// The identity (node id, token) a node acknowledged, per address:
+    /// stamped on its deletes (Phase 3.11, R-100).
+    identities: Arc<Mutex<HashMap<String, NodeIdentity>>>,
     /// `GetShard` RPCs in flight per node address (durable-read priority
     /// for cache populations).
     reads_in_flight: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
 }
+
+/// A node's identity: its id and the token it acknowledged.
+type NodeIdentity = (u64, [u8; 16]);
 
 /// How a delete fence is pushed ([`NodeClients::push_delete_fence_with`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -543,8 +553,10 @@ impl NodeClients {
             incarnation: Arc::default(),
             delete_fence: Arc::default(),
             deletes_latched: Arc::default(),
+            last_delete_fence: Arc::default(),
             tls: None,
             node_ids: Arc::default(),
+            identities: Arc::default(),
         }
     }
 
@@ -565,6 +577,31 @@ impl NodeClients {
     /// Record which node serves `addr`: TLS connections to it then require
     /// `spiffe://<td>/node/<id>` exactly (otherwise any node identity of
     /// the trust domain). A change drops the cached channel.
+    /// The identity the node at `addr` acknowledged (stamped on deletes to
+    /// it), or `None` to stamp none.
+    pub fn note_identity(&self, addr: &str, identity: Option<(u64, [u8; 16])>) {
+        let mut m = self
+            .identities
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match identity {
+            Some(i) => {
+                m.insert(addr.to_string(), i);
+            }
+            None => {
+                m.remove(addr);
+            }
+        }
+    }
+
+    fn identity_of(&self, addr: &str) -> Option<(u64, [u8; 16])> {
+        self.identities
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(addr)
+            .copied()
+    }
+
     /// The node addresses this client knows an id for.
     #[must_use]
     pub fn known_addresses(&self) -> Vec<String> {
@@ -611,6 +648,9 @@ impl NodeClients {
         *g = generation
             .filter(|g| *g > 0)
             .filter(|_| !self.deletes_latched.load(Ordering::SeqCst));
+        if let Some(v) = *g {
+            self.last_delete_fence.fetch_max(v, Ordering::SeqCst);
+        }
     }
 
     /// Stop this process's deletes now and return the generation they
@@ -626,6 +666,7 @@ impl NodeClients {
             self.deletes_latched.store(true, Ordering::SeqCst);
         }
         g.take()
+            .or_else(|| Some(self.last_delete_fence.load(Ordering::SeqCst)).filter(|v| *v > 0))
     }
 
     /// The delete fence generation stamped on deletes, if any.
@@ -1299,6 +1340,7 @@ impl NodeClients {
                 "delete fence closed in this process: no delete is sent",
             ));
         };
+        let identity = self.identity_of(addr);
         self.with_faults(ctx, |_| {
             self.unary(async {
                 let mut client = self.client(addr)?;
@@ -1332,6 +1374,10 @@ impl NodeClients {
                     if_sequence: token.sequence,
                     if_store_epoch: token.store_epoch,
                     delete_fence: fence,
+                    node_id: identity.map_or(0, |i| i.0),
+                    node_identity: identity
+                        .map(|i| Bytes::copy_from_slice(&i.1))
+                        .unwrap_or_default(),
                 };
                 client.delete_shard(req).await?;
                 Ok(())

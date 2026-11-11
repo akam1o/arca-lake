@@ -57,7 +57,7 @@ impl Trip {
             // The phase or incarnation refuses the work: deletes stop until
             // the leader's health pass reopens them (the existing path).
             KvError::ClusterState(_) => {
-                self.stop(false, false);
+                self.stop(false, false, false);
                 return;
             }
             KvError::Fenced(_) => false,
@@ -67,7 +67,12 @@ impl Trip {
         // Another leader, or a store being replaced: this term is over.
         // Deletes stay stopped for the rest of it and the leader steps
         // down; a later term starts from what the store says then.
-        self.stop(true, true);
+        // A store replaced: the generation above is closed, so that any
+        // later leader on what was restored (another process, or this one
+        // restarted, which keeps no memory of this) finds the nodes ahead of
+        // its record and holds the fence (review). A takeover closes the
+        // term's own generation (the next leader opens above it).
+        self.stop(true, true, replaced);
         if replaced && !self.suspect.swap(true, Ordering::SeqCst) {
             tracing::error!(error = %e, "metadata store locked or replaced under this leader: deletes stopped");
         }
@@ -80,19 +85,20 @@ impl Trip {
     }
 
     /// Stop the process's deletes (`latch`: for the rest of the term), and
-    /// with `close_nodes` close the generation they carried on every node
-    /// this process knows. A node acknowledges a close only after the deletes it already
+    /// with `close_nodes` close the generation they carried (with `above`,
+    /// the next one) on every node this process knows. A node acknowledges a close only after the deletes it already
     /// admitted finished, and refuses every later one of that generation,
     /// so a delete still in flight (sent before the trip, delayed) is
     /// refused too. No metadata is read or written: it works while the
     /// store is locked or empty. Best effort per node; a node that misses
     /// it closes on its own when its rejoin lease ends.
-    pub fn stop(&self, latch: bool, close_nodes: bool) {
+    pub fn stop(&self, latch: bool, close_nodes: bool, above: bool) {
         let generation = self.clients.stop_deletes(latch);
         self.trips.fetch_add(1, Ordering::Relaxed);
         let Some(generation) = generation.filter(|_| close_nodes) else {
             return;
         };
+        let generation = generation + u64::from(above);
         let clients = self.clients.clone();
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {

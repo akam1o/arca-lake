@@ -65,6 +65,33 @@ The leader gives every node a random 128-bit token, kept in metadata
 Recovery pushes carry no identity: restored metadata may predate a
 node's identity.
 
+The identity is a check that a disk is the one registered. It is not
+authentication: a request carrying no identity still changes the node's
+facts as before. Such requests come from earlier controllers, admin
+pushes and recovery, and are authorized by mutual TLS.
+
+Review fixes (Phase 3.11):
+
+- **Restored metadata without a record.** When the metadata has no
+  record for a node, as after restoring a backup from before identities,
+  the leader carries none. If the node holds an identity for its own id
+  and its incarnation sequence is not above the cluster's, the leader
+  takes it into the metadata. If the node holds none, it is given one.
+  A node holding another node's identity is quarantined. Before this
+  fix, every node would have been quarantined after such a restore.
+- **Damaged file.** A damaged identity file is never replaced by an
+  adoption. An operator removes it; `rejoin --fresh-identity` then gives
+  a new one.
+- **Deletes bound to the disk.** Deletes carry the identity the node
+  acknowledged (`DeleteShardRequest.node_id`, `node_identity`, additive
+  fields). A node holding another identity, or none, refuses them: a
+  delete decided for one node never runs on another disk at its
+  address.
+- **Reconciliation.** It skips removed and quarantined nodes.
+- **Removed addresses.** A removed node's address cannot be registered
+  by itself again. A new machine there comes in through `admin node
+  rejoin --fresh-identity`, on an empty disk.
+
 ### Unregister (`admin node unregister --node N --reason R --yes`)
 
 Only a decommissioned or quarantined node that no group lists and no

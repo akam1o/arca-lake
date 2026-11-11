@@ -2123,3 +2123,141 @@ async fn boundary_a_leader_cut_off_from_the_store_applies_deletes_until_the_rejo
     ctl.abort();
     c.shutdown().await;
 }
+
+/// Review #2 (Phase 3.11): the leader that tripped on the cleared store
+/// dies; a backup of its own generation is restored; another controller
+/// (no memory of the trip) leads on the restored metadata. The trip
+/// closed the generation above on the nodes: the new leader finds them
+/// ahead of its record and holds the fence instead of opening one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_controller_on_restored_metadata_holds_the_fence_after_a_trip() {
+    use arca_lake_controller::process::spawn;
+    let c = cluster().await;
+    put(&c, "kept", 24).await;
+    let holds = Holds::new();
+    let mut acfg = quiet_controller(holds.hook(false));
+    // Short: the restored lease record (A's) must expire for B to lead.
+    acfg.lease = Duration::from_secs(2);
+    let a = spawn(Arc::clone(&c.meta), acfg).await.unwrap();
+    term_open_everywhere(&c, &a).await;
+    let opened = delete_fence::current(c.meta.as_ref()).await.unwrap();
+    let backup = snapshot(c.meta.as_ref()).await;
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.clear_range(&keys::all_range());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let t = Instant::now();
+    while !a.metrics.delete_fence.restore_suspected() {
+        assert!(t.elapsed() < Duration::from_secs(10), "never tripped");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let t = Instant::now();
+    loop {
+        let mut ahead = true;
+        for n in &c.nodes {
+            let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+            ahead &= !h.delete_fence_open && h.delete_fence_generation > opened.generation;
+        }
+        if ahead {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "the generation above never closed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.abort();
+    restore(c.meta.as_ref(), &backup).await;
+    let mut cfg = quiet_controller(Holds::new().hook(false));
+    cfg.id = "ctl-other".into();
+    cfg.lease = Duration::from_secs(1);
+    let b = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    let t = Instant::now();
+    loop {
+        let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+        assert!(
+            !(rec.open && rec.generation > opened.generation),
+            "a new controller opened deletes on restored metadata: {rec:?}"
+        );
+        if rec.operator_hold && !rec.open && b.is_leader() {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(30), "never held: {rec:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    b.abort();
+    c.shutdown().await;
+}
+
+/// Review #5 (Phase 3.11): with the store watch off and the health pass
+/// stuck, the only transactions after the clear are reconciliation's,
+/// through the cluster-state guard; the guard's refusal trips (it used to
+/// stop above the trip), closing the generation the in-flight GC deletes
+/// carry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_guards_refusal_trips_too() {
+    use arca_lake_controller::process::spawn;
+    use std::sync::atomic::Ordering;
+    let c = cluster().await;
+    put(&c, "kept", 25).await;
+    let holds = Holds::new();
+    let mut cfg = quiet_controller(holds.hook(true));
+    cfg.store_watch_interval = Duration::ZERO;
+    cfg.reconcile_interval = Duration::from_millis(100);
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    term_open_everywhere(&c, &ctl).await;
+    holds.armed.store(true, Ordering::SeqCst);
+    let backup = snapshot(c.meta.as_ref()).await;
+    let shards_at_backup = c.total_shards().await;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    let t = Instant::now();
+    while holds.held.load(Ordering::SeqCst) < 6 {
+        assert!(t.elapsed() < Duration::from_secs(20), "GC never sent");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.clear_range(&keys::all_range());
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let t = Instant::now();
+    while !ctl.metrics.delete_fence.restore_suspected() && t.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(5) {
+        let mut open = false;
+        for n in &c.nodes {
+            open |= c
+                .clients
+                .health(&n.addr.to_string())
+                .await
+                .unwrap()
+                .delete_fence_open;
+        }
+        if !open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let before = ctl.metrics.gc.delete_rpc.snapshot().count;
+    holds.deletes.add_permits(1_000);
+    deletes_done(&ctl, before, 6).await;
+    restore(c.meta.as_ref(), &backup).await;
+    assert_eq!(
+        c.total_shards().await,
+        shards_at_backup,
+        "in-flight deletes applied: the guard's refusal did not trip"
+    );
+    holds.health.add_permits(1_000);
+    ctl.abort();
+    c.shutdown().await;
+}

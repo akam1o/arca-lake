@@ -967,6 +967,7 @@ async fn admin_restore_with_fdbrestore_resumes_after_a_failed_restore() {
         &journal,
         &plan.journal.token,
         &[],
+        &[],
         now_ms,
     )
     .await
@@ -989,6 +990,7 @@ async fn admin_restore_with_fdbrestore_resumes_after_a_failed_restore() {
         &journal,
         &plan.journal.token,
         &[],
+        &[],
         now_ms,
     )
     .await
@@ -1004,6 +1006,7 @@ async fn admin_restore_with_fdbrestore_resumes_after_a_failed_restore() {
         "op",
         "drill",
         true,
+        &[],
         Duration::from_secs(60),
         now_ms,
     )

@@ -273,6 +273,36 @@ pub async fn unregister<S: KvStore>(
     .await
 }
 
+/// Record a node removed again on metadata restored from before its
+/// removal (Phase 3.11 review: `admin restore` keeps what was unregistered
+/// out). Idempotent; does nothing for an unknown node.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn keep_removed<S: KvStore>(store: &S, node_id: u64, now_ms: u64) -> Result<()> {
+    transact(store, (node_id, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (node_id, now_ms) = *env;
+            if tx.get(&keys::node(node_id)).await?.is_none() {
+                return Ok(());
+            }
+            let r = NodeRetirementRecord {
+                node_id,
+                state: Retirement::Removed {
+                    since_ms: now_ms,
+                    by: "admin restore".into(),
+                    reason: "unregistered before the restore".into(),
+                },
+            };
+            write(tx, &keys::node_retirement(node_id), &r)?;
+            crate::ops::cluster::bump_map_version_in_tx(tx).await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
 /// Quarantine a node. Idempotent (the first reason is kept); a removed
 /// node stays removed. Returns whether the record changed.
 ///
@@ -383,6 +413,36 @@ pub async fn ensure_identity<S: KvStore>(store: &S, node_id: u64) -> Result<Node
             };
             write(tx, &keys::node_identity(*node_id), &r)?;
             Ok(r)
+        })
+    })
+    .await
+}
+
+/// Take the identity a node holds into the metadata (acknowledged), when
+/// the metadata has none for it (Phase 3.11 review: metadata restored
+/// from before the node had one). Never replaces an existing record.
+/// Returns whether it was taken.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn import_identity<S: KvStore>(store: &S, node_id: u64, token: [u8; 16]) -> Result<bool> {
+    transact(store, (node_id, token), |tx, env| {
+        Box::pin(async move {
+            let (node_id, token) = *env;
+            if tx.get(&keys::node_identity(node_id)).await?.is_some() {
+                return Ok(false);
+            }
+            write(
+                tx,
+                &keys::node_identity(node_id),
+                &NodeIdentityRecord {
+                    node_id,
+                    token,
+                    acknowledged: true,
+                },
+            )?;
+            Ok(true)
         })
     })
     .await

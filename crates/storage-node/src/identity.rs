@@ -7,7 +7,9 @@
 //! node (another cluster's controller, a reused id, the disk of another
 //! node); a disk without one (emptied, or new) adopts one only when the
 //! request asks for it, which a leader does only until the node first
-//! acknowledged its identity.
+//! acknowledged its identity. A damaged file is never replaced by an
+//! adoption: an operator removes it (`admin node rejoin --fresh-identity`
+//! then gives a new one).
 
 use std::fs::File;
 use std::io::Write as _;
@@ -97,7 +99,10 @@ impl NodeIdentity {
         let want = Identity { node_id, token };
         match &self.held {
             Ok(Some(h)) if *h == want => Ok(Check::Matches),
-            Ok(None) | Err(_) if adopt => {
+            // Only a disk without the file adopts: a damaged one stays
+            // refused until an operator removes it (the evidence of which
+            // disk this is would be gone).
+            Ok(None) if adopt => {
                 self.persist(want)?;
                 self.held = Ok(Some(want));
                 tracing::info!(node_id, "adopted node identity");
@@ -147,7 +152,7 @@ mod tests {
         // Survives a restart.
         let mut again = NodeIdentity::open(dir.path());
         assert_eq!(again.check(3, &[7; 16], false).unwrap(), Check::Matches);
-        // Damaged: mismatches until adopted again.
+        // Damaged: refused, even when asked to adopt.
         std::fs::write(
             dir.path().join(FILE),
             "identity 1\nnode_id 3\ntoken zz\ncrc 0\n",
@@ -155,6 +160,6 @@ mod tests {
         .unwrap();
         let mut damaged = NodeIdentity::open(dir.path());
         assert_eq!(damaged.check(3, &[7; 16], false).unwrap(), Check::Mismatch);
-        assert_eq!(damaged.check(3, &[7; 16], true).unwrap(), Check::Adopted);
+        assert_eq!(damaged.check(3, &[7; 16], true).unwrap(), Check::Mismatch);
     }
 }

@@ -121,12 +121,33 @@ of every operation goes through `Trip::observe`:
   latched) until a health pass succeeds: a leader that cannot show its
   lease does not delete. A lost lease stops and closes as `Fenced`.
 
-Every production delete goes through `NodeClients::delete_shard_if`,
+Every controller delete goes through `NodeClients::delete_shard_if`,
 which checks the process's fence before sending: GC, reconciliation
 (which also removes the former placement after a migration), a
 migration's cleanup of its own target copies, cache eviction and repair
-cleanups. The trip therefore covers all of them; gateways send no
-deletes.
+cleanups. The trip covers all of them. Gateways delete only the partial
+copies of a write they just made, under the fence they read; they have no
+trip, and the nodes refuse those deletes once the fence is closed
+(review correction).
+
+Review fixes (Phase 3.11):
+
+- The trip wraps the cluster-state guard: the guard's own refusals (a
+  missing or changed cluster state) trip too. Before, the guard answered
+  above the trip; the schedulers' bookkeeping through the fenced store
+  still tripped at the end of each pass, so the exposure was the rest of
+  a pass.
+- A trip on a locked or replaced store closes the generation above the
+  one in use on the nodes. Any later leader on restored metadata (another
+  controller, or this one restarted, neither remembering the trip) then
+  finds the nodes ahead of its record and holds the fence. A takeover
+  (`Fenced`) closes the term's own generation, so that ordinary failover
+  is unchanged.
+- A lost lease probes the store and reports a replaced one; the
+  generation a latched trip closes is the last one deletes carried, even
+  after an earlier stop took it.
+- Process heartbeats are not written into a store without a cluster
+  state: a cleared keyspace stays empty under processes left running.
 
 ## What is and is not guaranteed
 
@@ -137,8 +158,10 @@ release):
    store cleared, locked or replaced.
 2. No delete of that term's generation is applied by a node after the
    close push reached it, including deletes sent before the trip.
-3. The next term on the restored metadata deletes nothing until an
-   operator runs `recovery begin` (or releases the hold).
+3. The next term on the restored metadata, by this controller or another
+   one, deletes nothing until an operator runs `recovery begin` (or
+   releases the hold), provided the trip's close of the generation above
+   reached the nodes.
 
 Not guaranteed (no information exists, or the guarantee is bounded):
 

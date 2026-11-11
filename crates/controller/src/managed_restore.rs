@@ -64,6 +64,9 @@ pub enum Step {
     Frozen,
     /// Every node closed and holds the fence, acknowledged and re-read.
     Fenced,
+    /// About to clear: recorded before the clear commits, so that a crash
+    /// between the two resumes (the cluster state is gone by then).
+    Clearing,
     /// The destination's arca-lake keys cleared.
     Cleared,
     /// The backup restored.
@@ -79,10 +82,11 @@ pub enum Step {
 }
 
 impl Step {
-    const ALL: [Step; 9] = [
+    const ALL: [Step; 10] = [
         Step::Planned,
         Step::Frozen,
         Step::Fenced,
+        Step::Clearing,
         Step::Cleared,
         Step::Restored,
         Step::Marked,
@@ -98,6 +102,7 @@ impl Step {
             Step::Planned => "planned",
             Step::Frozen => "frozen",
             Step::Fenced => "fenced",
+            Step::Clearing => "clearing",
             Step::Cleared => "cleared",
             Step::Restored => "restored",
             Step::Marked => "marked",
@@ -425,6 +430,7 @@ pub async fn plan<S: KvStore>(
 /// Why a step was refused (nothing later was done; re-run once fixed);
 /// metadata, node or I/O errors.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub async fn run<S: KvStore + 'static, R: Restorer>(
     meta: &std::sync::Arc<S>,
     clients: &NodeClients,
@@ -432,6 +438,7 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
     path: &Path,
     confirm: &str,
     stopped: &[String],
+    absent: &[u64],
     now: impl Fn() -> u64,
 ) -> Result<Journal, ControlError> {
     let mut j = Journal::load(path).map_err(ControlError::Other)?;
@@ -453,7 +460,7 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
     }
     let meta_ref = meta.as_ref();
     // Before the clear the store must still be the planned cluster.
-    if !j.has(Step::Cleared) {
+    if !j.has(Step::Clearing) {
         let state = compat::cluster_state(meta_ref).await?.ok_or_else(|| {
             refuse("the cluster state is gone before the restore: not the planned store")
         })?;
@@ -530,16 +537,16 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
     // Steps 5-6: clear, restore. A failed restore leaves the journal at
     // `Cleared`: the re-run clears again and restores again.
     if !j.has(Step::Restored) {
-        if !j.has(Step::Cleared) {
-            // Again, right before the destructive step.
-            let running = running_processes(meta_ref, stopped, now()).await?;
-            if !running.is_empty() {
-                return Err(refuse(format!(
-                    "processes started meanwhile: {}",
-                    running.join(", ")
-                )));
-            }
+        // Again, right before every clear (a re-run after a failed
+        // restore too; review).
+        let running = running_processes(meta_ref, stopped, now()).await?;
+        if !running.is_empty() {
+            return Err(refuse(format!(
+                "processes started meanwhile: {}",
+                running.join(", ")
+            )));
         }
+        j.record(path, Step::Clearing)?;
         arca_lake_metadata::transact(meta_ref, (), |tx, ()| {
             Box::pin(async move {
                 tx.clear_range(&arca_lake_metadata::keys::all_range());
@@ -562,6 +569,15 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
     // Step 7: recovery begin on the restored metadata. A mark made by a
     // run that crashed before recording it is adopted, not made again.
     if !j.has(Step::Marked) {
+        // A process running on the restored metadata refreshes its
+        // heartbeat there: none may (review).
+        let running = running_processes(meta_ref, stopped, now()).await?;
+        if !running.is_empty() {
+            return Err(refuse(format!(
+                "processes running on the restored metadata: {}; stop them (re-run resumes at the mark)",
+                running.join(", ")
+            )));
+        }
         let state = compat::cluster_state(meta_ref).await?.ok_or_else(|| {
             refuse("the restored metadata has no cluster state: not an arca-lake backup")
         })?;
@@ -571,6 +587,41 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
             .restored_incarnation
             .as_deref()
             .is_some_and(|r| r != compat::hex(&state.incarnation));
+        // The restored metadata must describe this cluster's nodes
+        // (review: another cluster's backup would push our fence and
+        // incarnation to its nodes): every node it names is one the plan
+        // saw, at the same address (a backup from before a node was added
+        // names fewer).
+        let named = cluster::list_nodes(meta_ref).await?;
+        if named.is_empty() {
+            return Err(refuse(
+                "the restored metadata names no node: not this cluster's backup",
+            ));
+        }
+        for n in &named {
+            let planned = j.nodes.iter().find(|(id, _)| *id == n.id);
+            match planned {
+                Some((_, addr)) if *addr == n.address => {}
+                Some((_, addr)) => {
+                    return Err(refuse(format!(
+                        "the restored metadata places node {} at {}, this cluster at {addr}: not this cluster's backup",
+                        n.id, n.address
+                    )));
+                }
+                None if j.removed.contains(&n.id) => {}
+                None => {
+                    return Err(refuse(format!(
+                        "the restored metadata names node {} at {}, unknown to this cluster: not this cluster's backup",
+                        n.id, n.address
+                    )));
+                }
+            }
+        }
+        // What was unregistered stays out (review).
+        for id in &j.removed {
+            node_lifecycle::keep_removed(meta_ref, *id, now()).await?;
+        }
+        let excused: Vec<u64> = j.removed.iter().chain(absent).copied().collect();
         if !already {
             let closed = crate::delete_fence::close_and_push(
                 meta_ref,
@@ -583,14 +634,14 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
             let missing: Vec<u64> = closed
                 .not_acknowledged()
                 .into_iter()
-                .filter(|id| !j.removed.contains(id))
+                .filter(|id| !excused.contains(id))
                 .collect();
             if !missing.is_empty() {
                 return Err(refuse(format!(
-                    "nodes {missing:?} did not acknowledge the fence on the restored metadata: re-run once they answer"
+                    "nodes {missing:?} did not acknowledge the fence on the restored metadata: re-run once they answer, or, only for a node stopped for good, with --absent-node"
                 )));
             }
-            let seq = crate::delete_fence::restore_floors(meta_ref, clients, &j.removed)
+            let seq = crate::delete_fence::restore_floors(meta_ref, clients, &excused)
                 .await
                 .map_err(ControlError::Other)?;
             compat::mark_restoring_above(
@@ -674,6 +725,7 @@ pub async fn finish<S: KvStore>(
     operator: &str,
     reason: &str,
     force: bool,
+    absent: &[u64],
     wait: std::time::Duration,
     now: impl Fn() -> u64,
 ) -> Result<Journal, ControlError> {
@@ -710,8 +762,18 @@ pub async fn finish<S: KvStore>(
         let deadline = std::time::Instant::now() + wait;
         loop {
             let rec = delete_fence::current(meta).await?;
+            // The restored metadata's nodes in service (review: not the
+            // plan's, which may name nodes the backup predates).
+            let states = node_lifecycle::states(meta).await?;
+            let waited: Vec<(u64, String)> = cluster::list_nodes(meta)
+                .await?
+                .into_iter()
+                .filter(|n| !absent.contains(&n.id))
+                .filter(|n| !matches!(states.get(&n.id), Some(State::Removed | State::Quarantined)))
+                .map(|n| (n.id, n.address))
+                .collect();
             let mut lagging = Vec::new();
-            for (id, addr) in &j.nodes {
+            for (id, addr) in &waited {
                 match clients.health(addr).await {
                     Ok(h)
                         if h.delete_fence_open
