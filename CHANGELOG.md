@@ -24,6 +24,15 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   R-94(b) (open, High).
 - ADR-0026 option Q (proposed, next phase): history-confirmed retention,
   with its design audit.
+- M2 (R-98): epoch change intents: a member move records its intent
+  before raising node epochs; any leader resumes or settles an
+  interrupted one, so nodes are never left ahead of the metadata.
+- M3 (R-98): planned member moves keep the target's client reserve
+  (reserve-aware check, `Migration` write class); failure repairs keep
+  the repair floor.
+- M4 (R-98): the stripe repair queue is read in bounded pages from a
+  persisted, wrapping cursor; at most `tasks_per_pass` tasks held per
+  pass (`scan_window`, default 4096 entries scanned).
 - Node lifecycle (ADR-0027, R-100): `admin node list|status|decommission
   (drain)|unregister|rejoin`; removed and quarantined states; a node
   identity on the node's disk (HealthRequest `node_id`, `node_identity`,

@@ -31,6 +31,7 @@ mod e2e;
 #[cfg(feature = "fdb")]
 mod e2e_fdb;
 mod e2e_tls;
+mod epoch_intent;
 mod faults;
 #[cfg(feature = "fdb")]
 mod faults_fdb;
@@ -65,6 +66,7 @@ mod recovery_finalize;
 mod refused_bodies;
 mod repair;
 mod repair_completion;
+mod repair_paging;
 mod request_metrics;
 mod s3_compat;
 mod system_model;

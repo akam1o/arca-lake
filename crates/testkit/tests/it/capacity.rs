@@ -1341,3 +1341,120 @@ async fn failover_while_writes_are_refused_with_gateway_and_node_restarts() {
     b.shutdown().await;
     c.shutdown().await;
 }
+
+/// M3 (Phase 3.11): a planned move (a drain) keeps the target's client
+/// reserve. The spare's raw free space fits the member with its margin,
+/// but its room above the client reserve does not: the drain pauses with
+/// the reason, and nothing is moved. A failure repair onto the same spare
+/// may use the space down to the repair floor, and proceeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_planned_move_keeps_the_targets_client_reserve_a_failure_repair_may_not() {
+    use arca_lake_controller::process::{ControllerConfig, spawn};
+    use arca_lake_metadata::ops::membership;
+    use std::time::Duration;
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(3, 2, 1, MIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let mut keys = Vec::new();
+    for i in 0..2 {
+        let key = format!("m{i}");
+        let data = Bytes::from(random_bytes(usize::try_from(MIB).unwrap(), 70 + i));
+        s3::put(
+            &c.backend,
+            BUCKET,
+            &key,
+            data.clone(),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+        keys.push((key, data));
+    }
+    let spare = c.add_node().await;
+    c.set_node_capacity(spare, Some(300 * MIB)).await;
+    let dev = c.node_service(spare).device_capacity().unwrap();
+    let need = arca_lake_controller::capacity::needed(MIB);
+    assert!(
+        dev.available_bytes >= need && dev.available_bytes - dev.reserved_bytes < need,
+        "set-up: raw free fits, room above the reserve does not: {dev:?} need {need}"
+    );
+    let group = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| !g.is_cache())
+        .unwrap();
+    let leaving = group.members[0].node_id;
+    let mut cfg = ControllerConfig::new("ctl-m3");
+    cfg.lease = Duration::from_secs(2);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.repair_interval = Duration::from_millis(100);
+    cfg.unhealthy_after = Duration::from_secs(2);
+    cfg.auto_repair = true;
+    cfg.gc_interval = Duration::from_secs(3600);
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.failure_domain = "host".into();
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    membership::drain_node(c.meta.as_ref(), leaving, "t", now_ms())
+        .await
+        .unwrap();
+    let t = std::time::Instant::now();
+    let blocked = loop {
+        let st = membership::node_states(c.meta.as_ref()).await.unwrap();
+        if let Some(b) = st
+            .iter()
+            .find(|r| r.node_id == leaving)
+            .and_then(|r| r.blocked.clone())
+        {
+            break b;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "the drain never paused: {st:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(blocked.contains("insufficient capacity"), "{blocked}");
+    let g = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| g.id == group.id)
+        .unwrap();
+    assert_eq!(g.members, group.members, "nothing moved");
+    // A failure instead: the leaving member's node dies; repair restores
+    // redundancy onto the same spare.
+    membership::cancel_drain(c.meta.as_ref(), leaving)
+        .await
+        .unwrap();
+    let li = c.node_index(&group.members[0]).unwrap();
+    c.stop_node(li).await;
+    let spare_id = c.nodes[spare].id;
+    let t = std::time::Instant::now();
+    loop {
+        let g = c
+            .groups()
+            .await
+            .into_iter()
+            .find(|g| g.id == group.id)
+            .unwrap();
+        if g.state == arca_lake_metadata::records::GroupState::Active
+            && g.members.iter().any(|m| m.node_id == spare_id)
+        {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(60),
+            "the failure repair never completed: {g:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for (k, data) in &keys {
+        assert_eq!(&s3::get(&c.backend, BUCKET, k).await.unwrap().0, data);
+    }
+    ctl.shutdown().await;
+    c.shutdown().await;
+}

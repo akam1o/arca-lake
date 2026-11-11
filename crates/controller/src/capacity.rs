@@ -88,13 +88,26 @@ pub async fn member_size(
     None
 }
 
-/// Free bytes a node reports (`None`: unknown or unreachable).
-pub async fn node_free(clients: &NodeClients, addr: &str) -> Option<u64> {
-    clients
-        .health(addr)
-        .await
-        .ok()
-        .and_then(|h| (h.device_total_bytes > 0).then_some(h.device_free_bytes))
+/// Bytes a node may take for a member move (`None`: unknown or
+/// unreachable). A planned move (`keep_client_reserve`) gets the room
+/// above the node's client reserve and its writes in flight (as
+/// rebalancing does); a failure repair the free space down to the repair
+/// floor, which the node's admission enforces (Phase 3.11, M3). Either
+/// way the node's own admission check has the last word.
+pub async fn node_room(
+    clients: &NodeClients,
+    addr: &str,
+    keep_client_reserve: bool,
+) -> Option<u64> {
+    let h = clients.health(addr).await.ok()?;
+    if h.device_total_bytes == 0 && h.devices.is_empty() {
+        return None;
+    }
+    if keep_client_reserve {
+        Some(crate::admission::device_of(0, &h, 0).headroom())
+    } else {
+        (h.device_total_bytes > 0).then_some(h.device_free_bytes)
+    }
 }
 
 /// Measurements per `(group, epoch, index)`, reused for a while so that a

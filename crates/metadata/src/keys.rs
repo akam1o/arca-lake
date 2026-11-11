@@ -246,6 +246,18 @@ pub fn node_identity(node_id: u64) -> Key {
     pack(&(ROOT, "nident", node_id))
 }
 
+/// An open epoch change of a group (Phase 3.11, M2).
+#[must_use]
+pub fn epoch_intent(group_id: u64) -> Key {
+    pack(&(ROOT, "epochint", group_id))
+}
+
+/// Prefix of every epoch change intent.
+#[must_use]
+pub fn epoch_intents_prefix() -> Key {
+    pack(&(ROOT, "epochint"))
+}
+
 /// Every node identity record.
 #[must_use]
 pub fn node_identities_range() -> KeyRange {
@@ -280,6 +292,13 @@ pub fn repair_task(group_id: u64, chunk_id: &[u8; 16]) -> Key {
 #[must_use]
 pub fn repair_tasks_range() -> KeyRange {
     KeyRange::prefix(&pack(&(ROOT, "repair")))
+}
+
+/// Where the repair scheduler's next scan of the queue starts (Phase
+/// 3.11, M4). Outside the queue's range.
+#[must_use]
+pub fn repair_scan_cursor() -> Key {
+    pack(&(ROOT, "repaircur"))
 }
 
 /// `(group, chunk)` from a repair task key, if it is one.

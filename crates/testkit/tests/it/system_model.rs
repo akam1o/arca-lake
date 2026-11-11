@@ -89,16 +89,32 @@ enum Op {
     NodeRestart,
     /// Held deletes delivered, in shuffled order.
     DeliverDelayed,
+    /// Restore the pending backup through `admin restore` (Phase 3.11):
+    /// every held delete is delivered in the middle of the restore.
+    ManagedRestore,
+    /// `admin restore` attempted with a node down: refused before anything
+    /// changes (Phase 3.11).
+    UnsafeRestoreAttempt,
+    /// A member move interrupted after raising the epoch, then settled as
+    /// a leader does (Phase 3.11, M2).
+    EpochChangeCrash,
+    /// The spare node decommissioned, unregistered (a delete to it is
+    /// refused), and rejoined (Phase 3.11, R-100).
+    NodeRetireRejoin,
 }
 
 fn pick(rng: &mut Rng) -> Op {
-    match rng.below(27) {
+    match rng.below(31) {
         20 => return Op::Snapshot,
         21 => return Op::Restore,
         22 => return Op::PhaseFlip,
         23 => return Op::LeaderChange,
         24 => return Op::NodeRestart,
         25..=26 => return Op::DeliverDelayed,
+        27 => return Op::ManagedRestore,
+        28 => return Op::UnsafeRestoreAttempt,
+        29 => return Op::EpochChangeCrash,
+        30 => return Op::NodeRetireRejoin,
         _ => {}
     }
     match rng.below(20) {
@@ -402,6 +418,65 @@ async fn model_recover<S: KvStore + 'static>(c: &TestCluster<S>) -> [u8; 16] {
     marked.incarnation
 }
 
+/// `admin restore`'s restorer in the model: the held deletes arrive in
+/// the middle of the restore (between the clear and the write-back), then
+/// the backup's metadata is written.
+struct ModelRestorer<S> {
+    meta: std::sync::Arc<S>,
+    snap: Vec<(Vec<u8>, Vec<u8>)>,
+    delayed: std::sync::Mutex<Vec<(NodeClients, Vec<Decided>)>>,
+}
+
+impl<S: KvStore + 'static> arca_lake_controller::managed_restore::Restorer for ModelRestorer<S> {
+    fn destination(&self) -> String {
+        "model store".into()
+    }
+
+    async fn restore(&self, _source: &str, _version: u64) -> Result<(), String> {
+        let held = std::mem::take(&mut *self.delayed.lock().unwrap());
+        for (who, deletes) in held {
+            for (addr, shard, epoch) in deletes {
+                let _ = who.delete_shard(&addr, shard, epoch).await;
+            }
+        }
+        metadata_restore(self.meta.as_ref(), &self.snap).await;
+        Ok(())
+    }
+}
+
+/// Every object of the model has, for every chunk, at least its data
+/// shards on its group's members (durable data intact, whatever a cache
+/// copy still serves; Phase 3.11).
+async fn durable_intact<S: KvStore + 'static>(
+    c: &TestCluster<S>,
+    model: &BTreeMap<String, Bytes>,
+    seed: u64,
+    step: usize,
+) {
+    let groups = c.groups().await;
+    for k in model.keys() {
+        for (_, _, rec) in object_chunks(c, k).await {
+            let Some(g) = groups.iter().find(|g| g.id == rec.placement.group_id) else {
+                continue;
+            };
+            let mut present = 0;
+            for (i, m) in g.members.iter().enumerate() {
+                if let Some(n) = c.node_index(m) {
+                    present +=
+                        usize::from(c.node_store(n).keys_in_group(g.id).iter().any(|sk| {
+                            sk.chunk_id == rec.chunk_id && usize::from(sk.shard_index) == i
+                        }));
+                }
+            }
+            assert!(
+                present >= usize::from(rec.data_shards),
+                "seed {seed} step {step}: {k} has {present} of {} shards of a chunk on its members after a restore",
+                rec.data_shards + rec.parity_shards
+            );
+        }
+    }
+}
+
 /// Every key reads what the model says.
 async fn check<S: KvStore + 'static>(
     c: &TestCluster<S>,
@@ -436,7 +511,8 @@ async fn run<S: KvStore + 'static>(
         multipart_min_part_bytes: CHUNK / 4,
         cache_nodes: 2,
         cache: Some(ClusterOptions::default_cache()),
-        ..ClusterOptions::rs(6, 2, 1, CHUNK, 16 << 10)
+        // Seven durable nodes for two groups of three: one spare.
+        ..ClusterOptions::rs(7, 2, 1, CHUNK, 16 << 10)
     })
     .await;
     s3::create_bucket(&c.backend, BUCKET).await.unwrap();
@@ -453,7 +529,13 @@ async fn run<S: KvStore + 'static>(
         let mut op = pick(&mut rng);
         // A pending backup is restored soon (one step in six).
         if backup.is_some() && rng.below(6) == 0 {
-            op = Op::Restore;
+            // Either path, as often (Phase 3.11): the runbook by hand, or
+            // `admin restore`.
+            op = if rng.below(2) == 0 {
+                Op::Restore
+            } else {
+                Op::ManagedRestore
+            };
         }
         // While a backup is pending nothing removes data (GC, reconcile,
         // moves, delayed deletes): what a restore expects back is then
@@ -474,7 +556,23 @@ async fn run<S: KvStore + 'static>(
             op = Op::Compact;
         }
         trace.push(op);
-        let key = format!("k{}", rng.below(KEYS as u64));
+        let mut key = format!("k{}", rng.below(KEYS as u64));
+        // While a backup is pending, a delete targets an object the backup
+        // holds unchanged half the time (Phase 3.11): what a stale delete
+        // landing during a restore would destroy.
+        if matches!(op, Op::Delete)
+            && let Some((_, at_backup)) = &backup
+            && rng.below(2) == 0
+        {
+            let same: Vec<&String> = at_backup
+                .iter()
+                .filter(|(k, v)| model.get(*k) == Some(*v))
+                .map(|(k, _)| k)
+                .collect();
+            if !same.is_empty() {
+                key = same[rng.below(same.len() as u64) as usize].clone();
+            }
+        }
         let size = match rng.below(4) {
             0 => 1 + rng.below(16 << 10),
             1 => CHUNK,
@@ -536,6 +634,7 @@ async fn run<S: KvStore + 'static>(
                     token += 1;
                     leader_pass(&c, token).await;
                     model = before;
+                    durable_intact(&c, &model, seed, step).await;
                 }
             }
             Op::PhaseFlip => {
@@ -580,8 +679,220 @@ async fn run<S: KvStore + 'static>(
                 token += 1;
                 leader_pass(&c, token).await;
             }
+            Op::ManagedRestore => {
+                if let Some((snap, before)) = backup.take() {
+                    use arca_lake_controller::managed_restore as mr;
+                    let dir = tempfile::tempdir().unwrap();
+                    let journal = dir.path().join("journal");
+                    let restorer = ModelRestorer {
+                        meta: std::sync::Arc::clone(&c.meta),
+                        snap,
+                        delayed: std::sync::Mutex::new(std::mem::take(&mut delayed)),
+                    };
+                    let plan = mr::plan(
+                        c.meta.as_ref(),
+                        &c.clients,
+                        "model://backup",
+                        1,
+                        None,
+                        &mr::Restorer::destination(&restorer),
+                        &journal,
+                        now_ms(),
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("seed {seed} step {step}: plan: {e}"));
+                    mr::run(
+                        &c.meta,
+                        &c.clients,
+                        &restorer,
+                        &journal,
+                        &plan.journal.token,
+                        &[],
+                        now_ms,
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("seed {seed} step {step}: run: {e}"));
+                    // Finalized; no leader yet: then one opens a generation.
+                    let _ = mr::finish(
+                        c.meta.as_ref(),
+                        &c.clients,
+                        &journal,
+                        "model",
+                        "model",
+                        true,
+                        std::time::Duration::ZERO,
+                        now_ms,
+                    )
+                    .await;
+                    let inc = compat::cluster_state(c.meta.as_ref())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .incarnation;
+                    c.clients.set_incarnation(Some(inc));
+                    c.restart_backend().await.unwrap();
+                    token += 1;
+                    leader_pass(&c, token).await;
+                    mr::finish(
+                        c.meta.as_ref(),
+                        &c.clients,
+                        &journal,
+                        "model",
+                        "model",
+                        true,
+                        std::time::Duration::from_secs(5),
+                        now_ms,
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("seed {seed} step {step}: finish: {e}"));
+                    model = before;
+                    durable_intact(&c, &model, seed, step).await;
+                }
+            }
+            Op::UnsafeRestoreAttempt => {
+                // A node down: the managed restore does not start.
+                let i = rng.below(7) as usize;
+                c.stop_node(i).await;
+                let dir = tempfile::tempdir().unwrap();
+                let journal = dir.path().join("journal");
+                let r = arca_lake_controller::managed_restore::plan(
+                    c.meta.as_ref(),
+                    &c.clients,
+                    "model://backup",
+                    1,
+                    None,
+                    "model store",
+                    &journal,
+                    now_ms(),
+                )
+                .await;
+                assert!(
+                    r.is_err() && !journal.exists(),
+                    "seed {seed} step {step}: a restore was planned with a node down"
+                );
+                c.start_node(i).await;
+            }
+            Op::EpochChangeCrash => {
+                // Member `index` of a durable group moved to a node outside
+                // it; the move stops after raising the epoch; a leader then
+                // settles it (the move no longer wanted).
+                let groups = ec_groups(&c).await;
+                let g = &groups[rng.below(groups.len() as u64) as usize];
+                let index = rng.below(g.members.len() as u64) as usize;
+                if let Some(n) = c
+                    .nodes
+                    .iter()
+                    .find(|n| !g.members.iter().any(|m| m.node_id == n.id))
+                {
+                    let to = arca_lake_metadata::records::GroupMember {
+                        node_id: n.id,
+                        device_id: 0,
+                    };
+                    let _ = arca_lake_controller::repair::replace_member_with(
+                        c.meta.as_ref(),
+                        &c.clients,
+                        g.id,
+                        index,
+                        to,
+                        &arca_lake_controller::repair::RepairOptions::default(),
+                        async |step| {
+                            if step == arca_lake_controller::repair::RepairStep::Fenced {
+                                Err(arca_lake_controller::ControlError::Other(
+                                    "model crash".into(),
+                                ))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await;
+                    for intent in arca_lake_metadata::ops::epoch_intent::open(c.meta.as_ref())
+                        .await
+                        .unwrap()
+                    {
+                        for m in &g.members {
+                            if let Some(i) = c.node_index(m) {
+                                let _ = c
+                                    .clients
+                                    .update_epoch(
+                                        &c.nodes[i].addr.to_string(),
+                                        g.id,
+                                        intent.from_epoch + 1,
+                                    )
+                                    .await;
+                            }
+                        }
+                        arca_lake_metadata::ops::epoch_intent::settle(c.meta.as_ref(), &intent)
+                            .await
+                            .unwrap();
+                    }
+                    c.backend.refresh_map().await.unwrap();
+                }
+            }
+            Op::NodeRetireRejoin => {
+                use arca_lake_metadata::ops::{membership, node_lifecycle};
+                let groups = c.groups().await;
+                let spare = c
+                    .nodes
+                    .iter()
+                    .find(|n| {
+                        !groups
+                            .iter()
+                            .any(|g| g.members.iter().any(|m| m.node_id == n.id))
+                    })
+                    .map(|n| (n.id, n.addr.to_string()));
+                if let Some((id, addr)) = spare
+                    && node_lifecycle::state(c.meta.as_ref(), id).await.unwrap()
+                        == node_lifecycle::State::Active
+                {
+                    membership::drain_node(c.meta.as_ref(), id, "model", now_ms())
+                        .await
+                        .unwrap();
+                    membership::update_drain(c.meta.as_ref(), id, Some(now_ms()), None)
+                        .await
+                        .unwrap();
+                    let old = frozen(&c);
+                    arca_lake_controller::node_ops::unregister(
+                        c.meta.as_ref(),
+                        &c.clients,
+                        id,
+                        "model",
+                        "model",
+                        false,
+                        now_ms(),
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("seed {seed} step {step}: unregister: {e}"));
+                    let probe = ShardRef {
+                        group_id: groups[0].id,
+                        chunk_id: [0xee; 16],
+                        shard_index: 0,
+                    };
+                    let r = old.delete_shard(&addr, probe, groups[0].epoch).await;
+                    assert!(
+                        r.as_ref().is_err_and(NodeClients::is_fenced),
+                        "seed {seed} step {step}: an unregistered node took a delete: {r:?}"
+                    );
+                    // The node has acknowledged no identity in the model
+                    // (no leader process gives one): it rejoins with a
+                    // fresh one only if empty; it is.
+                    arca_lake_controller::node_ops::rejoin(c.meta.as_ref(), &c.clients, id, true)
+                        .await
+                        .unwrap_or_else(|e| panic!("seed {seed} step {step}: rejoin: {e}"));
+                    arca_lake_controller::delete_fence::release_and_push(
+                        c.meta.as_ref(),
+                        &c.clients,
+                        "model rejoin",
+                        now_ms(),
+                    )
+                    .await
+                    .ok();
+                    token += 1;
+                    leader_pass(&c, token).await;
+                }
+            }
             Op::NodeRestart => {
-                let i = rng.below(6) as usize;
+                let i = rng.below(7) as usize;
                 c.stop_node(i).await;
                 c.start_node(i).await;
             }
@@ -659,17 +970,27 @@ async fn run<S: KvStore + 'static>(
                         )
                         .await
                         .unwrap();
-                        repair_pass(
-                            c.meta.as_ref(),
-                            &c.clients,
-                            &coders(),
-                            &RepairWorkerOptions::default(),
-                            None,
-                            None,
-                            now_ms(),
-                        )
-                        .await
-                        .unwrap();
+                        // Sometimes with the smallest pages (Phase 3.11, M4):
+                        // one task per pass, a window of one entry.
+                        let small = rng.below(2) == 0;
+                        let ro = RepairWorkerOptions {
+                            tasks_per_pass: if small { 1 } else { 256 },
+                            scan_window: if small { 1 } else { 4096 },
+                            ..RepairWorkerOptions::default()
+                        };
+                        for _ in 0..if small { 8 } else { 1 } {
+                            repair_pass(
+                                c.meta.as_ref(),
+                                &c.clients,
+                                &coders(),
+                                &ro,
+                                None,
+                                None,
+                                now_ms(),
+                            )
+                            .await
+                            .unwrap();
+                        }
                     }
                 }
             }

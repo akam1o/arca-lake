@@ -109,6 +109,12 @@ pub struct RepairWorkerOptions {
     /// start of a pass is "busy": repair uses one transfer at a time on it
     /// (yielding to clients).
     pub busy_threshold: u64,
+    /// Queue entries a pass scans for due tasks (Phase 3.11, M4), from the
+    /// persisted scan cursor, in pages of at most
+    /// `integrity::TASK_PAGE_MAX`, one transaction each; the cursor wraps
+    /// at the end, so that every task is examined within
+    /// ceil(queue / window) passes. At least `tasks_per_pass`.
+    pub scan_window: usize,
 }
 
 impl Default for RepairWorkerOptions {
@@ -121,6 +127,7 @@ impl Default for RepairWorkerOptions {
             rate_bytes_per_s: 64 << 20,
             per_node_in_flight: 2,
             busy_threshold: 4,
+            scan_window: 4096,
         }
     }
 }
@@ -219,6 +226,10 @@ pub struct RepairWorkerReport {
     pub dropped: usize,
     /// Tasks deferred (not due, or epoch changed and re-planned).
     pub deferred: usize,
+    /// Queue entries scanned for due tasks.
+    pub scanned: usize,
+    /// The scan reached the end of the queue and wrapped.
+    pub wrapped: bool,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -902,29 +913,12 @@ pub async fn repair_pass<S: KvStore>(
         }
     }
     let budget = RepairBudget::new(opts, busy);
-    // Due tasks by priority: recoverable damage first, unrecoverable
-    // re-checks last; oldest first within a class.
-    let mut tasks: Vec<(u64, [u8; 16], RepairTask)> = integrity::tasks(meta, usize::MAX)
-        .await?
-        .into_iter()
-        .filter(|(_, _, t)| {
-            if t.next_attempt_ms > now_ms {
-                report.deferred += 1;
-                false
-            } else {
-                true
-            }
-        })
-        .collect();
-    tasks.sort_by_key(|(_, _, t)| {
-        let class = match t.reason {
-            Finding::UnrecoverableStripe => 2,
-            Finding::UnexpectedShard | Finding::StalePlacementEpoch => 1,
-            _ => 0,
-        };
-        (class, t.created_ms)
-    });
-    tasks.truncate(opts.tasks_per_pass);
+    // Due tasks by priority (recoverable damage first, unrecoverable
+    // re-checks last, oldest first within a class), among a window of the
+    // queue scanned page by page from the persisted cursor (Phase 3.11,
+    // M4): never the whole queue in one transaction, at most
+    // `tasks_per_pass` kept in memory.
+    let tasks = select_due(meta, opts, now_ms, &mut report).await?;
     report.examined = tasks.len();
     let mut stream = futures::stream::iter(tasks.into_iter().map(|(group_id, chunk_id, task)| {
         let budget = &budget;
@@ -974,10 +968,19 @@ pub async fn repair_pass<S: KvStore>(
     }
     drop(stream);
     if let Some(m) = metrics {
-        for (i, n) in integrity::open_by_class(meta).await?.iter().enumerate() {
+        // The whole queue counted (paged), at most every 30 s: with a large
+        // queue a count per pass would cost more than the pass.
+        let last = m.repair_queue_counted_ms.load(Ordering::Relaxed);
+        if last != 0 && now_ms.saturating_sub(last) < 30_000 {
+            return Ok(report);
+        }
+        m.repair_queue_counted_ms
+            .store(now_ms.max(1), Ordering::Relaxed);
+        let st = integrity::queue_stats(meta).await?;
+        for (i, n) in st.by_class.iter().enumerate() {
             m.integrity_findings_open[i].store(*n, Ordering::Relaxed);
         }
-        let (total, unrecoverable, failed) = integrity::queue_summary(meta).await?;
+        let (total, unrecoverable, failed) = (st.total, st.unrecoverable, st.failed);
         m.repair_queue_depth.store(total, Ordering::Relaxed);
         m.repair_tasks_unrecoverable
             .store(unrecoverable, Ordering::Relaxed);
@@ -990,6 +993,105 @@ pub async fn repair_pass<S: KvStore>(
         m.data_integrity_status.store(status, Ordering::Relaxed);
     }
     Ok(report)
+}
+
+/// Priority of a task: recoverable damage first, then unexpected shards
+/// and stale placements, unrecoverable re-checks last; oldest first.
+fn priority(t: &RepairTask) -> (u8, u64) {
+    let class = match t.reason {
+        Finding::UnrecoverableStripe => 2,
+        Finding::UnexpectedShard | Finding::StalePlacementEpoch => 1,
+        _ => 0,
+    };
+    (class, t.created_ms)
+}
+
+/// One pass's tasks (Phase 3.11, M4): scan up to `opts.scan_window`
+/// entries from the persisted cursor (wrapping once at the end), page by
+/// page, keeping the `tasks_per_pass` due ones of highest priority; then
+/// persist where the next pass starts.
+async fn select_due<S: KvStore>(
+    meta: &S,
+    opts: &RepairWorkerOptions,
+    now_ms: u64,
+    report: &mut RepairWorkerReport,
+) -> Result<Vec<(u64, [u8; 16], RepairTask)>, ControlError> {
+    use std::collections::BinaryHeap;
+    struct Ranked((u8, u64), u64, [u8; 16], RepairTask);
+    impl PartialEq for Ranked {
+        fn eq(&self, o: &Self) -> bool {
+            (self.0, self.1, self.2) == (o.0, o.1, o.2)
+        }
+    }
+    impl Eq for Ranked {}
+    impl PartialOrd for Ranked {
+        fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(o))
+        }
+    }
+    impl Ord for Ranked {
+        fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+            (self.0, self.1, self.2).cmp(&(o.0, o.1, o.2))
+        }
+    }
+    let keep = opts.tasks_per_pass.max(1);
+    let window = opts.scan_window.max(keep);
+    let start = integrity::scan_cursor(meta).await?;
+    // Max-heap of the best `keep` so far: the worst is popped.
+    let mut best: BinaryHeap<Ranked> = BinaryHeap::new();
+    let mut after = start.clone();
+    let mut next_start = None;
+    let mut wrapped = false;
+    while report.scanned < window {
+        let want = (window - report.scanned).min(integrity::TASK_PAGE_MAX);
+        let (page, next) = integrity::tasks_page(meta, after.as_deref(), want).await?;
+        let mut stop = false;
+        for (g, c, t) in page {
+            // After the wrap, stop where this pass started.
+            if wrapped
+                && start
+                    .as_deref()
+                    .is_some_and(|s| arca_lake_metadata::keys::repair_task(g, &c).as_slice() > s)
+            {
+                stop = true;
+                break;
+            }
+            report.scanned += 1;
+            next_start = Some(arca_lake_metadata::keys::repair_task(g, &c));
+            if t.next_attempt_ms > now_ms {
+                report.deferred += 1;
+                continue;
+            }
+            best.push(Ranked(priority(&t), g, c, t));
+            if best.len() > keep {
+                best.pop();
+            }
+        }
+        if stop {
+            break;
+        }
+        match next {
+            Some(k) => after = Some(k),
+            None if !wrapped && start.is_some() => {
+                // The end: wrap once, up to where this pass started.
+                wrapped = true;
+                report.wrapped = true;
+                after = None;
+            }
+            None => {
+                report.wrapped = true;
+                next_start = None;
+                break;
+            }
+        }
+    }
+    integrity::set_scan_cursor(meta, next_start).await?;
+    let mut out: Vec<(u64, [u8; 16], RepairTask)> = best
+        .into_iter()
+        .map(|Ranked(_, g, c, t)| (g, c, t))
+        .collect();
+    out.sort_by_key(|(g, c, t)| (priority(t), *g, *c));
+    Ok(out)
 }
 
 enum Outcome {

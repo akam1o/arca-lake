@@ -106,9 +106,12 @@ async fn world<S: KvStore>(meta: &S, clients: &NodeClients) -> Result<World, Con
     for n in nodes.values() {
         clients.note_node_id(&n.address, n.id);
         if let Ok(h) = clients.health(&n.address).await {
+            // A planned move keeps the target's client reserve (Phase
+            // 3.11, M3), as the leader's check does.
             free.insert(
                 n.id,
-                (h.device_total_bytes > 0).then_some(h.device_free_bytes),
+                (h.device_total_bytes > 0 || !h.devices.is_empty())
+                    .then(|| crate::admission::device_of(n.id, &h, 0).headroom()),
             );
         }
     }

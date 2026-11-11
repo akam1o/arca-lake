@@ -19,7 +19,7 @@ use arca_lake_metadata::fence::FencedKv;
 use arca_lake_metadata::guard::{GuardedKv, OpClass};
 use arca_lake_metadata::ops::cluster;
 use arca_lake_metadata::ops::leader;
-use arca_lake_metadata::ops::{compat, membership, node_lifecycle};
+use arca_lake_metadata::ops::{compat, epoch_intent, membership, node_lifecycle};
 use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord};
 use arca_lake_metadata::{KvError, KvStore, MetaError};
 use arca_lake_placement::{GroupSpec, choose_replacement};
@@ -1368,12 +1368,87 @@ async fn repair_pass<S: KvStore>(
         max_chunks: 0,
         former: Vec::new(),
         source: cfg.repair_source,
+        keep_client_reserve: false,
     };
     // Operator intents (Phase 3.3 §6): draining nodes and replacement
     // requests. They change placement on purpose, so they progress only
     // while the cluster is Active (RFC-015 §5.6); repairs of unhealthy
     // members and resumed repairs run in every state that admits repair.
     let intents = Intents::load(meta, &all_groups).await?;
+    // Open epoch changes first (Phase 3.11, M2): a move that raised node
+    // epochs and did not commit is resumed if still wanted, otherwise its
+    // epoch is settled (metadata at the raised epoch, membership
+    // unchanged), so that the group takes writes again. Finished or
+    // overtaken intents are removed.
+    let mut settled_any = false;
+    for intent in epoch_intent::open(meta).await? {
+        let Some(g) = all_groups.iter().find(|g| g.id == intent.group) else {
+            epoch_intent::discard(meta, intent.group).await?;
+            continue;
+        };
+        if g.epoch != intent.from_epoch {
+            epoch_intent::discard(meta, intent.group).await?;
+            continue;
+        }
+        settled_any = true;
+        let target = intent.replacement.node_id;
+        // Still wanted: the target can host it, and the slot still holds
+        // another member that is to leave (unhealthy, draining, or named
+        // by a replacement request for this index).
+        let leaving = |m: &GroupMember| {
+            !healthy(m.node_id)
+                || intents.draining.contains(&m.node_id)
+                || intents
+                    .requests
+                    .get(&g.id)
+                    .is_some_and(|r| r.index == intent.index)
+        };
+        let wanted = healthy(target)
+            && intents.may_host(target)
+            && g.members
+                .get(usize::from(intent.index))
+                .is_some_and(|m| *m != intent.replacement && leaving(m));
+        if wanted {
+            info!(
+                group = g.id,
+                index = intent.index,
+                node = target,
+                "resuming an interrupted epoch change"
+            );
+            if let Err(e) = crate::repair::replace_member_with(
+                meta,
+                clients,
+                g.id,
+                usize::from(intent.index),
+                intent.replacement,
+                &opts,
+                async |_| Ok(()),
+            )
+            .await
+            {
+                warn!(group = g.id, error = %e, "resumed epoch change failed; retried next pass");
+            }
+        } else {
+            for m in &g.members {
+                if let Some(n) = nodes.get(&m.node_id) {
+                    let _ = clients
+                        .update_epoch(&n.address, g.id, intent.from_epoch + 1)
+                        .await;
+                }
+            }
+            let after = epoch_intent::settle(meta, &intent).await?;
+            info!(
+                group = g.id,
+                epoch = after.epoch,
+                "settled an interrupted epoch change: membership unchanged"
+            );
+        }
+    }
+    if settled_any {
+        // The groups changed: the rest of the pass runs on fresh records
+        // next time.
+        return Ok(());
+    }
     intents.complete_drains(meta, &all_groups, now).await?;
     // Groups rebuilding a member without the node it left answering: their
     // reads and repairs have one shard fewer than the profile promises
@@ -1647,6 +1722,7 @@ async fn repair_one<S: KvStore>(
                 .filter(|&n| healthy(n) && !g.members.iter().any(|m| m.node_id == n))
                 .collect();
             let opts = RepairOptions {
+                keep_client_reserve: !former.is_empty(),
                 former,
                 ..opts.clone()
             };
@@ -1702,7 +1778,10 @@ async fn repair_one<S: KvStore>(
             let mut free: HashMap<u64, Option<u64>> = HashMap::new();
             for n in nodes.values().filter(|n| candidate(n.id)) {
                 if !g.members.iter().any(|m| m.node_id == n.id) {
-                    free.insert(n.id, crate::capacity::node_free(clients, &n.address).await);
+                    free.insert(
+                        n.id,
+                        crate::capacity::node_room(clients, &n.address, why != "auto repair").await,
+                    );
                 }
             }
             let roomy = |id: u64| crate::capacity::fits(free.get(&id).copied().flatten(), need);
@@ -1757,6 +1836,7 @@ async fn repair_one<S: KvStore>(
                 } else {
                     Vec::new()
                 },
+                keep_client_reserve: why != "auto repair" && healthy(leaving),
                 ..opts.clone()
             };
             run_repair(
@@ -2018,9 +2098,7 @@ async fn tiering_pass<S: KvStore>(
     {
         return Ok(());
     }
-    let (open, unrecoverable, failed) =
-        arca_lake_metadata::ops::integrity::queue_summary(meta).await?;
-    if open > unrecoverable + failed {
+    if arca_lake_metadata::ops::integrity::any_actionable(meta).await? {
         return Ok(());
     }
     metrics.tiering_active.store(true, Ordering::Relaxed);

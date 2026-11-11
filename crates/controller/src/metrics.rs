@@ -279,6 +279,9 @@ pub struct Metrics {
     pub gc_backlog_oldest_age_seconds: AtomicU64,
     /// Stripe repair tasks in metadata.
     pub repair_queue_depth: AtomicU64,
+    /// When the repair queue was last counted (ms; the count is paged and
+    /// runs at most every 30 s, Phase 3.11 M4). Not exported.
+    pub repair_queue_counted_ms: AtomicU64,
     /// Tasks in `Unrecoverable`.
     pub repair_tasks_unrecoverable: AtomicU64,
     /// Tasks in `Failed`.

@@ -388,7 +388,53 @@ pub async fn remove_task<S: KvStore>(store: &S, group_id: u64, chunk_id: &[u8; 1
     .await
 }
 
-/// Every task, in key order, at most `limit`.
+/// Largest page of the repair queue read in one transaction (Phase 3.11,
+/// M4): the queue is never read in one transaction, whatever its size.
+pub const TASK_PAGE_MAX: usize = 512;
+
+/// One page of tasks in key order: at most `limit` (capped at
+/// [`TASK_PAGE_MAX`]) after `after` (exclusive; `None`: from the start),
+/// in one transaction, and the key to continue after (`None`: the end).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn tasks_page<S: KvStore>(
+    store: &S,
+    after: Option<&[u8]>,
+    limit: usize,
+) -> Result<(Vec<(u64, [u8; 16], RepairTask)>, Option<Vec<u8>>)> {
+    let limit = limit.clamp(1, TASK_PAGE_MAX);
+    let range = keys::repair_tasks_range();
+    let range = match after {
+        Some(a) => {
+            let mut begin = a.to_vec();
+            begin.push(0);
+            crate::kv::KeyRange::new(begin, range.end)
+        }
+        None => range,
+    };
+    transact(store, (range, limit), |tx, env| {
+        Box::pin(async move {
+            let (range, limit) = env;
+            let rows = tx.get_range(range, *limit, false).await?;
+            let next = (rows.len() == *limit)
+                .then(|| rows.last().map(|(k, _)| k.clone()))
+                .flatten();
+            let mut out = Vec::with_capacity(rows.len());
+            for (k, v) in rows {
+                if let Some((g, c)) = keys::repair_task_from(&k) {
+                    out.push((g, c, decode::<RepairTask>(&v)?));
+                }
+            }
+            Ok((out, next))
+        })
+    })
+    .await
+}
+
+/// Every task, in key order, at most `limit`, read page by page (one
+/// transaction per page).
 ///
 /// # Errors
 ///
@@ -397,18 +443,120 @@ pub async fn tasks<S: KvStore>(
     store: &S,
     limit: usize,
 ) -> Result<Vec<(u64, [u8; 16], RepairTask)>> {
-    transact(store, limit, |tx, limit| {
-        Box::pin(async move {
-            let mut out = Vec::new();
-            for (k, v) in tx
-                .get_range(&keys::repair_tasks_range(), *limit, false)
-                .await?
-            {
-                if let Some((g, c)) = keys::repair_task_from(&k) {
-                    out.push((g, c, decode::<RepairTask>(&v)?));
-                }
+    let mut out = Vec::new();
+    let mut after: Option<Vec<u8>> = None;
+    while out.len() < limit {
+        let (page, next) = tasks_page(
+            store,
+            after.as_deref(),
+            (limit - out.len()).min(TASK_PAGE_MAX),
+        )
+        .await?;
+        out.extend(page);
+        match next {
+            Some(k) => after = Some(k),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// The repair queue counted page by page: open tasks by class, total,
+/// unrecoverable, failed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueueStats {
+    /// Open tasks by [`Finding::index`].
+    pub by_class: [u64; 8],
+    /// Every task.
+    pub total: u64,
+    /// Unrecoverable.
+    pub unrecoverable: u64,
+    /// Failed.
+    pub failed: u64,
+}
+
+/// [`QueueStats`], one transaction per page.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn queue_stats<S: KvStore>(store: &S) -> Result<QueueStats> {
+    let mut st = QueueStats::default();
+    let mut after: Option<Vec<u8>> = None;
+    loop {
+        let (page, next) = tasks_page(store, after.as_deref(), TASK_PAGE_MAX).await?;
+        for (_, _, t) in &page {
+            st.by_class[t.reason.index()] += 1;
+            st.total += 1;
+            match t.state {
+                RepairState::Unrecoverable { .. } => st.unrecoverable += 1,
+                RepairState::Failed { .. } => st.failed += 1,
+                _ => {}
             }
-            Ok(out)
+        }
+        match next {
+            Some(k) => after = Some(k),
+            None => return Ok(st),
+        }
+    }
+}
+
+/// Whether any task is actionable (neither unrecoverable nor failed):
+/// what rebalancing and tiering wait for. Stops at the first one, page by
+/// page.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn any_actionable<S: KvStore>(store: &S) -> Result<bool> {
+    let mut after: Option<Vec<u8>> = None;
+    loop {
+        let (page, next) = tasks_page(store, after.as_deref(), TASK_PAGE_MAX).await?;
+        if page.iter().any(|(_, _, t)| {
+            !matches!(
+                t.state,
+                RepairState::Unrecoverable { .. } | RepairState::Failed { .. }
+            )
+        }) {
+            return Ok(true);
+        }
+        match next {
+            Some(k) => after = Some(k),
+            None => return Ok(false),
+        }
+    }
+}
+
+/// Where the repair scheduler's next scan starts (Phase 3.11, M4): kept
+/// in metadata, so that a new leader goes on where the last one stopped.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn scan_cursor<S: KvStore>(store: &S) -> Result<Option<Vec<u8>>> {
+    transact(store, (), |tx, ()| {
+        Box::pin(async move {
+            tx.get(&keys::repair_scan_cursor())
+                .await
+                .map_err(Into::into)
+        })
+    })
+    .await
+}
+
+/// Record where the next scan starts (`None`: from the start).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn set_scan_cursor<S: KvStore>(store: &S, at: Option<Vec<u8>>) -> Result<()> {
+    transact(store, at, |tx, at| {
+        Box::pin(async move {
+            match at {
+                Some(k) => tx.set(&keys::repair_scan_cursor(), k),
+                None => tx.clear(&keys::repair_scan_cursor()),
+            }
+            Ok(())
         })
     })
     .await
@@ -493,11 +641,7 @@ pub async fn set_manifest_cursor<S: KvStore>(store: &S, c: &ManifestCursor) -> R
 ///
 /// Backend errors.
 pub async fn open_by_class<S: KvStore>(store: &S) -> Result<[u64; 8]> {
-    let mut out = [0u64; 8];
-    for (_, _, t) in tasks(store, usize::MAX).await? {
-        out[t.reason.index()] += 1;
-    }
-    Ok(out)
+    Ok(queue_stats(store).await?.by_class)
 }
 
 /// Queue summary for metrics: `(total, unrecoverable, failed)`.
@@ -506,16 +650,8 @@ pub async fn open_by_class<S: KvStore>(store: &S) -> Result<[u64; 8]> {
 ///
 /// Backend errors.
 pub async fn queue_summary<S: KvStore>(store: &S) -> Result<(u64, u64, u64)> {
-    let all = tasks(store, usize::MAX).await?;
-    let unrecoverable = all
-        .iter()
-        .filter(|(_, _, t)| matches!(t.state, RepairState::Unrecoverable { .. }))
-        .count() as u64;
-    let failed = all
-        .iter()
-        .filter(|(_, _, t)| matches!(t.state, RepairState::Failed { .. }))
-        .count() as u64;
-    Ok((all.len() as u64, unrecoverable, failed))
+    let st = queue_stats(store).await?;
+    Ok((st.total, st.unrecoverable, st.failed))
 }
 
 // ---- multipart manifest scrub (RFC-008 §8.6) --------------------------------

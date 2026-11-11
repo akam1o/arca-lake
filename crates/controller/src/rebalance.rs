@@ -332,12 +332,8 @@ pub async fn run_once_with<S: KvStore>(
         finish(meta, &mut state, &report).await?;
         return Ok(report);
     }
-    let (open, unrecoverable, failed) = integrity::queue_summary(meta).await?;
-    if open > unrecoverable + failed {
-        report.reason = format!(
-            "{} repair tasks open: repair first",
-            open - unrecoverable - failed
-        );
+    if integrity::any_actionable(meta).await? {
+        report.reason = "repair tasks open: repair first".to_string();
         finish(meta, &mut state, &report).await?;
         return Ok(report);
     }

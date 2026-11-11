@@ -12,6 +12,7 @@ pub mod cache;
 pub mod cluster;
 pub mod compat;
 pub mod delete_fence;
+pub mod epoch_intent;
 pub mod gc;
 pub mod integrity;
 pub mod leader;

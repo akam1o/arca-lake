@@ -38,7 +38,7 @@ use std::collections::{BTreeSet, HashMap};
 use arca_lake_common::split_chunk_id;
 use arca_lake_ec::{CodeParams, ErasureCoder, SchemeId, StripeLayout};
 use arca_lake_metadata::KvStore;
-use arca_lake_metadata::ops::{cluster, gc};
+use arca_lake_metadata::ops::{cluster, epoch_intent, gc};
 use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord, RepairCursor};
 use arca_lake_protocol::client::{NodeClients, ShardRef};
 use bytes::Bytes;
@@ -64,6 +64,11 @@ pub struct RepairOptions {
     pub former: Vec<u64>,
     /// How shards are obtained when a former member answers.
     pub source: RepairSource,
+    /// A planned move (the leaving member still answers, so redundancy is
+    /// whole): its writes keep the target's client reserve (`Migration`
+    /// class at the node's admission), unlike a failure repair, which may
+    /// use the space down to the repair floor (Phase 3.11, M3).
+    pub keep_client_reserve: bool,
 }
 
 /// Where a rebuilt shard comes from (Phase 3.4 §10).
@@ -234,23 +239,46 @@ pub async fn replace_member_with<S: KvStore>(
         }
     } else {
         let new_epoch = group.epoch + 1;
+        let expected_epoch = group.epoch;
+        // The intent first (Phase 3.11, M2): a crash once a node holds the
+        // new epoch leaves a record any leader resumes or settles.
+        let member = u16::try_from(index).unwrap_or(u16::MAX);
+        let intent = epoch_intent::EpochIntent {
+            group: group_id,
+            from_epoch: expected_epoch,
+            index: member,
+            replacement,
+            since_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0)),
+        };
+        match epoch_intent::begin(meta, &intent).await? {
+            epoch_intent::Begin::Recorded | epoch_intent::Begin::Same => {}
+            epoch_intent::Begin::Other(o) => {
+                return Err(ControlError::Other(format!(
+                    "group {group_id} has an open epoch change (member {} to node {}) from epoch {}: it is resumed or settled first",
+                    o.index, o.replacement.node_id, o.from_epoch
+                )));
+            }
+            epoch_intent::Begin::Stale { found } => {
+                return Err(ControlError::EpochChanged {
+                    group: group_id,
+                    expected: expected_epoch,
+                    found,
+                });
+            }
+        }
         fence(clients, &nodes, &group, replacement, new_epoch).await?;
         hook(RepairStep::Fenced).await?;
-        let expected_epoch = group.epoch;
-        let updated = cluster::update_group(meta, group_id, |g| {
-            if g.epoch != expected_epoch {
-                return false;
-            }
+        let updated = epoch_intent::commit(meta, group_id, expected_epoch, |g| {
             g.members[index] = replacement;
-            g.epoch = new_epoch;
             g.state = GroupState::Repairing;
             // The cursor names the member being rebuilt from the start, so
             // that any controller can resume the repair (RFC-011 §5.5).
             g.repair_cursor = Some(RepairCursor {
-                member: u16::try_from(index).unwrap_or(u16::MAX),
+                member,
                 chunk_id: [0; 16],
             });
-            true
         })
         .await?;
         if updated.epoch != new_epoch || updated.members[index] != replacement {
@@ -508,7 +536,11 @@ async fn reconstruct_member<S: KvStore>(
                 group.epoch,
                 bytes,
                 256 << 10,
-                arca_lake_protocol::storage::v1::WriteClass::Repair,
+                if opts.keep_client_reserve {
+                    arca_lake_protocol::storage::v1::WriteClass::Migration
+                } else {
+                    arca_lake_protocol::storage::v1::WriteClass::Repair
+                },
             )
             .await
         {
