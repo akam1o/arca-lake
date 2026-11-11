@@ -1093,3 +1093,32 @@ async fn a_pending_marker_is_this_journals_own() {
     assert_eq!(backup.restores.load(Ordering::SeqCst), 1);
     c.shutdown().await;
 }
+
+/// Re-review (Phase 3.11): a marker carried into a store restored by hand
+/// (a backup taken while an attempt was paused) is removed by `recovery
+/// begin`'s mark; node changes go on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_begin_removes_a_carried_marker() {
+    use arca_lake_metadata::ops::{compat, node_lifecycle};
+    let c = cluster().await;
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.set(&keys::restore_marker(), b"carried");
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    assert!(
+        node_lifecycle::set_identity(c.meta.as_ref(), c.nodes[0].id, [1; 16])
+            .await
+            .is_err()
+    );
+    compat::mark_restoring(c.meta.as_ref(), None, None, "t", now_ms())
+        .await
+        .unwrap();
+    node_lifecycle::set_identity(c.meta.as_ref(), c.nodes[0].id, [1; 16])
+        .await
+        .unwrap();
+    c.shutdown().await;
+}

@@ -1032,3 +1032,81 @@ async fn node_changes_wait_while_a_restore_holds_its_marker() {
         .unwrap();
     c.shutdown().await;
 }
+
+/// Re-review (Phase 3.11): another disk at a node's address (another
+/// cluster's node, holding its own identity and an operator hold):
+/// removing the node pushes nothing to it, and the hold stays as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removal_pushes_nothing_to_a_disk_that_is_not_the_nodes() {
+    use arca_lake_protocol::client::FencePush;
+    let c = cluster().await;
+    put_objects(&c, 1).await;
+    let ctl = leader(&c).await;
+    identities_acknowledged(&c).await;
+    ctl.shutdown().await;
+    let n = &c.nodes[0];
+    let addr = n.addr.to_string();
+    // The disk answering is another's: its identity file replaced.
+    let mut c = c;
+    c.stop_node(0).await;
+    std::fs::remove_file(c.nodes[0].dir.join("node-identity.txt")).unwrap();
+    c.start_node(0).await;
+    c.clients
+        .health_with(
+            &addr,
+            arca_lake_protocol::storage::v1::HealthRequest {
+                node_id: 99,
+                node_identity: Bytes::from_static(&[0xb1; 16]),
+                adopt_identity: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let theirs = [0xb2; 16];
+    let h = c.clients.health(&addr).await.unwrap();
+    c.clients
+        .push_delete_fence_with(
+            &addr,
+            h.delete_fence_generation.max(1),
+            false,
+            FencePush {
+                hold: true,
+                incarnation: Some(theirs),
+                ..FencePush::default()
+            },
+        )
+        .await
+        .unwrap();
+    let before = c.clients.health(&addr).await.unwrap();
+    let e = node_ops::keep_removed(c.meta.as_ref(), &c.clients, c.nodes[0].id, false, now_ms())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("not verifiably this node's"), "{e}");
+    let after = c.clients.health(&addr).await.unwrap();
+    assert_eq!(
+        (
+            after.delete_fence_generation,
+            after.delete_fence_open,
+            after.delete_fence_hold,
+            after.delete_fence_hold_incarnation.clone(),
+            after.incarnation.clone()
+        ),
+        (
+            before.delete_fence_generation,
+            before.delete_fence_open,
+            before.delete_fence_hold,
+            before.delete_fence_hold_incarnation.clone(),
+            before.incarnation.clone()
+        ),
+        "the other disk's fence or facts changed"
+    );
+    assert_eq!(
+        node_lifecycle::state(c.meta.as_ref(), c.nodes[0].id)
+            .await
+            .unwrap(),
+        State::Active
+    );
+    c.shutdown().await;
+}

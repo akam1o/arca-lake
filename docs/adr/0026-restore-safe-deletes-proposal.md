@@ -190,8 +190,11 @@ Review fixes (Phase 3.11):
   there; with changes refused, that copy is the captured state. A crash
   before the journal records the marker resumes as a fresh attempt.
   Incarnation equality cannot tell the planned store from a restored
-  copy, and a fixed marker could be in a backup. The mark step removes a
-  marker a restored copy carries. The writes gated by the marker are
+  copy, and a fixed marker could be in a backup. The mark (the managed
+  one and `recovery begin`, in the same transaction) removes a marker a
+  restored copy carries. While a marker is present, the leader's health
+  pass skips that node's lifecycle action for the pass rather than
+  failing the whole pass. The writes gated by the marker are
   every write to the node state the restore captures: operator lifecycle
   commands, registrations, and the leader's identity and quarantine
   writes. The clear itself, on the planned store, checks in its own

@@ -435,6 +435,22 @@ async fn hold_term<S: KvStore>(
     }
 }
 
+/// Quarantine a node; while a managed restore holds node changes, not
+/// recorded (the node is still skipped this pass; re-review: one refusal
+/// must not fail the whole health pass).
+async fn quarantine_unless_held<S: KvStore>(
+    meta: &S,
+    node_id: u64,
+    reason: &str,
+    now: u64,
+) -> Result<bool, ControlError> {
+    match node_lifecycle::quarantine(meta, node_id, reason, now).await {
+        Ok(q) => Ok(q),
+        Err(e) if node_lifecycle::is_restore_in_progress(&e) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// The lease is lost: if the record is gone or another term's, the trip
 /// learns why, so that a replaced store is remembered (Phase 3.11 review).
 async fn lost_lease<S: KvStore>(
@@ -1280,7 +1296,12 @@ async fn health_pass<S: KvStore>(
                 continue;
             };
             if p.identity_supported && p.identity_node_id == 0 {
-                ident = Some(node_lifecycle::ensure_identity(meta, n.id).await?);
+                match node_lifecycle::ensure_identity(meta, n.id).await {
+                    Ok(i) => ident = Some(i),
+                    // A managed restore holds node changes: next pass.
+                    Err(e) if node_lifecycle::is_restore_in_progress(&e) => continue,
+                    Err(e) => return Err(e.into()),
+                }
             } else if p.identity_supported && p.identity_node_id == n.id {
                 // Its own identity, unknown to this metadata: nothing is
                 // pushed (no facts, no fence: it takes no delete) until an
@@ -1306,7 +1327,7 @@ async fn health_pass<S: KvStore>(
                     "the node holds the identity of node {}: a disk moved or an id reused",
                     p.identity_node_id
                 );
-                if node_lifecycle::quarantine(meta, n.id, &reason, now).await? {
+                if quarantine_unless_held(meta, n.id, &reason, now).await? {
                     tracing::error!(node = n.id, address = %n.address, %reason, "storage node quarantined");
                 }
                 metrics
@@ -1349,9 +1370,17 @@ async fn health_pass<S: KvStore>(
                             let holds = h.identity_node_id == n.id && held == Some(i.token);
                             if !h.identity_mismatch && holds {
                                 if !i.acknowledged {
-                                    node_lifecycle::acknowledge_identity(meta, n.id, i.token)
-                                        .await?;
-                                    clients.note_identity(&n.address, Some((n.id, i.token)));
+                                    match node_lifecycle::acknowledge_identity(meta, n.id, i.token)
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            clients
+                                                .note_identity(&n.address, Some((n.id, i.token)));
+                                        }
+                                        // Held by a managed restore: next pass.
+                                        Err(e) if node_lifecycle::is_restore_in_progress(&e) => {}
+                                        Err(e) => return Err(e.into()),
+                                    }
                                 }
                                 None
                             } else if h.identity_node_id == 0 && i.acknowledged {
@@ -1369,7 +1398,7 @@ async fn health_pass<S: KvStore>(
                         }
                     };
                     if let Some(reason) = verdict {
-                        if node_lifecycle::quarantine(meta, n.id, &reason, now).await? {
+                        if quarantine_unless_held(meta, n.id, &reason, now).await? {
                             tracing::error!(node = n.id, address = %n.address, %reason, "storage node quarantined");
                         }
                         metrics

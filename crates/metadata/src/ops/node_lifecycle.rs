@@ -489,11 +489,17 @@ pub async fn set_identity<S: KvStore>(store: &S, node_id: u64, token: [u8; 16]) 
 /// errors.
 pub async fn no_restore_in_progress<X: Txn>(tx: &mut X) -> Result<()> {
     if tx.get(&keys::restore_marker()).await?.is_some() {
-        return Err(MetaError::InvalidArgument(
-            "a managed restore is in progress (`admin restore status`): node changes wait until it finishes".into(),
-        ));
+        return Err(MetaError::InvalidArgument(RESTORE_IN_PROGRESS.into()));
     }
     Ok(())
+}
+
+const RESTORE_IN_PROGRESS: &str = "a managed restore is in progress (`admin restore status`): node changes wait until it finishes";
+
+/// Whether `e` is [`no_restore_in_progress`]'s refusal.
+#[must_use]
+pub fn is_restore_in_progress(e: &MetaError) -> bool {
+    matches!(e, MetaError::InvalidArgument(m) if m == RESTORE_IN_PROGRESS)
 }
 
 /// Take `token` as the node's identity only if it has no record and is

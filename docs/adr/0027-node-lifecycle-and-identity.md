@@ -172,7 +172,12 @@ at any step.
     and refuses a node that does not answer unless `--unreachable`
     states that its disk will never be started again unwiped
     (confirmation review: a removed node is trusted to be fenced).
-    `unregister` and `keep-removed` first push the cluster's incarnation
+    Before anything is pushed, what answers at the address must be
+    verifiably the node's disk: it holds the identity this cluster
+    acknowledged for it, or none where none was acknowledged. Otherwise
+    nothing is pushed, so another cluster's node keeps its own hold and
+    facts, and the node is removed only with `--unreachable`.
+    `unregister` and `keep-removed` then push the cluster's incarnation
     (with its sequence) to the node, then accept only a hold the current
     incarnation cannot lift: unknown, or tied to the current incarnation
     on a node that holds it. Any other hold (an earlier incarnation's, or

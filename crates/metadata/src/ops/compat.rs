@@ -386,6 +386,11 @@ pub async fn mark_restoring_above<S: KvStore>(
         |tx, env| {
             Box::pin(async move {
                 let (incarnation, from, backup_point_ms, who, now_ms, at_least) = env;
+                // A managed restore's marker carried by the restored copy (a
+                // backup taken while an attempt was paused) belongs to no
+                // restore any more: `recovery begin` and the managed mark
+                // remove it (re-review).
+                tx.clear(&keys::restore_marker());
                 let prev: Option<ClusterStateRecord> = read(tx, &keys::cluster_state()).await?;
                 let rec = ClusterStateRecord {
                     incarnation: *incarnation,
