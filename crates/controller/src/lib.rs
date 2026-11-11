@@ -14,6 +14,7 @@ pub mod delete_fence;
 pub mod gc;
 pub mod groups;
 pub mod integrity;
+pub mod managed_restore;
 pub mod metrics;
 pub mod node_ops;
 pub mod objects;

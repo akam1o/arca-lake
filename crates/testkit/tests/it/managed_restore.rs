@@ -1,0 +1,566 @@
+//! `admin restore` (Phase 3.11, ADR-0026 option D): the managed restore
+//! procedure under the Phase 3.11 restore scenarios. The restore itself is
+//! a snapshot of the metadata store written back by a restorer that, as
+//! `fdbrestore`, refuses a non-empty destination (and can be made to fail);
+//! `fdb_restore.rs` runs the same procedure with `fdbrestore` on a real
+//! FoundationDB cluster.
+//!
+//! Invariants: no delete decided before the restore applies after it,
+//! whoever sends it and whenever; the procedure does not start while a
+//! node's safety cannot be confirmed (a node not answering, a process
+//! running); every step is resumable after a failure or a crash; the
+//! restored cluster deletes again only once finalized and a leader opened
+//! a generation above every earlier one.
+
+#![allow(clippy::too_many_lines, clippy::many_single_char_names)]
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+use arca_lake_controller::managed_restore::{self as mr, Restorer, Step};
+use arca_lake_controller::process::{ControllerConfig, ControllerHandle, spawn};
+use arca_lake_metadata::mem::MemKv;
+use arca_lake_metadata::ops::delete_fence;
+use arca_lake_metadata::records::ClusterPhase;
+use arca_lake_metadata::{Txn, keys, transact};
+use arca_lake_protocol::client::{NodeClients, ShardRef};
+use arca_lake_testkit::s3::{self, PutOptions};
+use arca_lake_testkit::{ClusterOptions, TestCluster, now_ms, random_bytes};
+use bytes::Bytes;
+
+const MIB: u64 = 1 << 20;
+const BUCKET: &str = "managed";
+
+async fn cluster() -> TestCluster {
+    let c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(3, 2, 1, MIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    c
+}
+
+async fn put(c: &TestCluster, key: &str, seed: u64) -> Bytes {
+    let d = Bytes::from(random_bytes(usize::try_from(MIB / 2).unwrap(), seed));
+    s3::put(&c.backend, BUCKET, key, d.clone(), &PutOptions::default())
+        .await
+        .unwrap();
+    d
+}
+
+/// The backup: a snapshot of the store, written back by `restore`.
+struct Snapshot {
+    meta: Arc<MemKv>,
+    data: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Restores that fail before writing anything (a lost connection).
+    fail: AtomicUsize,
+    restores: AtomicUsize,
+}
+
+impl Snapshot {
+    async fn take(meta: &Arc<MemKv>) -> Self {
+        let data = transact(meta.as_ref(), (), |tx, ()| {
+            Box::pin(async move {
+                Ok(tx
+                    .get_range(&keys::all_range(), usize::MAX, false)
+                    .await?
+                    .into_iter()
+                    .collect::<Vec<_>>())
+            })
+        })
+        .await
+        .unwrap();
+        Self {
+            meta: Arc::clone(meta),
+            data,
+            fail: AtomicUsize::new(0),
+            restores: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Restorer for Snapshot {
+    fn destination(&self) -> String {
+        "in-memory test store".into()
+    }
+
+    async fn restore(&self, source: &str, _version: u64) -> Result<(), String> {
+        assert_eq!(source, "snapshot://test");
+        if self
+            .fail
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err("injected: connection to the cluster lost".into());
+        }
+        let data = self.data.clone();
+        transact(self.meta.as_ref(), data, |tx, data| {
+            Box::pin(async move {
+                if !tx.get_range(&keys::all_range(), 1, false).await?.is_empty() {
+                    return Err(arca_lake_metadata::MetaError::InvalidArgument(
+                        "Attempted to restore into a non-empty destination database".into(),
+                    ));
+                }
+                for (k, v) in data {
+                    tx.set(k, v);
+                }
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        self.restores.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn controller(id: &str) -> ControllerConfig {
+    let mut cfg = ControllerConfig::new(id);
+    cfg.lease = Duration::from_secs(2);
+    cfg.health_interval = Duration::from_millis(100);
+    cfg.gc_interval = Duration::from_millis(200);
+    cfg.gc_grace = Duration::ZERO;
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.recovery_interval = Duration::from_millis(100);
+    cfg.failure_domain = "host".into();
+    cfg.heartbeat = None;
+    cfg
+}
+
+async fn wait_until(what: &str, timeout: Duration, mut cond: impl AsyncFnMut() -> bool) {
+    let start = Instant::now();
+    while !cond().await {
+        assert!(start.elapsed() < timeout, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A leader with its generation open on every node.
+async fn leading(c: &TestCluster, id: &str) -> ControllerHandle {
+    let ctl = spawn(Arc::clone(&c.meta), controller(id)).await.unwrap();
+    wait_until(
+        "a leader's generation open everywhere",
+        Duration::from_secs(30),
+        async || {
+            let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+            let mut all = ctl.is_leader() && rec.open && rec.leader_token == ctl.token();
+            for n in &c.nodes {
+                let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+                all &= h.delete_fence_open && h.delete_fence_generation == rec.generation;
+            }
+            all
+        },
+    )
+    .await;
+    ctl
+}
+
+/// Every shard of `key` on its member, as GC decides them (or a
+/// reconciliation of those shards as orphans, or a migration's cleanup of
+/// them as a former placement: the same `DeleteShard` RPCs).
+async fn decided_deletes(c: &TestCluster, key: &str) -> Vec<(String, ShardRef, u64)> {
+    let m = c.manifest(BUCKET, key).await;
+    let groups = c.groups().await;
+    let mut out = Vec::new();
+    for (_, rec) in &m.chunks {
+        let g = groups
+            .iter()
+            .find(|g| g.id == rec.placement.group_id)
+            .unwrap();
+        for (i, member) in g.members.iter().enumerate() {
+            let n = c.node_index(member).unwrap();
+            out.push((
+                c.nodes[n].addr.to_string(),
+                ShardRef {
+                    group_id: g.id,
+                    chunk_id: rec.chunk_id,
+                    shard_index: u16::try_from(i).unwrap(),
+                },
+                g.epoch,
+            ));
+        }
+    }
+    out
+}
+
+/// A process as it was when it decided: the cluster's incarnation and the
+/// leader's open generation.
+async fn frozen(c: &TestCluster) -> NodeClients {
+    let old = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
+    old.set_incarnation(Some(
+        arca_lake_metadata::ops::compat::cluster_state(c.meta.as_ref())
+            .await
+            .unwrap()
+            .unwrap()
+            .incarnation,
+    ));
+    let rec = delete_fence::current(c.meta.as_ref()).await.unwrap();
+    assert!(rec.open, "{rec:?}");
+    old.set_delete_fence(Some(rec.generation));
+    old
+}
+
+async fn deliver(old: &NodeClients, deletes: &[(String, ShardRef, u64)]) -> usize {
+    let mut applied = 0;
+    for (addr, shard, epoch) in deletes {
+        if old.delete_shard(addr, *shard, *epoch).await.is_ok() {
+            applied += 1;
+        }
+    }
+    applied
+}
+
+fn journal_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    dir.path().join("restore.journal")
+}
+
+async fn plan(c: &TestCluster, r: &Snapshot, path: &std::path::Path) -> Result<mr::Plan, String> {
+    mr::plan(
+        c.meta.as_ref(),
+        &c.clients,
+        "snapshot://test",
+        1,
+        Some(now_ms()),
+        &r.destination(),
+        path,
+        now_ms(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+async fn run(
+    c: &TestCluster,
+    r: &Snapshot,
+    path: &std::path::Path,
+    token: &str,
+    stopped: &[String],
+) -> Result<mr::Journal, String> {
+    mr::run(&c.meta, &c.clients, r, path, token, stopped, now_ms)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn finish(c: &TestCluster, path: &std::path::Path) -> Result<mr::Journal, String> {
+    mr::finish(
+        c.meta.as_ref(),
+        &c.clients,
+        path,
+        "op",
+        "drill",
+        true,
+        Duration::from_secs(30),
+        now_ms,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Scenarios 1, 9, 10, 11, 12, 15: the normal managed restore. A leader
+/// decided deletes after the backup point (GC of an object deleted then,
+/// and the same RPCs as a reconciliation or a migration's cleanup would
+/// send) and was stopped; they are delivered after the restore, by the old
+/// leader returning: none applies. The restored cluster reads every object
+/// of the backup point, writes and deletes again after `finish`, and the
+/// old deletes stay refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_managed_restore_applies_no_delete_decided_before_it() {
+    let mut c = cluster().await;
+    let kept = put(&c, "kept", 1).await;
+    let ctl = leading(&c, "ctl-before").await;
+    let backup = Snapshot::take(&c.meta).await;
+    // After the backup point: deleted; the leader decided its deletes.
+    let deletes = decided_deletes(&c, "kept").await;
+    let old = frozen(&c).await;
+    let _ = put(&c, "post", 2).await;
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    ctl.abort();
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    assert!(p.summary.iter().any(|l| l.starts_with("target cluster:")));
+    assert!(
+        p.summary
+            .iter()
+            .any(|l| l.starts_with("source: snapshot://test"))
+    );
+    assert!(p.summary.iter().any(|l| l.starts_with("destination:")));
+    // A wrong token changes nothing.
+    assert!(run(&c, &backup, &path, "wrong", &[]).await.is_err());
+    assert_eq!(
+        arca_lake_metadata::ops::compat::cluster_state(c.meta.as_ref())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ClusterPhase::Active
+    );
+    let j = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    assert_eq!(j.last(), Some(Step::Verified));
+    // The old leader returns: its deletes are refused.
+    assert_eq!(deliver(&old, &deletes).await, 0, "after run");
+    let ctl = spawn(Arc::clone(&c.meta), controller("ctl-after"))
+        .await
+        .unwrap();
+    let j = finish(&c, &path).await.unwrap();
+    assert_eq!(j.last(), Some(Step::Reopened));
+    assert_eq!(deliver(&old, &deletes).await, 0, "after finish");
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    assert!(s3::get(&c.backend, BUCKET, "post").await.is_err(), "RPO");
+    // Writes and GC work again.
+    let again = put(&c, "again", 3).await;
+    assert_eq!(s3::get(&c.backend, BUCKET, "again").await.unwrap().0, again);
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Scenarios 3, 4, 14: a controller or a gateway still running (fresh
+/// heartbeat) stops the procedure before anything is restored; a new
+/// leader started meanwhile is refused at the clear. Once stopped (or
+/// declared stopped), the same journal resumes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn running_processes_stop_the_procedure_before_anything_is_restored() {
+    let c = cluster().await;
+    put(&c, "kept", 4).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    // A controller with a heartbeat.
+    let mut cfg = controller("ctl-running");
+    cfg.heartbeat = Some(Duration::from_millis(200));
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    wait_until("its heartbeat", Duration::from_secs(10), async || {
+        !arca_lake_metadata::ops::compat::procs(c.meta.as_ref())
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("processes still running"), "{e}");
+    assert_eq!(backup.restores.load(Ordering::SeqCst), 0);
+    // A gateway heartbeat (as a running gateway writes it).
+    ctl.shutdown().await;
+    let gw = arca_lake_metadata::records::ProcRecord {
+        id: "gw-1".into(),
+        kind: arca_lake_metadata::records::ProcKind::Gateway,
+        software: "test".into(),
+        caps: arca_lake_controller::capabilities(),
+        incarnation: [0; 16],
+        last_ms: now_ms(),
+    };
+    arca_lake_metadata::ops::compat::heartbeat(c.meta.as_ref(), &gw)
+        .await
+        .unwrap();
+    let running: Vec<String> = arca_lake_metadata::ops::compat::procs(c.meta.as_ref())
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|p| now_ms().saturating_sub(p.last_ms) < 90_000)
+        .map(|p| p.id)
+        .collect();
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("Gateway gw-1"), "{e}");
+    // Declared stopped by the operator: the same journal goes on.
+    let j = run(&c, &backup, &path, &p.journal.token, &running)
+        .await
+        .unwrap();
+    assert_eq!(j.last(), Some(Step::Verified));
+    assert_eq!(backup.restores.load(Ordering::SeqCst), 1);
+    c.shutdown().await;
+}
+
+/// Scenario 5: a node that does not answer: the procedure does not start
+/// (plan refuses), nor resumes past the fence while one stopped answering
+/// after the plan; nothing is restored. A removed node is not waited for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_not_answering_stops_the_procedure_before_anything_changes() {
+    let mut c = cluster().await;
+    put(&c, "kept", 5).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    c.stop_node(2).await;
+    let e = plan(&c, &backup, &path).await.unwrap_err();
+    assert!(e.contains("cannot be confirmed"), "{e}");
+    assert!(!path.exists());
+    c.start_node(2).await;
+    let p = plan(&c, &backup, &path).await.unwrap();
+    c.stop_node(2).await;
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("did not acknowledge"), "{e}");
+    assert_eq!(backup.restores.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        mr::Journal::load(&path).unwrap().last(),
+        Some(Step::Frozen),
+        "stopped before the fence step completed"
+    );
+    // Back: the same journal resumes.
+    c.start_node(2).await;
+    let j = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    assert_eq!(j.last(), Some(Step::Verified));
+    c.shutdown().await;
+}
+
+/// Scenarios 7, 8, 16, 17: the restore fails (the connection to the
+/// cluster lost) after the destination was cleared; a storage node is
+/// restarted meanwhile and keeps its held fence; the re-run clears again
+/// and restores. A node stopped after the restore stops the mark until it
+/// is back. The procedure then completes, and old deletes stay refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_restore_and_a_node_restart_resume_without_reopening_deletes() {
+    let mut c = cluster().await;
+    put(&c, "kept", 6).await;
+    let ctl = leading(&c, "ctl-before").await;
+    let backup = Snapshot::take(&c.meta).await;
+    let deletes = decided_deletes(&c, "kept").await;
+    let old = frozen(&c).await;
+    ctl.abort();
+    backup.fail.store(1, Ordering::SeqCst);
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("restore failed"), "{e}");
+    assert_eq!(
+        mr::Journal::load(&path).unwrap().last(),
+        Some(Step::Cleared)
+    );
+    // A node restarts while the store is empty: still closed and held.
+    c.stop_node(1).await;
+    c.start_node_quiet(1).await;
+    let h = c
+        .clients
+        .health(&c.nodes[1].addr.to_string())
+        .await
+        .unwrap();
+    assert!(!h.delete_fence_open && h.delete_fence_hold, "{h:?}");
+    assert_eq!(deliver(&old, &deletes).await, 0, "while restoring");
+    // Something wrote into the cleared store (as a process left running
+    // would): the restore refuses a non-empty destination; the re-run
+    // clears it again.
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.set(&keys::leader(), b"stray");
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    // A node down at the mark: the mark waits for it.
+    c.stop_node(0).await;
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(e.contains("did not acknowledge"), "{e}");
+    assert_eq!(
+        mr::Journal::load(&path).unwrap().last(),
+        Some(Step::Restored)
+    );
+    c.start_node_quiet(0).await;
+    let j = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    assert_eq!(j.last(), Some(Step::Verified));
+    assert_eq!(backup.restores.load(Ordering::SeqCst), 1);
+    assert_eq!(deliver(&old, &deletes).await, 0, "after the restore");
+    let ctl = spawn(Arc::clone(&c.meta), controller("ctl-after"))
+        .await
+        .unwrap();
+    finish(&c, &path).await.unwrap();
+    assert_eq!(deliver(&old, &deletes).await, 0, "after finish");
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Scenario 6: the procedure itself crashes between a step and its record
+/// (here after the mark): the re-run adopts the mark instead of making
+/// another incarnation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crash_after_the_mark_is_resumed_without_a_second_incarnation() {
+    let c = cluster().await;
+    put(&c, "kept", 7).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    let j = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    let marked = j.new_incarnation.clone().unwrap();
+    // As if the process died right after marking: the journal says
+    // `Restored`.
+    let mut back = j.clone();
+    back.done.retain(|s| *s <= Step::Restored);
+    back.new_incarnation = None;
+    back.save(&path).unwrap();
+    let j = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    assert_eq!(j.new_incarnation.as_deref(), Some(marked.as_str()));
+    assert_eq!(j.last(), Some(Step::Verified));
+    c.shutdown().await;
+}
+
+/// Scenario 13: two restores in a row; the second plans only once the
+/// first finished; deletes of either era stay refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_restores_in_a_row() {
+    let c = cluster().await;
+    put(&c, "kept", 8).await;
+    let ctl = leading(&c, "ctl-0").await;
+    let backup = Snapshot::take(&c.meta).await;
+    let deletes = decided_deletes(&c, "kept").await;
+    let old = frozen(&c).await;
+    ctl.abort();
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap();
+    // A second plan while the first is unfinished is refused.
+    assert!(
+        plan(&c, &backup, &path)
+            .await
+            .unwrap_err()
+            .contains("unfinished")
+    );
+    let ctl = spawn(Arc::clone(&c.meta), controller("ctl-1"))
+        .await
+        .unwrap();
+    finish(&c, &path).await.unwrap();
+    let old1 = frozen(&c).await;
+    ctl.shutdown().await;
+    // The second restore, of the same backup.
+    let backup2 = Snapshot::take(&c.meta).await;
+    let p2 = plan(&c, &backup2, &path).await.unwrap();
+    run(&c, &backup2, &path, &p2.journal.token, &[])
+        .await
+        .unwrap();
+    let ctl = spawn(Arc::clone(&c.meta), controller("ctl-2"))
+        .await
+        .unwrap();
+    finish(&c, &path).await.unwrap();
+    assert_eq!(deliver(&old, &deletes).await, 0, "first era");
+    let deletes1 = decided_deletes(&c, "kept").await;
+    assert_eq!(deliver(&old1, &deletes1).await, 0, "second era");
+    ctl.shutdown().await;
+    c.shutdown().await;
+}

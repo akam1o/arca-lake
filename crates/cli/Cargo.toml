@@ -34,7 +34,7 @@ arca-lake-storage-node.workspace = true
 arca-lake-storage.workspace = true
 arca-lake-tiering.workspace = true
 clap.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "process"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

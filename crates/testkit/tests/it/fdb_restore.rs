@@ -804,3 +804,219 @@ async fn a_leader_left_running_through_fdbrestore_deletes_nothing_the_restore_ne
     assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
     c.shutdown().await;
 }
+
+/// `fdbrestore` into the test cluster; the first restore may be given a
+/// version the backup cannot restore to (a failed restore).
+struct Fdb {
+    backup: Backup,
+    // Version to use instead of the planned one, once.
+    bad_once: std::sync::Mutex<Option<u64>>,
+}
+impl arca_lake_controller::managed_restore::Restorer for Fdb {
+    fn destination(&self) -> String {
+        self.backup.cluster_file.clone()
+    }
+    // Blocking: the test runs on a multi-threaded runtime and does
+    // nothing else meanwhile.
+    fn restore(
+        &self,
+        source: &str,
+        version: u64,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let v = self.bad_once.lock().unwrap().take().unwrap_or(version);
+        let (ok, text) = self.backup.run(
+            "fdbrestore",
+            &[
+                "start",
+                "--dest-cluster-file",
+                &self.backup.cluster_file,
+                "-r",
+                source,
+                "-v",
+                &v.to_string(),
+                "-w",
+            ],
+        );
+        std::future::ready(if ok { Ok(()) } else { Err(text) })
+    }
+}
+
+/// `admin restore` (Phase 3.11, ADR-0026 option D) with `fdbrestore` on a
+/// real FoundationDB cluster: plan, a first run whose restore fails (a
+/// version the backup cannot restore to), the re-run resuming from the
+/// clear, finish. Deletes a leader decided after the backup point,
+/// delivered after the restore, are refused; the restored object reads
+/// back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admin_restore_with_fdbrestore_resumes_after_a_failed_restore() {
+    use arca_lake_controller::managed_restore::{self as mr, Restorer, Step};
+    use arca_lake_metadata::ops::delete_fence;
+    let Some(backup) = Backup::from_env() else {
+        eprintln!("ARCA_FDB_TESTS / ARCA_FDB_BACKUP_URL not set; skipping");
+        return;
+    };
+    let path = std::env::var("ARCA_FDB_CLUSTER_FILE").ok();
+    let kv = FdbKv::open_with_timeout(path.as_deref(), 10_000).expect("open FoundationDB");
+    kv.clear_range_blocking(&arca_lake_metadata::keys::all_range())
+        .await
+        .unwrap();
+    let meta = Arc::new(kv);
+    let mut c = TestCluster::start_with(
+        Arc::clone(&meta),
+        ClusterOptions {
+            groups: 1,
+            heartbeat: None,
+            ..ClusterOptions::rs(3, 2, 1, MIB, 0)
+        },
+    )
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let kept = payload(usize::try_from(MIB).unwrap(), 41);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "kept",
+        kept.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let mut cfg = ControllerConfig::new("ctl-before");
+    cfg.lease = Duration::from_secs(5);
+    cfg.health_interval = Duration::from_millis(200);
+    cfg.failure_domain = "host".into();
+    cfg.heartbeat = None;
+    let ctl = spawn(Arc::clone(&meta), cfg.clone()).await.unwrap();
+    wait_until(
+        "the leader's generation open",
+        Duration::from_secs(60),
+        async || {
+            let rec = delete_fence::current(meta.as_ref()).await.unwrap();
+            let mut all = ctl.is_leader() && rec.open && rec.leader_token == ctl.token();
+            for n in &c.nodes {
+                let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+                all &= h.delete_fence_open && h.delete_fence_generation == rec.generation;
+            }
+            all
+        },
+    )
+    .await;
+    let backup_url = backup.backup();
+    let version = backup.min_restorable_version(&backup_url);
+    // After the backup point: deleted; the leader's decided deletes.
+    let m = c.manifest(BUCKET, "kept").await;
+    let g = c.groups().await.remove(0);
+    let mut deletes = Vec::new();
+    for (_, ch) in &m.chunks {
+        for (i, mem) in g.members.iter().enumerate() {
+            let n = c.node_index(mem).unwrap();
+            deletes.push((
+                c.nodes[n].addr.to_string(),
+                arca_lake_protocol::client::ShardRef {
+                    group_id: g.id,
+                    chunk_id: ch.chunk_id,
+                    shard_index: u16::try_from(i).unwrap(),
+                },
+                g.epoch,
+            ));
+        }
+    }
+    let old = arca_lake_protocol::client::NodeClients::new(Duration::from_secs(5))
+        .with_tls(c.clients.tls().cloned());
+    old.set_incarnation(Some(
+        compat::cluster_state(meta.as_ref())
+            .await
+            .unwrap()
+            .unwrap()
+            .incarnation,
+    ));
+    old.set_delete_fence(Some(
+        delete_fence::current(meta.as_ref())
+            .await
+            .unwrap()
+            .generation,
+    ));
+    s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    ctl.shutdown().await;
+    let shards_at_backup = shards_total(&c).await;
+    let fdb = Fdb {
+        backup,
+        bad_once: std::sync::Mutex::new(Some(1)),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("restore.journal");
+    let plan = mr::plan(
+        meta.as_ref(),
+        &c.clients,
+        &backup_url,
+        version,
+        Some(now_ms()),
+        &fdb.destination(),
+        &journal,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    for l in &plan.summary {
+        eprintln!("plan: {l}");
+    }
+    let e = mr::run(
+        &meta,
+        &c.clients,
+        &fdb,
+        &journal,
+        &plan.journal.token,
+        &[],
+        now_ms,
+    )
+    .await
+    .unwrap_err();
+    eprintln!("first run: {e}");
+    assert!(e.to_string().contains("restore failed"), "{e}");
+    assert_eq!(
+        mr::Journal::load(&journal).unwrap().last(),
+        Some(Step::Cleared)
+    );
+    let mut applied = 0;
+    for (addr, shard, epoch) in &deletes {
+        applied += usize::from(old.delete_shard(addr, *shard, *epoch).await.is_ok());
+    }
+    assert_eq!(applied, 0, "while the restore failed");
+    let j = mr::run(
+        &meta,
+        &c.clients,
+        &fdb,
+        &journal,
+        &plan.journal.token,
+        &[],
+        now_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(j.last(), Some(Step::Verified));
+    let mut cfg = cfg;
+    cfg.id = "ctl-after".into();
+    let ctl = spawn(Arc::clone(&meta), cfg).await.unwrap();
+    let j = mr::finish(
+        meta.as_ref(),
+        &c.clients,
+        &journal,
+        "op",
+        "drill",
+        true,
+        Duration::from_secs(60),
+        now_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(j.last(), Some(Step::Reopened));
+    for (addr, shard, epoch) in &deletes {
+        applied += usize::from(old.delete_shard(addr, *shard, *epoch).await.is_ok());
+    }
+    assert_eq!(applied, 0, "after the restore");
+    assert_eq!(shards_total(&c).await, shards_at_backup);
+    c.restart_backend().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
+    ctl.shutdown().await;
+    c.shutdown().await;
+}

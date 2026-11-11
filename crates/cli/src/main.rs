@@ -983,6 +983,14 @@ enum AdminCommand {
     /// decommissioned only when no group lists it and no group is still
     /// rebuilding. Only while the cluster is Active. Requires `--yes`;
     /// `--cancel` stops the drain (members already moved stay moved).
+    /// Managed metadata restore (Phase 3.11, ADR-0026 option D): plan,
+    /// run, finish, status. The supported restore path: it refuses to
+    /// start while any node's safety cannot be confirmed. A restore done
+    /// any other way is outside its guarantee (R-94(b)).
+    Restore {
+        #[command(subcommand)]
+        command: RestoreCommand,
+    },
     /// Node lifecycle (Phase 3.11, R-100): list, status, decommission
     /// (alias drain), unregister, rejoin.
     Node {
@@ -2230,6 +2238,9 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
             plan,
         } => decommission_command(meta.as_ref(), node, yes, cancel, dry_run, &plan, now).await,
         AdminCommand::Node { command } => node_command(meta.as_ref(), command, now).await,
+        AdminCommand::Restore { command } => {
+            restore_command(&meta, &args.cluster_file, command, now).await
+        }
         AdminCommand::CheckConfig => check_config(meta.as_ref()).await,
         AdminCommand::Rebalance { command } => rebalance_command(meta.as_ref(), command).await,
         AdminCommand::DeleteFence { command } => {
@@ -2550,6 +2561,274 @@ async fn close_fence_everywhere<S: arca_lake_metadata::KvStore>(
         Err(format!(
             "nodes {missing:?} did not acknowledge the closed fence: deletes may still run there; make them reachable and re-run, or, for a node whose process is stopped and stays stopped, re-run with --absent-node ID"
         ))
+    }
+}
+
+/// `admin restore` subcommands (Phase 3.11).
+#[derive(Debug, Subcommand)]
+enum RestoreCommand {
+    /// Check the cluster and every node, show the target cluster, the
+    /// source and the destination, and write the journal with the
+    /// confirmation token `run` needs. Changes nothing in the cluster.
+    Plan {
+        /// Backup URL (as `fdbrestore -r` takes it).
+        #[arg(long)]
+        source: String,
+        /// Version to restore to (`fdbrestore -v`; the backup's minimum
+        /// restorable version for its snapshot point).
+        #[arg(long)]
+        version: u64,
+        /// Backup point, wall clock ms (splits orphans in the report).
+        #[arg(long)]
+        backup_point_ms: Option<u64>,
+        /// Journal file (outside the metadata store; keep it until
+        /// `finish` completed).
+        #[arg(long)]
+        journal: PathBuf,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
+    /// Freeze, close and hold the fence on every node, clear and restore,
+    /// `recovery begin`, verify. Resumes from the journal.
+    Run {
+        /// Journal file written by `plan`.
+        #[arg(long)]
+        journal: PathBuf,
+        /// The token `plan` printed.
+        #[arg(long)]
+        confirm: String,
+        /// A process whose heartbeat is fresh but which is stopped.
+        #[arg(long)]
+        stopped: Vec<String>,
+        /// Command prefix running `fdbrestore` where the backup agent
+        /// lives (e.g. `docker exec NAME`).
+        #[arg(long)]
+        fdbrestore_cmd: Option<String>,
+        /// Cluster file as that command sees it (default: this one).
+        #[arg(long)]
+        fdbrestore_cluster_file: Option<String>,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
+    /// Finalize on the report (`admin recovery status` shows it), then
+    /// wait until a leader opened a new generation on every node.
+    Finish {
+        /// Journal file.
+        #[arg(long)]
+        journal: PathBuf,
+        /// Who decides.
+        #[arg(long)]
+        operator: String,
+        /// Finalize despite critical findings (needs --reason).
+        #[arg(long)]
+        force: bool,
+        /// Why (required with --force).
+        #[arg(long, default_value = "")]
+        reason: String,
+        /// How long to wait for the new generation, s.
+        #[arg(long, default_value_t = 120)]
+        wait_secs: u64,
+        /// Confirm.
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
+    /// Show the journal's steps.
+    Status {
+        /// Journal file.
+        #[arg(long)]
+        journal: PathBuf,
+    },
+}
+
+/// Runs `fdbrestore` into this command's cluster.
+struct FdbRestorer {
+    prefix: Vec<String>,
+    cluster_file: String,
+}
+
+impl arca_lake_controller::managed_restore::Restorer for FdbRestorer {
+    fn destination(&self) -> String {
+        self.cluster_file.clone()
+    }
+
+    async fn restore(&self, source: &str, version: u64) -> Result<(), String> {
+        let mut cmd = match self.prefix.split_first() {
+            Some((first, rest)) => {
+                let mut c = tokio::process::Command::new(first);
+                c.args(rest).arg("fdbrestore");
+                c
+            }
+            None => tokio::process::Command::new("fdbrestore"),
+        };
+        cmd.args([
+            "start",
+            "--dest-cluster-file",
+            &self.cluster_file,
+            "-r",
+            source,
+            "-v",
+            &version.to_string(),
+            "-w",
+        ]);
+        let out = cmd.output().await.map_err(|e| format!("fdbrestore: {e}"))?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!("fdbrestore exited {}: {}", out.status, text.trim()))
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
+    meta: &Arc<S>,
+    cluster_file: &std::path::Path,
+    command: RestoreCommand,
+    now: u64,
+) -> ExitCode {
+    use arca_lake_controller::managed_restore as mr;
+    let clock = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| u64::try_from(d.as_millis()).ok())
+            .unwrap_or(0)
+    };
+    match command {
+        RestoreCommand::Plan {
+            source,
+            version,
+            backup_point_ms,
+            journal,
+            rpc,
+        } => {
+            let clients = match admin_node_clients(&rpc) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            match mr::plan(
+                meta.as_ref(),
+                &clients,
+                &source,
+                version,
+                backup_point_ms,
+                &cluster_file.display().to_string(),
+                &journal,
+                now,
+            )
+            .await
+            {
+                Ok(p) => {
+                    for l in &p.summary {
+                        println!("{l}");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(format!("restore not planned: {e}")),
+            }
+        }
+        RestoreCommand::Run {
+            journal,
+            confirm,
+            stopped,
+            fdbrestore_cmd,
+            fdbrestore_cluster_file,
+            rpc,
+        } => {
+            let clients = match admin_node_clients(&rpc) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            let restorer = FdbRestorer {
+                prefix: fdbrestore_cmd
+                    .map(|c| c.split_whitespace().map(str::to_string).collect())
+                    .unwrap_or_default(),
+                cluster_file: fdbrestore_cluster_file
+                    .unwrap_or_else(|| cluster_file.display().to_string()),
+            };
+            match mr::run(
+                meta, &clients, &restorer, &journal, &confirm, &stopped, clock,
+            )
+            .await
+            {
+                Ok(j) => {
+                    println!(
+                        "restored and verified (new incarnation {}): review `admin recovery status`, then `admin restore finish`",
+                        j.new_incarnation.unwrap_or_default()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(format!(
+                    "admin restore stopped (re-run resumes; journal {}): {e}",
+                    journal.display()
+                )),
+            }
+        }
+        RestoreCommand::Finish {
+            journal,
+            operator,
+            force,
+            reason,
+            wait_secs,
+            yes,
+            rpc,
+        } => {
+            if !yes {
+                return fail("finish makes the restored cluster Active; re-run with --yes");
+            }
+            if force && reason.is_empty() {
+                return fail("--force needs --reason");
+            }
+            let clients = match admin_node_clients(&rpc) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            match mr::finish(
+                meta.as_ref(),
+                &clients,
+                &journal,
+                &operator,
+                &reason,
+                force,
+                std::time::Duration::from_secs(wait_secs),
+                clock,
+            )
+            .await
+            {
+                Ok(_) => {
+                    println!(
+                        "restore finished: Active, a new delete fence generation open on every node"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        RestoreCommand::Status { journal } => match mr::Journal::load(&journal) {
+            Ok(j) => {
+                println!(
+                    "source {} version {} destination {}",
+                    j.source, j.version, j.destination
+                );
+                println!(
+                    "steps done: {}",
+                    j.done
+                        .iter()
+                        .map(|s| s.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e),
+        },
     }
 }
 

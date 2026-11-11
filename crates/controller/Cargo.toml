@@ -23,5 +23,8 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

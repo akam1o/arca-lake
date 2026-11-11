@@ -41,6 +41,7 @@ mod fdb_restore;
 mod gc_bench;
 mod gc_safety;
 mod integrity;
+mod managed_restore;
 mod member_move_redundancy;
 mod membership;
 mod membership_faults;

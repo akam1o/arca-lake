@@ -259,7 +259,26 @@ backup is not a data backup: objects whose shards were removed after the
 backup point are reported unreadable, never recovered, and writes after
 the backup point are lost (RPO = backup point).
 
-Restore runbook (exercised by `fdb_restore.rs`, real
+**Supported procedure (Phase 3.11, ADR-0026 option D): `admin restore`.**
+It runs the steps below as one resumable procedure and refuses to start
+while the safety of any node cannot be confirmed:
+
+```
+admin restore plan --source URL --version V --backup-point-ms MS --journal J   # shows cluster, source, destination; prints a token
+admin restore run --journal J --confirm TOKEN [--stopped PROC_ID]...           # freeze, fence everywhere, clear, fdbrestore, recovery begin, verify
+admin recovery status                                                          # the report
+admin restore finish --journal J --operator NAME --yes [--force --reason R]    # finalize; waits for a new generation on every node
+```
+
+Keep the journal (a local file) until `finish` completes. Re-run `run`
+or `finish` after any failure: each resumes from its first unrecorded
+step. The guarantee covers restores done this way only. A restore done
+any other way (a direct `fdbrestore`, a DR switch, a snapshot rollback)
+is R-94(b), open (High). ADR-0025 (the trip) and the rejoin lease only
+mitigate it.
+
+Manual restore runbook, for when the current metadata is gone, which
+`admin restore` refuses (exercised by `fdb_restore.rs`, real
 `fdbbackup`/`fdbrestore`; the delete fence steps by
 `it/delete_fence.rs`, ADR-0023):
 

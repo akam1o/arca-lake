@@ -1,7 +1,8 @@
 # ADR-0026: Restore-safe deletes (proposal to close R-94(b))
 
-Status: **proposed** (Phase 3.11). Not implemented. Needs a decision on
-scope and phase.
+Status: option D **accepted and implemented** (Phase 3.11, `admin
+restore`); option Q **proposed** for the next phase, not implemented and
+not verified. R-94(b) stays open (High). Option D does not close it.
 
 ## Problem
 
@@ -119,12 +120,179 @@ Costs and work:
 | Cost | small (CLI, checks) | protocol 5, format 3, schema 4, capacity `Q` | done |
 | Closes R-94(b) | only for restores that follow it | yes, bounded by `Q` (stated and configurable) | no |
 
+## Option D as implemented (Phase 3.11)
+
+`admin restore plan | run | finish | status`
+(`controller::managed_restore`) reuses the runbook's functions:
+`close_and_push`, `restore_floors`, `mark_restoring_above`, the
+verification pass and `finalize`.
+
+1. **plan.** Checks the cluster:
+   - cluster state `Active` or `ReadOnly`;
+   - no open upgrade finalize;
+   - every node answers, except removed nodes, which were fenced when
+     they were unregistered.
+
+   It refuses to start otherwise. It shows the target cluster
+   (incarnation, nodes), the source (backup URL, version) and the
+   destination. It writes a journal outside the metadata store, with a
+   confirmation token. Nothing in the cluster changes.
+2. **run --confirm TOKEN.** Refuses a wrong token, or a store that is not
+   the planned cluster. Then:
+   - freezes: `ReadOnly`, and no controller or gateway heartbeat fresh
+     (or the process is declared stopped);
+   - closes the fence with an operator hold on every node; each node
+     acknowledges after the deletes it admitted finished, and each
+     node's state is read back. Any node missing stops the procedure
+     before anything is restored;
+   - checks for processes again, then clears arca-lake's keys and
+     restores;
+   - runs `recovery begin`: the fence is closed again on the restored
+     metadata, a new incarnation is marked above every node's sequence,
+     and the schema floor is raised. A mark made by a run that crashed
+     before recording it is adopted, not made twice;
+   - runs the verification pass.
+
+   Each step is recorded in the journal once done. A failed or
+   interrupted run resumes from the first step not recorded. A failed
+   restore resumes from the clear.
+3. **finish.** Finalizes on the report (the operator's decision;
+   critical findings need `--force --reason`), then waits until a leader
+   opened a generation above the closed one on every node.
+
+Guaranteed under these conditions (tests: `it/managed_restore.rs`,
+`it/fdb_restore.rs::admin_restore_with_fdbrestore_resumes_after_a_failed_restore`
+on real FoundationDB, each check failing its test when removed):
+
+- No delete decided on the metadata before the restore applies after the
+  fence step.
+- No delete applies while the restore runs, or before finalize and a new
+  generation.
+- No step starts while a node's safety is unconfirmed or a process runs.
+- A failed or interrupted run resumes without reopening deletes and
+  without a second incarnation.
+
+Not guaranteed by option D:
+
+- **A restore done any other way.** A direct `fdbrestore`, a DR switch,
+  or a disk or snapshot rollback of the store remains R-94(b) (High). The
+  trip (ADR-0025) and the rejoin lease (ADR-0024) only mitigate it.
+- **Processes declared stopped that are not.** Their writes make the
+  restore fail ("non-empty destination"), which is safe, but their
+  deletes are already refused only by the fence step.
+- **Lost metadata.** When the current metadata is gone, the procedure
+  refuses to plan, and the manual runbook applies with its weaker
+  guarantee.
+
+## Option Q: design audit (Phase 3.11; not implemented)
+
+What Q relies on, and where that can fail:
+
+1. **History tokens roll back with FoundationDB.** The metadata log of
+   `(L, H)` is restored with the metadata. Steps up to the backup's
+   lineage `L_r` come back with their original tokens, so a node finds
+   them consistent. Only steps after `L_r` are written again with new
+   tokens, and only those reveal the rollback. A delete decided under a
+   step `L <= L_r` whose reference removal committed after the backup
+   point is therefore not detected by the tokens at all. Only the
+   retention window `Q` protects it. Consequence: the history check
+   cannot replace `Q`. It can only stop purges early once a fork is
+   seen.
+2. **The same token reappearing.** Tokens must be drawn from the OS's
+   random source at the moment the step is written, and never derived
+   from metadata, from a counter, or from a seed stored in the store. A
+   derived token is recreated identically by the restored history, and
+   the fork is invisible. Two restores of the same backup then write
+   different tokens for the same step numbers, with probability
+   1 - 2^-128 per step.
+3. **A restore later than `Q` after the delete.** The record may already
+   be reclaimed, and the restored metadata's reference is then lost.
+   This is explicit, bounded RPO and is reported by recovery. It is not
+   prevented.
+4. **An RPC delayed beyond `Q`.**
+   - Retention counts from when the node applies the delete, so a late
+     delete still gets `Q`.
+   - A delete whose step the node already knows to be forked is refused.
+   - A step that has aged out of the metadata log can never be
+     confirmed, so its record would stay forever. An explicit rule
+     (alarm, operator action, or reclaim after a longer `Q_max`) must
+     bound this. Otherwise the invariant "old data does not linger
+     needlessly" fails.
+5. **Storage node crash and restart.** The tag must sit in the
+   tombstone itself (one record, atomic). The node's map of seen
+   `(L, H)` must be persisted. Loss or damage of either must fail
+   closed: no reclaim until the tag is confirmed again.
+6. **Snapshot rollback of a node's disk.** The node's retained records
+   and its memory of steps roll back together. Deletes after its
+   snapshot point are undone, so the data is back, which is garbage,
+   not loss. Its memory of later steps is gone, so it may accept the
+   restored history as consistent. That is safe for its own data,
+   because nothing it reclaims was deleted after its snapshot point.
+   A disk rollback also undoes writes, which is a durability matter
+   (erasure coding across nodes), outside Q.
+7. **Nodes not reached.** They get no confirmation, so they reclaim
+   nothing; that costs capacity, not safety. One unreachable through a
+   restore sees the fork when it returns.
+8. **Leader change during confirmation.** A confirmation must be read
+   from the metadata in the same act. A push built before a restore and
+   delivered after it confirms the old history, and the node cannot tell.
+   This matters only for records already older than `Q`, which are
+   beyond the guarantee anyway. A leader cut off from the store cannot
+   build a confirmation; replaying an earlier one must be impossible by
+   construction (confirmations carry the confirming step).
+9. **GC backlog and the capacity reserve.**
+   - Retained bytes equal the delete rate times `Q`. They are counted as
+     reclaimable but not free.
+   - Admission sees less free space and throttles writes earlier.
+     Compaction cannot reclaim segments that hold retained records, so
+     write amplification rises.
+   - Under pressure the choice is to shorten `Q` (a smaller guarantee,
+     metered and alarmed) or to refuse writes. A silent shortening is
+     not acceptable.
+10. **Segment format and schema.** Tagged tombstones need segment
+    format 3, the lineage log needs schema 4, and the tags need
+    protocol 5.
+    - Until finalize, deletes from earlier controllers are untagged and
+      unprotected.
+    - After finalize, untagged deletes must be refused.
+    - Rolling nodes back past format 3 becomes impossible.
+11. **Restores from outside the cluster.** Q needs no observer: reclaim
+    needs a confirmation, and a restored history cannot produce one for
+    the forked steps. The guarantee still holds only if:
+    - the restore completes within `Q` of the delete;
+    - the node still holds the record (no disk loss or replacement);
+    - nobody shortened `Q`.
+
+    A restore of the metadata together with every node's disk (a whole
+    cluster snapshot) is consistent and needs no protection.
+
+**When every source of history rolls back.** If the metadata and a
+node's disk both roll back, the node's deletes after its snapshot point
+are undone with them, so nothing is lost. The fork is undetectable only
+when the node's memory of steps is lost but its deletes stand (damage
+of that memory). Q then rests on the retention time alone, which is
+why item 5 must fail closed.
+
+**Conditions Q cannot guarantee:**
+- a restore later than `Q`;
+- a lost or replaced node disk;
+- a shortened `Q`;
+- untagged deletes before finalize;
+- a damaged step memory without fail-closed handling.
+
+Q must therefore be presented as "restore-safe within `Q`". It is not an
+unconditional closure of R-94(b). Whether that bound is sufficient is a
+decision for the next phase. Proofs and model tests for items 1, 4, 5
+and 8 are needed before implementation.
+
 ## Recommendation
 
 Do both:
 
 - D now. It is cheap and makes the supported path safe.
-- Q to close R-94(b), as its own phase. It changes the protocol, the
-  storage format and the schema, and it adds capacity cost. Until Q
-  ships, R-94(b) stays High. The supported restore path is D, and the
-  guarantee is stated as "restores done through `admin restore`".
+- Q evaluated again in the next phase, against the audit above. It is
+  implemented only if its bounded guarantee is accepted and its proofs
+  hold. It changes the protocol, the storage format and the schema, and
+  it adds capacity cost. Until then R-94(b) stays High. The supported
+  restore path is D, and its guarantee is stated as "restores done
+  through `admin restore`".

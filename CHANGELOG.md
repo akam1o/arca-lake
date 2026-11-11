@@ -16,7 +16,14 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   end the term; the next term holds the fence for the operator. A store
   watch (`store_watch_interval`, 250 ms) and a local stop on a failed
   renewal. No leadership on a store without a cluster state record.
-- ADR-0026 (proposed): restore-safe deletes to close R-94(b).
+- `admin restore plan|run|finish|status` (ADR-0026 option D): the
+  supported restore procedure, resumable from a local journal; refuses
+  to start while any node does not acknowledge the closed, held fence or
+  a controller or gateway runs; shows target, source and destination and
+  needs the plan's confirmation token. Restores done otherwise remain
+  R-94(b) (open, High).
+- ADR-0026 option Q (proposed, next phase): history-confirmed retention,
+  with its design audit.
 - Node lifecycle (ADR-0027, R-100): `admin node list|status|decommission
   (drain)|unregister|rejoin`; removed and quarantined states; a node
   identity on the node's disk (HealthRequest `node_id`, `node_identity`,
