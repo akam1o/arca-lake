@@ -119,7 +119,9 @@ pub async fn close_and_push<S: KvStore>(
         opener: 0,
     };
     let mut nodes = Vec::new();
-    for n in cluster::list_nodes(meta).await? {
+    // Not removed nodes: held since they were unregistered, and what
+    // answers at their address may be anything (Phase 3.11 review).
+    for n in active_nodes(meta).await? {
         let pushed = clients
             .push_delete_fence_with(&n.address, record.generation, false, how)
             .await;
@@ -220,6 +222,23 @@ pub struct NodeFloors {
     pub silent: Vec<u64>,
 }
 
+/// Registered nodes not removed.
+async fn active_nodes<S: KvStore>(
+    meta: &S,
+) -> Result<Vec<arca_lake_metadata::records::NodeRecord>, ControlError> {
+    let removed: Vec<u64> = arca_lake_metadata::ops::node_lifecycle::retirements(meta)
+        .await?
+        .into_iter()
+        .filter(arca_lake_metadata::ops::node_lifecycle::NodeRetirementRecord::is_removed)
+        .map(|r| r.node_id)
+        .collect();
+    Ok(cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .filter(|n| !removed.contains(&n.id))
+        .collect())
+}
+
 /// See [`NodeFloors`].
 ///
 /// # Errors
@@ -230,7 +249,7 @@ pub async fn node_floors<S: KvStore>(
     clients: &NodeClients,
 ) -> Result<NodeFloors, ControlError> {
     let mut f = NodeFloors::default();
-    for n in cluster::list_nodes(meta).await? {
+    for n in active_nodes(meta).await? {
         clients.note_node_id(&n.address, n.id);
         match clients.health(&n.address).await {
             Ok(h) => {

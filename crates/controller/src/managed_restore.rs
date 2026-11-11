@@ -140,6 +140,12 @@ pub struct Journal {
     pub nodes: Vec<(u64, String)>,
     /// Nodes allowed not to answer (removed: fenced when unregistered).
     pub removed: Vec<u64>,
+    /// Their addresses (a restored record of a removed id at another
+    /// address is refused; review).
+    pub removed_at: Vec<(u64, String)>,
+    /// The identities the nodes acknowledged before the restore: put back
+    /// on the restored metadata (review: never imported from the nodes).
+    pub identities: Vec<(u64, [u8; 16])>,
     /// Incarnation the restored metadata carried right after the restore
     /// (hex): another one at the mark step means the mark was made.
     pub restored_incarnation: Option<String>,
@@ -174,6 +180,12 @@ impl Journal {
         }
         for id in &self.removed {
             let _ = writeln!(b, "removed {id}");
+        }
+        for (id, addr) in &self.removed_at {
+            let _ = writeln!(b, "removed_at {id} {addr}");
+        }
+        for (id, token) in &self.identities {
+            let _ = writeln!(b, "identity {id} {}", compat::hex(token));
         }
         if let Some(i) = &self.restored_incarnation {
             let _ = writeln!(b, "restored_incarnation {i}");
@@ -216,6 +228,8 @@ impl Journal {
             closed_generation: 0,
             nodes: Vec::new(),
             removed: Vec::new(),
+            removed_at: Vec::new(),
+            identities: Vec::new(),
             restored_incarnation: None,
             new_incarnation: None,
         };
@@ -235,6 +249,22 @@ impl Journal {
                     j.nodes.push((num(id)?, addr.into()));
                 }
                 "removed" => j.removed.push(num(v)?),
+                "removed_at" => {
+                    let (id, addr) = v.split_once(' ').ok_or("removed_at line")?;
+                    j.removed_at.push((num(id)?, addr.into()));
+                }
+                "identity" => {
+                    let (id, hex) = v.split_once(' ').ok_or("identity line")?;
+                    let mut t = [0u8; 16];
+                    if hex.len() != 32 {
+                        return Err("identity token".into());
+                    }
+                    for (i, b) in t.iter_mut().enumerate() {
+                        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    j.identities.push((num(id)?, t));
+                }
                 "restored_incarnation" => j.restored_incarnation = Some(v.into()),
                 "new_incarnation" => j.new_incarnation = Some(v.into()),
                 "done" => j
@@ -369,10 +399,12 @@ pub async fn plan<S: KvStore>(
     let states = node_lifecycle::states(meta).await?;
     let mut nodes = Vec::new();
     let mut removed = Vec::new();
+    let mut removed_at = Vec::new();
     let mut unreachable = Vec::new();
     for n in cluster::list_nodes(meta).await? {
         if states.get(&n.id) == Some(&State::Removed) {
             removed.push(n.id);
+            removed_at.push((n.id, n.address.clone()));
             continue;
         }
         clients.note_node_id(&n.address, n.id);
@@ -398,6 +430,13 @@ pub async fn plan<S: KvStore>(
         closed_generation: 0,
         nodes,
         removed,
+        removed_at,
+        identities: node_lifecycle::identities(meta)
+            .await?
+            .into_values()
+            .filter(|i| i.acknowledged)
+            .map(|i| (i.node_id, i.token))
+            .collect(),
         restored_incarnation: None,
         new_incarnation: None,
     };
@@ -608,7 +647,11 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                         n.id, n.address
                     )));
                 }
-                None if j.removed.contains(&n.id) => {}
+                None if j
+                    .removed_at
+                    .iter()
+                    .any(|(id, a)| *id == n.id && *a == n.address)
+                    || (j.removed_at.is_empty() && j.removed.contains(&n.id)) => {}
                 None => {
                     return Err(refuse(format!(
                         "the restored metadata names node {} at {}, unknown to this cluster: not this cluster's backup",
@@ -617,9 +660,15 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 }
             }
         }
-        // What was unregistered stays out (review).
+        // What was unregistered stays out, and the identities the nodes
+        // acknowledged are this cluster's again (review).
         for id in &j.removed {
             node_lifecycle::keep_removed(meta_ref, *id, now()).await?;
+        }
+        for (id, token) in &j.identities {
+            if named.iter().any(|n| n.id == *id) {
+                node_lifecycle::set_identity(meta_ref, *id, *token).await?;
+            }
         }
         let excused: Vec<u64> = j.removed.iter().chain(absent).copied().collect();
         if !already {
@@ -826,6 +875,8 @@ mod tests {
             closed_generation: 9,
             nodes: vec![(1, "a:1".into()), (2, "b:2".into())],
             removed: vec![3],
+            removed_at: vec![(3, "c:3".into())],
+            identities: vec![(1, [7; 16])],
             restored_incarnation: Some("0102".into()),
             new_incarnation: None,
         };

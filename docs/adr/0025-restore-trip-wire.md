@@ -145,7 +145,13 @@ Review fixes (Phase 3.11):
   is unchanged.
 - A lost lease probes the store and reports a replaced one; the
   generation a latched trip closes is the last one deletes carried, even
-  after an earlier stop took it.
+  after an earlier stop took it. The close above starts from the highest
+  generation the leader knows (its record, the nodes' reports), also when
+  its deletes never carried one (re-review).
+- A transient database lock (a DR switch, a lock taken by hand) is
+  treated as a restore: the fence is held until an operator releases it
+  (`admin delete-fence release`). This is a deliberate fail-closed
+  choice; nothing tells a lock without a rollback from one with.
 - Process heartbeats are not written into a store without a cluster
   state: a cleared keyspace stays empty under processes left running.
 

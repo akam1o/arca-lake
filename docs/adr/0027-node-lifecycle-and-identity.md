@@ -72,13 +72,30 @@ pushes and recovery, and are authorized by mutual TLS.
 
 Review fixes (Phase 3.11):
 
+- **Registration gives the identity.** `register_node` writes a new
+  node's identity record (not acknowledged) in the same transaction, so
+  a disk at a new node's address either adopts it or, holding another
+  identity (another cluster's disk that was not wiped), is quarantined.
+  An identity is never imported automatically (re-review: an import
+  keyed on the node id and the incarnation sequence admitted another
+  cluster's disk).
 - **Restored metadata without a record.** When the metadata has no
-  record for a node, as after restoring a backup from before identities,
-  the leader carries none. If the node holds an identity for its own id
-  and its incarnation sequence is not above the cluster's, the leader
-  takes it into the metadata. If the node holds none, it is given one.
-  A node holding another node's identity is quarantined. Before this
-  fix, every node would have been quarantined after such a restore.
+  record for a node (restored from before identities), the leader first
+  sends a probe that carries no facts:
+  - the node holds none: it is given one;
+  - it holds another node's: quarantined;
+  - it holds its own: *unconfirmed*. Nothing is pushed to it (no facts,
+    no fence, so it takes no delete), and it stays a healthy member for
+    reads and writes until an operator confirms it (`admin node
+    adopt-identity --node N --yes`). Metric:
+    `arca_controller_identity_unconfirmed_total`.
+
+  A managed restore puts back the identities it recorded at plan time,
+  so it leaves no node unconfirmed.
+- **Unstamped deletes.** A node holding an identity refuses deletes that
+  carry none (earlier controllers after a rollback, admin and test
+  clients). Gateways' cleanups of their own partial copies are among
+  them: those copies are orphans for reconciliation.
 - **Damaged file.** A damaged identity file is never replaced by an
   adoption. An operator removes it; `rejoin --fresh-identity` then gives
   a new one.
@@ -145,7 +162,12 @@ at any step.
   restored metadata's leader's, as long as its hold stands. Only a
   later incarnation that it adopts would lift the hold, and no leader
   of this release reaches it.
-- Residuals, recorded in R-100:
+- Residuals, recorded in R-100 (re-review):
+  - metadata restored by hand (`recovery begin`, not `admin restore`)
+    from before an unregister names the node active again; its hold is
+    lifted by the new incarnation. Only `admin restore` keeps removed
+    nodes removed. After a manual restore, unregister them again before
+    starting controllers;
   - a node unregistered with `--unreachable` relies on the operator's
     statement;
   - nodes of earlier releases are not checked by identity;

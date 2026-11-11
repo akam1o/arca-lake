@@ -174,8 +174,22 @@ Review fixes (Phase 3.11):
 - **Declared absences.** The mark and `finish` take `--absent-node`
   (the operator's statement, as for `recovery begin`).
 - **What `finish` waits for.** The restored metadata's nodes in service.
-- **Identities.** A leader on the restored metadata takes each node's own
-  identity into it, when the metadata predates it.
+- **Identities.** The plan records the identities the nodes
+  acknowledged, and the mark puts them back on the restored metadata.
+  Nothing is imported from the nodes.
+- **Removed nodes' addresses.** The plan records them. A restored record
+  of a removed id at another address is refused, and the restore's fence
+  and floor RPCs skip removed nodes.
+- **Accepted (re-review).** A process running against the empty store
+  between the clear and the restore writes nothing: a controller cannot
+  take leadership, guarded writes are refused, and heartbeats are
+  skipped. It becomes visible on the restored metadata at its next
+  heartbeat, and the check before the mark stops the run. A process
+  started less than one heartbeat interval before the mark is not seen.
+  It runs under the restored incarnation, which the mark replaces, so it
+  is refused afterwards. A backup taken less than 90 s before the
+  restore holds heartbeats that look fresh: name those processes with
+  `--stopped`.
 - **Destination.** It is compared as the cluster file's path, not its
   contents. A command prefix (`--fdbrestore-cmd`) that resolves the same
   path to another cluster is not detected; the nodes stay held, so

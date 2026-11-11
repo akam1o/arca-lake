@@ -448,6 +448,53 @@ pub async fn import_identity<S: KvStore>(store: &S, node_id: u64, token: [u8; 16
     .await
 }
 
+/// Set the identity of a node (acknowledged), replacing any: what an
+/// operator confirmed (`admin node adopt-identity`), or what a managed
+/// restore recorded before the restore (Phase 3.11 review).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn set_identity<S: KvStore>(store: &S, node_id: u64, token: [u8; 16]) -> Result<()> {
+    transact(store, (node_id, token), |tx, env| {
+        Box::pin(async move {
+            let (node_id, token) = *env;
+            write(
+                tx,
+                &keys::node_identity(node_id),
+                &NodeIdentityRecord {
+                    node_id,
+                    token,
+                    acknowledged: true,
+                },
+            )
+        })
+    })
+    .await
+}
+
+/// In a transaction: give a newly registered node its identity (not
+/// acknowledged yet), so that a disk at its address adopts it or, holding
+/// another, is quarantined (Phase 3.11 review: never imported).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn new_identity_in_tx<X: Txn>(tx: &mut X, node_id: u64) -> Result<()> {
+    if tx.get(&keys::node_identity(node_id)).await?.is_none() {
+        write(
+            tx,
+            &keys::node_identity(node_id),
+            &NodeIdentityRecord {
+                node_id,
+                token: crate::records::new_gen_id(),
+                acknowledged: false,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// The node reported holding `token`: from now on, a node at this id
 /// without it is not this node.
 ///

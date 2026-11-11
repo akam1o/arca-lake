@@ -804,16 +804,25 @@ impl StorageNode for StorageNodeService {
         self.check_epoch(key.group_id, req.group_epoch)?;
         // A delete for another node's identity never runs here (Phase 3.11,
         // R-100): another disk at the address it was decided for.
-        if req.node_identity.len() == 16 {
+        // A node holding an identity takes only deletes carrying it
+        // (review: an unstamped one, from an earlier controller or any other
+        // client, could have been decided for another disk at this address).
+        {
             let held = self
                 .identity
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .held();
-            if held.is_none_or(|h| h.node_id != req.node_id || h.token[..] != req.node_identity[..])
-            {
+            let carried = req.node_identity.len() == 16;
+            let refused = match held {
+                Some(h) => {
+                    !carried || h.node_id != req.node_id || h.token[..] != req.node_identity[..]
+                }
+                None => carried,
+            };
+            if refused {
                 return Err(tonic::Status::failed_precondition(
-                    "identity rejected: the delete was decided for another node's disk",
+                    "identity rejected: the delete was not decided for this node's disk",
                 ));
             }
         }

@@ -539,6 +539,24 @@ impl<S: KvStore + 'static> TestCluster<S> {
             .await
             .unwrap();
         self.push_delete_fence(&rec).await;
+        self.stamp_identities().await;
+    }
+
+    /// Stamp this cluster's clients with the identities nodes acknowledged
+    /// (as a leader does, Phase 3.11): a node holding one takes only
+    /// deletes carrying it.
+    pub async fn stamp_identities(&self) {
+        let ids = arca_lake_metadata::ops::node_lifecycle::identities(self.meta.as_ref())
+            .await
+            .unwrap_or_default();
+        for n in &self.nodes {
+            self.clients.note_identity(
+                &n.addr.to_string(),
+                ids.get(&n.id)
+                    .filter(|i| i.acknowledged)
+                    .map(|i| (n.id, i.token)),
+            );
+        }
     }
 
     /// Advertise `bytes` as node `i`'s capacity (`None`: the file

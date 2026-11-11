@@ -508,9 +508,18 @@ fn start_leader_tasks<S: KvStore + 'static>(
     clients.set_fault_hook(cfg.rpc_fault_hook.as_ref().map(|h| h.0.clone()));
     // Every task's store trips the term's deletes off on a failure that
     // means the metadata is no longer the one they were decided on.
-    let trip = Arc::new(crate::trip::Trip::new(
+    let trip = Arc::new(crate::trip::Trip::with_known(
         clients.clone(),
         metrics.delete_fence.suspect_flag(),
+        {
+            let metrics = Arc::clone(metrics);
+            Arc::new(move || {
+                metrics
+                    .delete_fence
+                    .max_generation()
+                    .max(metrics.delete_fence.generation())
+            })
+        },
     ));
     let token = fenced.leadership().token;
     let watch = (!cfg.store_watch_interval.is_zero()).then(|| {
@@ -1259,16 +1268,60 @@ async fn health_pass<S: KvStore>(
             unhealthy += 1;
             continue;
         }
-        // No record (a new node, or metadata restored from before this
-        // node had one): nothing is carried this pass; what the node holds
-        // decides below (review: replacing it would quarantine every node
-        // after such a restore).
-        let ident = identities.remove(&n.id);
-        // Deletes to this address carry the identity it acknowledged: a
-        // disk that is not this node's refuses them (Phase 3.11).
-        if let Some(i) = ident.as_ref().filter(|i| i.acknowledged) {
-            clients.note_identity(&n.address, Some((n.id, i.token)));
+        // No record: metadata restored from before this node had one (a
+        // new registration has one). A facts-free probe first: what the
+        // node holds decides (review: never imported, never replaced).
+        let mut ident = identities.remove(&n.id);
+        if ident.is_none() {
+            let Ok(p) = clients.health(&n.address).await else {
+                if now.saturating_sub(n.last_seen_ms) > ms(cfg.unhealthy_after) {
+                    unhealthy += 1;
+                }
+                continue;
+            };
+            if p.identity_supported && p.identity_node_id == 0 {
+                ident = Some(node_lifecycle::ensure_identity(meta, n.id).await?);
+            } else if p.identity_supported && p.identity_node_id == n.id {
+                // Its own identity, unknown to this metadata: nothing is
+                // pushed (no facts, no fence: it takes no delete) until an
+                // operator confirms it (`admin node adopt-identity`) or a
+                // managed restore reinstalls it. Reads and writes go on.
+                warn!(node = n.id, address = %n.address, "storage node holds an identity this metadata does not know (restored from before it?): confirm with `admin node adopt-identity`");
+                metrics
+                    .identity_unconfirmed_total
+                    .fetch_add(1, Ordering::Relaxed);
+                metrics.delete_fence.note_node(
+                    n.id,
+                    p.delete_fence_generation,
+                    p.delete_fence_open,
+                );
+                cluster::touch_node(meta, n.id, now).await?;
+                continue;
+            } else if p.identity_supported {
+                let reason = format!(
+                    "the node holds the identity of node {}: a disk moved or an id reused",
+                    p.identity_node_id
+                );
+                if node_lifecycle::quarantine(meta, n.id, &reason, now).await? {
+                    tracing::error!(node = n.id, address = %n.address, %reason, "storage node quarantined");
+                }
+                metrics
+                    .nodes_quarantined_total
+                    .fetch_add(1, Ordering::Relaxed);
+                unhealthy += 1;
+                continue;
+            }
         }
+        // Deletes to this address carry the identity it acknowledged (a
+        // disk that is not this node's refuses them); none while it has
+        // not acknowledged one (review: no stale token after a rejoin).
+        clients.note_identity(
+            &n.address,
+            ident
+                .as_ref()
+                .filter(|i| i.acknowledged)
+                .map(|i| (n.id, i.token)),
+        );
         let mut node_req = req.clone();
         if let Some(i) = &ident {
             node_req.node_id = n.id;
@@ -1286,29 +1339,8 @@ async fn health_pass<S: KvStore>(
                 if h.identity_supported {
                     let held = <[u8; 16]>::try_from(h.identity_token.as_ref()).ok();
                     let verdict: Option<String> = match &ident {
-                        None if h.identity_node_id == 0 => {
-                            // A disk without one: given one, adopted next pass.
-                            node_lifecycle::ensure_identity(meta, n.id).await?;
-                            None
-                        }
-                        None if h.identity_node_id == n.id
-                            && held.is_some()
-                            && h.incarnation_seq <= gate.incarnation_seq =>
-                        {
-                            // This node's own, from this cluster's history:
-                            // taken into the metadata.
-                            let token = held.unwrap_or_default();
-                            node_lifecycle::import_identity(meta, n.id, token).await?;
-                            clients.note_identity(&n.address, Some((n.id, token)));
-                            None
-                        }
-                        // Held for this id, but of a later history: left to
-                        // `recovery begin` (the incarnation warning below).
-                        None if h.identity_node_id == n.id => None,
-                        None => Some(format!(
-                            "the node holds the identity of node {}: a disk moved or an id reused",
-                            h.identity_node_id
-                        )),
+                        // Not carried (an earlier release's node: not judged).
+                        None => None,
                         Some(i) => {
                             let holds = h.identity_node_id == n.id && held == Some(i.token);
                             if !h.identity_mismatch && holds {

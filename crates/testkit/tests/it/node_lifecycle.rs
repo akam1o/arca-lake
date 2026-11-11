@@ -290,6 +290,13 @@ async fn an_unregistered_node_refuses_old_deletes_and_rejoins_only_after_its_che
         .unwrap();
     assert!(fence.open);
     old.set_delete_fence(Some(fence.generation));
+    // Carrying the node's identity, as the leader's deletes do.
+    let token = node_lifecycle::identity(c.meta.as_ref(), leaving)
+        .await
+        .unwrap()
+        .unwrap()
+        .token;
+    old.note_identity(&laddr, Some((leaving, token)));
     // Decommissioned only, the node takes it (what R-100 exposes).
     old.delete_shard(&laddr, shard_a, epoch)
         .await
@@ -556,6 +563,131 @@ async fn a_delete_decided_for_one_node_is_refused_by_another_disk_at_its_address
     c.start_node(x).await;
     c.start_node(z).await;
     all_read_back(&c, &objects).await;
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Re-review N1 (Phase 3.11): a new node whose disk was not wiped and
+/// holds another cluster's identity for the same node id. Its
+/// registration gave it an identity, which it cannot adopt: it is
+/// quarantined, never imported, and takes none of this cluster's work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_node_holding_another_clusters_identity_is_quarantined_not_imported() {
+    let mut c = cluster().await;
+    let i = c.add_node().await;
+    let id = c.nodes[i].id;
+    let addr = c.nodes[i].addr.to_string();
+    let given = node_lifecycle::identity(c.meta.as_ref(), id)
+        .await
+        .unwrap()
+        .expect("registration gives an identity");
+    assert!(!given.acknowledged);
+    // The disk holds cluster B's identity for the same id.
+    c.clients
+        .health_with(
+            &addr,
+            arca_lake_protocol::storage::v1::HealthRequest {
+                node_id: id,
+                node_identity: Bytes::from_static(&[0xb0; 16]),
+                adopt_identity: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let ctl = leader(&c).await;
+    wait_until("quarantined", Duration::from_secs(20), async || {
+        node_lifecycle::state(c.meta.as_ref(), id).await.unwrap() == State::Quarantined
+    })
+    .await;
+    let rec = node_lifecycle::identity(c.meta.as_ref(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.token, given.token, "never imported");
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
+/// Re-review (Phase 3.11): metadata without a node's identity record (as
+/// restored from before it had one) and a node holding its own: nothing
+/// is pushed to it and it is not quarantined; deletes without its
+/// identity are refused; an operator confirms it (`admin node
+/// adopt-identity`) and the leader pushes to it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unconfirmed_identity_is_left_alone_until_an_operator_adopts_it() {
+    let c = cluster().await;
+    put_objects(&c, 2).await;
+    let ctl = leader(&c).await;
+    identities_acknowledged(&c).await;
+    ctl.shutdown().await;
+    let n = &c.nodes[0];
+    let addr = n.addr.to_string();
+    arca_lake_metadata::transact(c.meta.as_ref(), n.id, |tx, id| {
+        Box::pin(async move {
+            tx.clear(&arca_lake_metadata::keys::node_identity(*id));
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let ctl = leader(&c).await;
+    wait_until("found unconfirmed", Duration::from_secs(20), async || {
+        ctl.metrics
+            .identity_unconfirmed_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+    })
+    .await;
+    assert_eq!(
+        node_lifecycle::state(c.meta.as_ref(), n.id).await.unwrap(),
+        State::Active
+    );
+    // A delete without its identity: refused by the node.
+    let g = c.groups().await.remove(0);
+    let any = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
+    any.set_incarnation(c.clients.incarnation());
+    let h = c.clients.health(&addr).await.unwrap();
+    any.set_delete_fence(Some(h.delete_fence_generation));
+    let shard = ShardRef {
+        group_id: g.id,
+        chunk_id: [0xcd; 16],
+        shard_index: 0,
+    };
+    let r = any.delete_shard(&addr, shard, g.epoch).await;
+    assert!(
+        r.as_ref()
+            .is_err_and(|e| e.message().contains("identity rejected") || NodeClients::is_fenced(e)),
+        "{r:?}"
+    );
+    // A confirmed node, its fence open: an unstamped delete is refused for
+    // its identity alone.
+    let other = c.nodes[1].addr.to_string();
+    let t0 = Instant::now();
+    let open = loop {
+        let h = c.clients.health(&other).await.unwrap();
+        if h.delete_fence_open {
+            break h.delete_fence_generation;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(20));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    any.set_delete_fence(Some(open));
+    let r = any.delete_shard(&other, shard, g.epoch).await;
+    assert!(
+        r.as_ref()
+            .is_err_and(|e| e.message().contains("identity rejected")),
+        "an unstamped delete was taken by a node holding an identity: {r:?}"
+    );
+    // Confirmed: the record is back, acknowledged.
+    let t = node_ops::adopt_identity(c.meta.as_ref(), &c.clients, n.id)
+        .await
+        .unwrap();
+    let rec = node_lifecycle::identity(c.meta.as_ref(), n.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rec.acknowledged && rec.token == t);
     ctl.shutdown().await;
     c.shutdown().await;
 }

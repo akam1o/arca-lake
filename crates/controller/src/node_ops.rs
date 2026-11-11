@@ -240,3 +240,44 @@ pub async fn rejoin<S: KvStore>(
     let was = node_lifecycle::rejoin(meta, node_id, check.fresh_identity).await?;
     Ok((was, check))
 }
+
+/// Confirm the identity a node holds as this cluster's (`admin node
+/// adopt-identity`): the operator states that the disk at the node's
+/// address is that node's (Phase 3.11 review: after metadata restored from
+/// before the node had an identity, nothing is imported automatically).
+/// Returns the token taken.
+///
+/// # Errors
+///
+/// [`ControlError::Other`] when the node does not answer, holds no
+/// identity or another node's; metadata errors.
+pub async fn adopt_identity<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    node_id: u64,
+) -> Result<[u8; 16], ControlError> {
+    let node = cluster::list_nodes(meta)
+        .await?
+        .into_iter()
+        .find(|n| n.id == node_id)
+        .ok_or_else(|| ControlError::Other(format!("node {node_id} unknown")))?;
+    let h = clients.health(&node.address).await.map_err(|e| {
+        ControlError::Other(format!("node {node_id} does not answer: {}", e.code()))
+    })?;
+    let token = <[u8; 16]>::try_from(h.identity_token.as_ref()).ok();
+    match (h.identity_supported, h.identity_node_id, token) {
+        (true, id, Some(t)) if id == node_id => {
+            node_lifecycle::set_identity(meta, node_id, t).await?;
+            Ok(t)
+        }
+        (false, _, _) => Err(ControlError::Other(format!(
+            "node {node_id} runs an earlier release: no identity to adopt"
+        ))),
+        (true, 0, _) | (true, _, None) => Err(ControlError::Other(format!(
+            "node {node_id} holds no identity: the leader gives it one by itself"
+        ))),
+        (true, id, _) => Err(ControlError::Other(format!(
+            "node {node_id}'s address answers with node {id}'s identity: not adopted"
+        ))),
+    }
+}

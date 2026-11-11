@@ -1404,10 +1404,13 @@ async fn a_planned_move_keeps_the_targets_client_reserve_a_failure_repair_may_no
     let t = std::time::Instant::now();
     let blocked = loop {
         let st = membership::node_states(c.meta.as_ref()).await.unwrap();
+        // Under load the first pass may find no node healthy yet (a
+        // two-second staleness limit here): wait for the capacity reason.
         if let Some(b) = st
             .iter()
             .find(|r| r.node_id == leaving)
             .and_then(|r| r.blocked.clone())
+            .filter(|b| b.contains("insufficient capacity"))
         {
             break b;
         }

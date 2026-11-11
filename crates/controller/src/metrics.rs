@@ -68,6 +68,15 @@ impl FenceView {
         g.lineage = g.lineage.max(v);
     }
 
+    /// The generation of the record held (0: none yet).
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation
+    }
+
     /// Remember the record held.
     pub fn set_record(&self, r: &arca_lake_metadata::ops::delete_fence::DeleteFenceRecord) {
         let mut g = self
@@ -295,6 +304,10 @@ pub struct Metrics {
     /// Health passes that found a node holding another identity than the
     /// one the cluster gave it (Phase 3.11, R-100; the node is quarantined).
     pub nodes_quarantined_total: AtomicU64,
+    /// Health passes that found a node holding an identity the metadata
+    /// does not know (restored from before it; Phase 3.11 review): nothing
+    /// pushed to it until confirmed.
+    pub identity_unconfirmed_total: AtomicU64,
     /// Groups whose current move this leader started as a planned move
     /// (a drain keeps no request once its move is under way; re-review).
     /// Lost with the leadership: the next leader takes them as failure
@@ -480,6 +493,10 @@ impl Metrics {
         out += &c(
             "arca_controller_nodes_quarantined_total",
             self.nodes_quarantined_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_identity_unconfirmed_total",
+            self.identity_unconfirmed_total.load(Ordering::Relaxed),
         );
         out += &c(
             "arca_controller_repair_group_errors_total",

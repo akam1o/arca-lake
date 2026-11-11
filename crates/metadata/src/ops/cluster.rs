@@ -109,9 +109,12 @@ pub async fn register_node<S: KvStore>(
                     )));
                 }
             }
-            let id = match &existing {
-                Some(n) => n.id,
-                None => next_id(tx, &keys::node_counter()).await?,
+            let id = if let Some(n) = &existing {
+                n.id
+            } else {
+                let id = next_id(tx, &keys::node_counter()).await?;
+                crate::ops::node_lifecycle::new_identity_in_tx(tx, id).await?;
+                id
             };
             let record = NodeRecord {
                 id,

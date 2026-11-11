@@ -30,12 +30,23 @@ use arca_lake_metadata::kv::{Key, KeyRange, KvError, KvStore, Limits, Txn, Value
 use arca_lake_protocol::client::NodeClients;
 
 /// What a trip does, shared by the store and its transactions.
-#[derive(Debug)]
 pub struct Trip {
     clients: NodeClients,
     suspect: Arc<AtomicBool>,
     trips: AtomicU64,
     step_down: tokio::sync::Notify,
+    /// The highest generation the leader knows (its record, the nodes'
+    /// reports): what a close above starts from when this term's deletes
+    /// never carried one (review).
+    known: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl std::fmt::Debug for Trip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Trip")
+            .field("trips", &self.trips)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Trip {
@@ -43,11 +54,22 @@ impl Trip {
     /// until the process acts on it) when the store looks replaced.
     #[must_use]
     pub fn new(clients: NodeClients, suspect: Arc<AtomicBool>) -> Self {
+        Self::with_known(clients, suspect, Arc::new(|| 0))
+    }
+
+    /// [`Trip::new`] with what the leader knows of the generations.
+    #[must_use]
+    pub fn with_known(
+        clients: NodeClients,
+        suspect: Arc<AtomicBool>,
+        known: Arc<dyn Fn() -> u64 + Send + Sync>,
+    ) -> Self {
         Self {
             clients,
             suspect,
             trips: AtomicU64::new(0),
             step_down: tokio::sync::Notify::new(),
+            known,
         }
     }
 
@@ -95,10 +117,17 @@ impl Trip {
     pub fn stop(&self, latch: bool, close_nodes: bool, above: bool) {
         let generation = self.clients.stop_deletes(latch);
         self.trips.fetch_add(1, Ordering::Relaxed);
+        // Above: from the highest generation known, carried or not.
+        let generation = if above {
+            Some(generation.unwrap_or(0).max((self.known)()))
+                .filter(|g| *g > 0)
+                .map(|g| g + 1)
+        } else {
+            generation
+        };
         let Some(generation) = generation.filter(|_| close_nodes) else {
             return;
         };
-        let generation = generation + u64::from(above);
         let clients = self.clients.clone();
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {

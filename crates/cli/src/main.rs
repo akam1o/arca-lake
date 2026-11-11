@@ -2954,6 +2954,19 @@ enum NodeCommand {
         #[command(flatten)]
         rpc: NodeRpcArgs,
     },
+    /// Confirm that the identity the node holds is this cluster's (after
+    /// metadata restored from before the node had one, nothing is pushed to
+    /// it until then).
+    AdoptIdentity {
+        /// Node id.
+        #[arg(long)]
+        node: u64,
+        /// Confirm: the disk at the node's address is that node's.
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        rpc: NodeRpcArgs,
+    },
     /// Bring a removed, quarantined or decommissioned node back, without
     /// members, after checking it (release, segment format, incarnation,
     /// schema floor, identity).
@@ -3112,6 +3125,26 @@ async fn node_command<S: arca_lake_metadata::KvStore>(
                         } else {
                             " while unreachable: its disk must never be started again unwiped"
                         }
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        NodeCommand::AdoptIdentity { node, yes, rpc } => {
+            if !yes {
+                return fail(
+                    "adopt-identity takes the disk at the node's address as that node's; re-run with --yes",
+                );
+            }
+            let clients = match admin_node_clients(&rpc) {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            match arca_lake_controller::node_ops::adopt_identity(meta, &clients, node).await {
+                Ok(_) => {
+                    println!(
+                        "node {node}: its identity is adopted; the leader pushes it again from its next pass"
                     );
                     ExitCode::SUCCESS
                 }
