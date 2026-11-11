@@ -180,14 +180,20 @@ Review fixes (Phase 3.11):
 - **When identities are taken.** Right before the clear, after the
   freeze, and again on a resume while the planned store is still there
   (the clear did not commit), so that a fresh rejoin since the plan is
-  not undone (confirmation review). "Still there" is a marker key,
-  random and new for each clear attempt, recorded in the journal and
-  written into the store right before the clear. Incarnation equality
-  cannot tell, since a backup of the same incarnation restores it; a
-  fixed marker could be in a backup taken while an attempt was paused.
-  A store holding the current attempt's marker is the planned store, or
-  a copy of it taken between that write and the clear, which is the
-  same frozen store (re-reviews).
+  not undone (confirmation review). Each clear attempt writes a marker
+  key into the planned store, random and new each attempt. While a
+  marker is in the store, node lifecycle changes and registrations are
+  refused, checked in their own transactions. The identities and removed
+  nodes are captured after the marker is written, and the journal then
+  records the marker. On a resume, a store holding the journal's marker
+  is the planned store, or a backup of it taken while the marker was
+  there; with changes refused, that copy is the captured state. A crash
+  before the journal records the marker resumes as a fresh attempt.
+  Incarnation equality cannot tell the planned store from a restored
+  copy, and a fixed marker could be in a backup. The mark step removes a
+  marker a restored copy carries. `admin restore abandon` removes the
+  marker when a restore is given up before its clear; the cluster stays
+  read-only and held (re-reviews).
 - **Removed nodes' addresses.** The plan records them. A restored record
   of a removed id at another address is refused, and the restore's fence
   and floor RPCs skip removed nodes.

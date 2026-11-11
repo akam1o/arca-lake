@@ -270,7 +270,10 @@ admin recovery status                                                          #
 admin restore finish --journal J --operator NAME --yes [--force --reason R]    # finalize; waits for a new generation on every node
 ```
 
-Keep the journal (a local file) until `finish` completes. Re-run `run`
+Keep the journal (a local file) until `finish` completes. From the
+step before the clear until the clear, node changes (`admin node ...`,
+`admin register-node`) are refused; `admin restore abandon --yes` lifts
+that when a restore is given up before its clear. Re-run `run`
 or `finish` after any failure: each resumes from its first unrecorded
 step. The guarantee covers restores done this way only. A restore done
 any other way (a direct `fdbrestore`, a DR switch, a snapshot rollback)

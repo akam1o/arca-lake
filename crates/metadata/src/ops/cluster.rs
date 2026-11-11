@@ -68,6 +68,7 @@ pub async fn register_node<S: KvStore>(
 ) -> Result<NodeRecord> {
     transact(store, (address, labels, devices, now_ms), |tx, env| {
         Box::pin(async move {
+            crate::ops::node_lifecycle::no_restore_in_progress(tx).await?;
             let (address, labels, devices, now_ms) = env;
             let existing = tx
                 .get_range(&KeyRange::prefix(&keys::nodes_prefix()), usize::MAX, false)

@@ -594,16 +594,15 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 running.join(", ")
             )));
         }
-        // What the restored metadata gets back is taken now, after the
-        // freeze and right before the clear (third review: a node
-        // rejoined with a fresh identity since the plan).
-        // On a resume too, while the planned store is still there (the
-        // clear did not commit; confirmation review).
-        // The current attempt's marker (written below, new each attempt)
-        // still there: the store is the planned one, or a copy of it taken
-        // after the marker and before the clear (the same frozen store).
-        // Incarnation equality cannot tell the planned store from a
-        // restored copy; a fixed marker could be in a backup (re-reviews).
+        // The marker of this attempt (random, new each attempt) goes into
+        // the planned store first: from then on node lifecycle changes and
+        // registrations are refused there (`no_restore_in_progress`), so
+        // what is captured next stays true until the clear, also in any
+        // backup taken meanwhile. Then the capture, then the journal. On a
+        // resume, the store holding the journal's marker is the planned
+        // store, or such a frozen copy of it (re-reviews: incarnation
+        // equality cannot tell it from a restored copy). A crash before the
+        // journal records the marker resumes as a fresh attempt.
         let still_planned = match j.marker.clone() {
             Some(marker) => {
                 arca_lake_metadata::transact(meta_ref, marker, |tx, marker| {
@@ -619,6 +618,17 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
             None => false,
         };
         if !j.has(Step::Clearing) || still_planned {
+            let marker = compat::hex(&arca_lake_metadata::records::new_gen_id());
+            arca_lake_metadata::transact(meta_ref, marker.clone(), |tx, marker| {
+                Box::pin(async move {
+                    tx.set(
+                        &arca_lake_metadata::keys::restore_marker(),
+                        marker.as_bytes(),
+                    );
+                    Ok(())
+                })
+            })
+            .await?;
             j.identities = node_lifecycle::identities(meta_ref)
                 .await?
                 .into_values()
@@ -633,23 +643,9 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 .map(|n| (n.id, n.address))
                 .collect();
             j.removed = j.removed_at.iter().map(|(id, _)| *id).collect();
+            j.marker = Some(marker);
         }
-        // A new marker for this attempt: recorded first, then written. A
-        // crash between the two leaves the store without it; the resume
-        // keeps what the previous attempt captured from the same store.
-        let marker = compat::hex(&arca_lake_metadata::records::new_gen_id());
-        j.marker = Some(marker.clone());
         j.record(path, Step::Clearing)?;
-        arca_lake_metadata::transact(meta_ref, marker, |tx, marker| {
-            Box::pin(async move {
-                tx.set(
-                    &arca_lake_metadata::keys::restore_marker(),
-                    marker.as_bytes(),
-                );
-                Ok(())
-            })
-        })
-        .await?;
         arca_lake_metadata::transact(meta_ref, (), |tx, ()| {
             Box::pin(async move {
                 tx.clear_range(&arca_lake_metadata::keys::all_range());
@@ -723,6 +719,15 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 }
             }
         }
+        // A marker the restored copy carries (a backup taken while an
+        // attempt was paused) is not this restore's any more.
+        arca_lake_metadata::transact(meta_ref, (), |tx, ()| {
+            Box::pin(async move {
+                tx.clear(&arca_lake_metadata::keys::restore_marker());
+                Ok(())
+            })
+        })
+        .await?;
         // What was unregistered stays out, and the identities the nodes
         // acknowledged are this cluster's again (review).
         for id in &j.removed {
@@ -917,6 +922,28 @@ pub async fn finish<S: KvStore>(
         j.record(path, Step::Reopened)?;
     }
     Ok(j)
+}
+
+/// Give up a managed restore before its clear: remove the marker that
+/// holds node lifecycle changes (`admin restore abandon`). The cluster
+/// stays read-only and its fence held until the operator activates it and
+/// releases the hold. Returns whether a marker was removed.
+///
+/// # Errors
+///
+/// Metadata errors.
+pub async fn abandon<S: KvStore>(meta: &S) -> Result<bool, ControlError> {
+    Ok(arca_lake_metadata::transact(meta, (), |tx, ()| {
+        Box::pin(async move {
+            let had = tx
+                .get(&arca_lake_metadata::keys::restore_marker())
+                .await?
+                .is_some();
+            tx.clear(&arca_lake_metadata::keys::restore_marker());
+            Ok(had)
+        })
+    })
+    .await?)
 }
 
 #[cfg(test)]

@@ -102,6 +102,24 @@ async fn fence_and_hold<S: KvStore>(
         addr: node.address.clone(),
         status,
     };
+    // The node first takes the cluster's incarnation (with its sequence,
+    // as recovery pushes it), so that the hold is tied to it.
+    let gate = compat::gate(meta).await?;
+    if let Some(state) = gate.cluster.as_ref() {
+        let _ = clients
+            .health_with(
+                &node.address,
+                arca_lake_protocol::storage::v1::HealthRequest {
+                    format_write: gate.format_write.unwrap_or(0),
+                    incarnation: bytes::Bytes::copy_from_slice(&state.incarnation),
+                    incarnation_changed_ms: state.changed_ms,
+                    incarnation_seq: gate.incarnation_seq,
+                    schema_floor: gate.schema.unwrap_or(0),
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
     let generation = h.delete_fence_generation.max(1);
     let close = FencePush {
         hold: true,
@@ -169,13 +187,13 @@ async fn fence_and_hold<S: KvStore>(
 
 /// Whether a hold tied to `tied` stays in place against opens of the
 /// cluster's `current` incarnation, on a node holding `node_incarnation`:
-/// tied to the current one; unknown (only a release lifts it); or set
-/// before the node had an incarnation while it still has none (a zero
-/// hold is lifted by any incarnation adopted later).
+/// unknown (only a release lifts it), or tied to the current incarnation
+/// on a node holding it. A zero hold, or one of an earlier incarnation, is
+/// lifted by an incarnation the node adopts later (re-reviews: also when
+/// it has not adopted the current one yet).
 fn hold_is_unliftable(tied: &[u8], current: Option<[u8; 16]>, node_incarnation: &[u8]) -> bool {
-    current.is_none_or(|i| tied == i.as_slice())
-        || tied == [0xff; 16].as_slice()
-        || (tied == [0u8; 16].as_slice() && node_incarnation.is_empty())
+    tied == [0xff; 16].as_slice()
+        || current.is_none_or(|i| tied == i.as_slice() && node_incarnation == i.as_slice())
 }
 
 /// `admin node keep-removed` (Phase 3.11): after a manual restore of
@@ -405,8 +423,12 @@ mod tests {
             "zeros, node adopted one"
         );
         assert!(
-            hold_is_unliftable(&[0; 16], cur, &[]),
-            "zeros, node has none"
+            !hold_is_unliftable(&[0; 16], cur, &[]),
+            "zeros, node has none yet"
+        );
+        assert!(
+            !hold_is_unliftable(&[5; 16], cur, &[]),
+            "the node has not adopted it"
         );
         assert!(
             hold_is_unliftable(&[4; 16], None, &[]),

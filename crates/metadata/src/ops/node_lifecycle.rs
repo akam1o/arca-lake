@@ -225,6 +225,7 @@ pub async fn unregister<S: KvStore>(
         (node_id, by.to_string(), reason.to_string(), now_ms),
         |tx, env| {
             Box::pin(async move {
+            no_restore_in_progress(tx).await?;
                 let (node_id, by, reason, now_ms) = env;
                 let node_id = *node_id;
                 if tx.get(&keys::node(node_id)).await?.is_none() {
@@ -283,6 +284,7 @@ pub async fn unregister<S: KvStore>(
 pub async fn keep_removed<S: KvStore>(store: &S, node_id: u64, now_ms: u64) -> Result<()> {
     transact(store, (node_id, now_ms), |tx, env| {
         Box::pin(async move {
+            no_restore_in_progress(tx).await?;
             let (node_id, now_ms) = *env;
             if tx.get(&keys::node(node_id)).await?.is_none() {
                 return Ok(());
@@ -350,6 +352,7 @@ pub async fn quarantine<S: KvStore>(
 pub async fn rejoin<S: KvStore>(store: &S, node_id: u64, fresh_identity: bool) -> Result<State> {
     transact(store, (node_id, fresh_identity), |tx, env| {
         Box::pin(async move {
+            no_restore_in_progress(tx).await?;
             let (node_id, fresh) = *env;
             if tx.get(&keys::node(node_id)).await?.is_none() {
                 return Err(MetaError::InvalidArgument(format!(
@@ -458,6 +461,7 @@ pub async fn import_identity<S: KvStore>(store: &S, node_id: u64, token: [u8; 16
 pub async fn set_identity<S: KvStore>(store: &S, node_id: u64, token: [u8; 16]) -> Result<()> {
     transact(store, (node_id, token), |tx, env| {
         Box::pin(async move {
+            no_restore_in_progress(tx).await?;
             let (node_id, token) = *env;
             write(
                 tx,
@@ -473,6 +477,23 @@ pub async fn set_identity<S: KvStore>(store: &S, node_id: u64, token: [u8; 16]) 
     .await
 }
 
+/// In a transaction: refuse while a managed restore holds its marker in
+/// the store (Phase 3.11 re-review): between the marker and the clear the
+/// node lifecycle stays as `admin restore` captured it.
+///
+/// # Errors
+///
+/// [`MetaError::InvalidArgument`] while the marker is present; backend
+/// errors.
+pub async fn no_restore_in_progress<X: Txn>(tx: &mut X) -> Result<()> {
+    if tx.get(&keys::restore_marker()).await?.is_some() {
+        return Err(MetaError::InvalidArgument(
+            "a managed restore is in progress (`admin restore status`): node changes wait until it finishes".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Take `token` as the node's identity only if it has no record and is
 /// not quarantined, in one transaction. Returns whether it was taken.
 ///
@@ -486,6 +507,7 @@ pub async fn adopt_if_unconfirmed<S: KvStore>(
 ) -> Result<bool> {
     transact(store, (node_id, token), |tx, env| {
         Box::pin(async move {
+            no_restore_in_progress(tx).await?;
             let (node_id, token) = *env;
             if tx.get(&keys::node_identity(node_id)).await?.is_some()
                 || read_state(tx, node_id).await? == State::Quarantined

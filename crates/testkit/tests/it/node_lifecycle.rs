@@ -959,3 +959,73 @@ async fn removal_re_ties_an_earlier_incarnations_hold() {
     );
     c.shutdown().await;
 }
+
+/// Re-review (Phase 3.11): while a managed restore's marker is in the
+/// store (between its capture and its clear), node lifecycle changes and
+/// registrations are refused, so that what it captured stays true;
+/// `admin restore abandon` lifts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn node_changes_wait_while_a_restore_holds_its_marker() {
+    let c = cluster().await;
+    let n = c.nodes[0].id;
+    arca_lake_metadata::transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            tx.set(&arca_lake_metadata::keys::restore_marker(), b"paused");
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let busy = |e: String| assert!(e.contains("managed restore is in progress"), "{e}");
+    busy(
+        node_lifecycle::keep_removed(c.meta.as_ref(), n, now_ms())
+            .await
+            .unwrap_err()
+            .to_string(),
+    );
+    busy(
+        node_lifecycle::set_identity(c.meta.as_ref(), n, [1; 16])
+            .await
+            .unwrap_err()
+            .to_string(),
+    );
+    busy(
+        node_lifecycle::adopt_if_unconfirmed(c.meta.as_ref(), n, [1; 16])
+            .await
+            .unwrap_err()
+            .to_string(),
+    );
+    busy(
+        node_lifecycle::rejoin(c.meta.as_ref(), n, true)
+            .await
+            .unwrap_err()
+            .to_string(),
+    );
+    busy(
+        node_lifecycle::unregister(c.meta.as_ref(), n, "t", "t", now_ms())
+            .await
+            .unwrap_err()
+            .to_string(),
+    );
+    busy(
+        cluster::register_node(
+            c.meta.as_ref(),
+            "elsewhere:1",
+            Vec::new(),
+            vec![0],
+            now_ms(),
+        )
+        .await
+        .unwrap_err()
+        .to_string(),
+    );
+    assert!(
+        arca_lake_controller::managed_restore::abandon(c.meta.as_ref())
+            .await
+            .unwrap()
+    );
+    node_lifecycle::set_identity(c.meta.as_ref(), n, [1; 16])
+        .await
+        .unwrap();
+    c.shutdown().await;
+}

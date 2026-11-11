@@ -2642,6 +2642,13 @@ enum RestoreCommand {
         #[command(flatten)]
         rpc: NodeRpcArgs,
     },
+    /// Give up a restore before its clear: remove its marker, which holds
+    /// node changes (the cluster stays read-only and held).
+    Abandon {
+        /// Confirm.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show the journal's steps.
     Status {
         /// Journal file.
@@ -2824,6 +2831,26 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
                     println!(
                         "restore finished: Active, a new delete fence generation open on every node"
                     );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        RestoreCommand::Abandon { yes } => {
+            if !yes {
+                return fail(
+                    "abandon lets node changes go on before the restore cleared anything; re-run with --yes",
+                );
+            }
+            match mr::abandon(meta.as_ref()).await {
+                Ok(true) => {
+                    println!(
+                        "restore marker removed; the cluster stays read-only with its fence held (activate it and release the hold when ready)"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Ok(false) => {
+                    println!("no restore marker");
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(e),

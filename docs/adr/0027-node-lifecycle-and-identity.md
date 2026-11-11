@@ -172,12 +172,13 @@ at any step.
     and refuses a node that does not answer unless `--unreachable`
     states that its disk will never be started again unwiped
     (confirmation review: a removed node is trusted to be fenced).
-    `unregister` and `keep-removed` accept only a hold the current
-    incarnation cannot lift: tied to it, unknown, or set before the node
-    had an incarnation while it still has none. A hold tied to an earlier
-    incarnation, or a zero one on a node that adopted an incarnation since
-    (either is lifted by an open of the current one), is released and set
-    again at the same generation, then read back (`HealthResponse.
+    `unregister` and `keep-removed` first push the cluster's incarnation
+    (with its sequence) to the node, then accept only a hold the current
+    incarnation cannot lift: unknown, or tied to the current incarnation
+    on a node that holds it. Any other hold (an earlier incarnation's, or
+    one set before the node had one), which an incarnation the node adopts
+    later would lift, is released and set again at the same generation,
+    then read back (`HealthResponse.
     delete_fence_hold_incarnation`, field 41, additive). A held node that
     does not report it (an earlier release) is refused: upgrade it, or stop
     it for good and use `--unreachable` (re-reviews);
