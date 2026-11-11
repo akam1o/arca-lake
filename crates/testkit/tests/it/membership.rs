@@ -368,7 +368,7 @@ async fn a_group_that_cannot_finish_its_repair_does_not_stop_the_others() {
         .collect();
     groups.sort_by_key(|g| g.id);
     let (stuck, other) = (groups[0].clone(), groups[1].clone());
-    for i in 0..20 {
+    for i in 0..40 {
         let key = format!("o{i}");
         let data = Bytes::from(random_bytes(usize::try_from(MIB / 2).unwrap(), 40 + i));
         s3::put(&c.backend, BUCKET, &key, data, &PutOptions::default())
@@ -394,7 +394,9 @@ async fn a_group_that_cannot_finish_its_repair_does_not_stop_the_others() {
     // replacement goes down.
     let mut cfg = fast("ctl-isolated");
     cfg.planned_move_chunks_per_pass = 1;
-    cfg.repair_interval = Duration::from_millis(300);
+    // One chunk a second: the move takes many seconds (on a slow runner
+    // a short one used to finish before its replacement was stopped).
+    cfg.repair_interval = Duration::from_secs(1);
     let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
     wait_until(
         "the first group's move",
@@ -404,6 +406,11 @@ async fn a_group_that_cannot_finish_its_repair_does_not_stop_the_others() {
     .await;
     let i = c.nodes.iter().position(|n| n.id == spare).unwrap();
     c.stop_node(i).await;
+    assert_eq!(
+        group(&c, stuck.id).await.state,
+        GroupState::Repairing,
+        "set-up: the first group's move finished before its replacement was stopped"
+    );
     membership::request_replace(c.meta.as_ref(), other.id, 0, None, "admin", now_ms())
         .await
         .unwrap();
