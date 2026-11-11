@@ -39,6 +39,9 @@ async fn cluster() -> TestCluster {
     })
     .await;
     s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    // Verifiable nodes, as after a leader ran (`admin restore` checks each
+    // node's identity).
+    c.acknowledge_identities().await;
     c
 }
 
@@ -986,8 +989,13 @@ async fn abandon_gives_up_a_restore_before_its_clear_only() {
         0,
         "nothing restored"
     );
-    // Node changes go on again.
-    node_lifecycle::set_identity(c.meta.as_ref(), c.nodes[0].id, [1; 16])
+    // Node changes go on again (its own token, set again).
+    let own = node_lifecycle::identity(c.meta.as_ref(), c.nodes[0].id)
+        .await
+        .unwrap()
+        .unwrap()
+        .token;
+    node_lifecycle::set_identity(c.meta.as_ref(), c.nodes[0].id, own)
         .await
         .unwrap();
     // A new plan is allowed over an abandoned journal; once its store is
@@ -1141,5 +1149,52 @@ async fn recovery_begin_removes_a_carried_marker() {
     node_lifecycle::set_identity(c.meta.as_ref(), c.nodes[0].id, [1; 16])
         .await
         .unwrap();
+    c.shutdown().await;
+}
+
+/// Re-review (Phase 3.11): another disk at a node's address (holding
+/// another node's identity) cannot acknowledge the restore's hold for that
+/// node: the stamped close is refused there, and the restore does not
+/// start; nothing is cleared.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_disk_at_a_nodes_address_stops_the_restore_before_the_clear() {
+    let mut c = cluster().await;
+    put(&c, "kept", 18).await;
+    let backup = Snapshot::take(&c.meta).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_path(&dir);
+    let p = plan(&c, &backup, &path).await.unwrap();
+    // Node 0's address now answers with a disk holding another identity.
+    let addr = c.nodes[0].addr.to_string();
+    c.stop_node(0).await;
+    std::fs::remove_file(c.nodes[0].dir.join("node-identity.txt")).unwrap();
+    c.start_node_quiet(0).await;
+    c.clients
+        .health_with(
+            &addr,
+            arca_lake_protocol::storage::v1::HealthRequest {
+                node_id: 97,
+                node_identity: Bytes::from_static(&[0xb4; 16]),
+                adopt_identity: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let e = run(&c, &backup, &path, &p.journal.token, &[])
+        .await
+        .unwrap_err();
+    assert!(
+        e.contains("did not acknowledge") || e.contains("cannot be verified"),
+        "{e}"
+    );
+    assert!(
+        arca_lake_metadata::ops::compat::cluster_state(c.meta.as_ref())
+            .await
+            .unwrap()
+            .is_some(),
+        "cleared"
+    );
+    assert_eq!(backup.restores.load(Ordering::SeqCst), 0);
     c.shutdown().await;
 }

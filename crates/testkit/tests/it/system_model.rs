@@ -682,6 +682,8 @@ async fn run<S: KvStore + 'static>(
             Op::ManagedRestore => {
                 if let Some((snap, before)) = backup.take() {
                     use arca_lake_controller::managed_restore as mr;
+                    // Verifiable nodes, as after a leader ran.
+                    c.acknowledge_identities().await;
                     let dir = tempfile::tempdir().unwrap();
                     let journal = dir.path().join("journal");
                     let restorer = ModelRestorer {
@@ -834,6 +836,7 @@ async fn run<S: KvStore + 'static>(
             }
             Op::NodeRetireRejoin => {
                 use arca_lake_metadata::ops::{membership, node_lifecycle};
+                c.acknowledge_identities().await;
                 let groups = c.groups().await;
                 let spare = c
                     .nodes

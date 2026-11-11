@@ -124,7 +124,18 @@ pub async fn close_and_push<S: KvStore>(
     let mut nodes = Vec::new();
     // Not removed nodes: held since they were unregistered, and what
     // answers at their address may be anything (Phase 3.11 review).
+    // Each push carries the identity the node acknowledged: a disk holding
+    // another at its address adopts nothing and is not counted as
+    // acknowledging (re-review).
+    let identities = arca_lake_metadata::ops::node_lifecycle::identities(meta).await?;
     for n in active_nodes(meta).await? {
+        let how = FencePush {
+            identity: identities
+                .get(&n.id)
+                .filter(|i| i.acknowledged)
+                .map(|i| (n.id, i.token)),
+            ..how
+        };
         let pushed = clients
             .push_delete_fence_with(&n.address, record.generation, false, how)
             .await;

@@ -166,6 +166,13 @@ Review fixes (Phase 3.11):
   crash between the two resumes. Processes are checked before every
   clear, and again on the restored metadata before the mark, where a
   running process refreshes its heartbeat.
+- **Each node's own disk.** The fence close carries each node's
+  acknowledged identity, so a disk holding another identity at its
+  address adopts nothing and is not counted. The read-back before the
+  clear requires every node to report the identity this cluster
+  acknowledged for it. A node that cannot be verified (no acknowledged
+  identity, or an earlier release) stops the restore; earlier-release
+  nodes are restored by the manual runbook (re-review).
 - **Node check.** Before the mark, the restored metadata must name only
   this cluster's nodes, at their addresses. Another cluster's backup is
   refused.

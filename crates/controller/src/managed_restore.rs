@@ -604,11 +604,30 @@ pub async fn run<S: KvStore + 'static, R: Restorer>(
                 "nodes {missing:?} did not acknowledge the closed, held fence: the restore does not start (nothing was restored; re-run once they answer)"
             )));
         }
+        // Each node's own disk, by the identity this cluster acknowledged
+        // for it (re-review: another disk at its address could otherwise
+        // acknowledge the hold for it); one that cannot be verified stops
+        // the restore.
+        let identities = node_lifecycle::identities(meta_ref).await?;
         for (id, addr) in &j.nodes {
             let h = clients
                 .health(addr)
                 .await
                 .map_err(|e| refuse(format!("node {id} stopped answering: {}", e.code())))?;
+            let verified = identities
+                .get(id)
+                .filter(|i| i.acknowledged)
+                .is_some_and(|i| {
+                    h.identity_supported
+                        && h.identity_node_id == *id
+                        && h.identity_token.as_ref() == i.token.as_slice()
+                });
+            if !verified {
+                return Err(refuse(format!(
+                    "node {id}'s disk cannot be verified (no acknowledged identity, an earlier release, or another disk at its address, which holds node {}'s): the restore does not start; let a leader give it its identity, or decommission and unregister it",
+                    h.identity_node_id
+                )));
+            }
             if h.delete_fence_open
                 || !h.delete_fence_hold
                 || h.delete_fence_generation < closed.record.generation

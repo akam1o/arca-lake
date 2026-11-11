@@ -543,6 +543,41 @@ impl<S: KvStore + 'static> TestCluster<S> {
         self.stamp_identities().await;
     }
 
+    /// Every running node adopts its identity and it is recorded
+    /// acknowledged, as a leader does (Phase 3.11): for tests that run no
+    /// controller but need verifiable nodes (`admin restore`, removals).
+    ///
+    /// # Panics
+    ///
+    /// On metadata or node errors.
+    pub async fn acknowledge_identities(&self) {
+        use arca_lake_metadata::ops::node_lifecycle;
+        for n in self.nodes.iter().filter(|n| n.handle.is_some()) {
+            let rec = node_lifecycle::ensure_identity(self.meta.as_ref(), n.id)
+                .await
+                .unwrap();
+            if rec.acknowledged {
+                continue;
+            }
+            self.clients
+                .health_with(
+                    &n.addr.to_string(),
+                    arca_lake_protocol::storage::v1::HealthRequest {
+                        node_id: n.id,
+                        node_identity: bytes::Bytes::copy_from_slice(&rec.token),
+                        adopt_identity: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            node_lifecycle::acknowledge_identity(self.meta.as_ref(), n.id, rec.token)
+                .await
+                .unwrap();
+        }
+        self.stamp_identities().await;
+    }
+
     /// Stamp this cluster's clients with the identities nodes acknowledged
     /// (as a leader does, Phase 3.11): a node holding one takes only
     /// deletes carrying it.

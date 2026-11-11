@@ -871,6 +871,7 @@ async fn admin_restore_with_fdbrestore_resumes_after_a_failed_restore() {
     )
     .await;
     s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    c.acknowledge_identities().await;
     let kept = payload(usize::try_from(MIB).unwrap(), 41);
     s3::put(
         &c.backend,
