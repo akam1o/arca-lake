@@ -183,7 +183,12 @@ Assumptions:
   member a member again counts its retired record as absent and writes
   the shard again (`ShardEntry.retired_any`; Phase 3.12 review: it took
   the retired record as present, needed it unchanged, and a later move
-  away let it be reclaimed on its first retirement's age).
+  away let it be reclaimed on its first retirement's age). What the
+  argument needs is weaker than H4 and holds on both paths: no
+  retirement survives a period in which its record was needed. A rewrite
+  ends it (a new sequence), and so does `keep` when a reclaim pass finds
+  the record needed; either way the record's next retirement starts at
+  its next delete, after it became unneeded again.
 - **H5.** Restored metadata is used for deletes and reclaims only under a
   new cluster incarnation (`recovery begin`, `admin restore`). New
   leaders on restored metadata are held back until then by the

@@ -1025,8 +1025,14 @@ pub async fn reclaim_node<S: KvStore>(
                             // pass; a later delete retires it anew. A record
                             // of a missing group is never needed, so the
                             // group is known here.
-                            if let Some(g) = group {
-                                let _ = clients.keep_shard(node_addr, shard, g.epoch, token).await;
+                            if let Some(g) = group
+                                && clients
+                                    .keep_shard(node_addr, shard, g.epoch, token)
+                                    .await
+                                    .is_err()
+                            {
+                                // Kept retired until a later pass (counted).
+                                return ReclaimOutcome::KeepFailed;
                             }
                             return ReclaimOutcome::Needed;
                         }
@@ -1088,6 +1094,10 @@ pub async fn reclaim_node<S: KvStore>(
         for o in outcomes {
             match o {
                 ReclaimOutcome::Needed => report.needed += 1,
+                ReclaimOutcome::KeepFailed => {
+                    report.needed += 1;
+                    report.errors += 1;
+                }
                 ReclaimOutcome::Reclaimed => report.reclaimed += 1,
                 ReclaimOutcome::Refused => report.refused += 1,
                 ReclaimOutcome::MetaError => report.errors += 1,
@@ -1116,6 +1126,7 @@ pub async fn reclaim_node<S: KvStore>(
 /// How one retired record ended in a reclaim pass.
 enum ReclaimOutcome {
     Needed,
+    KeepFailed,
     Reclaimed,
     Refused,
     MetaError,

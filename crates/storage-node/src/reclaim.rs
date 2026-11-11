@@ -132,36 +132,31 @@ impl Deferred {
                 // the newline restored. If not, it is an append a crash cut
                 // short (never acknowledged: a line is acknowledged once
                 // written and synced whole) or damage to the last line,
-                // which cannot be told apart: it is cut, and every cache
-                // role is forgotten with it (an unknown group is durable,
-                // and only a cache write marks one cache again), since a
-                // lost durable role is the one loss that is not safe.
-                let mut forget_cache_roles = false;
+                // which cannot be told apart. A lost durable role is the one
+                // loss that is not safe, so every group is then durable for
+                // good (sticky, as a durable write makes it), and the log is
+                // replaced at once by that state through one rename: a crash
+                // before it leaves the same file, recovered the same way.
+                let mut torn = false;
                 if !text.is_empty() && !text.ends_with('\n') {
                     let start = text.rfind('\n').map_or(0, |i| i + 1);
-                    let whole = line_checks(&text[start..]);
-                    let fixed = OpenOptions::new()
-                        .write(true)
-                        .open(&d.path)
-                        .and_then(|mut f| {
-                            if whole {
-                                use std::io::{Seek as _, SeekFrom};
-                                f.seek(SeekFrom::End(0))?;
-                                f.write_all(b"\n")?;
-                            } else {
-                                f.set_len(start as u64)?;
-                            }
-                            f.sync_all()
-                        });
-                    if let Err(e) = fixed {
-                        tracing::error!(path = %d.path.display(), error = %e, "pending-reclaim log: an unterminated last line could not be repaired: nothing is reclaimed");
-                        d.damaged = true;
-                    }
-                    if whole {
+                    if line_checks(&text[start..]) {
+                        let fixed =
+                            OpenOptions::new()
+                                .append(true)
+                                .open(&d.path)
+                                .and_then(|mut f| {
+                                    f.write_all(b"\n")?;
+                                    f.sync_all()
+                                });
+                        if let Err(e) = fixed {
+                            tracing::error!(path = %d.path.display(), error = %e, "pending-reclaim log: a newline could not be restored: nothing is reclaimed");
+                            d.damaged = true;
+                        }
                         text.push('\n');
                     } else {
                         text.truncate(start);
-                        forget_cache_roles = true;
+                        torn = true;
                     }
                 }
                 for l in text.lines() {
@@ -172,10 +167,13 @@ impl Deferred {
                         break;
                     }
                 }
-                if forget_cache_roles && !d.damaged {
-                    d.cache_groups.retain(|_, cache| !*cache);
+                if torn && !d.damaged {
+                    for cache in d.cache_groups.values_mut() {
+                        *cache = false;
+                    }
+                    tracing::warn!(path = %d.path.display(), "pending-reclaim log: a torn last line cut; every group is durable on this node from now on");
                     if let Err(e) = d.compact() {
-                        tracing::error!(path = %d.path.display(), error = %e, "pending-reclaim log: cache roles not forgotten: nothing is reclaimed");
+                        tracing::error!(path = %d.path.display(), error = %e, "pending-reclaim log: not rewritten after a torn line: nothing is reclaimed");
                         d.damaged = true;
                     }
                 }
@@ -747,8 +745,11 @@ mod tests {
         assert!(!d.damaged());
         assert_eq!(d.retired(&key(1)).unwrap().sequence, 5);
         assert!(d.defers(9), "a cache role survived a torn last line");
-        let d = Deferred::open(dir.path(), 1000);
-        assert!(!d.damaged() && d.defers(9), "forgotten for good");
+        drop(d);
+        let mut d = Deferred::open(dir.path(), 1000);
+        assert!(!d.damaged() && d.defers(9), "durable for good");
+        d.note_write(9, true).unwrap();
+        assert!(d.defers(9), "a cache write made it cache again");
         // Whole but unterminated: kept, its newline restored.
         let whole = line(&format!("p {} 6 200 {}", key_fields(&key(2)), hex(&I)));
         std::fs::write(

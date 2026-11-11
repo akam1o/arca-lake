@@ -324,6 +324,19 @@ above. New findings in the fixes, all fixed:
 
 A second re-review of these fixes is in §12.2.
 
+### 12.2 Second re-review
+
+| Finding | Severity | Resolution |
+| --- | --- | --- |
+| Torn-tail recovery: a crash between the truncation and the rewrite left the old cache role; forgetting a cache role let a later cache write make the group cache again | High | the recovered state (every group durable, sticky) replaces the log through one rename; a crash before it recovers the same way |
+| `keep` can end a retirement before the member move's walk sees it, so the move does not rewrite (H4 as stated no longer holds) | High (no loss sequence found) | no data at risk: `keep` removes the retirement, so the next one starts at the next delete; the argument restated as "no retirement survives a period in which its record was needed" (ADR-0028 H4); `keep_ends_a_retirement_and_a_later_delete_starts_it_again` |
+| `keep` failures silent | Low | counted in the reclaim errors |
+| No dedicated `keep` test | Low | added |
+| More delete and retire churn for repair sources of a `Repairing` group | Low | accepted (bounded) |
+
+The Claude reviewer found no new Critical or High in the second
+re-review; the other reviewer's two are resolved above.
+
 ## 13. Performance
 
 One fsynced append per durable delete (and per role change); one listing

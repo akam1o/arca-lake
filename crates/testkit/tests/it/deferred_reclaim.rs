@@ -785,3 +785,59 @@ async fn after_a_restore_a_member_move_rebuilds_from_retired_copies() {
     assert_eq!(s3::get(&c.backend, BUCKET, "x").await.unwrap().0, data);
     c.shutdown().await;
 }
+
+/// `keep` (Phase 3.12 review): a needed record's retirement ends and the
+/// record stays; a later delete under the same incarnation retires it anew,
+/// and a reclaim within the retention of that delete is refused, after it
+/// allowed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keep_ends_a_retirement_and_a_later_delete_starts_it_again() {
+    let c = cluster(RETENTION).await;
+    put(&c, "o", 12).await;
+    let g = c.groups().await.remove(0);
+    let addr = c.nodes[0].addr.to_string();
+    let page = c
+        .clients
+        .list_shards_page_with(&addr, g.id, None, 0, false)
+        .await
+        .unwrap();
+    let shard = page.entries[0].0;
+    let token = page.sequences[&shard];
+    c.sync_delete_fence().await;
+    c.clients
+        .delete_shard_if(&addr, shard, g.epoch, token)
+        .await
+        .unwrap();
+    tokio::time::sleep(RETENTION + Duration::from_millis(300)).await;
+    c.clients
+        .keep_shard(&addr, shard, g.epoch, token)
+        .await
+        .unwrap();
+    let (p, _, _) = c.clients.list_pending(&addr, None, 0).await.unwrap();
+    assert!(p.is_empty(), "{p:?}");
+    assert!(
+        c.node_store(0).contains(&shard_key(shard)),
+        "keep removed the record"
+    );
+    // Deleted again: its retirement starts now, not at the first delete.
+    c.clients
+        .delete_shard_if(&addr, shard, g.epoch, token)
+        .await
+        .unwrap();
+    let r = c
+        .clients
+        .reclaim_shard(&addr, shard, g.epoch, token, now_ms())
+        .await;
+    assert!(
+        r.as_ref()
+            .is_err_and(|e| e.message().contains("less than the retention")),
+        "{r:?}"
+    );
+    tokio::time::sleep(RETENTION + Duration::from_millis(300)).await;
+    c.clients
+        .reclaim_shard(&addr, shard, g.epoch, token, now_ms())
+        .await
+        .unwrap();
+    assert!(!c.node_store(0).contains(&shard_key(shard)));
+    c.shutdown().await;
+}
