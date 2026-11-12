@@ -860,6 +860,8 @@ pub struct ReclaimReport {
     pub needed: u64,
     /// Reclaimed.
     pub reclaimed: u64,
+    /// Payload bytes the nodes removed by them (Phase 3.13).
+    pub reclaimed_bytes: u64,
     /// Refused by the node (its checks), or fenced.
     pub refused: u64,
     /// Records skipped on an error (metadata or node), retried next pass.
@@ -875,6 +877,7 @@ impl ReclaimReport {
         self.young += other.young;
         self.needed += other.needed;
         self.reclaimed += other.reclaimed;
+        self.reclaimed_bytes += other.reclaimed_bytes;
         self.refused += other.refused;
         self.errors += other.errors;
         self.nodes_not_deferring += other.nodes_not_deferring;
@@ -980,7 +983,10 @@ pub async fn reclaim_node<S: KvStore>(
     let mut after = None;
     let mut consecutive = 0u64;
     loop {
-        let (entries, next, retention) = match clients.list_pending(node_addr, after, page).await {
+        let (entries, next, retention) = match clients
+            .list_pending_with(node_addr, after, page, true)
+            .await
+        {
             Ok(p) => p,
             Err(s) if s.code() == tonic::Code::Unimplemented => {
                 report.nodes_not_deferring += 1;
@@ -1070,10 +1076,10 @@ pub async fn reclaim_node<S: KvStore>(
                         let _ = clients.delete_shard_if(node_addr, shard, epoch, token).await;
                     }
                     match clients
-                        .reclaim_shard(node_addr, shard, epoch, token, observed)
+                        .reclaim_shard_sized(node_addr, shard, epoch, token, observed)
                         .await
                     {
-                        Ok(()) => ReclaimOutcome::Reclaimed,
+                        Ok(bytes) => ReclaimOutcome::Reclaimed(bytes),
                         Err(s)
                             if s.code() == tonic::Code::FailedPrecondition
                                 || s.code() == tonic::Code::Aborted
@@ -1098,7 +1104,10 @@ pub async fn reclaim_node<S: KvStore>(
                     report.needed += 1;
                     report.errors += 1;
                 }
-                ReclaimOutcome::Reclaimed => report.reclaimed += 1,
+                ReclaimOutcome::Reclaimed(bytes) => {
+                    report.reclaimed += 1;
+                    report.reclaimed_bytes += bytes;
+                }
                 ReclaimOutcome::Refused => report.refused += 1,
                 ReclaimOutcome::MetaError => report.errors += 1,
                 ReclaimOutcome::NodeError => {
@@ -1127,7 +1136,7 @@ pub async fn reclaim_node<S: KvStore>(
 enum ReclaimOutcome {
     Needed,
     KeepFailed,
-    Reclaimed,
+    Reclaimed(u64),
     Refused,
     MetaError,
     NodeError,

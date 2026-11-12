@@ -167,13 +167,21 @@ message ReclaimShardRequest {
   // for good.
   bool keep = 11;
 }
-message ReclaimShardResponse {}
+message ReclaimShardResponse {
+  // Phase 3.13: payload bytes of the record removed (0: kept, gone
+  // already, or an earlier release).
+  uint64 payload_bytes = 1;
+}
 
 // Retired records in key order (Phase 3.12, ADR-0028).
 message ListPendingRequest {
   uint32 protocol_version = 1;
   ShardKey after = 2;
   uint32 limit = 3;
+  // Phase 3.13 (R-106): only records due by the node's clock (retired at
+  // least its retention ago); one call looks at a bounded number of
+  // records, so a page may be short or empty with `next` set.
+  bool due_only = 4;
 }
 message PendingShard {
   ShardKey key = 1;
@@ -456,6 +464,10 @@ message HealthResponse {
   // H2): `admin restore` bounds a backup's age by the retention less twice
   // this.
   uint64 reclaim_skew_ms = 45;
+  // Payload bytes of the retired records (Phase 3.13): still on the device
+  // (counted as used by device_free_bytes) until reclaimed. 0 from an
+  // earlier release.
+  uint64 reclaim_retained_bytes = 46;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").

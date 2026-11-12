@@ -351,7 +351,8 @@ async fn a_move_is_not_held_up_by_a_failed_writes_leftover_in_the_group() {
 /// Phase 3.10 audit: one group's repair failing every pass (its
 /// replacement node, named by the operator, is down) no longer stops the
 /// repair of the groups after it. Before, the error ended the pass at that
-/// group, every pass.
+/// group, every pass. Phase 3.13 (R-104): and the group itself no longer
+/// stays `Repairing` onto the dead node: its slot is rebuilt elsewhere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_group_that_cannot_finish_its_repair_does_not_stop_the_others() {
     let mut c = TestCluster::start(ClusterOptions {
@@ -423,7 +424,17 @@ async fn a_group_that_cannot_finish_its_repair_does_not_stop_the_others() {
         },
     )
     .await;
-    assert_eq!(group(&c, stuck.id).await.state, GroupState::Repairing);
+    wait_until(
+        "the first group's rebuild onto another node",
+        Duration::from_secs(60),
+        async || {
+            let g = group(&c, stuck.id).await;
+            g.state == GroupState::Active
+                && g.members[0].node_id != spare
+                && g.members[0] != stuck.members[0]
+        },
+    )
+    .await;
     ctl.shutdown().await;
     c.shutdown().await;
 }

@@ -94,6 +94,9 @@ struct Delivered {
     applied: usize,
     fenced: usize,
     incarnation: usize,
+    /// Refused as decided for another disk (a node that adopted an
+    /// identity since; the decision carried none): not applied either.
+    identity: usize,
 }
 
 /// Deliver held deletes.
@@ -104,6 +107,7 @@ async fn deliver(old: &NodeClients, deletes: &[(String, ShardRef, u64)]) -> Deli
             Ok(()) => d.applied += 1,
             Err(e) if NodeClients::is_fenced(&e) => d.fenced += 1,
             Err(e) if e.message().starts_with("incarnation rejected") => d.incarnation += 1,
+            Err(e) if e.message().starts_with("identity rejected") => d.identity += 1,
             Err(e) => panic!("refused for another reason: {e}"),
         }
     }

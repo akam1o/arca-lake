@@ -74,7 +74,10 @@ arca_controller_reclaimed_total	counter	controller	records	-	retired records rec
 arca_controller_reclaim_refused_total	counter	controller	records	-	reclaims a node refused (retention, sequence, fence or identity checks)
 arca_controller_reclaim_errors_total	counter	controller	records	-	retired records or nodes a reclaim pass skipped on an error (retried next pass)
 arca_controller_nodes_not_deferring	gauge	controller	nodes	-	nodes that do not defer deletes (earlier release or retention 0): R-94(b) not bounded on them
+arca_controller_reclaimed_bytes_total	counter	controller	bytes	-	payload bytes of the retired records reclaimed (Phase 3.13)
 arca_controller_repair_group_errors_total	counter	controller	groups	-	group repairs that failed in a pass (an unrecoverable chunk, a node error) while the other groups were repaired
+arca_controller_repair_retargets_total	counter	controller	groups	-	repairs whose target was replaced because it was gone or kept failing (Phase 3.13)
+arca_controller_groups_repair_waiting	gauge	controller	groups	-	Repairing groups waiting for nodes, capacity, an operator, or with unrecoverable data, rather than progressing (Phase 3.13)
 arca_controller_rebalance_capacity_stops_total	counter	controller	passes	-	rebalance passes stopped before a chunk because a target member would have gone below the placement threshold, needed compaction first or did not report its device
 arca_controller_rebalance_skipped_chunks_total	counter	controller	chunks	-	chunks capacity rebalancing examined and did not move (changed, in flight, target at its reserve, failed)
 arca_controller_recovery_passes_total	counter	controller	passes	-	restore recovery passes that did work

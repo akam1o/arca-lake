@@ -23,6 +23,7 @@ pub mod node_lifecycle;
 pub mod object;
 pub mod rebalance;
 pub mod recovery;
+pub mod repair_status;
 
 use crate::error::Result;
 use crate::kv::Txn;

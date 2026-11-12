@@ -227,6 +227,7 @@ impl StorageNodeService {
         deferred
             .prune(|k| store.locate(k).map(|l| l.sequence))
             .map_err(|e| std::io::Error::other(e.to_string()))?;
+        deferred.measure(|k| store.locate(k).map(|l| l.payload_len));
         if !report.quarantined.is_empty()
             || !report.holes.is_empty()
             || !report.corrupt_segments.is_empty()
@@ -755,9 +756,24 @@ impl StorageNode for StorageNodeService {
         // cannot be recorded, the write is refused.
         {
             let cache = class == pb::WriteClass::Cache;
-            let mut d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Err(e) = d.note_write(key.group_id, cache) {
-                if !cache && d.retention_ms() > 0 {
+            let (noted, syncer) = {
+                let mut d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+                (d.note_write(key.group_id, cache), d.syncer())
+            };
+            // A role change is durable before the record exists (rare: the
+            // group's first write of a class), waited for off the runtime
+            // and off the lock (Phase 3.13, group commit).
+            let noted = match noted {
+                Ok(Some(t)) => tokio::task::spawn_blocking(move || syncer.wait(t))
+                    .await
+                    .map_err(|e| tonic::Status::internal(e.to_string()))?,
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = noted {
+                // Whatever the retention (re-review: one lowered to 0 may be
+                // raised again, and the role must have survived).
+                if !cache {
                     return Err(tonic::Status::unavailable(format!(
                         "pending-reclaim log not writable: {e}"
                     )));
@@ -921,8 +937,17 @@ impl StorageNode for StorageNodeService {
                     if if_sequence != 0 && newest != if_sequence {
                         return Ok((false, true));
                     }
-                    d.retire(key, newest, now_unix_ms(), incarnation)
+                    let t = d
+                        .retire(key, newest, now_unix_ms(), incarnation)
                         .map_err(StorageError::Io)?;
+                    if let Some(l) = store.locate(&key) {
+                        d.note_bytes(&key, l.payload_len);
+                    }
+                    let syncer = d.syncer();
+                    drop(d);
+                    // Acknowledged once durable, waited for off the lock:
+                    // concurrent deletes share one sync (Phase 3.13).
+                    syncer.wait_opt(t).map_err(StorageError::Io)?;
                     return Ok((true, true));
                 }
                 // No live record. A quarantined one (a corrupt copy is not
@@ -1000,15 +1025,19 @@ impl StorageNode for StorageNodeService {
         let (sequence, observed) = (req.sequence, req.observed_at_ms);
         let incarnation = incarnation_of(&req.incarnation);
         let keep = req.keep;
+        let compact = Arc::clone(&self.deferred);
+        let reclaimed_bytes = Arc::new(Mutex::new(0u64));
+        let reported = Arc::clone(&reclaimed_bytes);
         let outcome = tokio::task::spawn_blocking(move || {
             let _fence = fence;
             let mut d = deferred.lock().unwrap_or_else(PoisonError::into_inner);
             if keep {
                 // Needed: the retirement of exactly this sequence ends, the
                 // record stays (nothing else is checked: keeping is safe).
-                if d.retired(&key).is_some_and(|r| r.sequence == sequence) {
-                    d.reclaimed(&key, sequence).map_err(StorageError::Io)?;
-                }
+                let t = d.kept(&key, sequence).map_err(StorageError::Io)?;
+                let syncer = d.syncer();
+                drop(d);
+                syncer.wait_opt(t).map_err(StorageError::Io)?;
                 return Ok(Ok(()));
             }
             let newest = store.locate(&key).map(|l| l.sequence);
@@ -1030,9 +1059,13 @@ impl StorageNode for StorageNodeService {
             ) {
                 crate::reclaim::ReclaimCheck::Refused(why) => Ok(Err(why)),
                 crate::reclaim::ReclaimCheck::Allowed => {
+                    let bytes = store.locate(&key).map_or(0, |l| u64::from(l.payload_len));
                     let removed = store.delete_if(key, sequence)?;
                     d.reclaimed(&key, sequence).map_err(StorageError::Io)?;
                     Ok(if removed {
+                        *reclaimed_bytes
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner) = bytes;
                         Ok(())
                     } else {
                         Err("the record changed".to_string())
@@ -1043,8 +1076,11 @@ impl StorageNode for StorageNodeService {
         .await
         .map_err(|e| tonic::Status::internal(e.to_string()))?
         .map_err(Self::storage_status)?;
+        crate::reclaim::maybe_compact_in_background(&compact);
         match outcome {
-            Ok(()) => Ok(tonic::Response::new(pb::ReclaimShardResponse {})),
+            Ok(()) => Ok(tonic::Response::new(pb::ReclaimShardResponse {
+                payload_bytes: *reported.lock().unwrap_or_else(PoisonError::into_inner),
+            })),
             Err(why) => Err(tonic::Status::failed_precondition(format!(
                 "reclaim refused: {why}"
             ))),
@@ -1061,11 +1097,19 @@ impl StorageNode for StorageNodeService {
         let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
         let limit = Self::page_limit(req.limit);
         let d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
-        let page = d.page(after, limit);
+        let (page, next) = if req.due_only {
+            // Bounded per call (Phase 3.13): the lock is held for at most
+            // this many records.
+            let (page, next) = d.page_due(after, limit, 100_000, now_unix_ms());
+            (page, next.map(|k| Self::pb_key(&k)))
+        } else {
+            let page = d.page(after, limit);
+            let next = (page.len() == limit)
+                .then(|| page.last().map(|(k, _)| Self::pb_key(k)))
+                .flatten();
+            (page, next)
+        };
         let store_epoch = self.store.store_epoch();
-        let next = (page.len() == limit)
-            .then(|| page.last().map(|(k, _)| Self::pb_key(k)))
-            .flatten();
         Ok(tonic::Response::new(pb::ListPendingResponse {
             shards: page
                 .iter()
@@ -1077,7 +1121,7 @@ impl StorageNode for StorageNodeService {
                 })
                 .collect(),
             next,
-            retention_ms: d.retention_ms(),
+            retention_ms: d.listed_retention_ms(),
         }))
     }
 
@@ -1392,6 +1436,9 @@ impl StorageNode for StorageNodeService {
                 || r.delete_fence_hold
                 || r.delete_fence_release
                 || r.delete_fence_release_token != 0
+                // Adopting an identity changes the node's facts too (Phase
+                // 3.13, R-105).
+                || r.adopt_identity
         };
         self.authorize(
             &request,
@@ -1406,12 +1453,31 @@ impl StorageNode for StorageNodeService {
         // nothing here (Phase 3.11, R-100): another cluster's controller, a
         // reused node id, or a controller that registered another disk at
         // this address. It still gets the report, mismatch flagged.
-        let identity = self
-            .identity
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .check(req.node_id, &req.node_identity, req.adopt_identity)
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        // The node's own certificate names its node id (Phase 3.13,
+        // R-105): a request for another id is not this node's, whatever
+        // its disk holds, and adopts nothing.
+        let cert_node = self.tls.as_ref().and_then(|t| {
+            let own = t.identity();
+            (own.role == arca_lake_protocol::tls::Role::Node)
+                .then(|| own.name.parse::<u64>().ok())
+                .flatten()
+        });
+        let cert_conflict =
+            req.node_identity.len() == 16 && cert_node.is_some_and(|c| c != req.node_id);
+        let identity = if cert_conflict {
+            tracing::warn!(
+                node_id = req.node_id,
+                certificate = ?cert_node,
+                "a request carried an identity for another node id than this node's certificate: nothing adopted"
+            );
+            crate::identity::Check::Mismatch
+        } else {
+            self.identity
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .check(req.node_id, &req.node_identity, req.adopt_identity)
+                .map_err(|e| tonic::Status::internal(e.to_string()))?
+        };
         let identity_mismatch = identity == crate::identity::Check::Mismatch;
         if identity_mismatch {
             tracing::warn!(
@@ -1594,9 +1660,14 @@ impl StorageNode for StorageNodeService {
         );
         // One lock, released before the response (a guard kept in the
         // expression below would deadlock the next lock).
-        let (reclaim_retention_ms, reclaim_pending, reclaim_damaged) = {
+        let (reclaim_retention_ms, reclaim_pending, reclaim_damaged, reclaim_retained_bytes) = {
             let d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
-            (d.retention_ms(), d.len() as u64, d.damaged())
+            (
+                d.retention_ms(),
+                d.len() as u64,
+                d.damaged(),
+                d.retained_bytes(),
+            )
         };
         Ok(tonic::Response::new(pb::HealthResponse {
             live_shards: stats.live_shards as u64,
@@ -1632,6 +1703,7 @@ impl StorageNode for StorageNodeService {
             reclaim_pending,
             reclaim_damaged,
             reclaim_skew_ms: self.reclaim_skew_ms,
+            reclaim_retained_bytes,
             delete_fence_hold_incarnation: self
                 .delete_fence_hold_incarnation()
                 .map(|h| Bytes::copy_from_slice(&h))

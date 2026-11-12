@@ -19,6 +19,7 @@ use arca_lake_metadata::fence::FencedKv;
 use arca_lake_metadata::guard::{GuardedKv, OpClass};
 use arca_lake_metadata::ops::cluster;
 use arca_lake_metadata::ops::leader;
+use arca_lake_metadata::ops::repair_status::{self, RepairReason, RepairStatus};
 use arca_lake_metadata::ops::{compat, epoch_intent, membership, node_lifecycle};
 use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord};
 use arca_lake_metadata::{KvError, KvStore, MetaError};
@@ -30,6 +31,7 @@ use tracing::{info, warn};
 
 use crate::metrics::{Metrics, serve_http};
 use crate::repair::RepairOptions;
+use crate::repair_liveness::{self, Decision, Observation, Outcome};
 use crate::{ControlError, gc, groups, repair};
 
 /// Controller configuration.
@@ -132,6 +134,8 @@ pub struct ControllerConfig {
     /// Test hook: a fault hook on this process's node RPCs (Phase 3.11,
     /// deterministic delete delays). `None` in deployments.
     pub rpc_fault_hook: Option<RpcFaultHook>,
+    /// Retry delays of a repair that makes no progress (Phase 3.13).
+    pub repair_pacing: crate::repair_liveness::Pacing,
 }
 
 impl ControllerConfig {
@@ -180,6 +184,7 @@ impl ControllerConfig {
             admission: crate::backpressure::Policy::default(),
             admission_max_chunk_bytes: 8 << 20,
             rpc_fault_hook: None,
+            repair_pacing: crate::repair_liveness::Pacing::default(),
         }
     }
 }
@@ -1120,6 +1125,9 @@ async fn reclaim_pass<S: KvStore>(
         .map(|r| r.node_id)
         .collect();
     let mut not_deferring = 0;
+    // A node not heard counts as deferring (independent review): its
+    // deletes may be retained, so GC's deletes are not room.
+    let mut deferring = 0;
     for n in cluster::list_nodes(meta)
         .await?
         .into_iter()
@@ -1130,9 +1138,18 @@ async fn reclaim_pass<S: KvStore>(
         {
             Ok(r) => {
                 not_deferring += r.nodes_not_deferring;
+                if r.nodes_not_deferring == 0 {
+                    deferring += 1;
+                }
                 metrics
                     .reclaimed_total
                     .fetch_add(r.reclaimed, Ordering::Relaxed);
+                metrics
+                    .reclaimed_bytes_total
+                    .fetch_add(r.reclaimed_bytes, Ordering::Relaxed);
+                metrics
+                    .room_returned_bytes
+                    .fetch_add(r.reclaimed_bytes, Ordering::Relaxed);
                 metrics
                     .reclaim_refused_total
                     .fetch_add(r.refused, Ordering::Relaxed);
@@ -1141,6 +1158,7 @@ async fn reclaim_pass<S: KvStore>(
                     .fetch_add(r.errors, Ordering::Relaxed);
             }
             Err(e) => {
+                deferring += 1;
                 metrics.reclaim_errors_total.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(node = n.id, error = %e, "reclaim pass: node skipped until the next pass");
             }
@@ -1149,6 +1167,8 @@ async fn reclaim_pass<S: KvStore>(
     metrics
         .nodes_not_deferring
         .store(not_deferring, Ordering::Relaxed);
+    metrics.nodes_deferring.store(deferring, Ordering::Relaxed);
+    metrics.deferral_known.store(true, Ordering::Relaxed);
     Ok(())
 }
 
@@ -1586,12 +1606,25 @@ async fn health_pass<S: KvStore>(
     // Write admission (Phase 3.6), from what the nodes just reported.
     // The term is the leader's fencing token: a failover (or leading
     // again) starts the admission state afresh (Phase 3.7, R-85).
+    // Room GC gives back counts only while no node defers deletes (Phase
+    // 3.13): a deferred delete frees nothing before its reclaim, which
+    // counts instead (otherwise a throttled tier would take in, for the
+    // whole retention, what GC deleted as if it were free).
+    let gc_now = metrics.gc.reclaimed_bytes.load(Ordering::Relaxed);
+    let gc_delta = gc_now.saturating_sub(metrics.gc_bytes_seen.swap(gc_now, Ordering::Relaxed));
+    if metrics.deferral_known.load(Ordering::Relaxed)
+        && metrics.nodes_deferring.load(Ordering::Relaxed) == 0
+    {
+        metrics
+            .room_returned_bytes
+            .fetch_add(gc_delta, Ordering::Relaxed);
+    }
     let totals = crate::admission::pass_in_term(
         meta,
         &metrics.admission,
         &cfg.admission,
         cfg.admission_max_chunk_bytes,
-        metrics.gc.reclaimed_bytes.load(Ordering::Relaxed),
+        metrics.room_returned_bytes.load(Ordering::Relaxed),
         crate::admission::Term {
             token: metrics.leader_token.load(Ordering::Relaxed),
             pass_started_ms: now,
@@ -1604,6 +1637,10 @@ async fn health_pass<S: KvStore>(
         .capacity
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = totals;
+    metrics.health_seen_term.store(
+        metrics.leader_token.load(Ordering::Relaxed),
+        Ordering::Relaxed,
+    );
     Ok(())
 }
 
@@ -1618,6 +1655,13 @@ async fn repair_pass<S: KvStore>(
     metrics: &Metrics,
     estimates: &crate::capacity::Estimates,
 ) -> Result<(), ControlError> {
+    // Not before this term's first health pass (Phase 3.13): the nodes'
+    // last-seen times are an earlier leader's, stale by the failover gap,
+    // and a node would be taken as failed (and repaired away) for it.
+    let token = metrics.leader_token.load(Ordering::Relaxed);
+    if token == 0 || metrics.health_seen_term.load(Ordering::Relaxed) != token {
+        return Ok(());
+    }
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
         .into_iter()
@@ -1658,6 +1702,31 @@ async fn repair_pass<S: KvStore>(
     // while the cluster is Active (RFC-015 §5.6); repairs of unhealthy
     // members and resumed repairs run in every state that admits repair.
     let intents = Intents::load(meta, &all_groups).await?;
+    // Repair statuses (Phase 3.13, R-104): those of groups gone or Active
+    // again are done.
+    let mut statuses = repair_liveness::statuses(meta).await?;
+    for (id, _) in statuses.clone() {
+        if all_groups
+            .iter()
+            .find(|g| g.id == id)
+            .is_none_or(|g| g.state == GroupState::Active)
+        {
+            repair_status::clear(meta, id).await?;
+            statuses.remove(&id);
+        }
+    }
+    metrics.groups_repair_waiting.store(
+        all_groups
+            .iter()
+            .filter(|g| g.state == GroupState::Repairing)
+            .filter(|g| {
+                statuses
+                    .get(&g.id)
+                    .is_some_and(|s| !s.reason.holds_background_work())
+            })
+            .count() as u64,
+        Ordering::Relaxed,
+    );
     // Open epoch changes first (Phase 3.11, M2): a move that raised node
     // epochs and did not commit is resumed if still wanted, otherwise its
     // epoch is settled (metadata at the raised epoch, membership
@@ -1679,9 +1748,14 @@ async fn repair_pass<S: KvStore>(
         let target = intent.replacement.node_id;
         // Still wanted: the target can host it, and the slot still holds
         // another member that is to leave (unhealthy, draining, or named
-        // by a replacement request for this index).
+        // by a replacement request for this index), or a member still
+        // being rebuilt (Phase 3.13: a target change of a repair, which
+        // holds nothing the group counts on yet).
+        let rebuilding = g.state == GroupState::Repairing
+            && g.repair_cursor.is_some_and(|c| c.member == intent.index);
         let leaving = |m: &GroupMember| {
-            !healthy(m.node_id)
+            rebuilding
+                || !healthy(m.node_id)
                 || intents.draining.contains(&m.node_id)
                 || intents
                     .requests
@@ -1703,13 +1777,23 @@ async fn repair_pass<S: KvStore>(
                 "resuming an interrupted epoch change"
             );
             let leaving = g.members[usize::from(intent.index)].node_id;
+            // The nodes that left the slot during this repair too (Phase
+            // 3.13); for a direct copy, not those that stored bytes that
+            // did not check.
+            let mut former: Vec<u64> = vec![leaving];
+            if let Some(s) = statuses.get(&g.id).filter(|s| s.index == intent.index) {
+                former.extend(s.former.iter().copied());
+                // The leaving node too (independent review): an untrusted
+                // one is never copied from as it is.
+                if cfg.repair_source != repair::RepairSource::Reconstruct {
+                    former.retain(|n| !s.untrusted.contains(n));
+                }
+            }
+            former.retain(|&n| healthy(n) && n != target);
+            former.dedup();
             let resume_opts = RepairOptions {
-                former: if healthy(leaving) {
-                    vec![leaving]
-                } else {
-                    Vec::new()
-                },
-                keep_client_reserve: healthy(leaving),
+                keep_client_reserve: healthy(leaving) && !rebuilding,
+                former,
                 ..opts.clone()
             };
             match crate::repair::replace_member_with(
@@ -1751,7 +1835,9 @@ async fn repair_pass<S: KvStore>(
         // next time.
         return Ok(());
     }
-    intents.complete_drains(meta, &all_groups, now).await?;
+    intents
+        .complete_drains(meta, clients, &nodes, &all_groups, now)
+        .await?;
     // Groups rebuilding a member without the node it left answering: their
     // reads and repairs have one shard fewer than the profile promises
     // until the rebuild completes (R-65). A healthy member's move keeps it.
@@ -1845,6 +1931,7 @@ async fn repair_pass<S: KvStore>(
             &healthy,
             &intents,
             estimates,
+            &statuses,
         )
         .await
         {
@@ -1882,6 +1969,7 @@ async fn repair_pass<S: KvStore>(
             &healthy,
             &intents,
             estimates,
+            &statuses,
         )
         .await
         {
@@ -1957,24 +2045,59 @@ impl Intents {
         !self.draining.contains(&node) && !self.retired.contains(&node)
     }
 
-    /// A draining node is decommissioned once no group lists it and no
-    /// group is still rebuilding (its shards may still be the better
-    /// source until every replacement has passed its completeness check).
+    /// A draining node is decommissioned once no group lists it and it
+    /// holds no shard of a group still rebuilding (its shards may still be
+    /// the better source until that replacement has passed its
+    /// completeness check). Phase 3.13 (R-104): only the groups it holds
+    /// shards of keep it, not every group rebuilding anywhere, and what it
+    /// waits for is reported.
     async fn complete_drains<S: KvStore>(
         &self,
         meta: &S,
+        clients: &NodeClients,
+        nodes: &HashMap<u64, NodeRecord>,
         groups: &[GroupRecord],
         now: u64,
     ) -> Result<(), ControlError> {
-        let repairing = groups.iter().any(|g| g.state == GroupState::Repairing);
+        let repairing: Vec<&GroupRecord> = groups
+            .iter()
+            .filter(|g| g.state == GroupState::Repairing)
+            .collect();
         for &n in &self.draining {
             let member_of = groups
                 .iter()
                 .filter(|g| g.members.iter().any(|m| m.node_id == n))
                 .count();
-            if member_of == 0 && !repairing {
+            let mut waits = None;
+            if member_of == 0
+                && let Some(node) = nodes.get(&n)
+            {
+                for g in &repairing {
+                    match clients.list_shards_page(&node.address, g.id, None, 1).await {
+                        Ok(p) if p.entries.is_empty() && p.next.is_none() => {}
+                        Ok(_) => {
+                            waits = Some(format!(
+                                "holds shards of group {}, which is rebuilding a member: kept as a source until it completes",
+                                g.id
+                            ));
+                            break;
+                        }
+                        Err(e) => {
+                            waits = Some(format!(
+                                "cannot list its shards of group {} (rebuilding a member): {}",
+                                g.id,
+                                e.message()
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+            if member_of == 0 && waits.is_none() {
                 membership::update_drain(meta, n, Some(now), None).await?;
                 info!(node = n, "node decommissioned: no group lists it");
+            } else if member_of == 0 {
+                membership::update_drain(meta, n, None, waits).await?;
             } else if !self.active {
                 membership::update_drain(
                     meta,
@@ -1989,8 +2112,9 @@ impl Intents {
     }
 }
 
-/// Resume or start the repair of one group when needed. Returns whether a
-/// repair ran (or was needed and could not start).
+/// Resume or start the repair of one group when needed. Returns whether
+/// the group holds back cache repair in this pass (a repair ran or made
+/// progress, or one is needed and could not start for a failed member).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn repair_one<S: KvStore>(
     meta: &S,
@@ -2004,48 +2128,327 @@ async fn repair_one<S: KvStore>(
     healthy: &impl Fn(u64) -> bool,
     intents: &Intents,
     estimates: &crate::capacity::Estimates,
+    statuses: &HashMap<u64, RepairStatus>,
 ) -> Result<bool, ControlError> {
     let candidate = |id: u64| healthy(id) && intents.may_host(id);
+    let now = now_ms();
+    let prior = statuses.get(&g.id);
     match g.state {
         GroupState::Repairing => {
+            let blocked = async |detail: &str| -> Result<bool, ControlError> {
+                warn!(group = g.id, "{detail}");
+                let s = RepairStatus {
+                    group: g.id,
+                    epoch: g.epoch,
+                    reason: RepairReason::PermanentlyBlocked,
+                    detail: detail.to_string(),
+                    since_ms: prior
+                        .filter(|p| p.reason == RepairReason::PermanentlyBlocked)
+                        .map_or(now, |p| p.since_ms),
+                    ..RepairStatus::default()
+                };
+                put_status(meta, prior, &s).await?;
+                Ok(false)
+            };
             let Some(cursor) = g.repair_cursor else {
-                warn!(
-                    group = g.id,
-                    "repairing without a cursor; needs an operator"
-                );
-                return Ok(true);
+                return blocked("repairing without a cursor; needs an operator").await;
             };
             let index = usize::from(cursor.member);
             let Some(&member) = g.members.get(index) else {
-                return Ok(true);
+                return blocked("repair cursor names no member; needs an operator").await;
             };
-            // The node the member left, when an intent names it and it
-            // still answers: a source of its own shards.
-            let former: Vec<u64> = intents
+            let obs = Observation {
+                group: g.id,
+                epoch: g.epoch,
+                index: cursor.member,
+                target: member.node_id,
+                target_candidate: candidate(member.node_id),
+                unhealthy_others: g
+                    .members
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, m)| *i != index && !healthy(m.node_id))
+                    .map(|(i, _)| u16::try_from(i).unwrap_or(u16::MAX))
+                    .collect(),
+                auto_repair: cfg.auto_repair,
+                data_shards: usize::from(g.data_shards),
+                members: g.members.len(),
+                status: prior.cloned(),
+                now_ms: now,
+                pacing: cfg.repair_pacing,
+            };
+            let current = repair_liveness::current(&obs);
+            // The node the member left, when an intent names it, and the
+            // nodes that left the slot during this repair (its first node,
+            // targets replaced since): sources of its shards while they
+            // answer. Targets left because they stored bytes that did not
+            // check are not copied from as they are (`Direct`); as one of
+            // the `k` inputs of a reconstruction they are, since its result
+            // is checked against the chunk's recorded checksum.
+            let trust_all = cfg.repair_source == repair::RepairSource::Reconstruct;
+            // Untrusted nodes are never a direct-copy source, whatever
+            // names them (re-review: a drained or requested one too).
+            let intent_former: Vec<u64> = intents
                 .requests
                 .get(&g.id)
                 .map(|r| r.from_node)
                 .into_iter()
                 .chain(intents.draining.iter().copied())
                 .filter(|&n| healthy(n) && !g.members.iter().any(|m| m.node_id == n))
+                .filter(|n| trust_all || !current.untrusted.contains(n))
                 .collect();
-            let opts = RepairOptions {
-                keep_client_reserve: !former.is_empty(),
-                former,
-                ..opts.clone()
+            let former = |also: Option<u64>| -> Vec<u64> {
+                let mut f = intent_former.clone();
+                for n in current.former.iter().copied().chain(also) {
+                    if healthy(n)
+                        && (trust_all || !current.untrusted.contains(&n))
+                        && !g.members.iter().any(|m| m.node_id == n)
+                        && !f.contains(&n)
+                    {
+                        f.push(n);
+                    }
+                }
+                f
             };
-            run_repair(
-                meta,
-                clients,
-                g.id,
-                index,
-                member,
-                &opts,
-                metrics,
-                g.is_cache(),
-            )
-            .await?;
-            Ok(true)
+            match repair_liveness::decide(&obs) {
+                Decision::Wait => Ok(current.reason.holds_background_work()),
+                // `decide` asks neither (only the walk just run decides on a
+                // second failure, below).
+                Decision::AwaitNodes(_) | Decision::ReplaceOther(_) => Ok(false),
+                Decision::Retarget(why) => {
+                    let leaving_former = former(Some(member.node_id));
+                    let ropts = RepairOptions {
+                        keep_client_reserve: !intent_former.is_empty(),
+                        former: leaving_former,
+                        ..opts.clone()
+                    };
+                    let mut exclude = current.former.clone();
+                    exclude.extend(current.excluded.iter().copied());
+                    exclude.push(member.node_id);
+                    info!(
+                        group = g.id,
+                        index,
+                        node = member.node_id,
+                        "{why}: choosing another target"
+                    );
+                    match start_move(
+                        meta,
+                        clients,
+                        cfg,
+                        metrics,
+                        nodes,
+                        all_groups,
+                        g,
+                        index,
+                        "retarget",
+                        None,
+                        &ropts,
+                        healthy,
+                        intents,
+                        estimates,
+                        Some(&current),
+                        &exclude,
+                    )
+                    .await?
+                    {
+                        Started::Ran(busy) => {
+                            metrics
+                                .repair_retargets_total
+                                .fetch_add(1, Ordering::Relaxed);
+                            Ok(busy)
+                        }
+                        Started::NoTarget { capacity, msg } => {
+                            warn!(group = g.id, index, "{why}; no other target: {msg}");
+                            let mut s = repair_liveness::no_new_target(
+                                &obs,
+                                capacity,
+                                format!("{why}; no other target: {msg}"),
+                            );
+                            // A target that still answers is tried again
+                            // (after the backoff) rather than not at all.
+                            if obs.target_candidate {
+                                s.failures = 0;
+                            }
+                            put_status(meta, prior, &s).await?;
+                            Ok(false)
+                        }
+                    }
+                }
+                Decision::Run => {
+                    let ropts = RepairOptions {
+                        keep_client_reserve: !intent_former.is_empty(),
+                        former: former(None),
+                        ..opts.clone()
+                    };
+                    let (busy, second) = attempt(
+                        meta,
+                        clients,
+                        cfg,
+                        metrics,
+                        nodes,
+                        g.id,
+                        index,
+                        member,
+                        &ropts,
+                        g.is_cache(),
+                        healthy,
+                        Some(&current),
+                    )
+                    .await?;
+                    match second {
+                        Some(Decision::ReplaceOther(_))
+                            if {
+                                // Former nodes down hold shards nobody
+                                // lists either (re-review): a chunk only
+                                // they and the members down hold is
+                                // invisible to the walk. Within the code's
+                                // tolerance (members and former nodes down
+                                // at most m), every chunk keeps a shard on a
+                                // member that answers.
+                                let former_down = current
+                                    .former
+                                    .iter()
+                                    .chain(current.excluded.iter())
+                                    .filter(|n| !healthy(**n))
+                                    .count();
+                                let members_down =
+                                    g.members.iter().filter(|m| !healthy(m.node_id)).count();
+                                former_down > 0
+                                    && members_down + former_down > usize::from(g.parity_shards)
+                            } =>
+                        {
+                            if let Some(mut s) =
+                                repair_liveness::statuses(meta).await?.remove(&g.id)
+                            {
+                                s.reason = RepairReason::AwaitingNodes;
+                                s.detail = "more members and former nodes down than the group's parity: a chunk could have its only shards on them; bring them back".into();
+                                s.next_attempt_ms = now_ms()
+                                    + repair_liveness::backoff_ms(
+                                        &cfg.repair_pacing,
+                                        s.stalls.max(1),
+                                    );
+                                repair_status::put(meta, &s).await?;
+                            }
+                            Ok(false)
+                        }
+                        Some(Decision::ReplaceOther(_))
+                            if !repair::former_shards_on_target(
+                                meta,
+                                clients,
+                                nodes,
+                                g,
+                                index,
+                                // Every former node that answers, untrusted
+                                // ones too (re-review): evidence of a
+                                // chunk, not a copy source.
+                                // `excluded` too: after a crash between a
+                                // status and its intent, this slot's former
+                                // nodes are there (only this slot's shards
+                                // are counted).
+                                &current
+                                    .former
+                                    .iter()
+                                    .chain(current.excluded.iter())
+                                    .chain(intents.requests.get(&g.id).map(|r| &r.from_node))
+                                    .chain(intents.draining.iter())
+                                    .copied()
+                                    .filter(|&n| healthy(n))
+                                    .collect::<Vec<u64>>(),
+                            )
+                            .await? =>
+                        {
+                            // A former node holds shards of the slot that its
+                            // member lacks: not whole after all.
+                            if let Some(mut s) =
+                                repair_liveness::statuses(meta).await?.remove(&g.id)
+                            {
+                                s.walked_clean = false;
+                                s.reason = RepairReason::TemporarilyBlocked;
+                                s.detail = format!(
+                                    "a former node of slot {index} holds shards its member lacks"
+                                );
+                                repair_status::put(meta, &s).await?;
+                            }
+                            Ok(true)
+                        }
+                        Some(Decision::ReplaceOther(j)) => {
+                            let j = usize::from(j);
+                            info!(
+                                group = g.id,
+                                rebuilt = index,
+                                index = j,
+                                "slot rebuilt but for a failed member: replacing it"
+                            );
+                            // Never onto a node that left the slot just
+                            // rebuilt (its shards of that slot stay a
+                            // source; as a member of another slot they would
+                            // be reconciliation's).
+                            let mut exclude = current.former.clone();
+                            exclude.extend(current.excluded.iter().copied());
+                            exclude.push(member.node_id);
+                            let fresh = repair_liveness::statuses(meta).await?;
+                            match start_move(
+                                meta,
+                                clients,
+                                cfg,
+                                metrics,
+                                nodes,
+                                all_groups,
+                                g,
+                                j,
+                                "auto repair",
+                                None,
+                                opts,
+                                healthy,
+                                intents,
+                                estimates,
+                                fresh.get(&g.id),
+                                &exclude,
+                            )
+                            .await?
+                            {
+                                Started::Ran(busy) => Ok(busy),
+                                Started::NoTarget { capacity, msg } => {
+                                    let mut s = fresh.get(&g.id).cloned().unwrap_or(current);
+                                    s.reason = if capacity {
+                                        RepairReason::AwaitingCapacity
+                                    } else {
+                                        RepairReason::AwaitingNodes
+                                    };
+                                    s.detail = format!("member {j} does not answer; {msg}");
+                                    // Not walked again before the backoff
+                                    // (re-review).
+                                    s.next_attempt_ms = now_ms()
+                                        + repair_liveness::backoff_ms(
+                                            &cfg.repair_pacing,
+                                            s.stalls.max(1),
+                                        );
+                                    repair_status::put(meta, &s).await?;
+                                    Ok(false)
+                                }
+                            }
+                        }
+                        Some(Decision::AwaitNodes(detail)) => {
+                            if let Some(mut s) =
+                                repair_liveness::statuses(meta).await?.remove(&g.id)
+                            {
+                                s.reason = RepairReason::AwaitingNodes;
+                                s.detail = detail;
+                                // Not walked again before the backoff
+                                // (re-review).
+                                s.next_attempt_ms = now_ms()
+                                    + repair_liveness::backoff_ms(
+                                        &cfg.repair_pacing,
+                                        s.stalls.max(1),
+                                    );
+                                repair_status::put(meta, &s).await?;
+                            }
+                            Ok(false)
+                        }
+                        _ => Ok(busy),
+                    }
+                }
+            }
         }
         GroupState::Active => {
             // Unhealthy members first (auto repair), then an operator
@@ -2071,74 +2474,8 @@ async fn repair_one<S: KvStore>(
                 (None, _, Some(i)) if intents.active => (i, "drain", None),
                 _ => return Ok(false),
             };
-            // Capacity (Phase 3.4 §4): the member's bytes, measured on a
-            // surviving member, must fit on the target with headroom; a
-            // node that does not report its free space is not judged.
-            let one_copy_cache = g.is_cache() && g.parity_shards == 0 && g.members.len() == 1;
-            let need = if one_copy_cache {
-                0
-            } else {
-                estimates
-                    .member_size(clients, nodes, g, index, cfg.page_size)
-                    .await
-                    .map_or(0, |s| s.bytes)
-            };
-            let mut free: HashMap<u64, Option<u64>> = HashMap::new();
-            for n in nodes.values().filter(|n| candidate(n.id)) {
-                if !g.members.iter().any(|m| m.node_id == n.id) {
-                    free.insert(
-                        n.id,
-                        crate::capacity::node_room(clients, &n.address, why != "auto repair").await,
-                    );
-                }
-            }
-            let roomy = |id: u64| crate::capacity::fits(free.get(&id).copied().flatten(), need);
-            let pick = |with_room: bool| {
-                choose_for(nodes, all_groups, g, index, &cfg.failure_domain, &|id| {
-                    to_node.is_none_or(|n| n == id) && candidate(id) && (!with_room || roomy(id))
-                })
-            };
-            let replacement = pick(true)?;
-            let Some(replacement) = replacement else {
-                let msg = match (pick(false)?, to_node) {
-                    (Some(m), _) => format!(
-                        "insufficient capacity: node {} has {} bytes free, the member needs {}; paused until a node has room",
-                        m.node_id,
-                        free.get(&m.node_id).copied().flatten().unwrap_or(0),
-                        crate::capacity::needed(need)
-                    ),
-                    (None, Some(n)) => format!(
-                        "requested node {n} is unhealthy, draining, or breaks the failure domain"
-                    ),
-                    (None, None) => "no healthy replacement with free failure domain".to_string(),
-                };
-                warn!(group = g.id, index, why, "{msg}");
-                if why == "replace request" {
-                    membership::note_replace_error(meta, g.id, Some(msg)).await?;
-                } else if why == "drain" {
-                    let node = g.members[index].node_id;
-                    membership::update_drain(meta, node, None, Some(msg)).await?;
-                }
-                // Only an unhealthy member keeps cache repair waiting.
-                return Ok(why == "auto repair");
-            };
-            info!(
-                group = g.id,
-                index,
-                node = replacement.node_id,
-                cache = g.is_cache(),
-                why,
-                "member replacement"
-            );
-            // A move that was paused (capacity, no target) resumes: drop
-            // the reason it showed.
-            if why == "replace request" {
-                membership::note_replace_error(meta, g.id, None).await?;
-            } else if why == "drain" {
-                membership::update_drain(meta, g.members[index].node_id, None, None).await?;
-            }
             let leaving = g.members[index].node_id;
-            let opts = RepairOptions {
+            let mopts = RepairOptions {
                 former: if healthy(leaving) {
                     vec![leaving]
                 } else {
@@ -2147,21 +2484,344 @@ async fn repair_one<S: KvStore>(
                 keep_client_reserve: why != "auto repair" && healthy(leaving),
                 ..opts.clone()
             };
-            run_repair(
+            match start_move(
                 meta,
                 clients,
-                g.id,
-                index,
-                replacement,
-                &opts,
+                cfg,
                 metrics,
-                g.is_cache(),
+                nodes,
+                all_groups,
+                g,
+                index,
+                why,
+                to_node,
+                &mopts,
+                healthy,
+                intents,
+                estimates,
+                None,
+                &[],
             )
-            .await?;
-            Ok(true)
+            .await?
+            {
+                Started::Ran(busy) => Ok(busy),
+                Started::NoTarget { msg, .. } => {
+                    warn!(group = g.id, index, why, "{msg}");
+                    if why == "replace request" {
+                        membership::note_replace_error(meta, g.id, Some(msg)).await?;
+                    } else if why == "drain" {
+                        membership::update_drain(meta, leaving, None, Some(msg)).await?;
+                    }
+                    // Only an unhealthy member keeps cache repair waiting.
+                    Ok(why == "auto repair")
+                }
+            }
         }
         _ => Ok(false),
     }
+}
+
+/// How [`start_move`] ended.
+enum Started {
+    /// The move started (or resumed); whether it holds cache repair.
+    Ran(bool),
+    /// No node can take the member (`capacity`: candidates exist, none
+    /// with room).
+    NoTarget { capacity: bool, msg: String },
+}
+
+/// Rebuild slot `index` of `g` onto a node chosen now (capacity checked,
+/// `exclude` never chosen), then run the repair: a member move of an
+/// `Active` group, the replacement of a target that is gone or keeps
+/// failing, or of a second failed member of a `Repairing` group (Phase
+/// 3.13). The membership change is an epoch intent (fenced, resumable).
+#[allow(clippy::too_many_arguments)]
+async fn start_move<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    cfg: &ControllerConfig,
+    metrics: &Metrics,
+    nodes: &HashMap<u64, NodeRecord>,
+    all_groups: &[GroupRecord],
+    g: &GroupRecord,
+    index: usize,
+    why: &str,
+    to_node: Option<u64>,
+    opts: &RepairOptions,
+    healthy: &impl Fn(u64) -> bool,
+    intents: &Intents,
+    estimates: &crate::capacity::Estimates,
+    prior: Option<&RepairStatus>,
+    exclude: &[u64],
+) -> Result<Started, ControlError> {
+    let candidate = |id: u64| {
+        healthy(id)
+            && intents.may_host(id)
+            && !exclude.contains(&id)
+            && !prior.is_some_and(|p| p.excluded.contains(&id))
+    };
+    // Capacity (Phase 3.4 §4): the member's bytes, measured on a surviving
+    // member, must fit on the target with headroom; a node that does not
+    // report its free space is not judged.
+    let one_copy_cache = g.is_cache() && g.parity_shards == 0 && g.members.len() == 1;
+    let need = if one_copy_cache {
+        0
+    } else {
+        estimates
+            .member_size(clients, nodes, g, index, cfg.page_size)
+            .await
+            .map_or(0, |s| s.bytes)
+    };
+    // A failure repair may use the space down to the repair floor; a
+    // planned move (and a retarget of one) keeps the client reserve.
+    let planned = why != "auto repair" && (why != "retarget" || opts.keep_client_reserve);
+    let mut free: HashMap<u64, Option<u64>> = HashMap::new();
+    for n in nodes.values().filter(|n| candidate(n.id)) {
+        if !g.members.iter().any(|m| m.node_id == n.id) {
+            free.insert(
+                n.id,
+                crate::capacity::node_room(clients, &n.address, planned).await,
+            );
+        }
+    }
+    let roomy = |id: u64| crate::capacity::fits(free.get(&id).copied().flatten(), need);
+    let pick = |with_room: bool| {
+        choose_for(nodes, all_groups, g, index, &cfg.failure_domain, &|id| {
+            to_node.is_none_or(|n| n == id) && candidate(id) && (!with_room || roomy(id))
+        })
+    };
+    let Some(replacement) = pick(true)? else {
+        let without_room = pick(false)?;
+        let msg = match (without_room, to_node) {
+            (Some(m), _) => format!(
+                "insufficient capacity: node {} has {} bytes free, the member needs {}; paused until a node has room",
+                m.node_id,
+                free.get(&m.node_id).copied().flatten().unwrap_or(0),
+                crate::capacity::needed(need)
+            ),
+            (None, Some(n)) => {
+                format!("requested node {n} is unhealthy, draining, or breaks the failure domain")
+            }
+            (None, None) => "no healthy replacement with free failure domain".to_string(),
+        };
+        return Ok(Started::NoTarget {
+            capacity: without_room.is_some(),
+            msg,
+        });
+    };
+    info!(
+        group = g.id,
+        index,
+        node = replacement.node_id,
+        cache = g.is_cache(),
+        why,
+        "member replacement"
+    );
+    // A move that was paused (capacity, no target) resumes: drop the
+    // reason it showed.
+    if why == "replace request" {
+        membership::note_replace_error(meta, g.id, None).await?;
+    } else if why == "drain" {
+        membership::update_drain(meta, g.members[index].node_id, None, None).await?;
+    }
+    let leaving = g.members[index].node_id;
+    // Recorded before the change (Phase 3.13): which node the slot leaves
+    // stays known to any leader, as a source while it answers.
+    let started = repair_liveness::started(
+        prior,
+        g.id,
+        g.epoch + 1,
+        u16::try_from(index).unwrap_or(u16::MAX),
+        replacement.node_id,
+        leaving,
+        false,
+        now_ms(),
+    );
+    repair_status::put(meta, &started).await?;
+    let busy = attempt(
+        meta,
+        clients,
+        cfg,
+        metrics,
+        nodes,
+        g.id,
+        index,
+        replacement,
+        opts,
+        g.is_cache(),
+        healthy,
+        Some(&started),
+    )
+    .await?
+    .0;
+    Ok(Started::Ran(busy))
+}
+
+/// Run one repair attempt of slot `index` onto `target` and record how it
+/// ended (Phase 3.13). Returns whether the group holds back cache repair.
+#[allow(clippy::too_many_arguments)]
+async fn attempt<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    cfg: &ControllerConfig,
+    metrics: &Metrics,
+    nodes: &HashMap<u64, NodeRecord>,
+    group_id: u64,
+    index: usize,
+    target: GroupMember,
+    opts: &RepairOptions,
+    cache: bool,
+    healthy: &impl Fn(u64) -> bool,
+    prior: Option<&RepairStatus>,
+) -> Result<(bool, Option<Decision>), ControlError> {
+    let result = run_repair(meta, clients, group_id, index, target, opts, metrics, cache).await;
+    match &result {
+        Err(e) if is_fenced(e) => return result.map(|_| (true, None)),
+        Err(ControlError::Meta(_)) => return result.map(|_| (true, None)),
+        Err(e) => {
+            warn!(group = group_id, error = %e, "repair of the group failed; the others go on");
+            metrics
+                .repair_group_errors_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(_) => {}
+    }
+    let after = cluster::get_group(meta, group_id).await?;
+    let (Some(cursor), GroupState::Repairing) = (after.repair_cursor, after.state) else {
+        if after.state == GroupState::Active {
+            repair_status::clear(meta, group_id).await?;
+        }
+        return Ok((true, None));
+    };
+    let rebuilt = usize::from(cursor.member);
+    let Some(now_target) = after.members.get(rebuilt).copied() else {
+        return Ok((true, None));
+    };
+    let target_addr = nodes.get(&target.node_id).map(|n| n.address.as_str());
+    let members_down = after.members.iter().any(|m| !healthy(m.node_id));
+    let outcome = classify(
+        &result,
+        target_addr,
+        members_down,
+        |i| after.members.get(i).is_some_and(|m| !healthy(m.node_id)),
+        (usize::from(after.data_shards), after.members.len()),
+    );
+    let obs = Observation {
+        group: group_id,
+        epoch: after.epoch,
+        index: cursor.member,
+        target: now_target.node_id,
+        target_candidate: true,
+        unhealthy_others: after
+            .members
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| *i != rebuilt && !healthy(m.node_id))
+            .map(|(i, _)| u16::try_from(i).unwrap_or(u16::MAX))
+            .collect(),
+        auto_repair: cfg.auto_repair,
+        data_shards: usize::from(after.data_shards),
+        members: after.members.len(),
+        // Whatever slot it names (re-review): `current` keeps what another
+        // slot's status excludes and distrusts.
+        status: prior.cloned(),
+        now_ms: now_ms(),
+        pacing: cfg.repair_pacing,
+    };
+    let second = repair_liveness::second_failure(&obs, &outcome);
+    if let Some(s) = repair_liveness::after(&obs, &outcome) {
+        let busy = s.reason.holds_background_work();
+        repair_status::put(meta, &s).await?;
+        Ok((busy, second))
+    } else {
+        repair_status::clear(meta, group_id).await?;
+        Ok((true, None))
+    }
+}
+
+/// How a repair attempt ended, for its status (Phase 3.13).
+fn classify(
+    result: &Result<repair::RepairReport, ControlError>,
+    target_addr: Option<&str>,
+    members_down: bool,
+    unhealthy: impl Fn(usize) -> bool,
+    shape: (usize, usize),
+) -> Outcome {
+    match result {
+        Ok(r) if r.complete => Outcome::Complete,
+        Ok(r) if r.budget_exhausted => Outcome::Budget,
+        Ok(r) => {
+            let c = &r.completeness;
+            // Per chunk: shards on the members that answered (re-review).
+            let (k, n) = shape;
+            let down: BTreeSet<usize> = c
+                .unavailable
+                .iter()
+                .copied()
+                .chain((0..n).filter(|&i| unhealthy(i)))
+                .collect();
+            let chunks_short = c.missing_elsewhere.len() >= 1000
+                || c.missing_elsewhere.iter().any(|(_, missing)| {
+                    let gone: BTreeSet<usize> = down
+                        .iter()
+                        .copied()
+                        .chain(missing.iter().map(|&i| usize::from(i)))
+                        .collect();
+                    n.saturating_sub(gone.len()) < k
+                });
+            Outcome::Incomplete {
+                chunks_short,
+                slot_whole: r.slot_whole,
+                unavailable: c
+                    .unavailable
+                    .iter()
+                    .map(|&i| u16::try_from(i).unwrap_or(u16::MAX))
+                    .collect(),
+                unhealthy_unavailable: c.unavailable.iter().any(|&i| unhealthy(i)),
+                progressed: r.reconstructed > 0,
+                detail: format!(
+                    "completeness: {} chunks missing on some member, {} length mismatches, corrupt {:?}, members not answering {:?}",
+                    c.missing, c.length_mismatch, c.corrupt, c.unavailable
+                ),
+            }
+        }
+        // The target stored bytes that do not check (`repair.rs`: the
+        // replacement's own report), as opposed to a chunk the sources
+        // cannot give (any other integrity error, found before the write).
+        Err(ControlError::Corrupt(m)) if m.starts_with("replacement ") => Outcome::TargetFailure {
+            corrupt: true,
+            detail: m.clone(),
+        },
+        Err(e @ (ControlError::Unrecoverable { .. } | ControlError::Corrupt(_))) => {
+            Outcome::Unrebuilt {
+                members_down,
+                detail: e.to_string(),
+            }
+        }
+        Err(e @ ControlError::Node { addr, .. }) if Some(addr.as_str()) == target_addr => {
+            Outcome::TargetFailure {
+                corrupt: false,
+                detail: e.to_string(),
+            }
+        }
+        Err(ControlError::Other(m)) if m.starts_with("replacement ") => Outcome::TargetFailure {
+            corrupt: false,
+            detail: m.clone(),
+        },
+        Err(e) => Outcome::Transient(e.to_string()),
+    }
+}
+
+/// Write `s` unless it is what is recorded already.
+async fn put_status<S: KvStore>(
+    meta: &S,
+    prior: Option<&RepairStatus>,
+    s: &RepairStatus,
+) -> Result<(), ControlError> {
+    if prior != Some(s) {
+        repair_status::put(meta, s).await?;
+    }
+    Ok(())
 }
 
 pub(crate) fn choose_for(
@@ -2228,7 +2888,7 @@ async fn run_repair<S: KvStore>(
     opts: &RepairOptions,
     metrics: &Metrics,
     cache: bool,
-) -> Result<(), ControlError> {
+) -> Result<repair::RepairReport, ControlError> {
     let (started, reconstructed, completed) = if cache {
         (
             &metrics.cache_repairs_started_total,
@@ -2258,7 +2918,7 @@ async fn run_repair<S: KvStore>(
         completed.fetch_add(1, Ordering::Relaxed);
     }
     info!(group = group_id, index, cache, ?report, "repair pass");
-    Ok(())
+    Ok(report)
 }
 
 /// LRU eviction of every configured cache tier (RFC-006 §5.4).
@@ -2399,11 +3059,10 @@ async fn tiering_pass<S: KvStore>(
                 && r.tiers.iter().all(|t| t.state < 2) => {}
         _ => return Ok(()),
     }
-    if cluster::list_groups(meta)
-        .await?
-        .iter()
-        .any(|g| !g.is_cache() && g.state == GroupState::Repairing)
-    {
+    // Phase 3.13 (R-104): only a repair making progress holds tiering.
+    let groups = cluster::list_groups(meta).await?;
+    let statuses = crate::repair_liveness::statuses(meta).await?;
+    if crate::repair_liveness::holding_group(&groups, &statuses).is_some() {
         return Ok(());
     }
     if arca_lake_metadata::ops::integrity::any_actionable(meta).await? {

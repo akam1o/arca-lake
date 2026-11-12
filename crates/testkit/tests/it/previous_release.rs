@@ -4,7 +4,9 @@
 //! finalize, below), `ARCA_BIN_PREV_310` and `ARCA_BIN_PREV_311` the Phase
 //! 3.10 and 3.11 releases (protocol 4, schema 3, as this one: mixed versions
 //! without a finalize, [`same_schema_matrix`], and the managed restore with
-//! a removed node), `ARCA_BIN_CUR` this one.
+//! a removed node), `ARCA_BIN_PREV_312` the Phase 3.12 release (Phase
+//! 3.13: [`upgrade_and_rollback_with_the_phase_3_12_release`]),
+//! `ARCA_BIN_CUR` this one.
 //! Storage nodes, controllers and gateways are separate processes on a
 //! FoundationDB cluster.
 //!
@@ -158,6 +160,23 @@ impl Cluster<'_> {
         let args = self.args(i, cur);
         self.nodes[i] = self.env.spawn(&name, cur, &args);
         wait_tcp(&self.addrs[i], Duration::from_secs(20)).await;
+    }
+}
+
+/// [`leads`], printing the process's log when it does not lead in time.
+async fn leads_or_log(env: &Env, id: &str, p: &Proc) {
+    let start = std::time::Instant::now();
+    while !env
+        .admin(true, &["status"])
+        .1
+        .contains(&format!("leader {id}"))
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{id} did not lead; its log:\n{}",
+            p.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -1041,20 +1060,20 @@ async fn same_schema_matrix(var: &str) {
     assert!(e.contains("do not defer"), "{e}");
     assert!(!journal.exists(), "a refused plan wrote a journal");
     // Back on this release: its retirements of m2 are still there (the
-    // records stayed the newest) and are reclaimed.
+    // records stayed the newest). Phase 3.13 (ADR-0030): the retention
+    // lowered from 3600 s to 3 s keeps 3600 s for them, so they stay
+    // retained; what is retired from now on gets 3 s.
     c.retention = Some(3);
     c.node(1, true).await;
     let p = pending(&clients, &c.addrs).await;
     assert!(p[1] >= 3, "retirements lost across the rollback: {p:?}");
-    collected(
-        &clients,
-        &c.addrs,
-        &before,
-        &[1],
-        6,
-        "node 1 reclaims after the round trip",
-    )
-    .await;
+    let m2_on_1 = p[1];
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert_eq!(
+        pending(&clients, &c.addrs).await[1],
+        m2_on_1,
+        "a lowered retention shortened what was retired before it"
+    );
     collected(
         &clients,
         &c.addrs,
@@ -1088,7 +1107,10 @@ async fn same_schema_matrix(var: &str) {
     (gw, s3) = gateway(&env, "gw-cur-2", true).await;
     leads(&env, "ctl-cur-2").await;
     check(&s3, &committed).await;
-    assert_eq!(pending(&clients, &c.addrs).await, vec![0, 0, 0]);
+    // Node 1's retirements under the earlier, longer retention may stay
+    // (Phase 3.13); the others are reclaimed.
+    let p = pending(&clients, &c.addrs).await;
+    assert!(p[0] == 0 && p[2] == 0 && p[1] <= m2_on_1, "{p:?}");
     ctl.kill();
     gw.kill();
     drop(c);
@@ -1102,4 +1124,261 @@ async fn same_schema_matrix_with_the_phase_3_10_release() {
 #[tokio::test]
 async fn same_schema_matrix_with_the_phase_3_11_release() {
     same_schema_matrix("ARCA_BIN_PREV_311").await;
+}
+
+/// Phase 3.13 against the Phase 3.12 release (`ARCA_BIN_PREV_312`; both
+/// defer deletes): retirements cross the upgrade and the rollback of a
+/// node either way (the retirement log stays in the format both read); a
+/// controller rolled back in the middle of a repair the current one began
+/// (a repair status record left behind) carries it to its end, and the
+/// current one, back, removes the stale record; with the retention then
+/// lowered, what either release retired before keeps the earlier one and a
+/// new delete is reclaimed at the new one.
+#[tokio::test]
+async fn upgrade_and_rollback_with_the_phase_3_12_release() {
+    let Some(env) = env_named("ARCA_BIN_PREV_312") else {
+        eprintln!("ARCA_FDB_TESTS / ARCA_BIN_PREV_312 / ARCA_BIN_CUR not set; skipping");
+        return;
+    };
+    let meta = arca_lake_metadata::fdb::FdbKv::open_with_timeout(env.cluster_file.to_str(), 5_000)
+        .expect("open FoundationDB");
+    meta.clear_range_blocking(&keys::all_range()).await.unwrap();
+    let clients = NodeClients::new(Duration::from_secs(5));
+    let dirs: Vec<PathBuf> = (0..4)
+        .map(|i| env.tmp.path().join(format!("node{i}")))
+        .collect();
+    let addrs: Vec<String> = (0..4).map(|_| free_addr()).collect();
+    // Both releases defer: the retention is given to either binary.
+    let args = |i: usize, retention: u64| {
+        let mut a = Env::node_args(&dirs[i], &addrs[i]);
+        a.extend([
+            "--reclaim-retention-secs".into(),
+            retention.to_string(),
+            "--reclaim-skew-secs".into(),
+            "1".into(),
+        ]);
+        a
+    };
+    let mut nodes: Vec<Proc> = (0..4)
+        .map(|i| env.spawn(&format!("node{i}-prev"), false, &args(i, 3600)))
+        .collect();
+    for a in &addrs {
+        wait_tcp(a, Duration::from_secs(20)).await;
+    }
+    let restart = async |nodes: &mut Vec<Proc>, i: usize, cur: bool, retention: u64, tag: &str| {
+        nodes[i].kill();
+        nodes[i] = env.spawn(&format!("node{i}-{tag}"), cur, &args(i, retention));
+        wait_tcp(&addrs[i], Duration::from_secs(20)).await;
+    };
+    env.admin_ok(false, &["init"]);
+    for (i, a) in addrs.iter().enumerate() {
+        env.admin_ok(
+            false,
+            &[
+                "register-node",
+                "--address",
+                a,
+                "--label",
+                &format!("node=n{i}"),
+                "--label",
+                "device_class=hdd",
+            ],
+        );
+    }
+    env.admin_ok(
+        false,
+        &[
+            "create-groups",
+            "--tier",
+            "default",
+            "--device-class",
+            "hdd",
+            "--failure-domain",
+            "node",
+            "--count",
+            "1",
+            "--k",
+            "2",
+            "--m",
+            "1",
+            "--chunk-bytes",
+            &(256u64 << 10).to_string(),
+            "--small-threshold",
+            "0",
+        ],
+    );
+    let mut ctl = controller(&env, "ctl-prev", false);
+    let (mut gw, s3) = gateway(&env, "gw-prev", false).await;
+    s3.create_bucket().bucket(BUCKET).send().await.unwrap();
+    let mut committed: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..10u64 {
+        let d = body(600 << 10, 400 + i);
+        put(&s3, &format!("p{i}"), d.clone()).await;
+        committed.push((format!("p{i}"), d));
+    }
+    let group = arca_lake_metadata::ops::cluster::list_groups(&meta)
+        .await
+        .unwrap()[0]
+        .clone();
+    let check = async |s3: &Client, committed: &[(String, Vec<u8>)]| {
+        for (k, d) in committed {
+            assert_eq!(&get(s3, k).await, d, "{k}");
+        }
+    };
+    let retained = async |i: usize, n: u64, what: &str| {
+        wait_until(what, Duration::from_secs(60), async || {
+            let p = pending(&clients, &addrs).await[i];
+            p != u64::MAX && p >= n
+        })
+        .await;
+    };
+    // Which node is which member (by address).
+    let mut index_of = Vec::new();
+    for m in &group.members {
+        let mut found = None;
+        for (i, a) in addrs.iter().enumerate() {
+            if cluster_node_id(&meta, a).await == m.node_id {
+                found = Some(i);
+            }
+        }
+        index_of.push(found.unwrap());
+    }
+    let n0 = index_of[0];
+
+    // ---- 1. Retired by 3.12, read by a 3.13 node.
+    delete(&s3, "p0").await;
+    committed.retain(|(k, _)| k != "p0");
+    retained(n0, 1, "retired by the 3.12 node").await;
+    let by_312 = pending(&clients, &addrs).await[n0];
+    restart(&mut nodes, n0, true, 3600, "cur").await;
+    assert!(
+        pending(&clients, &addrs).await[n0] >= by_312,
+        "3.12 retirements lost on upgrade"
+    );
+    // ---- 2. Retired by 3.13, read back by the 3.12 node (rollback with
+    // retired shards; the process killed, not stopped cleanly).
+    delete(&s3, "p1").await;
+    committed.retain(|(k, _)| k != "p1");
+    retained(n0, by_312 + 1, "retired by the 3.13 node").await;
+    let by_313 = pending(&clients, &addrs).await[n0];
+    restart(&mut nodes, n0, false, 3600, "prev-2").await;
+    assert!(
+        pending(&clients, &addrs).await[n0] >= by_313,
+        "3.13 retirements lost on rollback"
+    );
+    check(&s3, &committed).await;
+
+    // ---- 3. A repair begun by the current controller, the controller
+    // rolled back in the middle, then forward again.
+    ctl.kill();
+    let cur_args = |id: &str| {
+        let mut a = env.controller_args(id);
+        a.extend(
+            [
+                "--auto-repair",
+                "--unhealthy-after-secs",
+                "3",
+                "--failure-repair-chunks-per-pass",
+                "1",
+            ]
+            .map(String::from),
+        );
+        a
+    };
+    ctl = env.spawn("ctl-cur", true, &cur_args("ctl-cur"));
+    leads_or_log(&env, "ctl-cur", &ctl).await;
+    let lost = index_of[1];
+    nodes[lost].kill();
+    wait_until(
+        "the current controller's repair and its status",
+        Duration::from_secs(60),
+        async || {
+            let g = arca_lake_metadata::ops::cluster::get_group(&meta, group.id)
+                .await
+                .unwrap();
+            g.state == arca_lake_metadata::records::GroupState::Repairing
+                && arca_lake_metadata::ops::repair_status::get(&meta, group.id)
+                    .await
+                    .unwrap()
+                    .is_some()
+        },
+    )
+    .await;
+    ctl.kill();
+    let mut prev_args = env.controller_args("ctl-prev-2");
+    prev_args.extend(["--auto-repair", "--unhealthy-after-secs", "3"].map(String::from));
+    ctl = env.spawn("ctl-prev-2", false, &prev_args);
+    let start = std::time::Instant::now();
+    while arca_lake_metadata::ops::cluster::get_group(&meta, group.id)
+        .await
+        .unwrap()
+        .state
+        != arca_lake_metadata::records::GroupState::Active
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(300),
+            "the 3.12 controller did not finish the repair; its log:\n{}",
+            ctl.log()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    check(&s3, &committed).await;
+    ctl.kill();
+    ctl = env.spawn("ctl-cur-2", true, &cur_args("ctl-cur-2"));
+    leads_or_log(&env, "ctl-cur-2", &ctl).await;
+    wait_until(
+        "the stale repair status removed",
+        Duration::from_secs(30),
+        async || {
+            arca_lake_metadata::ops::repair_status::list(&meta)
+                .await
+                .unwrap()
+                .is_empty()
+        },
+    )
+    .await;
+
+    // ---- 4. Everything current, short retention: what either release
+    // retired is reclaimed; every committed object reads back.
+    restart(&mut nodes, lost, true, 3, "cur-3").await;
+    for i in 0..4 {
+        if i != lost {
+            restart(&mut nodes, i, true, 3, "cur-3").await;
+        }
+    }
+    gw.kill();
+    let (gw2, s3) = gateway(&env, "gw-cur", true).await;
+    gw = gw2;
+    ctl.kill();
+    ctl = controller(&env, "ctl-cur-3", true);
+    leads_or_log(&env, "ctl-cur-3", &ctl).await;
+    // What was retired under 3600 s keeps it (the retention lowered to 3 s
+    // applies to what is retired from now on, ADR-0030): a new delete is
+    // retired, then reclaimed; the earlier retirements stay.
+    // The new delete's shards go (retired, then reclaimed after 3 s).
+    let live_total = async || -> u64 { live(&clients, &addrs).await.iter().sum() };
+    let before = live_total().await;
+    delete(&s3, "p2").await;
+    committed.retain(|(k, _)| k != "p2");
+    wait_until(
+        "the new delete reclaimed",
+        Duration::from_secs(120),
+        async || live_total().await <= before - 9,
+    )
+    .await;
+    // Node n0's retirements of p0 and p1 (made under 3600 s, nothing
+    // needs them) are still there; other retirements may have ended (a
+    // former member's shards, retired after the lowering, go at 3 s).
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let p = pending(&clients, &addrs).await;
+    assert!(
+        p[n0] >= by_313,
+        "an earlier retirement was reclaimed early: {p:?}"
+    );
+    check(&s3, &committed).await;
+    ctl.kill();
+    gw.kill();
+    for mut n in nodes {
+        n.kill();
+    }
 }

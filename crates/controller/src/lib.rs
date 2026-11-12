@@ -23,6 +23,7 @@ pub mod process;
 pub mod rebalance;
 pub mod recovery;
 pub mod repair;
+pub mod repair_liveness;
 pub mod tiering;
 pub mod trip;
 pub mod upgrade;

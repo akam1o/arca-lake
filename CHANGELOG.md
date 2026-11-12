@@ -6,6 +6,40 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Added (Phase 3.13)
+
+- Repair retargeting (ADR-0029, R-104): a `Repairing` group whose target
+  is gone, keeps refusing writes or stores bytes that do not check is
+  rebuilt onto another node through the fenced epoch change; a second
+  failed member is replaced once the slot under rebuild is whole and `k`
+  members answer. Per-group repair status (`("al","repairstat",group)`,
+  reasons `progressing`, `temporarily-blocked`, `awaiting-capacity`,
+  `awaiting-nodes`, `data-unrecoverable`, `permanently-blocked`) with
+  backoff, shown by `admin status`. Metrics
+  `arca_controller_repair_retargets_total`,
+  `arca_controller_groups_repair_waiting`.
+- Deferred reclamation at scale (ADR-0030, R-106): group commit of the
+  retirement log, background compaction, `ListPendingRequest.due_only`,
+  retention history (`pending-reclaim.retention`), health field
+  `reclaim_retained_bytes` (46), `ReclaimShardResponse.payload_bytes`,
+  `arca_controller_reclaimed_bytes_total`.
+- `s3load --op delete`; `benchmarks/linux/repair-faults.sh`,
+  `benchmarks/linux/reclaim-load.sh`.
+
+### Changed (Phase 3.13)
+
+- Rebalancing, tiering and cache repair wait only for repairs that
+  progress; a drained node waits only while it holds shards of a group
+  being rebuilt, and its drain reports what it waits for.
+- Write admission counts reclaimed bytes, not GC's deletes, as room
+  coming back while nodes defer deletes.
+- A manual delete-fence close (`admin delete-fence close`, `admin
+  recovery begin`) does not count a node whose disk holds another
+  identity; adopting an identity needs the facts role and the node's
+  certificate id; a channel made before a node id was known is re-made.
+- Lowering `--reclaim-retention-secs` keeps the earlier retention for
+  what was retired before.
+
 ### Added (Phase 3.12)
 
 - Deferred reclamation (ADR-0028, R-94(b) bounded): storage nodes retire

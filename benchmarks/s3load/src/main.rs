@@ -32,6 +32,9 @@ enum Op {
     MultipartPut,
     /// GET every object `--passes` times.
     Get,
+    /// DELETE every object once (a missing one is not an error: S3 answers
+    /// 204 either way).
+    Delete,
 }
 
 #[derive(Debug, Parser)]
@@ -215,6 +218,17 @@ async fn one_request(
                 .map_err(|e| e.to_string())?
                 .to_bytes();
             (status, body.len() as u64, Some(body))
+        }
+        Op::Delete => {
+            let req = http::Request::builder()
+                .method("DELETE")
+                .uri(&uri)
+                .body(Full::new(Bytes::new()))
+                .map_err(|e| e.to_string())?;
+            let resp = client.request(req).await.map_err(|e| e.to_string())?;
+            let status = resp.status();
+            let _ = resp.into_body().collect().await;
+            (status, 0, None)
         }
         Op::CreateBucket => unreachable!(),
     };
@@ -517,8 +531,8 @@ fn main() {
                     1
                 }
             },
-            Op::Put | Op::MultipartPut | Op::Get => {
-                let passes = if matches!(args.op, Op::Put | Op::MultipartPut) {
+            Op::Put | Op::MultipartPut | Op::Get | Op::Delete => {
+                let passes = if matches!(args.op, Op::Put | Op::MultipartPut | Op::Delete) {
                     1
                 } else {
                     args.passes.max(1)

@@ -2406,6 +2406,29 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                             );
                         }
                     }
+                    // Phase 3.13 (R-104): why each rebuilding group is
+                    // where it is.
+                    if let Ok(statuses) =
+                        arca_lake_metadata::ops::repair_status::list(meta.as_ref()).await
+                    {
+                        for s in statuses {
+                            println!(
+                                "repair group {} member {} target {} epoch {} status {} since_ms {} last_progress_ms {} failures {} retargets {} next_attempt_ms {} former {:?} detail {:?}",
+                                s.group,
+                                s.index,
+                                s.target,
+                                s.epoch,
+                                s.reason.as_str(),
+                                s.since_ms,
+                                s.last_progress_ms,
+                                s.failures,
+                                s.retargets,
+                                s.next_attempt_ms,
+                                s.former,
+                                s.detail
+                            );
+                        }
+                    }
                     ExitCode::SUCCESS
                 }
                 (n, g, l) => fail(
@@ -2556,6 +2579,15 @@ fn print_node_fences(nodes: &[arca_lake_controller::delete_fence::NodeFence]) {
                 if n.held { " held" } else { "" }
             ),
             Err(e) => println!("node {} unreachable ({e})", n.node_id),
+        }
+        match &n.identity {
+            arca_lake_controller::delete_fence::IdentityCheck::Verified => {}
+            arca_lake_controller::delete_fence::IdentityCheck::Unverifiable(why) => {
+                println!("node {} identity unverified ({why})", n.node_id);
+            }
+            arca_lake_controller::delete_fence::IdentityCheck::Mismatch(why) => {
+                println!("node {} identity MISMATCH ({why}): not counted", n.node_id);
+            }
         }
     }
 }

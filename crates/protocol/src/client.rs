@@ -631,7 +631,10 @@ impl NodeClients {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(addr.to_string(), node_id);
-        if prev.is_some_and(|p| p != node_id) {
+        // A channel made before the id was known (or for another id) is
+        // not pinned to this node's certificate name (Phase 3.13, R-105):
+        // the next call connects again, pinned.
+        if prev != Some(node_id) {
             self.forget(addr);
         }
     }
@@ -1415,6 +1418,25 @@ impl NodeClients {
     ) -> Result<(), tonic::Status> {
         self.reclaim_or_keep(addr, shard, epoch, token, observed_at_ms, false)
             .await
+            .map(|_| ())
+    }
+
+    /// [`Self::reclaim_shard`], returning the payload bytes the node
+    /// removed (Phase 3.13; 0 from an earlier release).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::reclaim_shard`].
+    pub async fn reclaim_shard_sized(
+        &self,
+        addr: &str,
+        shard: ShardRef,
+        epoch: u64,
+        token: RecordToken,
+        observed_at_ms: u64,
+    ) -> Result<u64, tonic::Status> {
+        self.reclaim_or_keep(addr, shard, epoch, token, observed_at_ms, false)
+            .await
     }
 
     /// End the retirement of a record the caller's metadata needs (Phase
@@ -1432,6 +1454,7 @@ impl NodeClients {
     ) -> Result<(), tonic::Status> {
         self.reclaim_or_keep(addr, shard, epoch, token, 0, true)
             .await
+            .map(|_| ())
     }
 
     async fn reclaim_or_keep(
@@ -1442,7 +1465,7 @@ impl NodeClients {
         token: RecordToken,
         observed_at_ms: u64,
         keep: bool,
-    ) -> Result<(), tonic::Status> {
+    ) -> Result<u64, tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::ReclaimShard,
@@ -1477,8 +1500,7 @@ impl NodeClients {
                     observed_at_ms,
                     keep,
                 };
-                client.reclaim_shard(req).await?;
-                Ok(())
+                Ok(client.reclaim_shard(req).await?.into_inner().payload_bytes)
             })
         })
         .await
@@ -1498,6 +1520,25 @@ impl NodeClients {
         after: Option<ShardRef>,
         limit: u32,
     ) -> Result<(Vec<(ShardRef, RecordToken, u64)>, Option<ShardRef>, u64), tonic::Status> {
+        self.list_pending_with(addr, after, limit, false).await
+    }
+
+    /// [`Self::list_pending`], with `due_only` (Phase 3.13): only records
+    /// due by the node's clock; a page may be short or empty with a next
+    /// cursor (each call looks at a bounded number of records). A node of
+    /// an earlier phase lists every record.
+    ///
+    /// # Errors
+    ///
+    /// RPC errors.
+    #[allow(clippy::type_complexity)]
+    pub async fn list_pending_with(
+        &self,
+        addr: &str,
+        after: Option<ShardRef>,
+        limit: u32,
+        due_only: bool,
+    ) -> Result<(Vec<(ShardRef, RecordToken, u64)>, Option<ShardRef>, u64), tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::ListShards,
@@ -1513,6 +1554,7 @@ impl NodeClients {
                         protocol_version: negotiated,
                         after: after.map(|a| a.pb()),
                         limit,
+                        due_only,
                     })
                     .await?
                     .into_inner();

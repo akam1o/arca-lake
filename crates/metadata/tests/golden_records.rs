@@ -27,6 +27,7 @@ use arca_lake_metadata::ops::recovery::{
     Acceptance, AffectedObject, DataLossRecord, FinalizeAudit, NodeCapRecord, RecoveryPhase,
     RestoreCounts, RestoreCursor, RestoreReport,
 };
+use arca_lake_metadata::ops::repair_status::{RepairReason, RepairStatus};
 use arca_lake_metadata::records::{
     BucketRecord, CacheCopyTokens, CachePlacement, CacheShardToken, Checksum, ChecksumAlgorithm,
     ChecksumType, ChunkRecord, ClusterPhase, ClusterStateRecord, CurrentPointer, DurablePlacement,
@@ -600,6 +601,28 @@ fn cases() -> Vec<Case> {
             "RebalanceInTransit",
             RebalanceInTransit {
                 entries: vec![(1, 4 << 20, 9 << 20, 99), (2, 7, 0, 100)],
+            },
+        ),
+        case(
+            "RepairStatus",
+            RepairStatus {
+                group: 4,
+                epoch: 9,
+                index: 2,
+                target: 17,
+                reason: RepairReason::AwaitingCapacity,
+                detail: "no room".into(),
+                since_ms: 1_793_000_000_000,
+                last_progress_ms: 1_793_000_000_500,
+                failures: 3,
+                stalls: 4,
+                next_attempt_ms: 1_793_000_060_000,
+                former: vec![5, 17],
+                untrusted: vec![17],
+                walked_clean: true,
+                retargets: 1,
+                excluded: vec![3],
+                no_target: true,
             },
         ),
     ]

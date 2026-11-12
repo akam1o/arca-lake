@@ -19,6 +19,58 @@ pub struct NodeFence {
     pub fence: Result<(u64, bool), String>,
     /// It holds an operator hold (only known when it answered).
     pub held: bool,
+    /// What answered at its address, by the identity it reports (Phase
+    /// 3.13, R-105).
+    pub identity: IdentityCheck,
+}
+
+/// The identity a node reports against what the metadata records for it
+/// (Phase 3.13, R-105): what a manual close counts as acknowledged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityCheck {
+    /// The node holds this node id's recorded identity.
+    Verified,
+    /// It cannot be told (no identity reported: an earlier release, no
+    /// identity adopted yet, no record, or no answer): counted, listed.
+    Unverifiable(String),
+    /// Another disk answers at the address (another node id, or another
+    /// token than the recorded one): never counted as acknowledging.
+    Mismatch(String),
+}
+
+/// Compare what `h` reports with `record` for `node_id`.
+#[must_use]
+pub fn check_identity(
+    node_id: u64,
+    record: Option<&arca_lake_metadata::ops::node_lifecycle::NodeIdentityRecord>,
+    h: &arca_lake_protocol::storage::v1::HealthResponse,
+) -> IdentityCheck {
+    if !h.identity_supported {
+        return IdentityCheck::Unverifiable("an earlier release: no identity reported".into());
+    }
+    if h.identity_node_id == 0 {
+        // A disk without an identity where this node acknowledged one: not
+        // that disk (independent review: a replaced or emptied disk).
+        if record.is_some_and(|r| r.acknowledged) {
+            return IdentityCheck::Mismatch(
+                "the disk holds no identity, although this node acknowledged one (a replaced or emptied disk)".into(),
+            );
+        }
+        return IdentityCheck::Unverifiable("the node holds no identity yet".into());
+    }
+    if h.identity_node_id != node_id {
+        return IdentityCheck::Mismatch(format!(
+            "the disk at this address holds the identity of node {}",
+            h.identity_node_id
+        ));
+    }
+    match record {
+        Some(r) if h.identity_token.as_ref() == r.token.as_slice() => IdentityCheck::Verified,
+        Some(_) => IdentityCheck::Mismatch(
+            "the disk holds another registration of this node id (a reused id, or metadata restored from before it)".into(),
+        ),
+        None => IdentityCheck::Unverifiable("no identity recorded for the node".into()),
+    }
 }
 
 /// What [`close_and_push`] did.
@@ -34,7 +86,8 @@ pub struct Closed {
 
 impl Closed {
     /// Nodes that did not acknowledge the closed generation (unreachable,
-    /// or holding another state).
+    /// holding another state, or another disk answering at the address:
+    /// Phase 3.13, R-105).
     #[must_use]
     pub fn not_acknowledged(&self) -> Vec<u64> {
         self.nodes
@@ -44,6 +97,7 @@ impl Closed {
             .filter(|n| {
                 !matches!(n.fence, Ok((g, false)) if g >= self.record.generation)
                     || (self.record.operator_hold && !n.held)
+                    || matches!(n.identity, IdentityCheck::Mismatch(_))
             })
             .map(|n| n.node_id)
             .collect()
@@ -60,19 +114,30 @@ pub async fn node_fences<S: KvStore>(
     clients: &NodeClients,
 ) -> Result<Vec<NodeFence>, ControlError> {
     let mut out = Vec::new();
+    let identities = arca_lake_metadata::ops::node_lifecycle::identities(meta).await?;
     // Not removed nodes (third review): what answers at their address must
-    // not set the generation a close goes to.
+    // not set the generation a close goes to, nor another disk there
+    // (Phase 3.13, R-105).
     for n in active_nodes(meta).await? {
         clients.note_node_id(&n.address, n.id);
         let h = clients.health(&n.address).await;
         let held = h.as_ref().is_ok_and(|h| h.delete_fence_hold);
-        let fence = h
-            .map(|h| (h.delete_fence_generation, h.delete_fence_open))
-            .map_err(|e| format!("{}: {}", e.code(), e.message()));
+        let identity = match &h {
+            Ok(h) => check_identity(n.id, identities.get(&n.id), h),
+            Err(_) => IdentityCheck::Unverifiable("no answer".into()),
+        };
+        let fence = match h {
+            Ok(_) if matches!(identity, IdentityCheck::Mismatch(_)) => {
+                Err("another disk answers at the address".to_string())
+            }
+            Ok(h) => Ok((h.delete_fence_generation, h.delete_fence_open)),
+            Err(e) => Err(format!("{}: {}", e.code(), e.message())),
+        };
         out.push(NodeFence {
             node_id: n.id,
             fence,
             held,
+            identity,
         });
     }
     Ok(out)
@@ -143,10 +208,23 @@ pub async fn close_and_push<S: KvStore>(
         let fence = pushed
             .map(|(g, o, _)| (g, o))
             .map_err(|e| format!("{}: {}", e.code(), e.message()));
+        // Which disk acknowledged (Phase 3.13, R-105): a node whose push
+        // carried no acknowledged identity is asked what it holds; one
+        // holding another node's, or another registration's, is not
+        // counted (the node meant may be elsewhere, its fence open).
+        let identity = if fence.is_ok() {
+            match clients.health(&n.address).await {
+                Ok(h) => check_identity(n.id, identities.get(&n.id), &h),
+                Err(e) => IdentityCheck::Unverifiable(format!("{}: {}", e.code(), e.message())),
+            }
+        } else {
+            IdentityCheck::Unverifiable("did not acknowledge".into())
+        };
         nodes.push(NodeFence {
             node_id: n.id,
             fence,
             held: is_held,
+            identity,
         });
     }
     Ok(Closed {

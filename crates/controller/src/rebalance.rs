@@ -368,11 +368,13 @@ pub async fn run_once_with<S: KvStore>(
         return Ok(report);
     }
     let groups = cluster::list_groups(meta).await?;
-    if let Some(g) = groups
-        .iter()
-        .find(|g| !g.is_cache() && g.state != GroupState::Active)
-    {
-        report.reason = format!("group {} is {:?}: repair first", g.id, g.state);
+    // Repair first, but a group whose repair waits (nodes, capacity, an
+    // operator, unrecoverable data) does not stop rebalancing elsewhere
+    // (Phase 3.13, R-104); its own chunks are never moved (only Active
+    // groups are sources or targets).
+    let statuses = crate::repair_liveness::statuses(meta).await?;
+    if let Some((_, why)) = crate::repair_liveness::holding_group(&groups, &statuses) {
+        report.reason = why;
         finish(meta, &mut state, &report).await?;
         return Ok(report);
     }

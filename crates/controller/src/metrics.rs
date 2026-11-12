@@ -208,6 +208,10 @@ pub struct Metrics {
     pub leader: AtomicBool,
     /// Current fencing token (0 when not leader).
     pub leader_token: AtomicU64,
+    /// The leader token whose term completed a health pass (Phase 3.13):
+    /// until then node health is what an earlier leader recorded, stale
+    /// by the failover gap, and no repair decision is made on it.
+    pub health_seen_term: AtomicU64,
     /// Leadership acquisitions.
     pub leader_acquired_total: AtomicU64,
     /// Leadership losses (renewal failed or fenced).
@@ -298,6 +302,12 @@ pub struct Metrics {
     /// Group repairs that failed in a pass while the others went on
     /// (Phase 3.10 audit).
     pub repair_group_errors_total: AtomicU64,
+    /// Repairs whose target was replaced because it was gone or kept
+    /// failing (Phase 3.13, R-104).
+    pub repair_retargets_total: AtomicU64,
+    /// `Repairing` groups whose repair waits (nodes, capacity, an operator,
+    /// unrecoverable data) rather than progressing (Phase 3.13).
+    pub groups_repair_waiting: AtomicU64,
     /// Health passes that found a node at another incarnation of the
     /// cluster's sequence or above it (Phase 3.10 review).
     pub incarnation_conflicts_total: AtomicU64,
@@ -313,6 +323,21 @@ pub struct Metrics {
     pub identity_unverifiable_total: AtomicU64,
     /// Retired records reclaimed (Phase 3.12, ADR-0028).
     pub reclaimed_total: AtomicU64,
+    /// Payload bytes of the records reclaimed (Phase 3.13).
+    pub reclaimed_bytes_total: AtomicU64,
+    /// Nodes that defer deletes (or did not answer), at the last reclaim
+    /// pass (Phase 3.13).
+    pub nodes_deferring: AtomicU64,
+    /// A reclaim pass ran in this process (until then deferral is unknown
+    /// and GC's deletes are not counted as room).
+    pub deferral_known: std::sync::atomic::AtomicBool,
+    /// Physical bytes given back to the devices, for write admission
+    /// (Phase 3.13): what reclaims removed, and what GC deleted while no
+    /// node defers (a deferred delete gives nothing back before its
+    /// reclaim, a retention later).
+    pub room_returned_bytes: AtomicU64,
+    /// GC's deleted bytes already looked at for `room_returned_bytes`.
+    pub gc_bytes_seen: AtomicU64,
     /// Reclaims a node refused (its retention, sequence or fence checks).
     pub reclaim_refused_total: AtomicU64,
     /// Retired records (or nodes) a reclaim pass skipped on an error,
@@ -532,8 +557,20 @@ impl Metrics {
             self.nodes_not_deferring.load(Ordering::Relaxed),
         );
         out += &c(
+            "arca_controller_reclaimed_bytes_total",
+            self.reclaimed_bytes_total.load(Ordering::Relaxed),
+        );
+        out += &c(
             "arca_controller_repair_group_errors_total",
             self.repair_group_errors_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_repair_retargets_total",
+            self.repair_retargets_total.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_groups_repair_waiting",
+            self.groups_repair_waiting.load(Ordering::Relaxed),
         );
         out += &c(
             "arca_controller_rebalance_capacity_stops_total",

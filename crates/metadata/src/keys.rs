@@ -258,6 +258,19 @@ pub fn epoch_intents_prefix() -> Key {
     pack(&(ROOT, "epochint"))
 }
 
+/// Repair status of a group (Phase 3.13, R-104): a key of its own, which
+/// earlier releases never read.
+#[must_use]
+pub fn repair_status(group_id: u64) -> Key {
+    pack(&(ROOT, "repairstat", group_id))
+}
+
+/// Prefix of every repair status.
+#[must_use]
+pub fn repair_statuses_prefix() -> Key {
+    pack(&(ROOT, "repairstat"))
+}
+
 /// Every node identity record.
 #[must_use]
 pub fn node_identities_range() -> KeyRange {

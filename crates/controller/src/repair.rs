@@ -95,6 +95,7 @@ fn now_unix_ms() -> u64 {
 
 /// Result of a repair.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RepairReport {
     /// Chunks this walk could not rebuild, queued for stripe repair
     /// (Phase 3.12).
@@ -116,6 +117,12 @@ pub struct RepairReport {
     pub used_former: usize,
     /// Whether the group is `Active` again.
     pub complete: bool,
+    /// The completeness check found the rebuilt slot itself whole: every
+    /// chunk placed in the group listed on the target, none of its shards
+    /// corrupt, none queued for stripe repair, the target answering
+    /// (Phase 3.13: only then may a second failed member be replaced; its
+    /// shards are no longer needed for any chunk to have `k`).
+    pub slot_whole: bool,
     /// What the completeness check found.
     pub completeness: Completeness,
 }
@@ -127,6 +134,8 @@ pub struct Completeness {
     pub chunks: usize,
     /// Chunks missing on at least one member.
     pub missing: usize,
+    /// Of `missing`, chunks missing (or retired) on the member rebuilt.
+    pub missing_on_target: usize,
     /// Chunks whose shards have different payload lengths across members.
     pub length_mismatch: usize,
     /// Shards that failed verification, per member index.
@@ -364,6 +373,10 @@ pub async fn replace_member_with<S: KvStore>(
         }
     }
     let complete = completeness.is_complete() && !queued_for_member;
+    report.slot_whole = completeness.missing_on_target == 0
+        && completeness.corrupt.is_empty()
+        && !completeness.unavailable.contains(&index)
+        && !queued_for_member;
     // Shards missing on the other members (a corrupt one quarantined when
     // the move read it, a member that lost one) are stripe repair's work:
     // queue it, so that the next check can pass (otherwise the group would
@@ -547,6 +560,10 @@ async fn reconstruct_member<S: KvStore>(
             persist_cursor(meta, group, index, cid).await?;
             continue;
         }
+        // Members whose listing failed in this walk are not asked for
+        // shards either (Phase 3.13: with a member down, every chunk's read
+        // of it waited for the RPC retries, and a walk took hours).
+        let down = walker.unavailable();
         let rebuilt = match reconstruct_one(
             meta,
             clients,
@@ -557,6 +574,7 @@ async fn reconstruct_member<S: KvStore>(
             coder.as_ref(),
             params,
             opts,
+            &down,
         )
         .await
         {
@@ -691,6 +709,7 @@ async fn reconstruct_one<S: KvStore>(
     coder: &dyn ErasureCoder,
     params: CodeParams,
     opts: &RepairOptions,
+    down: &[usize],
 ) -> Result<Option<(Bytes, Source)>, ControlError> {
     let cid = chunk.chunk_id;
     let k = params.data;
@@ -739,7 +758,7 @@ async fn reconstruct_one<S: KvStore>(
     let order: Vec<usize> = chunk
         .holders()
         .chain(0..group.members.len())
-        .filter(|&i| i != index)
+        .filter(|&i| i != index && !down.contains(&i))
         .collect();
     for i in order {
         if have >= k || shards[i].is_some() {
@@ -896,6 +915,53 @@ fn joined_matches(
     arca_lake_storage::format::crc32c(&joined) == crc32c
 }
 
+/// Whether every shard of slot `index` that one of `former` (nodes that
+/// held the slot, answering) still lists, of a chunk placed in the group,
+/// is on the slot's member (Phase 3.13 re-review: a chunk no current
+/// member lists is invisible to the members' walk, but a former node may
+/// hold it). `false` also when a listing fails.
+///
+/// # Errors
+///
+/// Metadata errors.
+#[allow(clippy::implicit_hasher)]
+pub async fn former_shards_on_target<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    nodes: &HashMap<u64, NodeRecord>,
+    group: &GroupRecord,
+    index: usize,
+    former: &[u64],
+) -> Result<bool, ControlError> {
+    let Some(target) = group.members.get(index).and_then(|m| nodes.get(&m.node_id)) else {
+        return Ok(false);
+    };
+    let slot = u16::try_from(index).unwrap_or(u16::MAX);
+    let Ok(on_target) = clients.list_shards(&target.address, group.id).await else {
+        return Ok(false);
+    };
+    let on_target: BTreeSet<[u8; 16]> = on_target
+        .iter()
+        .filter(|s| s.shard_index == slot)
+        .map(|s| s.chunk_id)
+        .collect();
+    for id in former {
+        if group.members.iter().any(|m| m.node_id == *id) {
+            continue;
+        }
+        let Some(n) = nodes.get(id) else { continue };
+        let Ok(held) = clients.list_shards(&n.address, group.id).await else {
+            return Ok(false);
+        };
+        for s in held.iter().filter(|s| s.shard_index == slot) {
+            if !on_target.contains(&s.chunk_id) && placed_here(meta, group, &s.chunk_id).await? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Completeness check: walk every member's listing (same chunk IDs, same
 /// payload lengths), verify the replacement's shards (and every member's
 /// when `verify_all_members`).
@@ -940,6 +1006,9 @@ async fn check_completeness<S: KvStore>(
             && placed_here(meta, group, &chunk.chunk_id).await?
         {
             c.missing += 1;
+            if target_retired || chunk.present.get(index).is_none_or(Option::is_none) {
+                c.missing_on_target += 1;
+            }
             let others: Vec<u16> = chunk
                 .present
                 .iter()
