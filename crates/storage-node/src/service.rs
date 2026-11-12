@@ -929,7 +929,7 @@ impl StorageNode for StorageNodeService {
         let (deleted, was_deferred) = tokio::task::spawn_blocking(move || {
             let _fence = fence;
             let mut d = deferred.lock().unwrap_or_else(PoisonError::into_inner);
-            if d.defers(key.group_id) {
+            if d.defers(key.group_id) || d.protects(&key) {
                 if let Some(newest) = store.locate(&key).map(|l| l.sequence) {
                     // Retired, not removed (ADR-0028): the record stays
                     // readable until a reclaim proves it unneeded long

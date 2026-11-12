@@ -81,7 +81,7 @@ thread (one `fdatasync` ≈ 1 ms), 2,425 with 4, 4,106 with 8, 8,016 with
 (estimated 80 s to open, 11 GB of memory). The O(N) work left and its
 limits: ADR-0030 §Remaining O(N) work.
 
-Real-process reclaim load (host A, §8): pending.
+Real-process reclaim load: §8.
 
 ## 5. Capacity and admission
 
@@ -121,14 +121,88 @@ acknowledged; adopting an identity needs the facts role and the node's
 certificate id. Remaining (Low): a node with no identity yet, or of an
 earlier release, is counted and listed `identity unverified`.
 
-## 8. Real-process runs (host A)
+## 8. Real-process runs (host A, and A with B for rebalancing)
 
-Pending (final build).
+**Repair under faults** (`benchmarks/linux/repair-faults.sh`, final build;
+two controllers, eight nodes, two 2+1 groups, PUT/GET/DELETE load
+throughout; one run): every scenario passed, every acknowledged object
+read back verified.
 
-## 9. Upgrade and rollback
+| Scenario | Result |
+| --- | --- |
+| S1 target stopped mid-rebuild | rebuilt onto a third node; `Active` 30 s after the target stop (59 s from the first stop) |
+| S2 leader killed mid-repair | completed by the other controller, 29 s after the kill |
+| S3 stopped nodes return | nothing changed (stale shards ignored) |
+| S4 second member stopped (2+1) | `awaiting-nodes` reached (430 s: each attempt first deep-verifies the target's shards, minutes on a large group, R-104 remainder); the needed member never replaced; `Active` 69 s after it returned |
+| S5 drain while group 1 waits | the drained node decommissioned; rebalancing not held by group 1 |
 
-Pending (final build): previous-release suites with 3.9, 3.10, 3.11, and
-`upgrade_and_rollback_with_the_phase_3_12_release` (new, also in CI).
+PUTs refused while both groups had a member down (a write needs every
+member of its group; unchanged from Phase 3.12): 821 errors over 674
+iterations of four objects, none acknowledged and lost. Earlier runs of
+the script found two scheduling problems, both fixed: a new leader repaired
+a healthy member away on last-seen times stale by the failover gap (§11),
+and a repair with a member down read it for every chunk.
+
+**Deferred reclamation under load** (`benchmarks/linux/reclaim-load.sh`,
+three nodes, one 2+1 group, retention 120 s, skew allowance 5 s, 20 min,
+iterations of 16 × 1 MiB PUT, verified GET of the previous iteration,
+DELETE of the one before, 2 s apart; one run per release, same s3load):
+
+| | Phase 3.12 | Phase 3.13 |
+| --- | --- | --- |
+| PUT ops/s, median (IQR) | 157.8 (148.9–164.2) | 157.4 (150.6–165.1) |
+| PUT p95 / p99, ms (medians) | 55.7 / 56.9 | 55.6 / 56.5 |
+| GET ops/s, median (IQR) | 550.2 (515.8–576.0) | 557.8 (529.4–585.6) |
+| GET p95 / p99, ms | 14.6 / 15.2 | 14.2 / 14.8 |
+| DELETE ops/s, median (IQR) | 1,831 (1,709–1,938) | 1,842 (1,685–1,940) |
+| DELETE p95 / p99, ms | 4.6 / 4.6 | 4.5 / 4.6 |
+| Errors / body mismatches | 0 / 0 | 0 / 0 |
+| Reclaimed records/s | 17.6 | 17.7 (8.9 MiB/s) |
+| Node CPU s (three nodes) | 25.8, 25.6, 19.4 | 23.2, 23.2, 17.0 |
+| Node RSS max, MiB | 63–67 | 55–70 |
+| Retirement files, max | 286 KiB | 228 KiB |
+
+Every difference is within the runs' spread: no regression, and no
+improvement is claimed. One sample per release. Unpaced runs (no sleep
+between iterations) filled the nodes' allotments with a retention's
+deletes in both releases: admission went to `write_rejected`; the smallest
+margin above the reserve seen was about 236 MiB (3.12) and 238 MiB (3.13),
+the reserve never crossed (the capacity requirement of R-106).
+
+**Rebalancing** (`benchmarks/linux/rebalance-load.sh`, two hosts, 30 min
+per window, a leader kill and a node stop in the second window; one run
+per release): both releases passed (no body mismatch, every acknowledged
+object read back). Not comparable: with the default one-day retention the
+script's 3 GiB allotments filled with retained deletes before any plan, so
+neither release moved a byte and nearly every PUT was refused
+(`write_rejected`) in both. GET medians: 81.5 and 81.7 ops/s (3.13, 3.12)
+in the rebalancing window; 73.8 (IQR 54.9–79.3) and 82.0 (80.7–83.4) in
+the first window, a spread too wide to call. Rebalancing on real
+processes is **not verified** this phase (the script needs capacity for a
+retention's deletes, or a short retention).
+
+## 9. Upgrade and rollback (host A, FoundationDB)
+
+Final build, `fdb-suite.sh` with the CI filters plus `previous_release::`
+(binaries of 3.9, 3.10, 3.11 built from their commits, 3.12 from
+`cddd078`): 70 of 70 passed; `upgrade_and_rollback_with_the_phase_3_12_release`
+three more runs, all passed; the three-process failover and membership
+fault suites 7 of 7; `mixed_version::rolling_upgrade_with_two_binaries`
+passed after the retention-0 correction (§11).
+
+The 3.12 test covers: retirements of 3.12 read by a 3.13 node, of 3.13
+read by a node rolled back to 3.12 (process killed); a repair begun by a
+3.13 controller (a repair status left) finished by a 3.12 controller,
+the stale status removed by 3.13 back; the retention lowered from 3600 s
+to 3 s afterwards keeping the earlier retention for what was retired
+before while a new delete is reclaimed. The 3.10/3.11 matrices were
+updated for that rule (a node's retirements across a lowering stay
+retained).
+
+Not covered: rollback across an `admin restore` with 3.12 (covered for
+3.11 by `a_managed_restore_and_a_removed_node_with_a_previous_release_binary`);
+a rollback with a `pending-reclaim.prev` left by a crash (documented:
+start once on 3.13 first).
 
 ## 10. Mutation runs (in process, host B)
 
@@ -172,7 +246,7 @@ Critical or High was left. Findings and resolution:
 | Error after a compaction's rename left appends on the unlinked log | other | High | fixed (fail closed) |
 | Retention history pruned with a future-dated retirement | other | High | fixed (never pruned by time) |
 | Duplicate delete acknowledged before the retirement was synced | other | Medium | fixed |
-| Retention lowered to 0 bypassed earlier protection | other | Medium | fixed (still defers) |
+| Retention lowered to 0 bypassed earlier protection | other | Medium | fixed: at 0 a record retired before stays retired (a delete of it keeps it); other deletes are immediate again (a first fix kept every delete deferred for good, which CI's mixed-version test caught) |
 | Failed seal disabled compaction until restart | other | Medium | fixed |
 | Admission credited GC's deletes before deferral was known | other | Medium | fixed |
 | A kept record's end not durable: a later delete reused the old retirement time | Claude | High | fixed (keep waits) |
@@ -201,9 +275,25 @@ repair pass before the term's first health pass
 the guard removed). Pre-existing since auto repair; with the default
 `unhealthy_after` (60 s) it needed a failover gap that long.
 
-## 12. Not verified
+## 12. CI and test adaptations
+
+The CI runs at the final commits are in the Phase 3.13 report. Test
+changes to existing tests: `membership::a_group_that_cannot_finish_*`
+(expects the retarget), the 3.10/3.11 matrices (the lowered-retention
+rule), `delete_fence::a_restore_with_every_procedural_safeguard_skipped_loses_nothing`
+(a held delete refused because the node adopted an identity since is
+counted as not applied: with this phase's timing a controller adopts
+identities before the delivery in about one run of three; refused either
+way).
+
+## 13. Not verified
 
 - Power loss and physical-disk `fsync` behaviour of the retirement log.
 - Clock skew between hosts (single-host runs share a clock).
 - 1e8 retired records per node (estimated only).
-- A 24-hour run; rebalancing convergence beyond the runs of §8.
+- A 24-hour run; one sample per release of each real-process run (no
+  variance across runs).
+- Rebalancing on real processes (§8: the workload filled the allotments
+  with retained deletes in both releases).
+- Repair liveness at scale: an attempt's time is dominated by the target's
+  deep verification (R-104 remainder).

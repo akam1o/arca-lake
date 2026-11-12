@@ -743,6 +743,10 @@ impl Deferred {
         // above the configured retention go, and past 64 the two oldest
         // merge into one at least as protective.
         prior.retain(|(r, _)| *r > self.retention_ms);
+        // An entry protects nothing once no retirement predates its end
+        // (by the records, never by the clock).
+        let oldest = self.entries.values().map(|e| e.retired_ms).min();
+        prior.retain(|(_, until)| oldest.is_some_and(|o| o < *until));
         prior.sort_by_key(|(_, until)| *until);
         while prior.len() > 64 {
             let (r0, _) = prior.remove(0);
@@ -778,16 +782,19 @@ impl Deferred {
     /// is not known as a cache group (an unknown group is durable).
     #[must_use]
     pub fn defers(&self, group: u64) -> bool {
-        // A retention lowered to 0 still defers while an earlier one may
-        // protect records (independent review, Phase 3.13): a delete of a
-        // record retired before keeps its retirement.
         // Damaged: always (re-review: a history that could not be read may
         // have protected records even at retention 0).
         self.damaged()
-            || (self.retention_ms > 0 || !self.prior_retentions.is_empty())
-                && (self.all_durable
-                    || self.damaged()
-                    || self.cache_groups.get(&group) != Some(&true))
+            || self.retention_ms > 0
+                && (self.all_durable || self.cache_groups.get(&group) != Some(&true))
+    }
+
+    /// Whether a delete of `key` must keep it although deletes are not
+    /// deferred: it is retired already (a retention lowered to 0 does not
+    /// shorten what was retired before; independent review, Phase 3.13).
+    #[must_use]
+    pub fn protects(&self, key: &ShardKey) -> bool {
+        self.entries.contains_key(key)
     }
 
     /// Whether a write of `group` with this class changes nothing of the
@@ -1883,8 +1890,22 @@ mod tests {
         assert_eq!(d.retention_for(old), 100_000);
         drop(d);
         let d = Deferred::open(dir.path(), 0);
-        assert!(d.defers(9), "lowered to 0: deletes still retained");
+        // Lowered to 0: new deletes go at once, what was retired stays
+        // retired, with its retention.
+        assert!(!d.defers(9));
+        assert!(d.protects(&key(1)));
+        assert!(!d.protects(&key(3)));
         assert_eq!(d.retention_for(old), 100_000);
+        drop(d);
+        // Once nothing retired before the lowering is left, the history
+        // entry goes (by the records, not the clock).
+        let mut d = Deferred::open(dir.path(), 0);
+        d.reclaimed(&key(1), 1).unwrap();
+        d.reclaimed(&key(2), 1).unwrap();
+        d.syncer().flush().unwrap();
+        drop(d);
+        let d = Deferred::open(dir.path(), 0);
+        assert_eq!(d.retention_for(old), 0);
     }
 
     /// Independent review (Phase 3.13): the end of a kept record is durable

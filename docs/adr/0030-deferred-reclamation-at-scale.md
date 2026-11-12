@@ -69,8 +69,11 @@ although a deferred delete frees nothing before its reclaim.
   lowering, `(earlier retention, until)`. A record retired before
   `until` is kept at least the earlier retention; `until` is at least
   the newest retirement known at the start (a clock behind it does not
-  shorten it). Raising the retention covers everything at once. A
-  damaged history fails closed.
+  shorten it). Raising the retention covers everything at once. At a
+  retention of 0, deletes are immediate again except of a record retired
+  before, which stays retired. An entry is dropped once no retired record
+  predates its end (by the records, never by the clock). A damaged history
+  fails closed.
 - **Retained bytes.** Each record's payload size is kept in memory
   (measured at start from the store, noted at retirement): node health
   `reclaim_retained_bytes` (field 46). `ReclaimShardResponse.payload_bytes`
