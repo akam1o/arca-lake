@@ -72,7 +72,11 @@ although a deferred delete frees nothing before its reclaim.
   shorten it). Raising the retention covers everything at once. At a
   retention of 0, deletes are immediate again except of a record retired
   before, which stays retired. An entry is dropped once no retired record
-  predates its end (by the records, never by the clock). A damaged history
+  predates its end (by the records, never by the clock). A record retired
+  again under another incarnation starts its clock again (ADR-0028); if
+  its earlier retirement would end later, the difference is added to the
+  history, durable before the retirement (it may protect other records of
+  that span longer). A damaged history, or one that cannot be written,
   fails closed.
 - **Retained bytes.** Each record's payload size is kept in memory
   (measured at start from the store, noted at retirement): node health

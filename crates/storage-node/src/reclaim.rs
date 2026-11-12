@@ -758,6 +758,11 @@ impl Deferred {
         if !changed {
             return Ok(());
         }
+        self.write_retentions()
+    }
+
+    /// Write the retention history (a temporary file synced, renamed).
+    fn write_retentions(&self) -> std::io::Result<()> {
         let mut body = line(&format!("c {}", self.retention_ms));
         for (r, u) in &self.prior_retentions {
             body.push_str(&line(&format!("s {r} {u}")));
@@ -768,7 +773,7 @@ impl Deferred {
             f.write_all(body.as_bytes())?;
             f.sync_all()?;
         }
-        std::fs::rename(&tmp, &path)?;
+        std::fs::rename(&tmp, self.dir.join(RETENTION))?;
         sync_dir(&self.dir)
     }
 
@@ -859,7 +864,8 @@ impl Deferred {
     /// Retire `key` at `sequence` (the record stays), by a delete of
     /// `incarnation`. A record already retired at that sequence by that
     /// incarnation keeps its first retirement time; by another incarnation
-    /// its retirement starts again now. The retirement is acknowledged only
+    /// its retirement starts again now, unless the earlier one would end
+    /// later (a lowered retention). The retirement is acknowledged only
     /// once its ticket is waited for.
     ///
     /// # Errors
@@ -889,8 +895,36 @@ impl Deferred {
             }
             return Ok(Some(t));
         }
+        // Retired again under another incarnation: its clock starts again
+        // (ADR-0028), but its protection never ends before the retirement
+        // it replaces would have (independent reviews, Phase 3.13: after a
+        // lowered retention the new time gets the shorter one). The
+        // difference becomes a retention-history entry for what is retired
+        // until now (durable before the retirement; it may protect other
+        // records of that span longer: the safe side), so that a retention
+        // raised later still applies on top.
+        if let Some(old) = self.entries.get(&key).filter(|o| o.sequence == sequence) {
+            let old_end = old
+                .retired_ms
+                .saturating_add(self.retention_for(old.retired_ms));
+            let needed = old_end.saturating_sub(now_ms);
+            if needed > self.retention_for(now_ms) {
+                self.prior_retentions
+                    .push((needed, now_ms.saturating_add(1)));
+                if let Err(e) = self.write_retentions() {
+                    // Not durable: not in force either, and nothing retired
+                    // or reclaimed from now on (review: a retry would see
+                    // the entry in memory and skip the write).
+                    self.prior_retentions.pop();
+                    self.damaged = true;
+                    tracing::error!(error = %e, "pending-reclaim retention history not writable: nothing is reclaimed");
+                    return Err(e);
+                }
+            }
+        }
+        let retired_ms = now_ms;
         let t = self.append(&format!(
-            "p {} {sequence} {now_ms} {}",
+            "p {} {sequence} {retired_ms} {}",
             key_fields(&key),
             hex(&incarnation)
         ))?;
@@ -898,7 +932,7 @@ impl Deferred {
             key,
             Entry {
                 sequence,
-                retired_ms: now_ms,
+                retired_ms,
                 incarnation: inc,
                 bytes: 0,
             },
@@ -1975,6 +2009,45 @@ mod tests {
         let d = Deferred::open(dir.path(), 0);
         assert!(d.damaged());
         assert!(d.defers(1), "damaged: deletes retained even at retention 0");
+    }
+
+    /// Independent review (Phase 3.13): a record retired before a lowering
+    /// and retired again under another incarnation keeps the deadline of
+    /// its first retirement when that ends later.
+    #[test]
+    fn a_new_incarnations_retirement_never_ends_before_the_earlier_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_unix_ms();
+        let old = now - 5_000;
+        let mut d = Deferred::open(dir.path(), 100_000);
+        let _ = d.retire(key(1), 1, old, I).unwrap();
+        drop(d);
+        let mut d = Deferred::open(dir.path(), 0);
+        let again = now + 1_000;
+        let _ = d.retire(key(1), 1, again, J).unwrap();
+        let r = d.retired(&key(1)).unwrap();
+        assert_eq!(r.incarnation, J, "a reclaim must be of the new incarnation");
+        assert_eq!(r.retired_ms, again, "its clock starts again (ADR-0028)");
+        let refused = |r: ReclaimCheck| matches!(r, ReclaimCheck::Refused(_));
+        let check = |d: &Deferred, at: u64| d.reclaim_check(&key(1), 1, Some(1), J, at, at, 0);
+        // Not before the earlier retirement's end (old + 100 s).
+        assert!(refused(check(&d, old + 99_000)));
+        assert!(!refused(check(&d, old + 100_000)));
+        drop(d);
+        // Across a restart, and with the retention raised later: the new
+        // retirement gets the raised one on top.
+        let d = Deferred::open(dir.path(), 0);
+        assert!(refused(check(&d, old + 99_000)));
+        drop(d);
+        let d = Deferred::open(dir.path(), 200_000);
+        assert!(refused(check(&d, again + 199_000)));
+        assert!(!refused(check(&d, again + 200_000)));
+        // With an unchanged retention, the new time (later) is kept.
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = Deferred::open(dir.path(), 1_000);
+        let _ = d.retire(key(2), 1, 100, I).unwrap();
+        let _ = d.retire(key(2), 1, 900, J).unwrap();
+        assert_eq!(d.retired(&key(2)).unwrap().retired_ms, 900);
     }
 
     fn rss_kib() -> u64 {
