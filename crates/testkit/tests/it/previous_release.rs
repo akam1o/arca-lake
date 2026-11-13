@@ -6,6 +6,8 @@
 //! without a finalize, [`same_schema_matrix`], and the managed restore with
 //! a removed node), `ARCA_BIN_PREV_312` the Phase 3.12 release (Phase
 //! 3.13: [`upgrade_and_rollback_with_the_phase_3_12_release`]),
+//! `ARCA_BIN_PREV_313` the Phase 3.13 release (Phase 3.14, with 3.12:
+//! [`rollback_residuals_with_the_phase_3_13_and_3_12_releases`]),
 //! `ARCA_BIN_CUR` this one.
 //! Storage nodes, controllers and gateways are separate processes on a
 //! FoundationDB cluster.
@@ -1374,6 +1376,441 @@ async fn upgrade_and_rollback_with_the_phase_3_12_release() {
     assert!(
         p[n0] >= by_313,
         "an earlier retirement was reclaimed early: {p:?}"
+    );
+    check(&s3, &committed).await;
+    ctl.kill();
+    gw.kill();
+    for mut n in nodes {
+        n.kill();
+    }
+}
+
+/// The node's retirement log file (`pending-reclaim.log`) under `dir`.
+fn retirement_log(dir: &std::path::Path) -> PathBuf {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == "pending-reclaim.log") {
+                return p;
+            }
+        }
+    }
+    panic!("no retirement log under {}", dir.display());
+}
+
+/// A node stopped between the seal of a retirement-log compaction and its
+/// end (ADR-0030): the log renamed `.prev`, no log yet.
+fn leave_prev(dir: &std::path::Path) {
+    let log = retirement_log(dir);
+    let prev = log.with_extension("prev");
+    assert!(!prev.exists(), "a .prev already there");
+    std::fs::rename(&log, &prev).unwrap();
+}
+
+/// Phase 3.14 residual rollback cases (`ARCA_BIN_PREV_313`: the Phase 3.13
+/// release, `54c468c`; `ARCA_BIN_PREV_312`: Phase 3.12, `cddd078`):
+/// 1. a repair begun by the current controller (a capacity reservation and
+///    a repair status left), the controller rolled back to 3.13 in the
+///    middle: 3.13 ignores the reservation and completes the repair; the
+///    current controller, back, sweeps the stale reservation;
+/// 2. a node with retirements stopped with a retirement-log `.prev` left
+///    (a compaction sealed, not finished): 3.13 merges it; 3.12 does not
+///    know `.prev` and forgets those retirements (nothing deleted, they are
+///    not reclaimed while it runs); back on this release they are there
+///    again;
+/// 3. node identities and delete fences with nodes of 3.12, 3.13 and this
+///    release under the current controller: every identity acknowledged,
+///    every fence open, a delete retained on every member;
+/// 4. a managed restore (`admin restore`'s library: plan, run) with nodes
+///    of 3.12 and 3.13, then every process on this release and `finish`: a
+///    member lost after the restore is repaired, and a delete is reclaimed
+///    after the (lowered) retention while the earlier retirements keep
+///    theirs.
+#[tokio::test]
+async fn rollback_residuals_with_the_phase_3_13_and_3_12_releases() {
+    use arca_lake_controller::managed_restore as mr;
+    use arca_lake_metadata::ops::{cluster, compat, node_lifecycle, repair_status, reservation};
+    use arca_lake_metadata::records::GroupState;
+    let (Some(env), Some(env12)) = (
+        env_named("ARCA_BIN_PREV_313"),
+        env_named("ARCA_BIN_PREV_312"),
+    ) else {
+        eprintln!(
+            "ARCA_FDB_TESTS / ARCA_BIN_PREV_313 / ARCA_BIN_PREV_312 / ARCA_BIN_CUR not set; skipping"
+        );
+        return;
+    };
+    let meta = std::sync::Arc::new(
+        arca_lake_metadata::fdb::FdbKv::open_with_timeout(env.cluster_file.to_str(), 5_000)
+            .expect("open FoundationDB"),
+    );
+    meta.clear_range_blocking(&keys::all_range()).await.unwrap();
+    let clients = NodeClients::new(Duration::from_secs(5));
+    let dirs: Vec<PathBuf> = (0..4)
+        .map(|i| env.tmp.path().join(format!("node{i}")))
+        .collect();
+    let addrs: Vec<String> = (0..4).map(|_| free_addr()).collect();
+    // Every release here defers deletes: the retention is given to each.
+    let args = |i: usize, retention: u64| {
+        let mut a = Env::node_args(&dirs[i], &addrs[i]);
+        a.extend([
+            "--reclaim-retention-secs".into(),
+            retention.to_string(),
+            "--reclaim-skew-secs".into(),
+            "1".into(),
+        ]);
+        a
+    };
+    // Which binary: 14 (this release), 13 or 12.
+    let spawn = |name: &str, release: u32, a: &[String]| match release {
+        14 => env.spawn(name, true, a),
+        13 => env.spawn(name, false, a),
+        _ => env12.spawn(name, false, a),
+    };
+    let mut nodes: Vec<Proc> = (0..4)
+        .map(|i| spawn(&format!("node{i}-14"), 14, &args(i, 3600)))
+        .collect();
+    for a in &addrs {
+        wait_tcp(a, Duration::from_secs(20)).await;
+    }
+    let restart =
+        async |nodes: &mut Vec<Proc>, i: usize, release: u32, retention: u64, tag: &str| {
+            nodes[i].kill();
+            nodes[i] = spawn(
+                &format!("node{i}-{release}-{tag}"),
+                release,
+                &args(i, retention),
+            );
+            wait_tcp(&addrs[i], Duration::from_secs(20)).await;
+        };
+    env.admin_ok(true, &["init"]);
+    for (i, a) in addrs.iter().enumerate() {
+        env.admin_ok(
+            true,
+            &[
+                "register-node",
+                "--address",
+                a,
+                "--label",
+                &format!("node=n{i}"),
+                "--label",
+                "device_class=hdd",
+            ],
+        );
+    }
+    env.admin_ok(
+        true,
+        &[
+            "create-groups",
+            "--tier",
+            "default",
+            "--device-class",
+            "hdd",
+            "--failure-domain",
+            "node",
+            "--count",
+            "1",
+            "--k",
+            "2",
+            "--m",
+            "1",
+            "--chunk-bytes",
+            &(256u64 << 10).to_string(),
+            "--small-threshold",
+            "0",
+        ],
+    );
+    let repair_args = |id: &str, release: u32| {
+        let mut a = env.controller_args(id);
+        a.extend(["--auto-repair", "--unhealthy-after-secs", "3"].map(String::from));
+        if release == 14 {
+            a.extend(
+                [
+                    "--failure-repair-chunks-per-pass",
+                    "1",
+                    "--reclaim-interval-secs",
+                    "1",
+                ]
+                .map(String::from),
+            );
+        }
+        a
+    };
+    let mut ctl = spawn("ctl-14", 14, &repair_args("ctl-14", 14));
+    leads_or_log(&env, "ctl-14", &ctl).await;
+    let (mut gw, s3) = gateway(&env, "gw-14", true).await;
+    s3.create_bucket().bucket(BUCKET).send().await.unwrap();
+    let mut committed: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..10u64 {
+        let d = body(600 << 10, 700 + i);
+        put(&s3, &format!("q{i}"), d.clone()).await;
+        committed.push((format!("q{i}"), d));
+    }
+    let check = async |s3: &Client, committed: &[(String, Vec<u8>)]| {
+        for (k, d) in committed {
+            assert_eq!(&get(s3, k).await, d, "{k}");
+        }
+    };
+    let group = cluster::list_groups(meta.as_ref()).await.unwrap()[0].clone();
+    let mut index_of = Vec::new();
+    for m in &group.members {
+        let mut found = None;
+        for (i, a) in addrs.iter().enumerate() {
+            if cluster_node_id(meta.as_ref(), a).await == m.node_id {
+                found = Some(i);
+            }
+        }
+        index_of.push(found.unwrap());
+    }
+
+    // ---- 1. A pending reservation, the controller rolled back to 3.13.
+    let lost = index_of[1];
+    nodes[lost].kill();
+    wait_until(
+        "the current controller's repair and its reservation",
+        Duration::from_secs(60),
+        async || {
+            let g = cluster::get_group(meta.as_ref(), group.id).await.unwrap();
+            g.state == GroupState::Repairing
+                && !reservation::list(meta.as_ref()).await.unwrap().is_empty()
+        },
+    )
+    .await;
+    ctl.kill();
+    ctl = spawn("ctl-13", 13, &repair_args("ctl-13", 13));
+    let start = std::time::Instant::now();
+    while cluster::get_group(meta.as_ref(), group.id)
+        .await
+        .unwrap()
+        .state
+        != GroupState::Active
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(300),
+            "the 3.13 controller did not finish the repair; its log:\n{}",
+            ctl.log()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        !reservation::list(meta.as_ref()).await.unwrap().is_empty(),
+        "set-up: 3.13 does not know reservations"
+    );
+    check(&s3, &committed).await;
+    ctl.kill();
+    ctl = spawn("ctl-14-2", 14, &repair_args("ctl-14-2", 14));
+    leads_or_log(&env, "ctl-14-2", &ctl).await;
+    wait_until(
+        "the stale reservation and status removed",
+        Duration::from_secs(30),
+        async || {
+            reservation::list(meta.as_ref()).await.unwrap().is_empty()
+                && repair_status::list(meta.as_ref()).await.unwrap().is_empty()
+        },
+    )
+    .await;
+    restart(&mut nodes, lost, 14, 3600, "back").await;
+
+    // ---- 2. Retirements with a `.prev` left.
+    let group = cluster::get_group(meta.as_ref(), group.id).await.unwrap();
+    let mut member_nodes = Vec::new();
+    for m in &group.members {
+        for (i, a) in addrs.iter().enumerate() {
+            if cluster_node_id(meta.as_ref(), a).await == m.node_id {
+                member_nodes.push(i);
+            }
+        }
+    }
+    let n0 = member_nodes[0];
+    delete(&s3, "q0").await;
+    committed.retain(|(k, _)| k != "q0");
+    wait_until(
+        "retired on the member",
+        Duration::from_secs(60),
+        async || {
+            let p = pending(&clients, &addrs).await[n0];
+            p != u64::MAX && p >= 1
+        },
+    )
+    .await;
+    let retired = pending(&clients, &addrs).await[n0];
+    let shards = live(&clients, &addrs).await[n0];
+    nodes[n0].kill();
+    leave_prev(&dirs[n0]);
+    restart(&mut nodes, n0, 13, 3600, "prev").await;
+    assert!(
+        pending(&clients, &addrs).await[n0] >= retired,
+        "3.13 lost the retirements of a .prev"
+    );
+    nodes[n0].kill();
+    leave_prev(&dirs[n0]);
+    restart(&mut nodes, n0, 12, 3600, "prev").await;
+    let on_312 = pending(&clients, &addrs).await[n0];
+    eprintln!("3.12 with a .prev: {on_312} of {retired} retirements known");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        live(&clients, &addrs).await[n0] >= shards,
+        "a 3.12 node with a .prev deleted a shard"
+    );
+    check(&s3, &committed).await;
+    restart(&mut nodes, n0, 14, 3600, "after-prev").await;
+    assert!(
+        pending(&clients, &addrs).await[n0] >= retired,
+        "the retirements of the .prev lost after a 3.12 run"
+    );
+
+    // ---- 3. Identities and fences, three releases of nodes.
+    let others: Vec<usize> = (0..4).filter(|&i| i != n0).collect();
+    restart(&mut nodes, others[0], 13, 3600, "mixed").await;
+    restart(&mut nodes, others[1], 12, 3600, "mixed").await;
+    wait_until(
+        "every identity acknowledged and every fence open",
+        Duration::from_secs(60),
+        async || {
+            let ids_ok = node_lifecycle::identities(meta.as_ref())
+                .await
+                .is_ok_and(|ids| ids.len() == 4 && ids.values().all(|i| i.acknowledged));
+            let mut fences = true;
+            for a in &addrs {
+                fences &= clients.health(a).await.is_ok_and(|h| h.delete_fence_open);
+            }
+            ids_ok && fences
+        },
+    )
+    .await;
+    let before = pending(&clients, &addrs).await;
+    delete(&s3, "q1").await;
+    committed.retain(|(k, _)| k != "q1");
+    wait_until(
+        "the delete retained on every member",
+        Duration::from_secs(60),
+        async || {
+            let p = pending(&clients, &addrs).await;
+            member_nodes
+                .iter()
+                .all(|&i| p[i] != u64::MAX && p[i] > before[i])
+        },
+    )
+    .await;
+    check(&s3, &committed).await;
+
+    // ---- 4. A managed restore with 3.12 and 3.13 nodes, then forward.
+    let backup = snapshot(meta.as_ref()).await;
+    ctl.kill();
+    gw.kill();
+    let stopped: Vec<String> = compat::procs(meta.as_ref())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let restorer = SnapRestorer {
+        meta: std::sync::Arc::clone(&meta),
+        snap: backup,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("restore.journal");
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
+    };
+    let plan = mr::plan(
+        meta.as_ref(),
+        &clients,
+        "snapshot",
+        1,
+        None,
+        &mr::Restorer::destination(&restorer),
+        &journal,
+        true,
+        now(),
+    )
+    .await
+    .unwrap();
+    let j = mr::run(
+        &meta,
+        &clients,
+        &restorer,
+        &journal,
+        &plan.journal.token,
+        &stopped,
+        &[],
+        now,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("managed restore with 3.12 and 3.13 nodes: {e}"));
+    assert_eq!(j.last(), Some(mr::Step::Verified));
+    for i in 0..4 {
+        restart(&mut nodes, i, 14, 3, "restored").await;
+    }
+    ctl = spawn("ctl-14-3", 14, &repair_args("ctl-14-3", 14));
+    leads_or_log(&env, "ctl-14-3", &ctl).await;
+    let j = mr::finish(
+        meta.as_ref(),
+        &clients,
+        &journal,
+        "test",
+        "residual rollback cases",
+        false,
+        &[],
+        Duration::from_secs(60),
+        now,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("restore finish: {e}"));
+    assert_eq!(j.last(), Some(mr::Step::Reopened));
+    let (gw2, s3) = gateway(&env, "gw-14-2", true).await;
+    gw = gw2;
+    check(&s3, &committed).await;
+    // A member lost after the restore is repaired.
+    let group = cluster::get_group(meta.as_ref(), group.id).await.unwrap();
+    let victim_addr = {
+        let id = group.members[2].node_id;
+        cluster::list_nodes(meta.as_ref())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|n| n.id == id)
+            .unwrap()
+            .address
+    };
+    let victim = addrs.iter().position(|a| *a == victim_addr).unwrap();
+    nodes[victim].kill();
+    let start = std::time::Instant::now();
+    loop {
+        let g = cluster::get_group(meta.as_ref(), group.id).await.unwrap();
+        if g.state == GroupState::Active && g.epoch > group.epoch {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(300),
+            "repair after the restore did not complete; log:\n{}",
+            ctl.log()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    check(&s3, &committed).await;
+    restart(&mut nodes, victim, 14, 3, "after-repair").await;
+    // A new delete is reclaimed at the lowered retention; what was
+    // retired under 3600 s before keeps it.
+    let kept = pending(&clients, &addrs).await[n0];
+    let live_total = async || -> u64 { live(&clients, &addrs).await.iter().sum() };
+    let before = live_total().await;
+    delete(&s3, "q2").await;
+    committed.retain(|(k, _)| k != "q2");
+    wait_until(
+        "the new delete reclaimed",
+        Duration::from_secs(120),
+        async || live_total().await + 3 <= before,
+    )
+    .await;
+    assert!(
+        pending(&clients, &addrs).await[n0] >= kept.min(retired),
+        "an earlier retirement was reclaimed early"
     );
     check(&s3, &committed).await;
     ctl.kill();

@@ -318,6 +318,21 @@ impl StorageNodeService {
             .incarnation
     }
 
+    /// Deferred reclamation (Phase 3.14 metrics): retention in ms, records
+    /// retired and not reclaimed, whether the state is damaged (nothing is
+    /// reclaimed), and their payload bytes (retained: on the device, not
+    /// free).
+    #[must_use]
+    pub fn reclaim_state(&self) -> (u64, u64, bool, u64) {
+        let d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+        (
+            d.retention_ms(),
+            d.len() as u64,
+            d.damaged(),
+            d.retained_bytes(),
+        )
+    }
+
     /// Timing counters of this node.
     #[must_use]
     pub fn stats(&self) -> NodeStatsSnapshot {
@@ -1206,6 +1221,10 @@ impl StorageNode for StorageNodeService {
         Self::check_version(req.protocol_version)?;
         let after = req.after.map(|k| Self::key(Some(k))).transpose()?;
         let limit = Self::page_limit(req.limit);
+        // Read before the listing: every record below it is listed (or
+        // gone) on this page's window.
+        let indexed_below = self.store.indexed_below();
+        let store_epoch = self.store.store_epoch();
         let page = self
             .store
             .entries_in_group_after(req.group_id, after, limit);
@@ -1213,6 +1232,21 @@ impl StorageNode for StorageNodeService {
         let next = more
             .then(|| page.last().map(|(k, _)| Self::pb_key(k)))
             .flatten();
+        // Differential verification (Phase 3.14): records below the
+        // caller's watermark of this store epoch were verified before (a
+        // record written again has a newer sequence); not read again.
+        let since_applied = req.since_sequence > 0 && req.since_store_epoch == store_epoch;
+        let page: Vec<_> = if since_applied {
+            page.into_iter()
+                .filter(|(k, _)| {
+                    self.store
+                        .locate(k)
+                        .is_none_or(|l| l.sequence >= req.since_sequence)
+                })
+                .collect()
+        } else {
+            page
+        };
         let store = Arc::clone(&self.store);
         let read_only = req.read_only;
         let _slot = self
@@ -1262,6 +1296,9 @@ impl StorageNode for StorageNodeService {
             shards: verified,
             next,
             more,
+            store_epoch,
+            indexed_below,
+            since_applied,
         }))
     }
 

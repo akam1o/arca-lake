@@ -77,7 +77,20 @@ arca_controller_nodes_not_deferring	gauge	controller	nodes	-	nodes that do not d
 arca_controller_reclaimed_bytes_total	counter	controller	bytes	-	payload bytes of the retired records reclaimed (Phase 3.13)
 arca_controller_repair_group_errors_total	counter	controller	groups	-	group repairs that failed in a pass (an unrecoverable chunk, a node error) while the other groups were repaired
 arca_controller_repair_retargets_total	counter	controller	groups	-	repairs whose target was replaced because it was gone or kept failing (Phase 3.13)
+arca_controller_repair_verify_shards_read_total	counter	controller	shards	-	shards read by repair target verification passes (Phase 3.14)
+arca_controller_repair_verify_passes_differential_total	counter	controller	passes	-	repair target verification passes that read only records written since an earlier one (Phase 3.14)
+arca_controller_repair_verify_passes_full_total	counter	controller	passes	-	repair target verification passes that read every record (Phase 3.14)
+arca_controller_reconcile_errors_total	counter	controller	pairs	-	(group, node) reconciliations that failed (other than a node not answering), passed over until the next sweep (Phase 3.14)
+arca_controller_tiering_errors_total	counter	controller	generations	-	generations a tiering pass could not examine, passed over until the next sweep (Phase 3.14)
+arca_controller_capacity_reservations	gauge	controller	reservations	-	capacity reservations of member moves at the last repair pass (Phase 3.14, ADR-0032; leader)
+arca_controller_capacity_reserved_bytes	gauge	controller	bytes	-	bytes the reserved member moves still have to write on their targets (leader)
+arca_controller_capacity_reservations_released_total	counter	controller	reservations	-	capacity reservations released because they no longer described their group's move (completed, retargeted, never begun, a former leader's)
+arca_controller_capacity_reservation_refusals_total	counter	controller	moves	-	member moves not started because other moves had reserved the target's room
 arca_controller_groups_repair_waiting	gauge	controller	groups	-	Repairing groups waiting for nodes, capacity, an operator, or with unrecoverable data, rather than progressing (Phase 3.13)
+arca_controller_repair_groups	gauge	controller	groups	reason=progressing|temporarily-blocked|awaiting-capacity|awaiting-nodes|data-unrecoverable|permanently-blocked|none	Repairing groups by the reason of their repair status at the last repair pass; data-unrecoverable means chunks with fewer than k readable shards: possible data loss (Phase 3.14; leader)
+arca_controller_repair_longest_stall_seconds	gauge	controller	seconds	-	seconds since the Repairing group that waited longest last made progress (leader)
+arca_controller_repair_longest_stall_group	gauge	controller	group	-	the Repairing group that waited longest since its last progress (0: none; leader)
+arca_controller_repair_attempt_max_seconds	gauge	controller	seconds	-	the longest repair attempt of the last repair pass (leader)
 arca_controller_rebalance_capacity_stops_total	counter	controller	passes	-	rebalance passes stopped before a chunk because a target member would have gone below the placement threshold, needed compaction first or did not report its device
 arca_controller_rebalance_skipped_chunks_total	counter	controller	chunks	-	chunks capacity rebalancing examined and did not move (changed, in flight, target at its reserve, failed)
 arca_controller_recovery_passes_total	counter	controller	passes	-	restore recovery passes that did work
@@ -205,6 +218,10 @@ arca_node_phase_seconds	histogram	node	seconds	phase=put_recv|put_queue|put_stor
 arca_node_process_memory_bytes	gauge	node	bytes	kind=resident|anon|heap_in_use|heap_free|heap_mmap	process memory at scrape time: resident and anonymous set, and on glibc the allocator bytes in use, free but retained, and mmapped
 arca_node_put_in_flight	gauge	node	streams	-	PutShard streams open now
 arca_node_quarantined_bytes	gauge	node	bytes	-	payload bytes of quarantined shards
+arca_node_reclaim_damaged	gauge	node	boolean	-	1 when the deferred-reclamation state is damaged: nothing is reclaimed until it is repaired (fail-closed; Phase 3.14)
+arca_node_reclaim_pending_records	gauge	node	records	-	retired records waiting for a reclaim (deferred reclamation, ADR-0028; Phase 3.14)
+arca_node_reclaim_retained_bytes	gauge	node	bytes	-	payload bytes of the retired records not reclaimed yet: on the device, not free (ADR-0030; Phase 3.14)
+arca_node_reclaim_retention_seconds	gauge	node	seconds	-	the configured reclaim retention (records retired before a lowering keep the earlier one; Phase 3.14)
 arca_node_quarantined_shards	gauge	node	shards	-	quarantined shards on the device
 arca_node_scrub_bytes_total	counter	node	bytes	-	bytes read by ScrubShards
 arca_node_scrub_corrupt_total	counter	node	shards	-	shards ScrubShards found corrupt

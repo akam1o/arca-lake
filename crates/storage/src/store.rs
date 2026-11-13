@@ -1598,6 +1598,26 @@ impl Store {
         Ok(out)
     }
 
+    /// A sequence below which every record that exists is in the index
+    /// (Phase 3.13+: the next sequence, or the lowest still on its way to
+    /// the index if lower). A record written from now on gets a sequence at
+    /// or above it, so that a verification of every record listed now
+    /// covers every record below it.
+    #[must_use]
+    pub fn indexed_below(&self) -> u64 {
+        let w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        let next = w.next_sequence;
+        let lowest = self
+            .inflight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .first()
+            .copied()
+            .unwrap_or(u64::MAX);
+        drop(w);
+        next.min(lowest)
+    }
+
     /// The store epoch, new at every open. A delete token is `(store
     /// epoch, sequence)`; the node refuses one of another epoch.
     #[must_use]

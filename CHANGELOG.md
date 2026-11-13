@@ -6,6 +6,66 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Added (Phase 3.14)
+
+- Differential verification of repair targets (ADR-0031): `VerifyShards`
+  fields `since_sequence`/`since_store_epoch` (6/7) and response fields
+  `store_epoch`, `indexed_below`, `since_applied` (4/5/6); the leader
+  reads again only what was written on a target since its last pass of
+  the same group, epoch, slot and target (`Store::indexed_below`); the
+  completeness check before `Active` still reads everything. Parallel
+  rebuild of a slot (8 chunks at a time, results in walk order).
+  `RepairReport.timings`. Metrics
+  `arca_controller_repair_verify_shards_read_total`,
+  `_repair_verify_passes_differential_total`, `_repair_verify_passes_full_total`.
+- Capacity reservations of member moves (ADR-0032):
+  `("al","capresv",node,group)`, checked and written in one transaction
+  against every valid reservation of the node; repairs count only
+  repairs; validity derived from the group's state (or its open epoch
+  intent); swept by the leader; honoured by target choice and capacity
+  rebalancing; a planned reservation marks the move planned for any
+  leader. `admin status` lists them. Metrics
+  `arca_controller_capacity_reservations`, `_capacity_reserved_bytes`,
+  `_capacity_reservations_released_total`, `_capacity_reservation_refusals_total`.
+- Persisted cursors of reconciliation and tiering
+  (`("al","bgcursor",name)`): a pass resumes where the last one (any
+  leader's) stopped, a failing pair or generation is passed over and
+  counted; `--reconcile-pairs-per-pass` (default 0: every pair) and
+  `--tiering-generations-per-pass` (default 4096). Metrics
+  `arca_controller_reconcile_errors_total`, `_tiering_errors_total`.
+- Diagnostics: `arca_controller_repair_groups{reason=...}`,
+  `_repair_longest_stall_seconds`/`_group`, `_repair_attempt_max_seconds`;
+  node gauges `arca_node_reclaim_retained_bytes`, `_reclaim_pending_records`,
+  `_reclaim_retention_seconds`, `_reclaim_damaged`; `admin status` prints
+  each waiting repair's stall time and what the operator can do, the
+  reservations and the sweep cursors.
+- Tests: `repair_verify`, `capacity_reservation`, `background_cursor`,
+  `retirement_crash` (SIGKILL rounds against the retirement log, real
+  processes), `previous_release::rollback_residuals_with_the_phase_3_13_and_3_12_releases`
+  (CI's previous-release job builds Phase 3.13 too).
+- Benchmarks: `rebalance-load.sh` `RETENTION`, `SKEW`, `RUN_STORE_A`,
+  `CONVERGE_MIN` and more sampled metrics; `summarize_rebalance.py
+  --condition a|b` with the validity rules fixed before the runs.
+
+### Changed (Phase 3.14)
+
+- The tiering pass is bounded and resumes at its cursor; a generation
+  whose records cannot be decoded no longer stops every pass; a
+  generation whose target is full is passed over until the next sweep.
+- Reconciliation passes over a pair whose metadata cannot be decoded
+  instead of ending the pass there.
+
+### Fixed (Phase 3.14)
+
+- A new leader counted no room given back by GC until its first reclaim
+  pass had succeeded on every node (a pass that failed on a node counted
+  it as deferring), so after a failover with nodes that delete at once
+  the admission trend throttled client writes for up to a reclaim
+  interval (found by the rebalancing A/B: PUT errors in the failover
+  window 0.6 % with Phase 3.12, about 3 % with 3.13). Which nodes defer is
+  now taken from every health pass (a node that does not answer, or
+  whose retirement state is damaged, counts as deferring).
+
 ### Added (Phase 3.13)
 
 - Repair retargeting (ADR-0029, R-104): a `Repairing` group whose target

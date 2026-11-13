@@ -69,6 +69,88 @@ pub struct RepairOptions {
     /// class at the node's admission), unlike a failure repair, which may
     /// use the space down to the repair floor (Phase 3.11, M3).
     pub keep_client_reserve: bool,
+    /// What earlier attempts verified on a target (Phase 3.14): only
+    /// records written since are read again.
+    pub verify_cache: Option<std::sync::Arc<VerifyCache>>,
+    /// Chunks rebuilt and written at a time (Phase 3.14; 0 or 1: one after
+    /// the other, as before).
+    pub parallel: usize,
+}
+
+/// Results of earlier verifications of a slot's target (Phase 3.14,
+/// differential verification). In memory only: a controller that restarts
+/// verifies everything again.
+///
+/// An entry is keyed by group, epoch, slot and target address, and holds
+/// the target's store epoch, a watermark (every record below it that exists
+/// was verified: the node's `indexed_below` when the pass began; a record
+/// written again has a newer sequence) and the corrupt chunks found. It is
+/// used only while the node reports the same store epoch (a restart, or
+/// another disk, starts afresh); another epoch, slot or target is another
+/// key.
+#[derive(Debug, Default)]
+pub struct VerifyCache {
+    entries: std::sync::Mutex<HashMap<(u64, u64, usize, String), VerifyEntry>>,
+    /// Shards read by verification passes (all passes).
+    pub shards_read: std::sync::atomic::AtomicU64,
+    /// Passes that read only records written since an earlier one.
+    pub passes_differential: std::sync::atomic::AtomicU64,
+    /// Passes that read every record.
+    pub passes_full: std::sync::atomic::AtomicU64,
+    /// Counts only, never reuses a result (measurements: Phase 3.13's
+    /// behaviour).
+    no_reuse: bool,
+}
+
+#[derive(Debug, Clone)]
+struct VerifyEntry {
+    store_epoch: u64,
+    below: u64,
+    corrupt: BTreeSet<[u8; 16]>,
+}
+
+/// Entries kept at most (older ones are simply verified again).
+const VERIFY_CACHE_ENTRIES: usize = 4096;
+
+impl VerifyCache {
+    /// A cache that only counts (every pass reads everything).
+    #[must_use]
+    pub fn counting_only() -> Self {
+        Self {
+            no_reuse: true,
+            ..Self::default()
+        }
+    }
+
+    fn get(&self, key: &(u64, u64, usize, String)) -> Option<VerifyEntry> {
+        if self.no_reuse {
+            return None;
+        }
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    }
+
+    fn put(&self, key: (u64, u64, usize, String), e: VerifyEntry) {
+        let mut m = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if m.len() >= VERIFY_CACHE_ENTRIES && !m.contains_key(&key) {
+            m.clear();
+        }
+        m.insert(key, e);
+    }
+
+    /// Forget every entry of `group` (its repair completed, or moved on).
+    pub fn forget_group(&self, group: u64) {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|k, _| k.0 != group);
+    }
 }
 
 /// Where a rebuilt shard comes from (Phase 3.4 §10).
@@ -125,6 +207,32 @@ pub struct RepairReport {
     pub slot_whole: bool,
     /// What the completeness check found.
     pub completeness: Completeness,
+    /// Where this run's time went (Phase 3.14 measurements).
+    pub timings: RepairTimings,
+    /// Bytes of the slot this run wrote to the target (Phase 3.14: what its
+    /// capacity reservation no longer needs). Shards found there are not
+    /// counted: a walk started again (a completeness check resets the
+    /// cursor) finds the same ones, which must not be released twice
+    /// (Phase 3.14 review); a shard written before a crash and not counted
+    /// keeps its room reserved, the safe side.
+    pub target_bytes: u64,
+}
+
+/// Time spent by one repair run, by step (Phase 3.14).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepairTimings {
+    /// Verifying the target's shards at the start of the walk.
+    pub verify: std::time::Duration,
+    /// Listing the members (the walk itself).
+    pub walk: std::time::Duration,
+    /// Reading `k` shards and reconstructing (or copying) one.
+    pub reconstruct: std::time::Duration,
+    /// Writing the shard to the target.
+    pub write: std::time::Duration,
+    /// Metadata transactions recording the cursor (one per chunk).
+    pub cursor: std::time::Duration,
+    /// The completeness check (a full verification included).
+    pub completeness: std::time::Duration,
 }
 
 /// Outcome of the completeness check (RFC-008 §7).
@@ -342,6 +450,7 @@ pub async fn replace_member_with<S: KvStore>(
     }
     hook(RepairStep::Reconstructed).await?;
 
+    let completeness_started = std::time::Instant::now();
     let completeness = check_completeness(meta, clients, &nodes, &group, index, opts).await?;
     // A chunk a walk could not rebuild for this member is queued for
     // stripe repair (above); while its task is open the member is not
@@ -439,6 +548,7 @@ pub async fn replace_member_with<S: KvStore>(
     }
     report.complete = complete;
     report.completeness = completeness;
+    report.timings.completeness = completeness_started.elapsed();
     Ok(report)
 }
 
@@ -475,33 +585,105 @@ async fn fence(
 }
 
 /// Shards on the target that fail verification (walks `VerifyShards`).
+/// With `cache` (Phase 3.14), only records written since the last result
+/// for this slot, epoch and target are read (unless `full`); the corrupt
+/// chunks of the records not read again are the ones found then. A `full`
+/// pass reads everything and replaces the cached result (the completeness
+/// check, before a group becomes `Active`: a record that decayed since it
+/// was verified is found there, as before).
 async fn corrupt_on_target(
     clients: &NodeClients,
     addr: &str,
     group: &GroupRecord,
     index: usize,
     page_size: u32,
+    cache: Option<&VerifyCache>,
+    full: bool,
 ) -> Result<BTreeSet<[u8; 16]>, ControlError> {
+    use std::sync::atomic::Ordering::Relaxed;
     let own = u16::try_from(index).unwrap_or(u16::MAX);
-    let mut out = BTreeSet::new();
-    let mut after = None;
-    loop {
-        let page = clients
-            .verify_shards_page(addr, group.id, after, page_size)
-            .await
-            .map_err(|status| ControlError::Node {
-                addr: addr.to_string(),
-                status,
-            })?;
-        for v in &page.shards {
-            if v.shard.shard_index == own && !v.ok {
-                out.insert(v.shard.chunk_id);
+    let key = (group.id, group.epoch, index, addr.to_string());
+    let earlier = cache.and_then(|c| c.get(&key)).filter(|_| !full);
+    let mut since = earlier.as_ref().map(|e| (e.store_epoch, e.below));
+    let mut restarts = 0u32;
+    'pass: loop {
+        let mut bad = BTreeSet::new();
+        let mut good = BTreeSet::new();
+        let mut after = None;
+        let mut first: Option<(u64, u64, bool)> = None;
+        loop {
+            let page = clients
+                .verify_shards_since(addr, group.id, after, page_size, since)
+                .await
+                .map_err(|status| ControlError::Node {
+                    addr: addr.to_string(),
+                    status,
+                })?;
+            if let Some(c) = cache {
+                c.shards_read.fetch_add(page.shards.len() as u64, Relaxed);
+            }
+            let (epoch, _, applied) =
+                *first.get_or_insert((page.store_epoch, page.indexed_below, page.since_applied));
+            if page.store_epoch != epoch || page.since_applied != applied {
+                // The node restarted during the pass: everything again,
+                // a few times at most (review: a target that keeps
+                // restarting is a failing target).
+                restarts += 1;
+                if restarts > 3 {
+                    return Err(ControlError::Node {
+                        addr: addr.to_string(),
+                        status: tonic::Status::unavailable(
+                            "the target restarted during every verification pass",
+                        ),
+                    });
+                }
+                since = None;
+                continue 'pass;
+            }
+            for v in page.shards.iter().filter(|v| v.shard.shard_index == own) {
+                if v.ok {
+                    good.insert(v.shard.chunk_id);
+                } else {
+                    bad.insert(v.shard.chunk_id);
+                }
+            }
+            if let Some(n) = page.next {
+                after = Some(n);
+                continue;
+            }
+            break;
+        }
+        // Records not read again keep what was found then; what was read
+        // now replaces it.
+        let differential = first.is_some_and(|f| f.2);
+        let mut corrupt = if differential {
+            earlier
+                .as_ref()
+                .map(|e| e.corrupt.clone())
+                .unwrap_or_default()
+        } else {
+            BTreeSet::new()
+        };
+        corrupt.retain(|c| !good.contains(c));
+        corrupt.extend(bad);
+        if let (Some(c), Some((store_epoch, below, _))) = (cache, first) {
+            if differential {
+                c.passes_differential.fetch_add(1, Relaxed);
+            } else {
+                c.passes_full.fetch_add(1, Relaxed);
+            }
+            if store_epoch > 0 && below > 0 {
+                c.put(
+                    key,
+                    VerifyEntry {
+                        store_epoch,
+                        below,
+                        corrupt: corrupt.clone(),
+                    },
+                );
             }
         }
-        match page.next {
-            Some(n) => after = Some(n),
-            None => return Ok(out),
-        }
+        return Ok(corrupt);
     }
 }
 
@@ -538,7 +720,18 @@ async fn reconstruct_member<S: KvStore>(
             ))
         })?;
     // Shards the target holds but cannot read back are treated as missing.
-    let corrupt = corrupt_on_target(clients, &target_addr, group, index, opts.page_size).await?;
+    let verify_started = std::time::Instant::now();
+    let corrupt = corrupt_on_target(
+        clients,
+        &target_addr,
+        group,
+        index,
+        opts.page_size,
+        opts.verify_cache.as_deref(),
+        false,
+    )
+    .await?;
+    let verify_time = verify_started.elapsed();
     let cursor = group
         .repair_cursor
         .filter(|c| usize::from(c.member) == index && c.chunk_id != [0; 16])
@@ -549,134 +742,198 @@ async fn reconstruct_member<S: KvStore>(
         epoch: group.epoch,
         ..RepairReport::default()
     };
+    report.timings.verify = verify_time;
     let mut walker = GroupWalker::new(clients, nodes, group, cursor, opts.page_size);
     let mut first_unrebuilt: Option<ControlError> = None;
-    while let Some(chunk) = walker.next().await? {
-        let cid = chunk.chunk_id;
-        // The target's record counts only if not retired (ADR-0028 H4,
-        // Phase 3.12 review): a retired one is written again.
-        if chunk.present[index].is_some() && !chunk.retired[index] && !corrupt.contains(&cid) {
-            report.skipped += 1;
-            persist_cursor(meta, group, index, cid).await?;
-            continue;
+    let class = if group.is_cache() {
+        // A cache group's copies are written as cache (Phase 3.12 review):
+        // the node learns its role from the class, and a repair write would
+        // make it durable for good, its evictions then retained for the
+        // reclaim retention. A discardable copy needs no reserve either.
+        arca_lake_protocol::storage::v1::WriteClass::Cache
+    } else if opts.keep_client_reserve {
+        arca_lake_protocol::storage::v1::WriteClass::Migration
+    } else {
+        arca_lake_protocol::storage::v1::WriteClass::Repair
+    };
+    // Chunks needing a shard are rebuilt and written up to `parallel` at a
+    // time (Phase 3.14); their results are taken in walk order, so that
+    // the cursor never passes a chunk not done (a crash resumes at the
+    // first one not recorded; what was written past it is present and
+    // skipped then).
+    let parallel = opts.parallel.max(1);
+    let mut batch: Vec<ChunkPresence> = Vec::new();
+    let mut walked_all = false;
+    loop {
+        let mut skip = None;
+        if !walked_all {
+            let t = std::time::Instant::now();
+            let next = walker.next().await?;
+            report.timings.walk += t.elapsed();
+            match next {
+                None => walked_all = true,
+                Some(chunk) => {
+                    let cid = chunk.chunk_id;
+                    // The target's record counts only if not retired
+                    // (ADR-0028 H4, Phase 3.12 review): a retired one is
+                    // written again.
+                    if chunk.present[index].is_some()
+                        && !chunk.retired[index]
+                        && !corrupt.contains(&cid)
+                    {
+                        skip = Some(cid);
+                    } else {
+                        batch.push(chunk);
+                        let left = if opts.max_chunks > 0 {
+                            opts.max_chunks.saturating_sub(report.reconstructed)
+                        } else {
+                            usize::MAX
+                        };
+                        if batch.len() < parallel.min(left) {
+                            continue;
+                        }
+                    }
+                }
+            }
         }
-        // Members whose listing failed in this walk are not asked for
-        // shards either (Phase 3.13: with a member down, every chunk's read
-        // of it waited for the RPC retries, and a walk took hours).
-        let down = walker.unavailable();
-        let rebuilt = match reconstruct_one(
-            meta,
-            clients,
-            nodes,
-            group,
-            index,
-            &chunk,
-            coder.as_ref(),
-            params,
-            opts,
-            &down,
-        )
-        .await
-        {
-            Ok(r) => r,
-            // A chunk this walk cannot rebuild (fewer than `k` shards, or
-            // what they give does not match its record) goes to the stripe
-            // repair queue, where it is retried with backoff and shown to
-            // the operator, and the walk goes on past it (Phase 3.12
-            // liveness audit: it was retried first on every pass, and the
-            // rest of the group waited behind it). The walk still ends in
-            // this error (below): the group stays `Repairing`, whatever
-            // completeness sees (shards a node hides are not listed).
-            Err(e @ (ControlError::Unrecoverable { .. } | ControlError::Corrupt(_))) => {
-                tracing::error!(group = group.id, chunk = %hex(&cid), error = %e, "member repair: chunk not rebuilt, queued for stripe repair");
-                arca_lake_metadata::ops::integrity::enqueue(
-                    meta,
-                    group.id,
-                    cid,
-                    arca_lake_metadata::ops::integrity::Finding::MissingShard,
-                    &[u16::try_from(index).unwrap_or(0)],
-                    now_unix_ms(),
-                )
-                .await?;
-                report.unrebuilt += 1;
-                first_unrebuilt.get_or_insert(e);
+        if !batch.is_empty() {
+            // Members whose listing failed in this walk are not asked for
+            // shards either (Phase 3.13: with a member down, every chunk's
+            // read of it waited for the RPC retries, and a walk took hours).
+            let down = walker.unavailable();
+            let work = std::mem::take(&mut batch);
+            let outcomes = futures::future::join_all(work.iter().map(|chunk| {
+                let down = &down;
+                let coder = coder.as_ref();
+                let target_addr = &target_addr;
+                async move {
+                    let t = std::time::Instant::now();
+                    let rebuilt = reconstruct_one(
+                        meta, clients, nodes, group, index, chunk, coder, params, opts, down,
+                    )
+                    .await;
+                    let reconstruct = t.elapsed();
+                    let t = std::time::Instant::now();
+                    let written = match &rebuilt {
+                        Ok(Some((bytes, _))) => Some((
+                            arca_lake_storage::format::crc32c(bytes),
+                            clients
+                                .put_shard_as(
+                                    target_addr,
+                                    ShardRef {
+                                        group_id: group.id,
+                                        chunk_id: chunk.chunk_id,
+                                        shard_index: u16::try_from(index).unwrap_or(0),
+                                    },
+                                    group.epoch,
+                                    bytes.clone(),
+                                    256 << 10,
+                                    class,
+                                )
+                                .await,
+                        )),
+                        _ => None,
+                    };
+                    (rebuilt, written, reconstruct, t.elapsed())
+                }
+            }))
+            .await;
+            for (chunk, (rebuilt, written, reconstruct, write)) in work.iter().zip(outcomes) {
+                let cid = chunk.chunk_id;
+                report.timings.reconstruct += reconstruct;
+                report.timings.write += write;
+                let rebuilt = match rebuilt {
+                    Ok(r) => r,
+                    // A chunk this walk cannot rebuild (fewer than `k`
+                    // shards, or what they give does not match its record)
+                    // goes to the stripe repair queue, where it is retried
+                    // with backoff and shown to the operator, and the walk
+                    // goes on past it (Phase 3.12 liveness audit). The walk
+                    // still ends in this error (below): the group stays
+                    // `Repairing`, whatever completeness sees (shards a node
+                    // hides are not listed).
+                    Err(e @ (ControlError::Unrecoverable { .. } | ControlError::Corrupt(_))) => {
+                        tracing::error!(group = group.id, chunk = %hex(&cid), error = %e, "member repair: chunk not rebuilt, queued for stripe repair");
+                        arca_lake_metadata::ops::integrity::enqueue(
+                            meta,
+                            group.id,
+                            cid,
+                            arca_lake_metadata::ops::integrity::Finding::MissingShard,
+                            &[u16::try_from(index).unwrap_or(0)],
+                            now_unix_ms(),
+                        )
+                        .await?;
+                        report.unrebuilt += 1;
+                        first_unrebuilt.get_or_insert(e);
+                        let t = std::time::Instant::now();
+                        persist_cursor(meta, group, index, cid).await?;
+                        report.timings.cursor += t.elapsed();
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                let Some((bytes, how)) = rebuilt else {
+                    // Deleted meanwhile (no live generation accounts for it).
+                    report.skipped += 1;
+                    let t = std::time::Instant::now();
+                    persist_cursor(meta, group, index, cid).await?;
+                    report.timings.cursor += t.elapsed();
+                    continue;
+                };
+                match written {
+                    Some((expected_crc, Ok(resp))) if resp.crc32c == expected_crc => {}
+                    Some((expected_crc, Ok(resp))) => {
+                        return Err(ControlError::Corrupt(format!(
+                            "replacement {target_addr} stored chunk {} with crc {:08x}, expected {expected_crc:08x}",
+                            hex(&cid),
+                            resp.crc32c
+                        )));
+                    }
+                    Some((_, Err(status))) if NodeClients::is_epoch_rejected(&status) => {
+                        return Err(ControlError::EpochChanged {
+                            group: group.id,
+                            expected: group.epoch,
+                            found: 0,
+                        });
+                    }
+                    Some((_, Err(status))) => {
+                        return Err(ControlError::Node {
+                            addr: target_addr.clone(),
+                            status,
+                        });
+                    }
+                    None => unreachable!("a rebuilt shard is written"),
+                }
+                let t = std::time::Instant::now();
                 persist_cursor(meta, group, index, cid).await?;
-                continue;
+                report.timings.cursor += t.elapsed();
+                match how {
+                    Source::Direct => report.copied_direct += 1,
+                    Source::WithFormer => report.used_former += 1,
+                    Source::Members => {}
+                }
+                let index_in_run = report.reconstructed;
+                report.reconstructed += 1;
+                report.target_bytes += bytes.len() as u64;
+                hook(RepairStep::Chunk {
+                    index: index_in_run,
+                    chunk_id: cid,
+                })
+                .await?;
+                if opts.max_chunks > 0 && report.reconstructed >= opts.max_chunks {
+                    report.budget_exhausted = true;
+                    return Ok(report);
+                }
             }
-            Err(e) => return Err(e),
-        };
-        let Some((bytes, how)) = rebuilt else {
-            // Deleted meanwhile (no live generation accounts for it).
+        }
+        if let Some(cid) = skip {
             report.skipped += 1;
+            let t = std::time::Instant::now();
             persist_cursor(meta, group, index, cid).await?;
-            continue;
-        };
-        let expected_crc = arca_lake_storage::format::crc32c(&bytes);
-        let shard = ShardRef {
-            group_id: group.id,
-            chunk_id: cid,
-            shard_index: u16::try_from(index).unwrap_or(0),
-        };
-        match clients
-            .put_shard_as(
-                &target_addr,
-                shard,
-                group.epoch,
-                bytes,
-                256 << 10,
-                // A cache group's copies are written as cache (Phase 3.12
-                // review): the node learns its role from the class, and a
-                // repair write would make it durable for good, its
-                // evictions then retained for the reclaim retention. A
-                // discardable copy needs no reserve either.
-                if group.is_cache() {
-                    arca_lake_protocol::storage::v1::WriteClass::Cache
-                } else if opts.keep_client_reserve {
-                    arca_lake_protocol::storage::v1::WriteClass::Migration
-                } else {
-                    arca_lake_protocol::storage::v1::WriteClass::Repair
-                },
-            )
-            .await
-        {
-            Ok(resp) if resp.crc32c == expected_crc => {}
-            Ok(resp) => {
-                return Err(ControlError::Corrupt(format!(
-                    "replacement {target_addr} stored chunk {} with crc {:08x}, expected {expected_crc:08x}",
-                    hex(&cid),
-                    resp.crc32c
-                )));
-            }
-            Err(status) if NodeClients::is_epoch_rejected(&status) => {
-                return Err(ControlError::EpochChanged {
-                    group: group.id,
-                    expected: group.epoch,
-                    found: 0,
-                });
-            }
-            Err(status) => {
-                return Err(ControlError::Node {
-                    addr: target_addr.clone(),
-                    status,
-                });
-            }
+            report.timings.cursor += t.elapsed();
         }
-        persist_cursor(meta, group, index, cid).await?;
-        match how {
-            Source::Direct => report.copied_direct += 1,
-            Source::WithFormer => report.used_former += 1,
-            Source::Members => {}
-        }
-        let index_in_run = report.reconstructed;
-        report.reconstructed += 1;
-        hook(RepairStep::Chunk {
-            index: index_in_run,
-            chunk_id: cid,
-        })
-        .await?;
-        if opts.max_chunks > 0 && report.reconstructed >= opts.max_chunks {
-            report.budget_exhausted = true;
-            return Ok(report);
+        if walked_all {
+            break;
         }
     }
     if let Some(e) = first_unrebuilt {
@@ -1036,7 +1293,16 @@ async fn check_completeness<S: KvStore>(
             c.unavailable.push(i);
             continue;
         };
-        let corrupt = corrupt_on_target(clients, &n.address, group, i, opts.page_size).await?;
+        let corrupt = corrupt_on_target(
+            clients,
+            &n.address,
+            group,
+            i,
+            opts.page_size,
+            opts.verify_cache.as_deref(),
+            true,
+        )
+        .await?;
         if !corrupt.is_empty() {
             c.corrupt.push((i, corrupt.len()));
         }

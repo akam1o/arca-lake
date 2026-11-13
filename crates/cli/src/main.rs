@@ -806,6 +806,15 @@ struct ControllerArgs {
     /// that every group in repair progresses each pass (0 = unlimited).
     #[arg(long, default_value_t = 4096)]
     failure_repair_chunks_per_pass: usize,
+    /// (group, node) pairs a reconciliation pass lists at most; the sweep
+    /// resumes at its persisted cursor (0 = every pair, the default:
+    /// rebalancing's settle time assumes a sweep per interval).
+    #[arg(long, default_value_t = 0)]
+    reconcile_pairs_per_pass: usize,
+    /// Generations a tiering pass examines at most; the sweep resumes at
+    /// its persisted cursor (0 = every generation).
+    #[arg(long, default_value_t = 4096)]
+    tiering_generations_per_pass: usize,
     /// Scrub a group when its last pass finished this many seconds ago
     /// (RFC-008 §8.3); 0 disables background scrubbing.
     #[arg(long, default_value_t = 86_400)]
@@ -1720,6 +1729,7 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
         let service = Arc::clone(node.service());
         tokio::spawn(serve_gateway_metrics(listener, move || {
             let mut out = render_node_stats(&service.stats(), &service.store().timings());
+            render_node_reclaim(&mut out, service.reclaim_state());
             render_compaction_stats(&mut out, service.compaction_stats());
             render_device_space(&mut out, service.device_space());
             render_node_capacity(
@@ -2016,6 +2026,8 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.rebalance_interval = Duration::from_secs(args.rebalance_interval_secs.max(1));
     cfg.cache_repair_chunks_per_pass = args.cache_repair_chunks_per_pass;
     cfg.planned_move_chunks_per_pass = args.planned_move_chunks_per_pass;
+    cfg.reconcile_pairs_per_pass = args.reconcile_pairs_per_pass;
+    cfg.tiering_generations_per_pass = args.tiering_generations_per_pass;
     cfg.failure_repair_chunks_per_pass = args.failure_repair_chunks_per_pass;
     cfg.scrub = arca_lake_controller::integrity::ScrubOptions {
         page: args.scrub_page,
@@ -2411,9 +2423,12 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                     if let Ok(statuses) =
                         arca_lake_metadata::ops::repair_status::list(meta.as_ref()).await
                     {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
                         for s in statuses {
                             println!(
-                                "repair group {} member {} target {} epoch {} status {} since_ms {} last_progress_ms {} failures {} retargets {} next_attempt_ms {} former {:?} detail {:?}",
+                                "repair group {} member {} target {} epoch {} status {} since_ms {} last_progress_ms {} stalled_s {} failures {} retargets {} next_attempt_ms {} former {:?} detail {:?}",
                                 s.group,
                                 s.index,
                                 s.target,
@@ -2421,11 +2436,53 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                                 s.reason.as_str(),
                                 s.since_ms,
                                 s.last_progress_ms,
+                                now.saturating_sub(s.last_progress_ms.max(s.since_ms)) / 1000,
                                 s.failures,
                                 s.retargets,
                                 s.next_attempt_ms,
                                 s.former,
                                 s.detail
+                            );
+                            // Phase 3.14: what the operator can do.
+                            if let Some(action) = repair_action(s.reason) {
+                                println!("  group {}: {action}", s.group);
+                            }
+                        }
+                    }
+                    // Phase 3.14 (ADR-0032): room reserved by member moves.
+                    if let (Ok(resv), Ok(groups)) = (
+                        arca_lake_metadata::ops::reservation::list(meta.as_ref()).await,
+                        arca_lake_metadata::ops::cluster::list_groups(meta.as_ref()).await,
+                    ) {
+                        for r in resv {
+                            println!(
+                                "reservation node {} group {} member {} epoch {} kind {} bytes {} written {} remaining {} holds {}",
+                                r.node,
+                                r.group,
+                                r.index,
+                                r.epoch,
+                                r.kind.as_str(),
+                                r.bytes,
+                                r.written,
+                                r.remaining(),
+                                groups.iter().any(|g| r.holds(g))
+                            );
+                        }
+                    }
+                    // Phase 3.14: background sweeps' cursors.
+                    if let Ok(cursors) =
+                        arca_lake_metadata::ops::bg_cursor::list(meta.as_ref()).await
+                    {
+                        for (name, c) in cursors {
+                            println!(
+                                "sweep {name} sweeps {} last_sweep_ms {} sweep_started_ms {} last_pass_ms {} last_pass_items {} last_pass_errors {} at_start {}",
+                                c.sweeps,
+                                c.last_sweep_ms,
+                                c.sweep_started_ms,
+                                c.last_pass_ms,
+                                c.last_pass_items,
+                                c.last_pass_errors,
+                                c.after.is_empty()
                             );
                         }
                     }
@@ -2439,6 +2496,27 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 ),
             }
         }
+    }
+}
+
+/// What an operator can do about a repair waiting for `reason` (Phase
+/// 3.14, `admin status`); `None` when it progresses on its own.
+fn repair_action(
+    reason: arca_lake_metadata::ops::repair_status::RepairReason,
+) -> Option<&'static str> {
+    use arca_lake_metadata::ops::repair_status::RepairReason as R;
+    match reason {
+        R::Progressing | R::TemporarilyBlocked => None,
+        R::AwaitingCapacity => Some(
+            "waiting for capacity: add a node or free space on one (the repair floor and reserves are never lowered for it); redundancy is reduced meanwhile",
+        ),
+        R::AwaitingNodes => Some(
+            "waiting for nodes: bring back the members that do not answer (a node that will not return: `admin node` lifecycle commands); with as many members down as the parity, another failure loses data",
+        ),
+        R::DataUnrecoverable => Some(
+            "WARNING: possible data loss: chunks with fewer than k readable shards while every member answers; bring back any node or disk that held this group, the chunks are listed by `admin integrity list`; the group stays Repairing and nothing is deleted for it",
+        ),
+        R::PermanentlyBlocked => Some("needs an operator: see the detail and the controller log"),
     }
 }
 
@@ -5195,6 +5273,23 @@ fn render_compaction_stats(
     }
 }
 
+/// Deferred reclamation (Phase 3.14): `(retention ms, retired records,
+/// damaged, retained bytes)`.
+fn render_node_reclaim(
+    out: &mut String,
+    (retention_ms, pending, damaged, retained): (u64, u64, bool, u64),
+) {
+    use std::fmt::Write as _;
+    for (name, v) in [
+        ("arca_node_reclaim_retained_bytes", retained),
+        ("arca_node_reclaim_pending_records", pending),
+        ("arca_node_reclaim_retention_seconds", retention_ms / 1000),
+        ("arca_node_reclaim_damaged", u64::from(damaged)),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} gauge\n{name} {v}");
+    }
+}
+
 fn render_node_stats(
     n: &arca_lake_storage_node::NodeStatsSnapshot,
     t: &arca_lake_storage_node::StoreTimingsSnapshot,
@@ -5304,6 +5399,7 @@ mod metrics_registry {
 
     fn node_text(tls_on: bool) -> String {
         let mut out = render_node_stats(&Default::default(), &Default::default());
+        render_node_reclaim(&mut out, (86_400_000, 3, false, 4096));
         render_compaction_stats(&mut out, &Default::default());
         render_device_space(&mut out, Some((1, 2)));
         render_node_capacity(&mut out, None, (0, [0; 4]), &Default::default());

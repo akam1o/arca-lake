@@ -172,6 +172,13 @@ pub struct VerifyPage {
     pub shards: Vec<ShardVerification>,
     /// Cursor for the next page, if any.
     pub next: Option<ShardRef>,
+    /// The node's store epoch (0 from an earlier release, Phase 3.14).
+    pub store_epoch: u64,
+    /// Every existing record below this sequence was listed in this
+    /// page's window (0: unknown).
+    pub indexed_below: u64,
+    /// Records below the caller's `since` were not read again.
+    pub since_applied: bool,
 }
 
 impl ShardRef {
@@ -1720,6 +1727,25 @@ impl NodeClients {
             .await
     }
 
+    /// [`Self::verify_shards_page`] reading again only records at or above
+    /// `since` = `(store epoch, sequence)` when the node is still at that
+    /// store epoch (Phase 3.14; an earlier release verifies everything).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::verify_shards_page`].
+    pub async fn verify_shards_since(
+        &self,
+        addr: &str,
+        group_id: u64,
+        after: Option<ShardRef>,
+        limit: u32,
+        since: Option<(u64, u64)>,
+    ) -> Result<VerifyPage, tonic::Status> {
+        self.verify_shards_inner(addr, group_id, after, limit, false, since)
+            .await
+    }
+
     /// [`Self::verify_shards_page`], read-only when `read_only` (a corrupt
     /// shard is reported, not quarantined; nodes whose `Health` says
     /// `verify_read_only`).
@@ -1734,6 +1760,19 @@ impl NodeClients {
         after: Option<ShardRef>,
         limit: u32,
         read_only: bool,
+    ) -> Result<VerifyPage, tonic::Status> {
+        self.verify_shards_inner(addr, group_id, after, limit, read_only, None)
+            .await
+    }
+
+    async fn verify_shards_inner(
+        &self,
+        addr: &str,
+        group_id: u64,
+        after: Option<ShardRef>,
+        limit: u32,
+        read_only: bool,
+        since: Option<(u64, u64)>,
     ) -> Result<VerifyPage, tonic::Status> {
         let ctx = RpcContext {
             addr,
@@ -1750,6 +1789,8 @@ impl NodeClients {
                     after: after.map(|s| s.pb()),
                     limit,
                     read_only,
+                    since_store_epoch: since.map_or(0, |s| s.0),
+                    since_sequence: since.map_or(0, |s| s.1),
                 };
                 let resp = client.verify_shards(req).await?.into_inner();
                 Ok(VerifyPage {
@@ -1770,6 +1811,9 @@ impl NodeClients {
                         .as_ref()
                         .and_then(ShardRef::from_pb)
                         .filter(|_| resp.more),
+                    store_epoch: resp.store_epoch,
+                    indexed_below: resp.indexed_below,
+                    since_applied: resp.since_applied,
                 })
             })
         })

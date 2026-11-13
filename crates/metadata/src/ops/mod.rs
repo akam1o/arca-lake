@@ -7,6 +7,7 @@
 //! never read the clock themselves.
 
 pub mod admission;
+pub mod bg_cursor;
 pub mod bucket;
 pub mod cache;
 pub mod cluster;
@@ -24,6 +25,7 @@ pub mod object;
 pub mod rebalance;
 pub mod recovery;
 pub mod repair_status;
+pub mod reservation;
 
 use crate::error::Result;
 use crate::kv::Txn;

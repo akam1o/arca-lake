@@ -433,9 +433,24 @@ async fn an_unrecoverable_group_does_not_hold_drains_or_background_work() {
         GroupState::Repairing,
         "never Active without the chunk"
     );
+    // Phase 3.14: shown by reason (a possible data loss), never as
+    // restored; the object of the chunk does not read back as if whole.
+    let text = ctl.metrics.render();
+    assert!(
+        text.contains("arca_controller_repair_groups{reason=\"data-unrecoverable\"} 1"),
+        "{}",
+        text.lines()
+            .filter(|l| l.contains("repair_groups"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     for (k, d) in &objects {
         let m = c.manifest(BUCKET, k).await;
         if m.chunks.iter().any(|(_, ch)| ch.chunk_id == chunk) {
+            assert!(
+                s3::get(&c.backend, BUCKET, k).await.is_err(),
+                "an unrecoverable chunk's object read back"
+            );
             continue;
         }
         assert_eq!(&s3::get(&c.backend, BUCKET, k).await.unwrap().0, d, "{k}");

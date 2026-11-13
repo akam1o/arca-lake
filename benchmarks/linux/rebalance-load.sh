@@ -27,7 +27,17 @@
 #   generator always comes from LOAD_REPO, default $HOME/arca-lake),
 #   REBALANCE (on; off keeps rebalancing paused in the second window too:
 #   the same load and faults, for comparison), SAMPLE_SECS (15: admission
-#   state, GC backlog and per-node capacity into samples.tsv).
+#   state, GC backlog and per-node capacity into samples.tsv),
+#   RETENTION (the nodes' --reclaim-retention-secs; unset: the release's
+#   default) and SKEW (--reclaim-skew-secs), RUN_STORE_A (a directory on
+#   host A that holds RUN_DIR's data there, through a symbolic link: for a
+#   small root disk), CONVERGE_MIN (25).
+#
+# Phase 3.14 conditions (docs/verification/phase-3.14-operational-hardening.md):
+#   A, convergence: RETENTION=0 and allotments with room for every move;
+#   B, capacity pressure: the default retention, so that the deletes of
+#   the load stay retained and the allotments fill.
+# A says nothing about the default retention's behaviour; B does.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT="${1:?output directory}"
@@ -54,6 +64,10 @@ BIN="env $ARCA_ENV $REMOTE_REPO/target/release/arca-lake"
 S3LOAD="${LOAD_REPO:-\$HOME/arca-lake}/target/release/s3load"
 REBALANCE="${REBALANCE:-on}"
 SAMPLE_SECS="${SAMPLE_SECS:-15}"
+CONVERGE_MIN="${CONVERGE_MIN:-25}"
+RECLAIM_ARGS=""
+[ -z "${RETENTION:-}" ] || RECLAIM_ARGS="--reclaim-retention-secs $RETENTION"
+[ -z "${SKEW:-}" ] || RECLAIM_ARGS="$RECLAIM_ARGS --reclaim-skew-secs $SKEW"
 CF="$RUN_DIR/fdb.cluster"
 ADMIN="$BIN admin --cluster-file $CF"
 EP="http://$ADDR_B:9000"
@@ -67,7 +81,7 @@ stop_all() { "$1" "for p in $RUN_DIR/*.pid; do [ -f \"\$p\" ] && kill \"\$(cat \
 
 CTL_ARGS="--cluster-file $CF --allow-shared-filesystem --failure-domain node --gc-interval-secs 10 --gc-grace-secs 30 --reconcile-interval-secs 30 --min-orphan-age-secs 60 --rebalance --rebalance-interval-secs 10 --rebalance-mib-per-pass 128 --rebalance-start-imbalance 0.15 --rebalance-stop-imbalance 0.05"
 node_cmd() { # <addr:port> <dir> <metrics port>
-  echo "$BIN storage-node --listen $1 --dir $RUN_DIR/$2 --metrics-listen 127.0.0.1:$3 --capacity-bytes $CAP"
+  echo "$BIN storage-node --listen $1 --dir $RUN_DIR/$2 --metrics-listen 127.0.0.1:$3 --capacity-bytes $CAP $RECLAIM_ARGS"
 }
 node() { # <ssh-fn> <name> <addr> <port> <metrics port>
   start "$1" "$2" "$(node_cmd "$3:$4" "$2" "$5")"
@@ -75,7 +89,7 @@ node() { # <ssh-fn> <name> <addr> <port> <metrics port>
 
 # ---- setup (only this run's directories and processes)
 stop_all sa; stop_all sb
-sa "rm -rf $RUN_DIR $FDB_DATA; mkdir -p $RUN_DIR/logs $RUN_DIR/fdb-log $FDB_DATA && echo 'arca:p39@$ADDR_A:$FDB_PORT' > $CF"
+sa "rm -rf $RUN_DIR $FDB_DATA; if [ -n '${RUN_STORE_A:-}' ]; then rm -rf ${RUN_STORE_A:-}; mkdir -p ${RUN_STORE_A:-}; ln -s ${RUN_STORE_A:-} $RUN_DIR; fi; mkdir -p $RUN_DIR/logs $RUN_DIR/fdb-log $FDB_DATA && echo 'arca:p39@$ADDR_A:$FDB_PORT' > $CF"
 sb "rm -rf $RUN_DIR; mkdir -p $RUN_DIR/logs && echo 'arca:p39@$ADDR_A:$FDB_PORT' > $CF"
 start sa fdb "fdbserver -p $ADDR_A:$FDB_PORT -C $CF -d $FDB_DATA -L $RUN_DIR/fdb-log"
 sleep 2
@@ -136,7 +150,7 @@ sampler() {
   while [ ! -f "$OUT/.stop-sampler" ]; do
     local t; t=$(date -u +%s)
     # One SSH session per host per sample.
-    local probe='c=$(curl -s http://127.0.0.1:9901/metrics | grep -E "^arca_controller_(leader |gc_backlog_bytes|rebalance_moved_bytes_total|rebalance_capacity_stops_total)"); [ -n "$c" ] && echo "$c" | sed "s/^/ctl-$H /"; for p in $PORTS; do curl -s http://127.0.0.1:$p/metrics | grep -E "^arca_node_capacity_bytes\{kind=\"(total|available|reserved)\"" | sed "s/^/$H:$p /"; done; [ -n "$GW" ] && curl -s http://127.0.0.1:9900/metrics | grep -E "^arca_gateway_admission_state" | sed "s/^/gw /"; true'
+    local probe='c=$(curl -s http://127.0.0.1:9901/metrics | grep -E "^arca_controller_(leader |gc_backlog_bytes|gc_backlog_physical_bytes|rebalance_moved_bytes_total|rebalance_moved_chunks_total|rebalance_capacity_stops_total|rebalance_skipped_chunks_total|rebalance_imbalance_permille|reclaimed_bytes_total|reclaim_refused_total|groups_repairing|groups_repair_waiting|repairs_started_total|repairs_completed_total|planned_|capacity_reserv)"); [ -n "$c" ] && echo "$c" | sed "s/^/ctl-$H /"; for p in $PORTS; do curl -s http://127.0.0.1:$p/metrics | grep -E "^arca_node_(capacity_bytes\{kind=\"(total|available|allocated|live|reclaimable|reserved|repair_floor)\"|reclaim_retained_bytes|reclaim_pending_records)" | sed "s/^/$H:$p /"; done; [ -n "$GW" ] && curl -s http://127.0.0.1:9900/metrics | grep -E "^arca_gateway_admission_state" | sed "s/^/gw /"; true'
     {
       sa "H=a PORTS='9910 9911 9912 9913' GW=; $probe"
       sb "H=b PORTS='9910 9911' GW=1; $probe"
@@ -210,6 +224,7 @@ snapshot after-baseline
 if [ "$REBALANCE" = on ]; then
   sa "$ADMIN rebalance resume" > /dev/null
 fi
+log "rebalance resumed at $(date -u +%s)"
 log "rebalance window ($REBALANCE): $WINDOW min, leader kill and node stop"
 window rebalance "$WINDOW" faults
 snapshot after-rebalance
@@ -217,7 +232,7 @@ snapshot after-rebalance
 # ---- converge
 log "converge: no load"
 converge_start=$(date +%s)
-deadline=$(( $(date +%s) + 25 * 60 ))
+deadline=$(( $(date +%s) + CONVERGE_MIN * 60 ))
 [ "$REBALANCE" = on ] || deadline=$(date +%s)
 while [ "$(date +%s)" -lt "$deadline" ]; do
   st=$(sa "$ADMIN rebalance status" 2>&1 || true)
@@ -245,6 +260,6 @@ done
 for h in sa sb; do $h "grep -h -E 'ERROR|panicked' $RUN_DIR/logs/*.log | tail -50"; done 2>&1 | strip > "$OUT/errors-in-logs.txt" || true
 log "iterations $iter, failures $failures"
 touch "$OUT/.stop-sampler"; wait "$SAMPLER" 2>/dev/null || true; rm -f "$OUT/.stop-sampler"
-echo "failures=$failures iterations=$iter window_min=$WINDOW base=$BASE cap=$CAP rebalance=$REBALANCE" > "$OUT/result.txt"
+echo "failures=$failures iterations=$iter window_min=$WINDOW base=$BASE cap=$CAP rebalance=$REBALANCE retention=${RETENTION:-default}" > "$OUT/result.txt"
 stop_all sa; stop_all sb
 [ "$failures" = 0 ]

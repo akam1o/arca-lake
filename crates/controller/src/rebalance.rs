@@ -35,7 +35,9 @@
 //!   keeps the placement threshold (`group_min_shards` of the largest
 //!   shards above its reserve and in-flight writes) after its shard, and
 //!   none needs compaction first. A pass stops at the first that does
-//!   not: client writes keep the room they are admitted on.
+//!   not: client writes keep the room they are admitted on. Room member
+//!   moves reserved on a node (Phase 3.14, ADR-0032: a repair waiting for
+//!   a node, a planned move) is not counted as its room.
 //!
 //! The source space comes back once reconciliation deletes the source
 //! shards, the nodes reclaim them (after their retention, ADR-0028) and
@@ -155,6 +157,7 @@ async fn target_takes(
     target: &GroupRecord,
     len: u64,
     now_ms: u64,
+    meta: &impl arca_lake_metadata::KvStore,
 ) -> Result<(), String> {
     let (floor, shard) = target_floor(policy, target, len);
     for m in &target.members {
@@ -169,10 +172,17 @@ async fn target_takes(
         if d.total == 0 {
             return Err(format!("target node {} reports no device", n.id));
         }
-        let room = d.headroom();
+        // Room member moves reserved (Phase 3.14, ADR-0032) is theirs:
+        // a repair waiting for a node keeps its target's room.
+        // Read now, not at the pass's start (Phase 3.14 review): a move
+        // that reserved this node since keeps its room.
+        let held = arca_lake_metadata::ops::reservation::held_on(meta, n.id)
+            .await
+            .map_err(|e| format!("reservations of target node {} not read: {e}", n.id))?;
+        let room = d.headroom().saturating_sub(held);
         if room < floor.saturating_add(shard) {
             return Err(format!(
-                "target node {} at the placement threshold ({room} bytes of room, {floor} kept for client writes)",
+                "target node {} at the placement threshold ({room} bytes of room after {held} reserved by member moves, {floor} kept for client writes)",
                 n.id
             ));
         }
@@ -563,7 +573,7 @@ pub async fn run_once_with<S: KvStore>(
                         continue;
                     }
                     if let Err(why) =
-                        target_takes(clients, &nodes, policy, target, len, now_ms).await
+                        target_takes(clients, &nodes, policy, target, len, now_ms, meta).await
                     {
                         report.reason = why;
                         report.capacity_stops += 1;

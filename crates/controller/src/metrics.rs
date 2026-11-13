@@ -185,6 +185,19 @@ impl FenceView {
     }
 }
 
+/// Reason labels of `arca_controller_repair_groups` (Phase 3.14), in the
+/// order of [`Metrics::repair_groups_by_reason`]; "none": a `Repairing`
+/// group with no status yet.
+pub const REPAIR_REASONS: [&str; 7] = [
+    "progressing",
+    "temporarily-blocked",
+    "awaiting-capacity",
+    "awaiting-nodes",
+    "data-unrecoverable",
+    "permanently-blocked",
+    "none",
+];
+
 /// Counters and gauges of one controller process.
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -305,6 +318,39 @@ pub struct Metrics {
     /// Repairs whose target was replaced because it was gone or kept
     /// failing (Phase 3.13, R-104).
     pub repair_retargets_total: AtomicU64,
+    /// `Repairing` groups by the reason of their status at the last repair
+    /// pass (Phase 3.14; index: [`REPAIR_REASONS`], the last one "none":
+    /// no status yet).
+    pub repair_groups_by_reason: [AtomicU64; 7],
+    /// Seconds since the `Repairing` group that waited longest last made
+    /// progress (its status's `last_progress_ms`, else `since_ms`), and
+    /// that group (0: none).
+    pub repair_longest_stall_seconds: AtomicU64,
+    /// See [`Self::repair_longest_stall_seconds`].
+    pub repair_longest_stall_group: AtomicU64,
+    /// The longest repair attempt of the last repair pass, milliseconds.
+    pub repair_attempt_max_ms: AtomicU64,
+    /// `(group, node)` reconciliations that failed (other than a node not
+    /// answering) and were passed over until the next sweep (Phase 3.14).
+    pub reconcile_errors_total: AtomicU64,
+    /// Generations a tiering pass could not examine (an error reading its
+    /// records) and passed over until the next sweep (Phase 3.14).
+    pub tiering_errors_total: AtomicU64,
+    /// Capacity reservations of member moves at the last repair pass
+    /// (Phase 3.14, ADR-0032), and the bytes they still need.
+    pub capacity_reservations: AtomicU64,
+    /// See [`Self::capacity_reservations`].
+    pub capacity_reserved_bytes: AtomicU64,
+    /// Reservations released because they no longer described their
+    /// group's move (completed, retargeted, never begun, or a former
+    /// leader's).
+    pub capacity_reservations_released_total: AtomicU64,
+    /// Moves not started because the reservation found the target's room
+    /// taken by other moves.
+    pub capacity_reservation_refusals_total: AtomicU64,
+    /// Verification results of repair targets (Phase 3.14, differential
+    /// verification).
+    pub verify_cache: std::sync::Arc<crate::repair::VerifyCache>,
     /// `Repairing` groups whose repair waits (nodes, capacity, an operator,
     /// unrecoverable data) rather than progressing (Phase 3.13).
     pub groups_repair_waiting: AtomicU64,
@@ -568,9 +614,71 @@ impl Metrics {
             "arca_controller_repair_retargets_total",
             self.repair_retargets_total.load(Ordering::Relaxed),
         );
+        out += &c(
+            "arca_controller_reconcile_errors_total",
+            self.reconcile_errors_total.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_tiering_errors_total",
+            self.tiering_errors_total.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_capacity_reservations",
+            self.capacity_reservations.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_capacity_reserved_bytes",
+            self.capacity_reserved_bytes.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_capacity_reservations_released_total",
+            self.capacity_reservations_released_total
+                .load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_capacity_reservation_refusals_total",
+            self.capacity_reservation_refusals_total
+                .load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_repair_verify_shards_read_total",
+            self.verify_cache.shards_read.load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_repair_verify_passes_differential_total",
+            self.verify_cache
+                .passes_differential
+                .load(Ordering::Relaxed),
+        );
+        out += &c(
+            "arca_controller_repair_verify_passes_full_total",
+            self.verify_cache.passes_full.load(Ordering::Relaxed),
+        );
         out += &g(
             "arca_controller_groups_repair_waiting",
             self.groups_repair_waiting.load(Ordering::Relaxed),
+        );
+        let _ = writeln!(out, "# TYPE arca_controller_repair_groups gauge");
+        for (i, reason) in REPAIR_REASONS.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "arca_controller_repair_groups{{reason=\"{reason}\"}} {}",
+                self.repair_groups_by_reason[i].load(Ordering::Relaxed)
+            );
+        }
+        out += &g(
+            "arca_controller_repair_longest_stall_seconds",
+            self.repair_longest_stall_seconds.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_repair_longest_stall_group",
+            self.repair_longest_stall_group.load(Ordering::Relaxed),
+        );
+        #[allow(clippy::cast_precision_loss)]
+        let attempt = self.repair_attempt_max_ms.load(Ordering::Relaxed) as f64 / 1000.0;
+        let _ = writeln!(
+            out,
+            "# TYPE arca_controller_repair_attempt_max_seconds gauge\narca_controller_repair_attempt_max_seconds {attempt}"
         );
         out += &c(
             "arca_controller_rebalance_capacity_stops_total",

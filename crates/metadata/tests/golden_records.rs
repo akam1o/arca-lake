@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use arca_lake_common::compat::{Capabilities, Target};
 use arca_lake_metadata::ops::admission::{AdmissionRecord, GroupRoom, TierAdmission};
+use arca_lake_metadata::ops::bg_cursor::BackgroundCursor;
 use arca_lake_metadata::ops::delete_fence::DeleteFenceRecord;
 use arca_lake_metadata::ops::integrity::{
     Finding, ManifestCursor, RepairState, RepairTask, ScrubCursor, ScrubPhase,
@@ -28,6 +29,7 @@ use arca_lake_metadata::ops::recovery::{
     RestoreCounts, RestoreCursor, RestoreReport,
 };
 use arca_lake_metadata::ops::repair_status::{RepairReason, RepairStatus};
+use arca_lake_metadata::ops::reservation::{CapacityReservation, ReservationKind};
 use arca_lake_metadata::records::{
     BucketRecord, CacheCopyTokens, CachePlacement, CacheShardToken, Checksum, ChecksumAlgorithm,
     ChecksumType, ChunkRecord, ClusterPhase, ClusterStateRecord, CurrentPointer, DurablePlacement,
@@ -623,6 +625,31 @@ fn cases() -> Vec<Case> {
                 retargets: 1,
                 excluded: vec![3],
                 no_target: true,
+            },
+        ),
+        case(
+            "CapacityReservation",
+            CapacityReservation {
+                node: 17,
+                group: 4,
+                epoch: 9,
+                index: 2,
+                kind: ReservationKind::Planned,
+                bytes: 3 << 30,
+                written: 1 << 30,
+                created_ms: 1_793_000_000_000,
+            },
+        ),
+        case(
+            "BackgroundCursor",
+            BackgroundCursor {
+                after: vec![0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 9],
+                sweeps: 12,
+                last_sweep_ms: 1_793_000_000_000,
+                sweep_started_ms: 1_793_000_100_000,
+                last_pass_ms: 1_793_000_200_000,
+                last_pass_items: 256,
+                last_pass_errors: 1,
             },
         ),
     ]

@@ -20,7 +20,8 @@ use arca_lake_metadata::guard::{GuardedKv, OpClass};
 use arca_lake_metadata::ops::cluster;
 use arca_lake_metadata::ops::leader;
 use arca_lake_metadata::ops::repair_status::{self, RepairReason, RepairStatus};
-use arca_lake_metadata::ops::{compat, epoch_intent, membership, node_lifecycle};
+use arca_lake_metadata::ops::reservation::{self, CapacityReservation, ReservationKind};
+use arca_lake_metadata::ops::{bg_cursor, compat, epoch_intent, membership, node_lifecycle};
 use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord};
 use arca_lake_metadata::{KvError, KvStore, MetaError};
 use arca_lake_placement::{GroupSpec, choose_replacement};
@@ -108,6 +109,14 @@ pub struct ControllerConfig {
     /// pass instead of the last one waiting for every earlier one's whole
     /// rebuild; the walk resumes at its cursor. 0 = unlimited.
     pub failure_repair_chunks_per_pass: usize,
+    /// `(group, node)` pairs a reconciliation pass lists at most (Phase
+    /// 3.14): the sweep resumes at its persisted cursor; 0 = every pair
+    /// (the default: rebalancing's settle time and in-transit credit assume
+    /// a whole sweep per reconcile interval; review).
+    pub reconcile_pairs_per_pass: usize,
+    /// Generations a tiering pass examines at most (Phase 3.14): the sweep
+    /// resumes at its persisted cursor; 0 = every generation.
+    pub tiering_generations_per_pass: usize,
     /// Background scrubbing (RFC-008 §8.3); `interval_ms = 0` disables it.
     pub scrub: crate::integrity::ScrubOptions,
     /// Interval between scrub scheduler invocations (each resumes or starts
@@ -172,6 +181,8 @@ impl ControllerConfig {
             rebalance_interval: Duration::from_mins(1),
             cache_repair_chunks_per_pass: 256,
             planned_move_chunks_per_pass: 512,
+            reconcile_pairs_per_pass: 0,
+            tiering_generations_per_pass: 4096,
             failure_repair_chunks_per_pass: 4096,
             scrub: crate::integrity::ScrubOptions::default(),
             scrub_tick: Duration::from_secs(60),
@@ -999,7 +1010,7 @@ async fn scheduler<S, F, Fut>(
     }
 }
 
-fn is_fenced(e: &ControlError) -> bool {
+pub(crate) fn is_fenced(e: &ControlError) -> bool {
     matches!(e, ControlError::Meta(MetaError::Kv(KvError::Fenced(_))))
 }
 
@@ -1125,9 +1136,6 @@ async fn reclaim_pass<S: KvStore>(
         .map(|r| r.node_id)
         .collect();
     let mut not_deferring = 0;
-    // A node not heard counts as deferring (independent review): its
-    // deletes may be retained, so GC's deletes are not room.
-    let mut deferring = 0;
     for n in cluster::list_nodes(meta)
         .await?
         .into_iter()
@@ -1138,9 +1146,6 @@ async fn reclaim_pass<S: KvStore>(
         {
             Ok(r) => {
                 not_deferring += r.nodes_not_deferring;
-                if r.nodes_not_deferring == 0 {
-                    deferring += 1;
-                }
                 metrics
                     .reclaimed_total
                     .fetch_add(r.reclaimed, Ordering::Relaxed);
@@ -1158,7 +1163,6 @@ async fn reclaim_pass<S: KvStore>(
                     .fetch_add(r.errors, Ordering::Relaxed);
             }
             Err(e) => {
-                deferring += 1;
                 metrics.reclaim_errors_total.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(node = n.id, error = %e, "reclaim pass: node skipped until the next pass");
             }
@@ -1167,11 +1171,15 @@ async fn reclaim_pass<S: KvStore>(
     metrics
         .nodes_not_deferring
         .store(not_deferring, Ordering::Relaxed);
-    metrics.nodes_deferring.store(deferring, Ordering::Relaxed);
-    metrics.deferral_known.store(true, Ordering::Relaxed);
+    // Which nodes defer is taken from their health every health pass
+    // (Phase 3.14): a reclaim pass's error on a node says nothing about its
+    // retention (a new leader's first pass, before its fence is open,
+    // could fail on every node and count them all as deferring, so GC's
+    // deletes were not counted as room for a reclaim interval).
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn reconcile_pass<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -1191,39 +1199,99 @@ async fn reconcile_pass<S: KvStore>(
         .filter(|n| !retired.contains(&n.id))
         .collect();
     let groups = cluster::list_groups(meta).await?;
+    // A bounded slice of the sweep from its persisted cursor (Phase 3.14):
+    // no pass lists every pair of a large cluster, a new leader resumes
+    // where the last pass stopped, and a pair that fails is passed over.
+    let mut cursor = bg_cursor::get(meta, bg_cursor::RECONCILE).await?;
+    let budget = if cfg.reconcile_pairs_per_pass == 0 {
+        usize::MAX
+    } else {
+        cfg.reconcile_pairs_per_pass
+    };
+    let batch = crate::sweep::next_pairs(
+        bg_cursor::parse_pair(&cursor.after),
+        &groups.iter().map(|g| g.id).collect::<Vec<_>>(),
+        &nodes.iter().map(|n| n.id).collect::<Vec<_>>(),
+        budget,
+    );
+    if cursor.after.is_empty() {
+        cursor.sweep_started_ms = now_ms();
+    }
+    let by_group: HashMap<u64, &GroupRecord> = groups.iter().map(|g| (g.id, g)).collect();
+    let by_node: HashMap<u64, &NodeRecord> = nodes.iter().map(|n| (n.id, n)).collect();
     let mut deleted = 0usize;
     let mut unreachable = 0usize;
-    for g in &groups {
+    let mut errors = 0u64;
+    let mut done = 0u64;
+    for (i, &(gid, nid)) in batch.pairs.iter().enumerate() {
         // Every few node listings: the batch a restore under this leader
         // could leave undetected stays small, at a commit per batch, not
-        // per (group, node) pair (re-review).
-        for (i, n) in nodes.iter().enumerate() {
-            if i % 8 == 0 {
-                advance_lineage(meta, metrics).await?;
+        // per (group, node) pair (re-review). The cursor goes with it.
+        if i % 8 == 0 {
+            advance_lineage(meta, metrics).await?;
+            if i > 0 {
+                cursor.after = bg_cursor::pair_position(batch.pairs[i - 1].0, batch.pairs[i - 1].1);
+                bg_cursor::put(meta, bg_cursor::RECONCILE, &cursor).await?;
             }
-            match gc::reconcile_node(
-                meta,
-                clients,
-                n.id,
-                &n.address,
-                g,
-                now_ms(),
-                ms(cfg.min_orphan_age),
-                cfg.page_size,
-            )
-            .await
+        }
+        let (Some(g), Some(n)) = (by_group.get(&gid), by_node.get(&nid)) else {
+            continue;
+        };
+        done += 1;
+        match gc::reconcile_node(
+            meta,
+            clients,
+            n.id,
+            &n.address,
+            g,
+            now_ms(),
+            ms(cfg.min_orphan_age),
+            cfg.page_size,
+        )
+        .await
+        {
+            Ok(r) => {
+                deleted += r.deleted();
+                metrics
+                    .delete_fence_refusals_total
+                    .fetch_add(r.kept_fenced as u64, Ordering::Relaxed);
+            }
+            Err(ControlError::Node { .. }) => unreachable += 1,
+            // A record of this pair that cannot be decoded is this pair's
+            // problem (review): passed over below, as any other.
+            Err(e)
+                if is_fenced(&e)
+                    || matches!(&e, ControlError::Meta(m) if !matches!(m, MetaError::Codec(_))) =>
             {
-                Ok(r) => {
-                    deleted += r.deleted();
-                    metrics
-                        .delete_fence_refusals_total
-                        .fetch_add(r.kept_fenced as u64, Ordering::Relaxed);
+                // The store or the leadership: stop here, the cursor
+                // before this pair.
+                if i > 0 {
+                    cursor.after =
+                        bg_cursor::pair_position(batch.pairs[i - 1].0, batch.pairs[i - 1].1);
+                    let _ = bg_cursor::put(meta, bg_cursor::RECONCILE, &cursor).await;
                 }
-                Err(ControlError::Node { .. }) => unreachable += 1,
-                Err(e) => return Err(e),
+                return Err(e);
+            }
+            Err(e) => {
+                warn!(group = gid, node = nid, error = %e, "reconcile of a node's shards failed; passed over until the next sweep");
+                errors += 1;
             }
         }
     }
+    if batch.wraps {
+        cursor.after.clear();
+        cursor.sweeps += 1;
+        cursor.last_sweep_ms = now_ms();
+    } else if let Some(&(g, n)) = batch.pairs.last() {
+        cursor.after = bg_cursor::pair_position(g, n);
+    }
+    cursor.last_pass_ms = now_ms();
+    cursor.last_pass_items = done;
+    cursor.last_pass_errors = errors;
+    bg_cursor::put(meta, bg_cursor::RECONCILE, &cursor).await?;
+    metrics
+        .reconcile_errors_total
+        .fetch_add(errors, Ordering::Relaxed);
     metrics
         .shards_deleted_total
         .fetch_add(deleted as u64, Ordering::Relaxed);
@@ -1377,6 +1445,15 @@ async fn health_pass<S: KvStore>(
     // identity, adopted until it acknowledged one, compared afterwards.
     let states = node_lifecycle::states(meta).await?;
     let mut identities = node_lifecycle::identities(meta).await?;
+    // Nodes that defer deletes, as their health says: every node in
+    // service but those that answered with a retention of 0 and a sound
+    // retirement state (one that does not answer, or is probed only,
+    // counts as deferring: the safe side). Admission counts GC's deletes as
+    // room only while none defers (Phase 3.14: taken from the reclaim pass
+    // before, whose errors at a new leader's first pass counted every node
+    // as deferring for a reclaim interval).
+    let mut in_service = 0u64;
+    let mut not_deferring_seen = 0u64;
     for n in &nodes {
         clients.note_node_id(&n.address, n.id);
         let state = states
@@ -1386,6 +1463,7 @@ async fn health_pass<S: KvStore>(
         if state == node_lifecycle::State::Removed {
             continue;
         }
+        in_service += 1;
         if state == node_lifecycle::State::Quarantined {
             let _ = clients.health(&n.address).await;
             unhealthy += 1;
@@ -1496,6 +1574,9 @@ async fn health_pass<S: KvStore>(
         }
         match clients.health_with(&n.address, node_req).await {
             Ok(h) => {
+                if h.reclaim_retention_ms == 0 && !h.reclaim_damaged {
+                    not_deferring_seen += 1;
+                }
                 // Its fence counts whatever its identity (review).
                 metrics.delete_fence.note_node(
                     n.id,
@@ -1598,6 +1679,11 @@ async fn health_pass<S: KvStore>(
             }
         }
     }
+    metrics.nodes_deferring.store(
+        in_service.saturating_sub(not_deferring_seen),
+        Ordering::Relaxed,
+    );
+    metrics.deferral_known.store(true, Ordering::Relaxed);
     metrics
         .nodes_total
         .store(nodes.len() as u64, Ordering::Relaxed);
@@ -1696,6 +1782,10 @@ async fn repair_pass<S: KvStore>(
         former: Vec::new(),
         source: cfg.repair_source,
         keep_client_reserve: false,
+        verify_cache: Some(std::sync::Arc::clone(&metrics.verify_cache)),
+        // Chunks rebuilt at a time (Phase 3.14): reads of `k` shards and
+        // the target's writes overlap; results are taken in order.
+        parallel: 8,
     };
     // Operator intents (Phase 3.3 §6): draining nodes and replacement
     // requests. They change placement on purpose, so they progress only
@@ -1715,6 +1805,63 @@ async fn repair_pass<S: KvStore>(
             statuses.remove(&id);
         }
     }
+    // Capacity reservations (Phase 3.14, ADR-0032): those that no longer
+    // describe their group's move are released; the rest are this pass's
+    // (and the planned ones say which moves are planned, whichever leader
+    // started them).
+    let released = reservation::sweep(meta).await?;
+    metrics
+        .capacity_reservations_released_total
+        .fetch_add(released as u64, Ordering::Relaxed);
+    let reservations = reservation::list(meta).await?;
+    metrics
+        .capacity_reservations
+        .store(reservations.len() as u64, Ordering::Relaxed);
+    metrics.capacity_reserved_bytes.store(
+        reservations
+            .iter()
+            .map(CapacityReservation::remaining)
+            .sum(),
+        Ordering::Relaxed,
+    );
+    let planned_reserved: BTreeSet<u64> = reservations
+        .iter()
+        .filter(|r| r.kind == ReservationKind::Planned)
+        .map(|r| r.group)
+        .collect();
+    // Why each rebuilding group is where it is, and the longest stalled
+    // one (Phase 3.14): by reason, never summed into one figure.
+    let mut by_reason = [0u64; 7];
+    let mut stall: Option<(u64, u64)> = None;
+    for g in all_groups
+        .iter()
+        .filter(|g| g.state == GroupState::Repairing)
+    {
+        let s = statuses.get(&g.id);
+        let i = s.map_or(6, |s| {
+            crate::metrics::REPAIR_REASONS
+                .iter()
+                .position(|r| *r == s.reason.as_str())
+                .unwrap_or(6)
+        });
+        by_reason[i] += 1;
+        let since = s.map_or(now, |s| s.last_progress_ms.max(s.since_ms));
+        let age = now.saturating_sub(since) / 1000;
+        if stall.is_none_or(|(a, _)| age > a) {
+            stall = Some((age, g.id));
+        }
+    }
+    for (a, v) in metrics.repair_groups_by_reason.iter().zip(by_reason) {
+        a.store(v, Ordering::Relaxed);
+    }
+    let (age, group) = stall.unwrap_or((0, 0));
+    metrics
+        .repair_longest_stall_seconds
+        .store(age, Ordering::Relaxed);
+    metrics
+        .repair_longest_stall_group
+        .store(group, Ordering::Relaxed);
+    metrics.repair_attempt_max_ms.store(0, Ordering::Relaxed);
     metrics.groups_repair_waiting.store(
         all_groups
             .iter()
@@ -1878,11 +2025,12 @@ async fn repair_pass<S: KvStore>(
         // failure work (re-review: a drain elsewhere does not make it
         // planned).
         let started_planned = g.state == GroupState::Repairing
-            && metrics
-                .planned_moves
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(&g.id);
+            && (planned_reserved.contains(&g.id)
+                || metrics
+                    .planned_moves
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .contains(&g.id));
         let moving = intents.requests.contains_key(&g.id)
             || started_planned
             || (g.state == GroupState::Active
@@ -2535,7 +2683,7 @@ enum Started {
 /// `Active` group, the replacement of a target that is gone or keeps
 /// failing, or of a second failed member of a `Repairing` group (Phase
 /// 3.13). The membership change is an epoch intent (fenced, resumable).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn start_move<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -2575,6 +2723,15 @@ async fn start_move<S: KvStore>(
     // A failure repair may use the space down to the repair floor; a
     // planned move (and a retarget of one) keeps the client reserve.
     let planned = why != "auto repair" && (why != "retarget" || opts.keep_client_reserve);
+    let kind = if planned {
+        ReservationKind::Planned
+    } else {
+        ReservationKind::Repair
+    };
+    // Room other moves reserved (Phase 3.14, ADR-0032): a repair counts
+    // only other repairs' (it comes first), a planned move every one.
+    let reserved = reserved_on(meta, all_groups, g.id, kind).await?;
+    let held = |id: u64| reserved.get(&id).copied().unwrap_or(0);
     let mut free: HashMap<u64, Option<u64>> = HashMap::new();
     for n in nodes.values().filter(|n| candidate(n.id)) {
         if !g.members.iter().any(|m| m.node_id == n.id) {
@@ -2584,7 +2741,15 @@ async fn start_move<S: KvStore>(
             );
         }
     }
-    let roomy = |id: u64| crate::capacity::fits(free.get(&id).copied().flatten(), need);
+    let roomy = |id: u64| {
+        crate::capacity::fits(
+            free.get(&id)
+                .copied()
+                .flatten()
+                .map(|f| f.saturating_sub(held(id))),
+            need,
+        )
+    };
     let pick = |with_room: bool| {
         choose_for(nodes, all_groups, g, index, &cfg.failure_domain, &|id| {
             to_node.is_none_or(|n| n == id) && candidate(id) && (!with_room || roomy(id))
@@ -2594,9 +2759,10 @@ async fn start_move<S: KvStore>(
         let without_room = pick(false)?;
         let msg = match (without_room, to_node) {
             (Some(m), _) => format!(
-                "insufficient capacity: node {} has {} bytes free, the member needs {}; paused until a node has room",
+                "insufficient capacity: node {} has {} bytes free ({} reserved by other moves), the member needs {}; paused until a node has room",
                 m.node_id,
                 free.get(&m.node_id).copied().flatten().unwrap_or(0),
+                held(m.node_id),
                 crate::capacity::needed(need)
             ),
             (None, Some(n)) => {
@@ -2609,6 +2775,41 @@ async fn start_move<S: KvStore>(
             msg,
         });
     };
+    // Reserve the member's bytes on the target, checked again in the
+    // transaction against every reservation there (two moves never take
+    // one room); written before the move begins, at its epoch: if it never
+    // begins, the reservation does not hold and is released.
+    if !g.is_cache() && need > 0 {
+        let r = CapacityReservation {
+            node: replacement.node_id,
+            group: g.id,
+            epoch: g.epoch + 1,
+            index: u16::try_from(index).unwrap_or(u16::MAX),
+            kind,
+            bytes: need,
+            written: 0,
+            created_ms: now_ms(),
+        };
+        let room = free
+            .get(&replacement.node_id)
+            .copied()
+            .flatten()
+            .map_or(u64::MAX, |f| {
+                f.saturating_sub(crate::capacity::needed(need) - need)
+            });
+        if let reservation::Reserved::No { held } = reservation::reserve(meta, &r, room).await? {
+            metrics
+                .capacity_reservation_refusals_total
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(Started::NoTarget {
+                capacity: true,
+                msg: format!(
+                    "insufficient capacity: node {} has {room} bytes of room, {held} reserved by other moves, the member needs {need}; paused until a node has room",
+                    replacement.node_id
+                ),
+            });
+        }
+    }
     info!(
         group = g.id,
         index,
@@ -2657,6 +2858,35 @@ async fn start_move<S: KvStore>(
     Ok(Started::Ran(busy))
 }
 
+/// Per node, the bytes the moves of other groups still need there, of the
+/// reservations that count against a new one of `kind` and still hold
+/// (Phase 3.14, ADR-0032).
+pub(crate) async fn reserved_on<S: KvStore>(
+    meta: &S,
+    groups: &[GroupRecord],
+    except: u64,
+    kind: ReservationKind,
+) -> Result<HashMap<u64, u64>, ControlError> {
+    // A move under way (its epoch change open, not committed) counts too
+    // (Phase 3.14 review).
+    let intents: HashMap<u64, epoch_intent::EpochIntent> = epoch_intent::open(meta)
+        .await?
+        .into_iter()
+        .map(|i| (i.group, i))
+        .collect();
+    let mut out: HashMap<u64, u64> = HashMap::new();
+    for r in reservation::list(meta).await? {
+        if r.group != except
+            && r.counts_against(kind)
+            && (groups.iter().any(|g| r.holds(g))
+                || intents.get(&r.group).is_some_and(|i| r.pending(i)))
+        {
+            *out.entry(r.node).or_default() += r.remaining();
+        }
+    }
+    Ok(out)
+}
+
 /// Run one repair attempt of slot `index` onto `target` and record how it
 /// ended (Phase 3.13). Returns whether the group holds back cache repair.
 #[allow(clippy::too_many_arguments)]
@@ -2674,7 +2904,20 @@ async fn attempt<S: KvStore>(
     healthy: &impl Fn(u64) -> bool,
     prior: Option<&RepairStatus>,
 ) -> Result<(bool, Option<Decision>), ControlError> {
+    let attempt_started = std::time::Instant::now();
     let result = run_repair(meta, clients, group_id, index, target, opts, metrics, cache).await;
+    metrics.repair_attempt_max_ms.fetch_max(
+        u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+    // What the move put on its target no longer needs reserving.
+    if let Ok(r) = &result
+        && !cache
+        && !r.complete
+        && r.target_bytes > 0
+    {
+        reservation::note_written(meta, target.node_id, group_id, r.epoch, r.target_bytes).await?;
+    }
     match &result {
         Err(e) if is_fenced(e) => return result.map(|_| (true, None)),
         Err(ControlError::Meta(_)) => return result.map(|_| (true, None)),
@@ -2690,6 +2933,8 @@ async fn attempt<S: KvStore>(
     let (Some(cursor), GroupState::Repairing) = (after.repair_cursor, after.state) else {
         if after.state == GroupState::Active {
             repair_status::clear(meta, group_id).await?;
+            reservation::clear(meta, target.node_id, group_id).await?;
+            metrics.verify_cache.forget_group(group_id);
         }
         return Ok((true, None));
     };
@@ -3070,7 +3315,17 @@ async fn tiering_pass<S: KvStore>(
     }
     metrics.tiering_active.store(true, Ordering::Relaxed);
     let _active = TieringActive(&metrics.tiering_active);
-    let r = crate::tiering::run_once(meta, clients, policy, now_ms()).await?;
+    let r = crate::tiering::run_once_bounded(
+        meta,
+        clients,
+        policy,
+        now_ms(),
+        cfg.tiering_generations_per_pass,
+    )
+    .await?;
+    metrics
+        .tiering_errors_total
+        .fetch_add(r.errors as u64, Ordering::Relaxed);
     metrics
         .chunks_promoted_total
         .fetch_add(r.promoted_chunks as u64, Ordering::Relaxed);

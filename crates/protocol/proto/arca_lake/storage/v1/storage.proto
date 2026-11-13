@@ -251,6 +251,11 @@ message VerifyShardsRequest {
   // verification). Honoured by nodes whose Health says
   // `verify_read_only`; older nodes ignore it and quarantine.
   bool read_only = 5;
+  // Phase 3.14 (differential verification): when `since_store_epoch` is
+  // the node's store epoch, records below `since_sequence` are not read
+  // again (not reported); otherwise, or when 0, every record is verified.
+  uint64 since_sequence = 6;
+  uint64 since_store_epoch = 7;
 }
 
 message ShardVerification {
@@ -267,6 +272,13 @@ message VerifyShardsResponse {
   repeated ShardVerification shards = 1;
   ShardKey next = 2;
   bool more = 3;
+  // Phase 3.14: the node's store epoch, and a sequence below which every
+  // existing record was in the index when this page was listed (0 from an
+  // earlier release: no differential verification).
+  uint64 store_epoch = 4;
+  uint64 indexed_below = 5;
+  // Whether `since_sequence` was applied to this page.
+  bool since_applied = 6;
 }
 
 // Deep verification of a page of shards (RFC-008 §8.2): every shard is read

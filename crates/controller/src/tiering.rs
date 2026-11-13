@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use arca_lake_metadata::KvStore;
-use arca_lake_metadata::ops::{cluster, object};
+use arca_lake_metadata::ops::{bg_cursor, cluster, object};
+use arca_lake_metadata::records::GenId;
 use arca_lake_metadata::records::{GenState, GroupRecord, GroupState, NodeRecord};
 use arca_lake_protocol::client::NodeClients;
 use arca_lake_tiering::durable::Coders;
@@ -43,6 +44,14 @@ pub struct TieringReport {
     pub demoted_chunks: usize,
     /// Chunks whose migration was skipped or failed (logged; retried later).
     pub skipped_chunks: usize,
+    /// Generations whose records could not be read (logged, passed over;
+    /// Phase 3.14).
+    pub errors: usize,
+    /// The last generation examined, and whether the pass reached the end
+    /// (Phase 3.14 cursor).
+    pub last: Option<GenId>,
+    /// See [`Self::last`].
+    pub reached_end: bool,
 }
 
 fn ms(d: Duration) -> u64 {
@@ -55,13 +64,72 @@ fn ms(d: Duration) -> u64 {
 ///
 /// Metadata errors. Migration errors of individual chunks are counted,
 /// not returned.
-#[allow(clippy::too_many_lines)]
 pub async fn run_once<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
     policy: &TieringPolicy,
     now_ms: u64,
 ) -> Result<TieringReport, ControlError> {
+    let mut report = TieringReport::default();
+    sweep(meta, clients, policy, now_ms, None, usize::MAX, &mut report).await?;
+    Ok(report)
+}
+
+/// A pass over at most `budget` generations (0: every one) from the
+/// persisted cursor (Phase 3.14, [`bg_cursor::TIERING`]): a large keyspace
+/// is swept over several passes, a new leader resumes where the last pass
+/// stopped, and a generation whose records cannot be read is passed over
+/// (logged and counted) instead of stopping every pass at it.
+///
+/// # Errors
+///
+/// As [`run_once`]; `Fenced` for a former leader.
+pub async fn run_once_bounded<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    policy: &TieringPolicy,
+    now_ms: u64,
+    budget: usize,
+) -> Result<TieringReport, ControlError> {
+    let mut cursor = bg_cursor::get(meta, bg_cursor::TIERING).await?;
+    let after = GenId::try_from(cursor.after.as_slice()).ok();
+    if after.is_none() {
+        cursor.sweep_started_ms = now_ms;
+    }
+    let budget = if budget == 0 { usize::MAX } else { budget };
+    // The position is kept even when the pass stops on an error (review):
+    // the generations before the one it stopped at are not examined again.
+    let mut report = TieringReport::default();
+    let result = sweep(meta, clients, policy, now_ms, after, budget, &mut report).await;
+    if let Err(e) = &result
+        && crate::process::is_fenced(e)
+    {
+        return result.map(|()| report);
+    }
+    if report.reached_end {
+        cursor.after.clear();
+        cursor.sweeps += 1;
+        cursor.last_sweep_ms = now_ms;
+    } else if let Some(last) = report.last {
+        cursor.after = last.to_vec();
+    }
+    cursor.last_pass_ms = now_ms;
+    cursor.last_pass_items = report.examined as u64;
+    cursor.last_pass_errors = report.errors as u64;
+    bg_cursor::put(meta, bg_cursor::TIERING, &cursor).await?;
+    result.map(|()| report)
+}
+
+#[allow(clippy::too_many_lines)]
+async fn sweep<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    policy: &TieringPolicy,
+    now_ms: u64,
+    start: Option<GenId>,
+    budget: usize,
+    report: &mut TieringReport,
+) -> Result<(), ControlError> {
     // Intents of migrations that crashed: their targets become reclaimable.
     object::expire_migrations(meta, now_ms).await?;
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
@@ -77,22 +145,48 @@ pub async fn run_once<S: KvStore>(
     let addr_of = |id: u64| nodes.get(&id).map(|n| n.address.clone());
     let coders = Coders::default();
     let tier_index = |tier: &str| policy.tiers.iter().position(|t| t == tier);
-    let mut report = TieringReport::default();
 
-    let mut after = None;
+    let mut after = start;
+    let mut seen = 0usize;
     loop {
         let page = object::list_generations(meta, after, 256).await?;
-        let Some((last, _)) = page.last() else { break };
+
+        let Some((last, _)) = page.last() else {
+            report.reached_end = true;
+            break;
+        };
         after = Some(*last);
         for (generation, header) in &page {
+            if seen >= budget {
+                return Ok(());
+            }
+            seen += 1;
+            // Where the cursor stays if this generation stops the pass.
+            let before = report.last;
+            report.last = Some(*generation);
             if header.state != GenState::Committed {
                 continue;
             }
             report.examined += 1;
-            let access = object::access_of(meta, generation)
-                .await?
-                .unwrap_or_default();
-            let Some(manifest) = object::read_manifest_of(meta, generation).await? else {
+            let records = async {
+                let access = object::access_of(meta, generation).await?;
+                let manifest = object::read_manifest_of(meta, generation).await?;
+                Ok::<_, arca_lake_metadata::MetaError>((access.unwrap_or_default(), manifest))
+            }
+            .await;
+            let (access, manifest) = match records {
+                Ok(r) => r,
+                Err(e @ arca_lake_metadata::MetaError::Codec(_)) => {
+                    tracing::warn!(error = %e, "tiering: a generation's records could not be read; passed over until the next sweep");
+                    report.errors += 1;
+                    continue;
+                }
+                Err(e) => {
+                    report.last = before;
+                    return Err(e.into());
+                }
+            };
+            let Some(manifest) = manifest else {
                 continue;
             };
             let Some((_, first)) = manifest.first() else {
@@ -168,7 +262,10 @@ pub async fn run_once<S: KvStore>(
                     {
                         tracing::info!(%addr, "tiering: target at its reserve, pass stopped");
                         report.skipped_chunks += 1;
-                        return Ok(report);
+                        // Passed over (review: a target that stays full must
+                        // not hold the rest of the sweep); tried again at
+                        // the next sweep.
+                        return Ok(());
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, index, "chunk migration failed");
@@ -185,10 +282,11 @@ pub async fn run_once<S: KvStore>(
             }
         }
         if page.len() < 256 {
+            report.reached_end = true;
             break;
         }
     }
-    Ok(report)
+    Ok(())
 }
 
 /// The group of `tier` a generation moves to: the Active durable groups of

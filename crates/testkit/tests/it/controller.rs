@@ -331,3 +331,62 @@ async fn a_second_process_with_the_same_id_does_not_share_the_leadership() {
     assert!(second.token() > token);
     second.shutdown().await;
 }
+
+/// Phase 3.14 (rebalancing A/B finding): a leader that has not run a
+/// reclaim pass yet takes the nodes' deferral from their health. With
+/// nodes that delete at once, what GC deletes counts as room given back
+/// from the first passes (before, nothing counted until the first reclaim
+/// pass, a reclaim interval after a failover, and the admission trend
+/// throttled writes meanwhile); with nodes that defer, it never does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_leader_counts_gc_room_before_its_first_reclaim_pass() {
+    use std::sync::atomic::Ordering::Relaxed;
+    for retention in [Duration::ZERO, Duration::from_secs(3600)] {
+        let c = TestCluster::start(ClusterOptions {
+            groups: 1,
+            reclaim_retention: retention,
+            ..ClusterOptions::rs(3, 2, 1, MIB, 64 << 10)
+        })
+        .await;
+        s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+        for i in 0..4 {
+            s3::put(
+                &c.backend,
+                BUCKET,
+                &format!("g{i}"),
+                payload(usize::try_from(MIB).unwrap(), i),
+                &PutOptions::default(),
+            )
+            .await
+            .unwrap();
+        }
+        let mut cfg = fast("ctl-room");
+        cfg.reclaim_interval = Duration::from_secs(3600);
+        let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+        wait_until("leadership", Duration::from_secs(10), async || {
+            ctl.is_leader()
+        })
+        .await;
+        for i in 0..4 {
+            s3::delete(&c.backend, BUCKET, &format!("g{i}"))
+                .await
+                .unwrap();
+        }
+        wait_until("GC", Duration::from_secs(30), async || {
+            ctl.metrics.gc.reclaimed_bytes.load(Relaxed) > 0
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let returned = ctl.metrics.room_returned_bytes.load(Relaxed);
+        if retention.is_zero() {
+            assert!(
+                returned > 0,
+                "GC's room not counted before the first reclaim pass"
+            );
+        } else {
+            assert_eq!(returned, 0, "GC's deletes counted while nodes defer");
+        }
+        ctl.shutdown().await;
+        c.shutdown().await;
+    }
+}

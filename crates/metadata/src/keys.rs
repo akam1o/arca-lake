@@ -271,6 +271,32 @@ pub fn repair_statuses_prefix() -> Key {
     pack(&(ROOT, "repairstat"))
 }
 
+/// Cursor of the leader's background sweep `name` (Phase 3.14): a key of
+/// its own, which earlier releases never read.
+#[must_use]
+pub fn bg_cursor(name: &str) -> Key {
+    pack(&(ROOT, "bgcursor", name))
+}
+
+/// Capacity reservation of `group`'s move onto `node` (Phase 3.14,
+/// ADR-0032): keys of their own, which earlier releases never read.
+#[must_use]
+pub fn capacity_reservation(node_id: u64, group_id: u64) -> Key {
+    pack(&(ROOT, "capresv", node_id, group_id))
+}
+
+/// Prefix of the capacity reservations on `node`.
+#[must_use]
+pub fn capacity_reservations_of(node_id: u64) -> Key {
+    pack(&(ROOT, "capresv", node_id))
+}
+
+/// Prefix of every capacity reservation.
+#[must_use]
+pub fn capacity_reservations_prefix() -> Key {
+    pack(&(ROOT, "capresv"))
+}
+
 /// Every node identity record.
 #[must_use]
 pub fn node_identities_range() -> KeyRange {

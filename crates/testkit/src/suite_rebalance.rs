@@ -851,6 +851,114 @@ pub async fn rebalancing_yields_to_client_writes_gc_and_tiering<S: KvStore + 'st
     c.shutdown().await;
 }
 
+/// Phase 3.14 (ADR-0032): room a member move reserved on a node is not the
+/// rebalancer's. A repair waiting for a node does not hold rebalancing
+/// (Phase 3.13), and its target is a member of the plan's target group:
+/// with the target's room reserved the pass stops before writing anything
+/// there, and moves again once the reservation no longer holds.
+pub async fn rebalancing_leaves_room_reserved_by_a_waiting_repair<S: KvStore + 'static>(
+    start: impl Starter<S>,
+) {
+    use arca_lake_metadata::ops::cluster;
+    use arca_lake_metadata::ops::repair_status::{self, RepairReason, RepairStatus};
+    use arca_lake_metadata::ops::reservation::{self, CapacityReservation, ReservationKind};
+    use arca_lake_metadata::records::GroupState;
+    let (c, _a, b) = cluster(&start, 160 * MIB).await;
+    exclude(&c, vec![b.id]).await;
+    for i in 0..60 {
+        s3::put(
+            &c.backend,
+            BUCKET,
+            &format!("o{i}"),
+            data(i),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+    }
+    let _ = evaluate(&c).await;
+    // A group of another tier rebuilding slot 0 onto a node of `b`,
+    // waiting for a node; its reservation takes that node's room.
+    let w = cluster::create_group(
+        c.meta.as_ref(),
+        GroupRecord {
+            tier: "elsewhere".into(),
+            state: GroupState::Repairing,
+            ..b.clone()
+        },
+    )
+    .await
+    .unwrap();
+    repair_status::put(
+        c.meta.as_ref(),
+        &RepairStatus {
+            group: w.id,
+            epoch: w.epoch,
+            target: w.members[0].node_id,
+            reason: RepairReason::AwaitingNodes,
+            ..RepairStatus::default()
+        },
+    )
+    .await
+    .unwrap();
+    let node = w.members[0].node_id;
+    let ni = c.nodes.iter().position(|n| n.id == node).unwrap();
+    let dev = c.node_service(ni).device_capacity().unwrap();
+    let r = CapacityReservation {
+        node,
+        group: w.id,
+        epoch: w.epoch,
+        index: 0,
+        kind: ReservationKind::Repair,
+        bytes: dev.available_bytes,
+        written: 0,
+        created_ms: now_ms(),
+    };
+    assert_eq!(
+        reservation::reserve(c.meta.as_ref(), &r, u64::MAX)
+            .await
+            .unwrap(),
+        reservation::Reserved::Yes
+    );
+    let before = c.shard_keys(ni, b.id).len();
+    let p = policy(8 * MIB);
+    let r = run_once_with(
+        c.meta.as_ref(),
+        &c.clients,
+        &p,
+        Pressure::default(),
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.moved_chunks, r.capacity_stops), (0, 1), "{r:?}");
+    assert!(r.reason.contains("reserved by member moves"), "{r:?}");
+    assert_eq!(
+        c.shard_keys(ni, b.id).len(),
+        before,
+        "written into reserved room"
+    );
+    // The repair is over: the reservation holds no more.
+    cluster::update_group(c.meta.as_ref(), w.id, |g| {
+        g.state = GroupState::Active;
+        true
+    })
+    .await
+    .unwrap();
+    let _ = evaluate(&c).await;
+    let r = run_once_with(
+        c.meta.as_ref(),
+        &c.clients,
+        &p,
+        Pressure::default(),
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert!(r.moved_chunks > 0, "{r:?}");
+    c.shutdown().await;
+}
+
 /// Instantiate the rebalancing cases for a backend: `$start` is an
 /// `Option` of a [`Starter`] (`None`: skipped).
 #[macro_export]
@@ -866,6 +974,7 @@ macro_rules! rebalance_suite {
             an_expired_move_never_deletes_its_successors_shards,
             a_finished_plan_settles_instead_of_overshooting,
             rebalancing_yields_to_client_writes_gc_and_tiering,
+            rebalancing_leaves_room_reserved_by_a_waiting_repair,
         );
     };
     (@each $start:expr; $($name:ident),* $(,)?) => {

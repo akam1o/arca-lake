@@ -13,6 +13,7 @@
 //! `ARCA_FDB_CLUSTER_FILE`; otherwise they skip. They share one keyspace,
 //! so run them with `--test-threads=1`.
 
+mod background_cursor;
 mod backup_verify;
 mod cache;
 mod cache_ec;
@@ -24,6 +25,7 @@ mod cache_tokens;
 mod capacity;
 mod capacity_bench;
 mod capacity_failover;
+mod capacity_reservation;
 mod commit_timeouts;
 mod controller;
 mod deferred_reclaim;
@@ -70,7 +72,10 @@ mod repair;
 mod repair_completion;
 mod repair_paging;
 mod repair_retarget;
+mod repair_verify;
 mod request_metrics;
+#[cfg(feature = "fdb")]
+mod retirement_crash;
 mod s3_compat;
 mod system_model;
 mod tiering;
