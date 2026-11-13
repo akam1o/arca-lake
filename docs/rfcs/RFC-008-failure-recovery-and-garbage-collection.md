@@ -904,6 +904,27 @@ From the background-operations audit (`docs/verification/phase-3.10-recovery.md`
   scan window from a persisted, wrapping cursor; priority applies within
   the window.
 
+### 8.12 Phase 3.14: verification reuse, reservations, sweep cursors
+
+- **Differential target verification (ADR-0031).** A repair attempt
+  reads again only the target's records written since its last pass of
+  the same group, epoch, slot and target, while the node's store epoch
+  holds (`VerifyShards.since_*`, `indexed_below`); the completeness check
+  before `Active` reads every shard, so §7's order is unchanged. Slots
+  are rebuilt eight chunks at a time, results taken in walk order (the
+  cursor never passes a chunk not done).
+- **Capacity reservations (ADR-0032).** A member move reserves the
+  member's bytes on its target in one transaction against the node's
+  other reservations (repairs count only repairs); validity is derived
+  from the group (or its open epoch intent), so a lost release or a
+  stale controller cannot hold room; rebalancing treats reserved room as
+  taken. The node's reserves stay the enforcement.
+- **Sweep cursors.** Reconciliation (§6.3) and tiering keep a persisted
+  cursor (`("al","bgcursor",name)`): a pass resumes where the last one
+  stopped, an item whose metadata cannot be decoded is passed over and
+  counted, and the sweep wraps; the reconciliation budget defaults to
+  every pair per pass.
+
 ## 9. Alternatives considered
 
 | Alternative | Why not |

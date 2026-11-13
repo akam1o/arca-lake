@@ -1,0 +1,160 @@
+2026-11-13T06:51:48.335609Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794552704506 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:52:18.603975Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794552734575 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:52:48.898028Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794552764629 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:53:19.162535Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794552794683 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:53:49.666094Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794552824743 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:54:19.945099Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794552854805 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:54:50.497038Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794552884856 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:55:20.781271Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794552914913 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:55:51.325423Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794552944969 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:56:21.610095Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794552975031 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:56:52.152449Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553005085 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:57:22.401743Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553035144 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:57:52.897551Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553065201 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:58:23.151283Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553095263 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:58:53.650672Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553125311 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:59:23.926192Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553155375 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T06:59:54.529481Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553185432 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:00:24.789776Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553215490 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:00:55.292632Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553245544 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:01:25.551331Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553275600 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:01:56.063980Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553315669 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:02:26.324033Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553345731 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:02:56.839881Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553375786 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:03:27.102628Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553405849 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:03:57.611750Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553435901 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:04:27.891195Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553465948 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:04:58.384589Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553496009 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:05:28.638015Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553526055 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:05:59.183017Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553556099 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:06:29.444291Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553586150 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:07:00.024560Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553616196 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:07:30.295806Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553646256 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:08:00.838332Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553676303 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:08:31.096313Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553706359 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:09:01.594291Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553736413 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:09:31.857183Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553766480 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:10:02.401517Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553796530 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:10:32.702847Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553826590 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:11:03.181395Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553856645 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start
+2026-11-13T07:11:33.437007Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 0 moved_bytes 0 skipped_chunks 0 last_pass_ms 1794553886709 last_reason tier default is write_rejected: client writes first
+plan none
+cursor start

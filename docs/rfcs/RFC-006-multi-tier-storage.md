@@ -366,6 +366,14 @@ its client reserve and writes with the `Migration` class, as tiering and
 rebalancing do; only a failure repair may use the space down to the
 repair floor.
 
+Phase 3.14: room reserved by member moves (ADR-0032) is not counted as a
+rebalancing target's room (read before each chunk); a tiering pass
+examines at most `--tiering-generations-per-pass` generations from a
+persisted cursor, passes over a generation whose records cannot be
+decoded or whose target is full (retried at the next sweep), and keeps
+its position across leaders. Tiering does not check reservations (it
+relies on the node's client reserve; ADR-0032 residual).
+
 ### 5.9 Cache protection (Phase 2.1)
 
 A cache tier chooses one *protection mode* for its groups. The mode is

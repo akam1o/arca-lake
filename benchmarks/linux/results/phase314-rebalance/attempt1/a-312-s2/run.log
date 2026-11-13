@@ -1,0 +1,5 @@
+The database is available, but has issues (type 'status' for more information).
+21:30:32 fill: 560 objects of 8388608 bytes
+21:31:16 baseline window: 15 min, rebalancing paused
+21:46:19 rebalance resumed at 1794519979
+21:46:19 rebalance window (on): 15 min, leader kill and node stop

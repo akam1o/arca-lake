@@ -183,6 +183,19 @@ for an unfinished cursor on every election and finishes it (fenced).
 - **Downgrade prevention** is enforced, not advisory: the startup gate
   on `schema`, the node's refusal to open a segment newer than it
   understands, and the protocol window.
+- **Phase 3.14 rollback cases** (real binaries,
+  `previous_release::rollback_residuals_with_the_phase_3_13_and_3_12_releases`):
+  a controller rolled back to 3.13 in the middle of a repair with a
+  capacity reservation completes it (it ignores reservations) and the
+  reservation is swept once this release leads again (safe); a node with
+  a `pending-reclaim.prev` left by a crash is merged by 3.13 (safe) and
+  forgotten by 3.12 while it runs (conditional: nothing deleted, merged
+  back later; roll back to 3.12 only from a clean stop); nodes of 3.12,
+  3.13 and this release under one leader all hold acknowledged
+  identities and open fences (safe); a managed restore with 3.12 and 3.13
+  nodes, then forward, repairs and reclaims as usual (safe). New fields
+  and keys are ignored by earlier releases (`VerifyShards` 6/7 and 4–6;
+  `capresv`, `bgcursor`).
 
 ### 5.7 Mixed-version test strategy
 

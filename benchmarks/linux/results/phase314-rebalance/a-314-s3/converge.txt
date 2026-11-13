@@ -1,0 +1,44 @@
+2026-11-13T02:12:03.685542Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 512 moved_bytes 2147483648 skipped_chunks 0 last_pass_ms 1794535920039 last_reason tier default is throttled: client writes first
+plan none
+cursor 01a1d290dee17147aab2effe0becabdc
+2026-11-13T02:12:33.971147Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 544 moved_bytes 2281701376 skipped_chunks 0 last_pass_ms 1794535951243 last_reason pass budget spent
+plan tier default source 1 (room 2084564517) target 2 (room 3153133094)
+cursor 01a1d290e0c075d4b56ea2e967c73a31
+2026-11-13T02:13:04.247408Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 576 moved_bytes 2415919104 skipped_chunks 0 last_pass_ms 1794535973139 last_reason pass budget spent
+plan tier default source 1 (room 2151673381) target 2 (room 3085762086)
+cursor 01a1d290e32175f7a540fe2b5eace636
+2026-11-13T02:13:34.514322Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 625 moved_bytes 2621440000 skipped_chunks 0 last_pass_ms 1794536007002 last_reason pass budget spent
+plan tier default source 1 (room 2252336677) target 2 (room 3289386534)
+cursor 01a1d290e54e72d39149fc6f72e8905c
+2026-11-13T02:14:04.794094Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 626 moved_bytes 2625634304 skipped_chunks 0 last_pass_ms 1794536038265 last_reason settling: the last plan's sources are reclaiming their space
+plan none
+cursor start
+2026-11-13T02:14:35.083245Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 626 moved_bytes 2625634304 skipped_chunks 0 last_pass_ms 1794536068320 last_reason settling: the last plan's sources are reclaiming their space
+plan none
+cursor start
+2026-11-13T02:15:05.603591Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 626 moved_bytes 2625634304 skipped_chunks 0 last_pass_ms 1794536098369 last_reason settling: the last plan's sources are reclaiming their space
+plan none
+cursor start
+2026-11-13T02:15:35.882843Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 626 moved_bytes 2625634304 skipped_chunks 0 last_pass_ms 1794536128424 last_reason settling: the last plan's sources are reclaiming their space
+plan none
+cursor start
+2026-11-13T02:16:06.448164Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 722 moved_bytes 3028287488 skipped_chunks 0 last_pass_ms 1794536162466 last_reason pass budget spent
+plan tier default source 1 (room 2424966693) target 2 (room 3116748326)
+cursor 01a1d290eb0f739581ae2c0c78e3df51
+2026-11-13T02:16:36.729340Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 786 moved_bytes 3296722944 skipped_chunks 0 last_pass_ms 1794536186268 last_reason pass budget spent
+plan tier default source 1 (room 2559184421) target 2 (room 2982006310)
+cursor 01a1d290ef447318bceb60bbf89996f5
+2026-11-13T02:17:07.245078Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)
+paused false dry_run false moved_chunks 850 moved_bytes 3565158400 skipped_chunks 0 last_pass_ms 1794536221828 last_reason balanced
+plan none
+cursor start

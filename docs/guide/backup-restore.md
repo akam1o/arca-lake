@@ -55,6 +55,17 @@ that the shards it names exist (RFC-015).
    though the older records are still kept. A Phase 3.12 node does not
    honour the history: keep the earlier retention configured when rolling
    a node back.
+   **Mixed releases and rollback (Phase 3.14).** Verified with real
+   binaries: `admin restore` (plan, run, finish) with nodes of Phase 3.12
+   and 3.13 among those of this release, then every process back on this
+   release: a member lost afterwards is repaired, and deletes are
+   reclaimed after the retention while earlier retirements keep theirs.
+   A node rolled back to Phase 3.12 with a `pending-reclaim.prev` left
+   (a crash during the log's compaction) forgets those retirements while
+   it runs: it deletes nothing for them, does not reclaim them, and a
+   later release merges them back; stop a node cleanly (no `.prev`)
+   before rolling it back to 3.12. Capacity reservations of this release
+   are ignored by earlier controllers and swept when it is back.
 4. When the current metadata is gone (`admin restore` then refuses to
    plan), the manual runbook: first `admin delete-fence close --reason restore --yes`
    (every storage node stops applying deletes decided on the current
