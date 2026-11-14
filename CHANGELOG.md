@@ -43,6 +43,8 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   `retirement_crash` (SIGKILL rounds against the retirement log, real
   processes), `previous_release::rollback_residuals_with_the_phase_3_13_and_3_12_releases`
   (CI's previous-release job builds Phase 3.13 too).
+- `benchmarks/linux/soak-analyze.py` (hourly degradation analysis of a
+  soak run).
 - Benchmarks: `rebalance-load.sh` `RETENTION`, `SKEW`, `RUN_STORE_A`,
   `CONVERGE_MIN` and more sampled metrics; `summarize_rebalance.py
   --condition a|b` with the validity rules fixed before the runs.
@@ -63,8 +65,9 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   the admission trend throttled client writes for up to a reclaim
   interval (found by the rebalancing A/B: PUT errors in the failover
   window 0.6 % with Phase 3.12, about 3 % with 3.13). Which nodes defer is
-  now taken from every health pass (a node that does not answer, or
-  whose retirement state is damaged, counts as deferring).
+  now taken from every health pass (a node that does not answer, whose
+  retirement state is damaged, or that still keeps retirements at a
+  retention of 0 counts as deferring).
 
 ### Added (Phase 3.13)
 

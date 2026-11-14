@@ -1,0 +1,53 @@
+2026-11-13T11:44:06Z node-restart d0
+2026-11-13T11:59:26Z gateway-kill gw-a
+2026-11-13T12:14:33Z leader-kill ctl-a
+2026-11-13T12:30:34Z fdb-process-restart 1
+2026-11-13T12:46:05Z net-delay d3 300ms 120s
+2026-11-13T13:03:06Z node-kill d0
+2026-11-13T13:18:37Z cache-node-kill c0
+2026-11-13T13:33:58Z net-blackhole d3 45s
+2026-11-13T13:49:43Z corrupt-shard d0 (node stopped)
+2026-11-13T13:49:44Z corrupt-shard-detail d0 picked group 1 chunk 01a1d52615b974839595b8f400000000 index 0 flipped one byte of the payload at offset 60313872 (segment 13 record offset 60194816) 
+2026-11-13T14:04:45Z eio-read d0 20
+2026-11-13T14:21:16Z net-reset d3 10s
+2026-11-13T14:36:27Z cert-rotate gw-a
+2026-11-13T14:51:28Z eio-write d0 5
+2026-11-13T15:07:59Z controller-restart (standby) ctl-a
+2026-11-13T15:23:10Z node-restart d1
+2026-11-13T15:38:31Z gateway-kill gw-b
+2026-11-13T15:53:38Z leader-kill ctl-b
+2026-11-13T16:09:39Z fdb-process-restart 2
+2026-11-13T16:25:10Z net-delay d3 300ms 120s
+2026-11-13T16:42:11Z node-kill d1
+2026-11-13T16:57:42Z cache-node-kill c1
+2026-11-13T17:13:03Z net-blackhole d3 45s
+2026-11-13T17:28:50Z corrupt-shard d1 (node stopped)
+2026-11-13T17:28:51Z corrupt-shard-detail d1 picked group 2 chunk 01a1d5afa0fd75f48de8b9e300000000 index 2 flipped one byte of the payload at offset 132318932 (segment 89 record offset 132177920) 
+2026-11-13T17:43:52Z eio-read d1 20
+2026-11-13T18:00:23Z net-reset d3 10s
+2026-11-13T18:15:34Z cert-rotate d1
+2026-11-13T18:30:34Z eio-write d1 5
+2026-11-13T18:47:06Z controller-restart (standby) ctl-b
+2026-11-13T19:02:17Z node-restart d2
+2026-11-13T19:17:38Z gateway-kill gw-a
+2026-11-13T19:32:45Z leader-kill ctl-a
+2026-11-13T19:48:46Z fdb-process-restart 3
+2026-11-13T20:04:17Z net-delay d3 300ms 120s
+2026-11-13T20:21:18Z node-kill d2
+2026-11-13T20:36:49Z cache-node-kill c0
+2026-11-13T20:52:10Z net-blackhole d3 45s
+2026-11-13T21:07:57Z corrupt-shard d2 (node stopped)
+2026-11-13T21:07:58Z corrupt-shard-detail d2 picked group 4 chunk 01a1d6b86e0e76b1a9952caa00000000 index 1 flipped one byte of the payload at offset 240189808 (segment 125 record offset 240189440) 
+2026-11-13T21:22:59Z eio-read d2 20
+2026-11-13T21:39:30Z net-reset d3 10s
+2026-11-13T21:54:41Z cert-rotate ctl-a
+2026-11-13T22:09:41Z eio-write d2 5
+2026-11-13T22:26:13Z controller-restart (standby) ctl-a
+2026-11-13T22:41:24Z node-restart d3
+2026-11-13T22:56:45Z gateway-kill gw-b
+2026-11-13T23:11:52Z leader-kill ctl-b
+2026-11-13T23:27:53Z fdb-process-restart 1
+2026-11-13T23:43:24Z net-delay d3 300ms 120s
+2026-11-14T00:00:25Z node-kill d3
+2026-11-14T00:15:56Z cache-node-kill c1
+2026-11-14T00:24:16Z faults stopped

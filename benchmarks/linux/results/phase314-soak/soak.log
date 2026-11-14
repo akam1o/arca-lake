@@ -1,0 +1,10 @@
+2026-11-13T11:33:47Z setup: FoundationDB (3 processes, TLS)
+2026-11-13T11:33:53Z setup: PKI
+2026-11-13T11:33:54Z setup: nodes
+2026-11-13T11:33:57Z setup: controllers and gateways
+2026-11-13T11:34:02Z setup: done
+2026-11-13T11:34:06Z started: duration 86400s, fault gap 900s
+2026-11-14T01:47:49Z finish: waiting for the workload's final verification
+2026-11-14T01:47:49Z finish: settle 600 s (GC, repair, reconcile)
+2026-11-14T01:57:54Z finish: summary in <run>/summary.json
+2026-11-14T02:01:27Z teardown: done

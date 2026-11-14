@@ -390,3 +390,81 @@ async fn a_new_leader_counts_gc_room_before_its_first_reclaim_pass() {
         c.shutdown().await;
     }
 }
+
+/// Review (Phase 3.14, R-107 fix): a node whose retention was lowered to
+/// 0 still keeps what it retired before; while it does, it counts as
+/// deferring and GC's deletes are not counted as room.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_lowered_to_zero_with_retirements_left_still_defers() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        reclaim_retention: Duration::from_secs(3600),
+        ..ClusterOptions::rs(3, 2, 1, MIB, 64 << 10)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    for i in 0..6 {
+        s3::put(
+            &c.backend,
+            BUCKET,
+            &format!("z{i}"),
+            payload(usize::try_from(MIB).unwrap(), 50 + i),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+    }
+    let mut cfg = fast("ctl-z1");
+    cfg.reclaim_interval = Duration::from_secs(3600);
+    let ctl = spawn(Arc::clone(&c.meta), cfg.clone()).await.unwrap();
+    wait_until("leadership", Duration::from_secs(10), async || {
+        ctl.is_leader()
+    })
+    .await;
+    for i in 0..3 {
+        s3::delete(&c.backend, BUCKET, &format!("z{i}"))
+            .await
+            .unwrap();
+    }
+    wait_until("retirements", Duration::from_secs(30), async || {
+        let h = c
+            .clients
+            .health(&c.nodes[0].addr.to_string())
+            .await
+            .unwrap();
+        h.reclaim_pending > 0
+    })
+    .await;
+    ctl.shutdown().await;
+    // Retention lowered to 0: the earlier retirements stay.
+    c.reclaim_retention = Duration::ZERO;
+    for i in 0..3 {
+        c.stop_node(i).await;
+        c.start_node(i).await;
+    }
+    let mut cfg = fast("ctl-z2");
+    cfg.reclaim_interval = Duration::from_secs(3600);
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    wait_until("leadership", Duration::from_secs(10), async || {
+        ctl.is_leader()
+    })
+    .await;
+    for i in 3..6 {
+        s3::delete(&c.backend, BUCKET, &format!("z{i}"))
+            .await
+            .unwrap();
+    }
+    wait_until("GC", Duration::from_secs(30), async || {
+        ctl.metrics.gc.reclaimed_bytes.load(Relaxed) > 0
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        ctl.metrics.room_returned_bytes.load(Relaxed),
+        0,
+        "GC's deletes counted as room while nodes keep earlier retirements"
+    );
+    ctl.shutdown().await;
+    c.shutdown().await;
+}

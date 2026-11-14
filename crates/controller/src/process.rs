@@ -1446,8 +1446,9 @@ async fn health_pass<S: KvStore>(
     let states = node_lifecycle::states(meta).await?;
     let mut identities = node_lifecycle::identities(meta).await?;
     // Nodes that defer deletes, as their health says: every node in
-    // service but those that answered with a retention of 0 and a sound
-    // retirement state (one that does not answer, or is probed only,
+    // service but those that answered with a retention of 0, a sound
+    // retirement state and no retirement left (one that does not answer,
+    // or is probed only,
     // counts as deferring: the safe side). Admission counts GC's deletes as
     // room only while none defers (Phase 3.14: taken from the reclaim pass
     // before, whose errors at a new leader's first pass counted every node
@@ -1574,7 +1575,9 @@ async fn health_pass<S: KvStore>(
         }
         match clients.health_with(&n.address, node_req).await {
             Ok(h) => {
-                if h.reclaim_retention_ms == 0 && !h.reclaim_damaged {
+                // At 0 a node still keeps what it retired before (an
+                // earlier retention): deferring while any is left.
+                if h.reclaim_retention_ms == 0 && !h.reclaim_damaged && h.reclaim_pending == 0 {
                     not_deferring_seen += 1;
                 }
                 // Its fence counts whatever its identity (review).

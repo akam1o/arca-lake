@@ -48,7 +48,7 @@ disks, on more than two hosts, or for longer than about ten hours.
 | Network overhead | Implemented | network bytes per GiB per mode (RFC-009 §6.3); transport matrix §6.11 | — |
 | FDB metadata overhead | Implemented | metabench: 278–8,264 placement transactions/s (1–32 tasks, one FoundationDB process) | multi-process FoundationDB Not Verified |
 | Repair | Implemented | this phase: 4,000-chunk in-process repair 51.5 s → 18.4 s (ADR-0031); stripe repair 11–36 MiB/s (Phase 3.3) | Not Verified on real processes at scale |
-| Rebalancing | Implemented with Limitations | this phase's A/B (verification document §6) | see there |
+| Rebalancing | Implemented with Limitations | this phase's A/B, two hosts, three valid samples per release: 2.4–2.6 GiB moved at about 2.4 MiB/s under load (retention 0), no difference between releases; client PUT in the failover window back to Phase 3.12's after R-107 (verification document §6) | no target set; rebalancing under capacity pressure Not Verified on real processes |
 
 ## 3. Scalability
 
@@ -75,7 +75,7 @@ disks, on more than two hosts, or for longer than about ten hours.
 | Failure recovery | Implemented with Limitations | repair, retargeting, differential verification, stripe repair; real-process fault runs (Phase 3.13) | one parity, second failure: waits for a node or an operator (EC limit) |
 | Security | Implemented with Limitations | mTLS, FoundationDB TLS, SigV4, policy subset (RFC-012) | no encryption at rest, no KMS |
 | Documentation | Implemented | guides, RFCs, ADRs, risks ledger | runbooks not exercised by a third party |
-| Long-running operation | Not Verified | longest run of this phase in the verification document §8 | 24 h soak not completed (R-79 history) |
+| Long-running operation | Not Verified (24 h) | Phase 3.14: 14 h 13 min under faults and capacity pressure, 0 ledger violations, reads 99.97 %, reserves kept (verification document §8) | 24 h under sustained write load; trends beyond 14 h; node heap growth unexplained (R-108) |
 | Physical disks / power loss | Not Verified | SIGKILL and injected I/O faults only | — |
 
 ## 5. Recommended Phase 4 priorities

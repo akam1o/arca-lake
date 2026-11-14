@@ -1,0 +1,8 @@
+2026-11-14T01:57:49.501438Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=<run>/fdb/pki/ca/ca.pem cert=<run>/fdb/pki/admin/cert.pem
+scrub group 1 pass 15 phase Done started_ms 1794620435622 finished_ms 1794620435622 verified 10894 bytes 2820772800 findings [0, 0, 0, 0, 10075, 0, 0, 0] errors 0
+scrub group 2 pass 15 phase Done started_ms 1794620666555 finished_ms 1794620666555 verified 10821 bytes 2836560192 findings [0, 0, 0, 0, 10185, 0, 0, 0] errors 0
+scrub group 3 pass 15 phase Done started_ms 1794620898504 finished_ms 1794620898504 verified 16329 bytes 34212666 findings [0, 0, 0, 0, 15300, 0, 0, 0] errors 0
+scrub group 4 pass 15 phase Done started_ms 1794620975617 finished_ms 1794620975617 verified 16221 bytes 33387552 findings [0, 0, 0, 0, 12699, 0, 0, 0] errors 0
+scrub group 5 pass 15 phase Done started_ms 1794621056712 finished_ms 1794621056712 verified 0 bytes 0 findings [0, 0, 0, 0, 0, 0, 0, 0] errors 0
+scrub group 6 pass 15 phase Done started_ms 1794621116736 finished_ms 1794621116736 verified 0 bytes 0 findings [0, 0, 0, 0, 0, 0, 0, 0] errors 0
+repair queue depth 0 unrecoverable 0 failed 0 status 0

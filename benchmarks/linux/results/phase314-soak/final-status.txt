@@ -1,0 +1,17 @@
+2026-11-14T01:57:49.584478Z  INFO arca_lake: metadata connection uses FoundationDB TLS ca=<run>/fdb/pki/ca/ca.pem cert=<run>/fdb/pki/admin/cert.pem
+node 1 127.0.0.1:9600 labels [("node", "d0"), ("device_class", "hdd")] last_seen_ms 1794621462533
+node 2 127.0.0.1:9601 labels [("node", "d1"), ("device_class", "hdd")] last_seen_ms 1794621462533
+node 3 127.0.0.1:9602 labels [("node", "d2"), ("device_class", "hdd")] last_seen_ms 1794621462533
+node 4 127.0.0.1:9613 labels [("node", "d3"), ("device_class", "hdd")] last_seen_ms 1794621462533
+node 5 127.0.0.1:9620 labels [("node", "c0"), ("device_class", "nvme")] last_seen_ms 1794621462533
+node 6 127.0.0.1:9621 labels [("node", "c1"), ("device_class", "nvme")] last_seen_ms 1794621462533
+group 1 tier default rs-gf8-v1 2+1 epoch 1 Active members [1, 2, 3]
+group 2 tier default rs-gf8-v1 2+1 epoch 1 Active members [4, 1, 2]
+group 3 tier default replication-v1 1+2 epoch 1 Active members [3, 4, 1]
+group 4 tier default replication-v1 1+2 epoch 1 Active members [2, 3, 4]
+group 5 tier cold rs-gf8-v1 2+1 epoch 1 Active members [1, 2, 3]
+group 6 tier cold replication-v1 1+2 epoch 1 Active members [4, 1, 2]
+group 7 tier fast replication-v1 1+1 epoch 1 Active members [5, 6]
+leader <user>@<host> token 5 lease_until_ms 1794621476568
+sweep reconcile sweeps 59 last_sweep_ms 1794620638662 sweep_started_ms 1794620627588 last_pass_ms 1794620638662 last_pass_items 42 last_pass_errors 0 at_start true
+sweep tiering sweeps 0 last_sweep_ms 0 sweep_started_ms 1794569937715 last_pass_ms 1794569937715 last_pass_items 800 last_pass_errors 0 at_start false

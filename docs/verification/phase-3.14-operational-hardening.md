@@ -19,11 +19,11 @@ run (process kills and injected I/O faults only).
 | Item | Status |
 | --- | --- |
 | Repair target verification (R-104 remainder) | differential verification and parallel rebuild (ADR-0031); measured in process (§2); not measured on real processes |
-| Rebalancing A/B | §6 |
+| Rebalancing A/B | valid: three valid samples per release (3.12, 3.13, 3.14) in condition A; no rebalancing difference claimed; a 3.13 regression of client PUT in the failover window found and fixed (R-107); condition B one sample per release (§6) |
 | Capacity reservation | Medium (re-evaluated, ADR-0032); implemented, persistent, conflict-controlled; residuals Low |
 | Reconcile / tiering cursors | implemented; reconcile budget default 0 (every pair) after review |
 | R-94(b) | **bounded (Medium), unchanged**: no delete, retire or reclaim path changed; no wider guarantee claimed |
-| 24 h soak | §8 |
+| 24 h soak | **Not Verified**: stopped after 14 h 13 min 43 s (12 h 50 min 10 s with faults) by decision; capacity-pressure liveness over that time verified (§8) |
 
 ## 2. Repair verification time (ADR-0031)
 
@@ -290,7 +290,66 @@ fault injection in process (`reclaim::tests::a_crash_at_either_step_of_a_compact
 | Partial / torn write | torn-line tests (in process) | torn sectors on a device |
 | Recovery from `.prev` | in process; real binaries (§7) | — |
 
-Soak: (filled in at the end of the phase)
+### Soak (host A, `benchmarks/linux/soak24.sh`; artifacts in `benchmarks/linux/results/phase314-soak/`)
+
+| Item | Value |
+| --- | --- |
+| Status of the 24-hour soak | **Not Verified** |
+| Actual duration | workload 2026-11-13T11:34:06Z – 2026-11-14T01:47:49Z = **14 h 13 min 43 s** (51,223 s); faults until 00:24:16Z (**12 h 50 min 10 s**), then 1 h 23 min 33 s without faults ending with a full verification; then `finish` (600 s settle, final checks) |
+| Reason it was stopped | not needed for the Phase 4 decision; the shared virtual disks of the validation host cannot show production durability (R-79), and with the settings below the workload was mostly refused for capacity, so a longer run would not have tested sustained write load either |
+| Verified scope | liveness under long capacity pressure (below) |
+| Limitations | 24 hours under sustained write load not verified; see "Not shown" |
+| Follow-up | Phase 4: a 24-hour (or longer) soak on dedicated or physical storage with allotments that keep writes flowing (readiness report, priority 1) |
+
+Set-up: one host; FoundationDB of three processes over TLS on a second
+virtual disk; four durable nodes and two cache nodes with 3 GiB
+allotments each, retention 2 h (skew 60 s); two controllers (auto
+repair, tiering, rebalancing on), two gateways; mutual TLS; eight
+workers of mixed S3 operations (PUT, versioned PUT, conditional PUT,
+multipart, copy, GET, range GET, HEAD, versioned GET, DELETE, versioned
+DELETE) with an acknowledged-write ledger verified in full every two
+hours; one fault every 15 minutes, round robin: node restart and kill,
+gateway kill, leader kill, standby controller restart, FoundationDB
+process restart, network delay, blackhole and reset (proxy), shard
+corruption, injected read and write EIO, cache node kill, certificate
+rotation (51 faults, each type three or four times).
+
+Shown:
+
+| | Result |
+| --- | --- |
+| Acknowledged-write ledger | 7 full verifications, the last one after the faults stopped; 0 violations (no acknowledged object lost or wrong) |
+| Final checks | scrub of every group: no missing, corrupt, truncated, mismatching or unrecoverable shard (the only findings are unreferenced shards: retired records kept for the retention); repair queue empty, nothing unrecoverable or failed; multipart manifests: 0 findings; every group `Active` |
+| Capacity pressure | the allotments filled with the retention's deletes 9 minutes in; `write_rejected` 9.6 h of the 14.2 h in 47 episodes: 6 long ones (0.65–2.05 h), each ended by reclaims after the retention, and 41 of 1–5 minutes between `throttled` and `write_rejected` (the state flapped at the boundary) |
+| Writes resumed | after every long episode (90,283 writes acknowledged in total, 593,616 refused with `SlowDown`, never a write lost) |
+| Read availability | 905,582 reads served, 275 failed (0.03 %): every failure within a minute of a gateway kill (the client used both gateways, without a balancer) or of a network blackhole of a node; reads went on throughout `write_rejected` |
+| Deletes | 216,613 served, 63 failed (same fault windows) |
+| Reserves | 5,156 node samples (every minute, every node): none below its reserve or its repair floor; the smallest headroom of a durable node above its reserve was 446 MiB (the gateways' admission refused writes first) |
+| Background work | GC backlog at most 1.7 GiB (first hour), then 0.1–0.7 GiB per hour; 32 GiB reclaimed; stripe repair queue up to 41 tasks after shard corruption, back to 0 within the hour every time; compaction backlog at most 5 MiB; retained bytes 5.0–5.7 GiB (all nodes) throughout |
+| FoundationDB | 860 status samples, none unavailable, 3 not fully recovered (around its process restarts), at least two of three processes always up |
+| Not exercised | no member move happened (no node stayed down past `--unhealthy-after-secs` 120), so no repair, retarget or capacity reservation ran (reservations 0 throughout); rebalancing moved nothing (the tier was full) |
+
+Long-run figures (hourly medians; processes restarted by faults keep
+their name):
+
+| | First hour | Last hour | Note |
+| --- | --- | --- | --- |
+| Durable node RSS, MiB | 49–52 | 61–89 | rising, with restarts in between; not separable from state growth in 14 h |
+| Durable node heap in use, MiB | 2.9–3.7 | 5.2–6.0 | rising steadily (R-108) |
+| Cache node RSS, MiB | 44–51 | 59–86 | |
+| Controller RSS, MiB | 38–71 | 39–63 | no trend (leadership moves) |
+| Gateway RSS, MiB | 55–66 | 68–72 | flat after the second hour |
+| FoundationDB process RSS, MiB | 105–120 | 115–170 | grows with the data and its cache |
+| File descriptors | nodes 23–27, others 14–27 | nodes 39–57, others 17–29 | nodes' grow with open segments; no unbounded growth seen |
+| GET p95 / p99, ms | 42.6 / 43.9 | 44.3 / 45.3 | +4 % over 14 h |
+| PUT p95 / p99, ms (successful writes) | 1,000 / 2,209 | 2,096 / 2,588 | varies with how much of the hour was refused; no trend separable |
+| FoundationDB commit latency | not sampled | | |
+| CPU | not sampled per interval; cumulative after 12.9 h: FoundationDB processes up to 5.5 % of a core, gateways 3.6 %, nodes below 0.5 %, the workload 2.5 % | | the host was mostly idle: the workload was refused |
+
+Not shown: 24 hours under sustained write load; behaviour on physical
+disks or production FoundationDB; memory or latency trends beyond 14
+hours (the node heap's rise is recorded, not explained: R-108); member
+moves, reservations and rebalancing under a long run.
 
 ## 9. Observability
 
@@ -318,13 +377,79 @@ re-review after the fixes:
 | Unbounded verification restarts | Claude | Low | fixed (three, then a target error) |
 | Tiering cursor lost on error; a full target starving the sweep | both | Low/Medium | fixed (persisted before the failing generation; a full target passed over) |
 | Reserve-to-intent window; failed attempt's writes not subtracted; rewritten shard counted twice; rollback can wake an old reservation; one rebalancing chunk in flight | both | Low | documented (ADR-0032) |
+| R-107 fix (deferral from health): a node lowered to retention 0 that still keeps earlier retirements counted as not deferring, so GC's deletes of such records could be credited as room (over-admission; the node's reserves still enforced) | other (review of the fix) | Medium | fixed: a node counts as not deferring only at retention 0 with no retirement left (`a_node_lowered_to_zero_with_retirements_left_still_defers`, fails without the check) |
 
-No Critical or High was found. Re-reviews: the fixes verified, no new
-Critical, High or Medium.
+No Critical or High was found. Re-reviews: the fixes verified; the
+review of the R-107 fix found the Medium above, fixed after it (the A/B
+samples of 3.14 ran with retention 0, where nodes keep no retirement:
+the fix does not change them).
 
-## 11. Not verified
+## 11. Completion conditions X1–X16
 
-- Power loss and physical disks.
+| ID | Condition | Status | Evidence | Not verified |
+| --- | --- | --- | --- | --- |
+| X1 | Repair verification bottleneck analysed | Verified with limitations | step breakdown (ADR-0031), in process, three runs | real processes, large shards |
+| X2 | Safe verification reuse | Verified | ADR-0031 guarantees, 4 + 1 tests, 6 of 8 mutants killed (2 survived: documented equivalences), two reviews | — |
+| X3 | Repair time reduction measured | Verified with limitations | 51.5 → 18.4 s (4,000 chunks), verify 15.0 → 0.78 s, retarget 47.2 → 17.7 s; three runs each, rotated | in process only; sequential gain within the disk's noise at small sizes |
+| X4 | Valid rebalancing A/B | Verified with limitations | three valid samples per release, rules fixed before the samples, discarded runs listed (§6) | the 3.14 samples taken hours after the others; no rebalancing difference claimed; the `SlowDown` rule was not effective |
+| X5 | Liveness under capacity pressure | Verified with limitations | condition B (one run per release), the soak's 9.6 h of `write_rejected` with resumption, reserves kept; in-process reservation and rebalancing tests | rebalancing and repair moves under pressure on real processes |
+| X6 | Reservation safety and persistence | Verified with limitations | ADR-0032; 7 tests, 11 mutants killed; FoundationDB suite (`rebalance_fdb::rebalancing_leaves_room_reserved_by_a_waiting_repair`) | real processes (the soak made no member move); Low residuals listed |
+| X7 | Reservation restored after a leader failover | Verified with limitations | `a_second_repair_is_not_started_onto_room_the_first_holds` (in process, failover in the middle); rollback test (3.13 controller and back) on FoundationDB | real-process failover with reservations |
+| X8 | Reconcile and tiering cursors | Verified | simulator (100 seeds), 4 process tests, 5 mutants killed, review fixes | reconcile budget other than 0 under rebalancing (default 0) |
+| X9 | Repair Medium classified, operator means | Verified | §5; metric and `admin status` actions; test extended | chunks listed by no member stay invisible to repair (beyond tolerance) |
+| X10 | Restore / rollback residuals | Verified with limitations | §7 on FoundationDB with 3.12 and 3.13 binaries; CI previous-release 6 of 6 | rollback below 3.12 with this phase's state; `.prev` + 3.12 conditional |
+| X11 | R-94(b) guarantee kept | Verified | no delete, retire or reclaim path changed; existing saved seeds, deferred-reclaim, restore and previous-release suites pass (§12) | no wider guarantee claimed |
+| X12 | Long-running / crash consistency | Verified with limitations | 30 SIGKILL rounds (real processes); the 14 h soak | **24 h soak Not Verified**; power loss and physical disks Not Verified |
+| X13 | Observability | Verified | §9; registry test | alert thresholds not tuned |
+| X14 | Independent review and mutations | Verified | two reviewers with re-reviews, no Critical or High; 24 mutants killed, 2 survived as documented equivalences | — |
+| X15 | Final CI green | see §12 | | |
+| X16 | Phase 4 readiness assessment | Verified | `phase-4-readiness.md` | — |
+
+## 12. Gates
+
+Phase 3.14 commits `cd0a51b` and `25d93d6`, CI run with every job green
+on its second attempt (the first failed only the known flaky test R-77
+`parallel_read::population_retried_after_resets_records_each_chunk_once`,
+704 of 705 passed); the final commit's CI is in the Phase 3.14 report.
+Locally at the final code: `cargo fmt --check`; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` (host B) clean; workspace
+tests 617 passed, 0 failed, 8 ignored (host B); FoundationDB suites on
+host A: the CI filters plus the system model, `previous_release` with
+3.12 and 3.13, `retirement_crash` (20 rounds), 69 of 69; `fdb_restore`
+with a backup agent 4 of 4.
+The three-process failover suite needs the CI's container harness: it
+ran in CI only. Secrets and identifiers: `sanitize.py --check` with a
+deny list of this environment's identifiers, 0 findings.
+
+## 13. Phase 4 decision
+
+| Condition | Met? | Basis |
+| --- | --- | --- |
+| 1. No open Critical or High | yes | risk ledger: none open; reviews: none found |
+| 2. Main failure paths of repair, rebalancing and reclaim verified | yes, with the limits stated | in process and FoundationDB suites, real-process runs of Phase 3.13 and this phase, SIGKILL rounds, soak faults |
+| 3. No capacity-management defect that breaks safety | yes | reserves node-enforced on every write; reservations; no reserve crossed in any run; R-107 fixed (it over-throttled, never over-admitted) |
+| 4. Valid rebalancing comparison | yes | §6 |
+| 5. Main Mediums: impact, mitigation, plan stated | yes | R-94(b), R-104 remainder, R-106 with their mitigations; Phase 4 roadmap |
+| 6. CI and previous-release tests pass | yes (final commit: Phase 3.14 report) | §12 |
+| 7. S3 / performance / scalability gaps listed | yes | `phase-4-readiness.md` |
+
+Phase 4 is recommended. This is **not** a judgement that the system is
+ready for production or for a release: the 24 h soak, power loss and
+physical disks, scale beyond two hosts, and sustained long write load
+are not verified, and R-94(b) stays bounded (Medium).
+
+## 14. Not verified
+
+- Power loss, physical-disk `fsync` and torn sectors (the retirement
+  log's durability is shown under SIGKILL and injected faults only).
+- The 24-hour soak (stopped at 14 h 13 min; §8); sustained write load
+  over a long run; trends beyond 14 hours.
 - Repair verification gains on real processes and large shards (the
   measurements are in process).
-- (completed at the end of the phase)
+- Rebalancing moves under capacity pressure on real processes
+  (condition B needed none); one B sample per release.
+- Capacity reservations on real processes (in process and FoundationDB
+  suites only; the soak made no member move).
+- Clock skew between hosts; clusters larger than two hosts.
+- The FoundationDB failover suite locally (it needs the CI's container
+  harness; it passed in CI).
