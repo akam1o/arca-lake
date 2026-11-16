@@ -1020,9 +1020,21 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                     .await
                     {
                         Err(MetaError::PreconditionFailed) => {
-                            let b =
-                                arca_lake_metadata::ops::bucket::get_bucket(meta, bucket).await?;
-                            if object::version_exists(meta, bucket, key, &marker).await? {
+                            // The resolution's own reads failing prove
+                            // nothing: unknown, not their error (Phase 4.1
+                            // review of R-112).
+                            let unknown = |e: MetaError| {
+                                MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(format!(
+                                    "{r}; then {e}"
+                                )))
+                            };
+                            let b = arca_lake_metadata::ops::bucket::get_bucket(meta, bucket)
+                                .await
+                                .map_err(unknown)?;
+                            if object::version_exists(meta, bucket, key, &marker)
+                                .await
+                                .map_err(unknown)?
+                            {
                                 Ok(object::Deleted {
                                     delete_marker_version: Some(marker),
                                     retired: None,
@@ -1038,7 +1050,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                                 })
                             }
                         }
-                        other => other,
+                        Ok(d) => Ok(d),
+                        // Not a definite answer after an unknown attempt,
+                        // which may still be applied (Phase 4.1 review of
+                        // R-112).
+                        Err(e) => Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(
+                            format!("{r}; then {e}"),
+                        ))),
                     };
                 }
                 other => return other,
@@ -1329,7 +1347,17 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             {
                 Ok(c) => return Ok(c),
                 Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r))) => last = Some(r),
-                Err(e) => return Err(complete_err(e)),
+                Err(e) if last.is_none() => return Err(complete_err(e)),
+                // After an attempt whose outcome was unknown, a later
+                // error is not a definite answer: that attempt may still
+                // be applied (Phase 4.1 review of R-112).
+                Err(e) => {
+                    return Err(s3_error!(
+                        ServiceUnavailable,
+                        "complete outcome unknown: {}; then {e}",
+                        last.unwrap_or_default()
+                    ));
+                }
             }
         }
         Err(s3_error!(

@@ -639,6 +639,47 @@ pub async fn head_object<S: KvStore>(
     }
 }
 
+/// The version id under which `generation` was published as a version of
+/// `bucket_id`/`key` (`None` if no version record names it: never
+/// published, or deleted since). Scans the key's versions newest first: for
+/// resolving the answer of a commit whose outcome was unknown, not for a
+/// request path (Phase 4.1, R-112).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn version_id_of<S: KvStore>(
+    store: &S,
+    bucket_id: u64,
+    key: &str,
+    generation: &GenId,
+) -> Result<Option<String>> {
+    const PAGE: usize = 256;
+    let full = keys::versions_range(bucket_id, key);
+    let mut begin = full.begin.clone();
+    loop {
+        let range = crate::kv::KeyRange::new(begin.clone(), full.end.clone());
+        let page = transact(store, range, |tx, range| {
+            Box::pin(async move { tx.get_range(range, PAGE, false).await.map_err(Into::into) })
+        })
+        .await?;
+        for (_, v) in &page {
+            let rec: VersionRecord = crate::records::decode(v)?;
+            if !rec.delete_marker && rec.generation == *generation {
+                return Ok(Some(rec.version_id));
+            }
+        }
+        if page.len() < PAGE {
+            return Ok(None);
+        }
+        let Some((last, _)) = page.last() else {
+            return Ok(None);
+        };
+        begin.clone_from(last);
+        begin.push(0);
+    }
+}
+
 /// HEAD semantics for the current version or a specific version id.
 ///
 /// # Errors

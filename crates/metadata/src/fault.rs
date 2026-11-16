@@ -33,6 +33,9 @@ pub enum CommitFault {
     /// later by [`FaultKv::apply_delayed`], against whatever changed
     /// meanwhile (a late commit that may still conflict, as in the store).
     TimeoutDelayed,
+    /// Drop the transaction and report a conflict (another writer won; the
+    /// transaction loop retries).
+    Conflict,
 }
 
 /// The error a commit timeout produces in the FoundationDB backend.
@@ -290,6 +293,7 @@ impl<T: Txn + 'static> Txn for FaultTx<T> {
                 Err(timeout_error())
             }
             CommitFault::TimeoutWithoutApply => Err(timeout_error()),
+            CommitFault::Conflict => Err(KvError::Conflict),
             CommitFault::TimeoutDelayed => {
                 self.parked
                     .lock()

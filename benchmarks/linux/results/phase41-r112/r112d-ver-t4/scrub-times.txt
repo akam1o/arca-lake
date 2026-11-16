@@ -1,0 +1,8 @@
+group 1 seconds 0 rc 0
+group 2 seconds 0 rc 0
+group 3 seconds 1 rc 0
+group 4 seconds 0 rc 0
+group 5 seconds 3 rc 0
+group 6 seconds 5 rc 0
+group 7 seconds 4 rc 0
+group 8 seconds 4 rc 0

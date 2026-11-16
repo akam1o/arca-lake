@@ -72,6 +72,13 @@ Results are written by criterion to `target/criterion/`.
   correction); failed requests are counted by class, not in the
   histogram. `nodebench`: one storage node's `PutShard`/`GetShard` per
   size and concurrency (reads hit shards just written: page cache).
+- `arcabench/` `contend` (Phase 4.1): many writers on a few keys through
+  S3 (every request and retry attempt logged with its times and answer),
+  then a check of what every gateway shows against the log: no
+  acknowledged write lost, no stale or backward read, versions (with
+  `--versioned`) in real-time order with the ids they were answered with,
+  no PUT answered SlowDown visible. Outcomes other than 2xx and SlowDown
+  are unknown and constrain nothing.
 - `metabench/` `metaops` (Phase 4.0): object metadata operations
   (`populate`, `put`, `overwrite`, `get`, `head`, `delete`, `list-page`,
   `map-version`, `access`) through the gateway's functions on

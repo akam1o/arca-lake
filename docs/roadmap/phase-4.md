@@ -7,7 +7,7 @@ limits are measured and then raised. Phase 4.0 measured; Phases 4.1 and
 | Sub-phase | Scope | Completion criteria | Status |
 | --- | --- | --- | --- |
 | 4.0 Scalability baseline | benchmark framework (`arcabench`, `nodebench`, `metaops`, `bench-cluster.sh`), validity rules, object count 10³–10⁶ through S3 and 10⁷ metadata-only, gateway, FoundationDB processes, storage node, concurrency and tail, background passes, metadata operations, profiles, failures under load, R-108 heap, three limited changes with A/B (gateway `TCP_NODELAY`, `--access-records`, `--admission-horizon-secs`), controller pass metrics, two reviews in two rounds | Y1–Y16 with evidence (`docs/verification/phase-4.0-scalability.md`) | delivered with limitations (see the report): 10⁷ through S3 and 10⁸ estimated; one 4-vCPU host for nodes and gateways; virtual disks; intermittent `managed_restore` failures not yet classified (R-113) |
-| 4.1 Metadata scalability and background processing optimization | below | below | not started |
+| 4.1 Metadata scalability and background processing optimization | below | below | in progress: P0-1 (R-112) done — `docs/verification/phase-4.1-r112.md`: no data effect through S3; answer defects found on the way fixed (R-114); hot-key availability stays (R-112, Medium) |
 | 4.2 Scale-out validation and capacity efficiency | below | below | not started |
 
 ## How Phase 4.0's figures are to be read
@@ -38,7 +38,10 @@ limits are measured and then raised. Phase 4.0 measured; Phases 4.1 and
 
 **P0 — correctness and liveness first**
 
-1. **R-112, concurrent overwrite of one key.** Reproduce through the S3
+1. **R-112, concurrent overwrite of one key** — *done (Phase 4.1,
+   `docs/verification/phase-4.1-r112.md`): no acknowledged write lost and
+   no wrong version visible in 34 trials; R-114 fixed; the per-key
+   commit ordering below moves to P1 as an availability item.* Reproduce through the S3
    path (real gateways, many concurrent PUTs of one key, with and without
    versioning), then GC, quiescence and a full check: no acknowledged
    write lost, no version visible that was not the last acknowledged or

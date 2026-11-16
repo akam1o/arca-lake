@@ -627,3 +627,348 @@ async fn a_versioned_delete_with_an_unproven_outcome_is_not_reported_done() {
     assert_eq!(e.code(), &s3s::S3ErrorCode::ServiceUnavailable, "{e:?}");
     c.shutdown().await;
 }
+
+/// A PUT whose first commit attempt has an unknown outcome and whose
+/// retry then conflicts until the transaction loop gives up is not
+/// answered `SlowDown` (a definite refusal, "retry"): the first attempt may
+/// still be applied, and here it is, after the fencing abort failed
+/// (Phase 4.1, R-112). The answer must say the outcome is unknown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_put_whose_outcome_is_unknown_is_never_answered_slowdown() {
+    let c: TestCluster<FaultKv<MemKv>> = TestCluster::start_with(
+        Arc::new(FaultKv::new(MemKv::default())),
+        ClusterOptions::rs(3, 2, 1, MIB, 0),
+    )
+    .await;
+    let s3 = &c.backend;
+    s3::create_bucket(s3, BUCKET).await.unwrap();
+    let old = part(1);
+    s3::put(s3, BUCKET, KEY, old.clone(), &s3::PutOptions::default())
+        .await
+        .unwrap();
+    let b = arca_lake_metadata::ops::bucket::get_bucket(c.meta.as_ref(), BUCKET)
+        .await
+        .unwrap();
+    let current = keys::object_current(b.id, KEY);
+    let cur = current.clone();
+    let writes_current = move |w: &[Vec<u8>]| w.contains(&cur);
+    // The first commit attempt is held (a timeout whose transaction may
+    // still commit); every attempt of the retry conflicts.
+    c.meta
+        .inject(writes_current.clone(), CommitFault::TimeoutDelayed, 1);
+    c.meta.inject(
+        writes_current,
+        CommitFault::Conflict,
+        arca_lake_metadata::kv::MAX_ATTEMPTS,
+    );
+    // Every abort fails (store unavailable): the generation stays pending.
+    c.meta.inject(
+        move |w: &[Vec<u8>]| w.iter().any(|k| is_retired_entry(k)) && !w.contains(&current),
+        CommitFault::Unavailable,
+        8,
+    );
+    let new = part(2);
+    let r = s3::put(s3, BUCKET, KEY, new.clone(), &s3::PutOptions::default()).await;
+    c.meta.clear_rules();
+    let late = c.meta.apply_delayed().await;
+    let now = s3::get(s3, BUCKET, KEY).await.unwrap().0;
+    match &r {
+        Ok(_) => assert_eq!(now, new, "acknowledged and not visible (late {late:?})"),
+        Err(e) => {
+            if now == new {
+                assert_ne!(
+                    e.code(),
+                    &s3s::S3ErrorCode::SlowDown,
+                    "answered SlowDown, then the write became visible (late {late:?}): {e:?}"
+                );
+            }
+        }
+    }
+    assert!(now == new || now == old, "neither version is current");
+    c.shutdown().await;
+}
+
+/// The same for UploadPart: a part whose first seal attempt has an
+/// unknown outcome and whose retry conflicts until the loop gives up is
+/// not answered `SlowDown` if it may still be sealed (Phase 4.1, R-112).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_part_whose_seal_is_unknown_is_never_answered_slowdown() {
+    use s3s::dto::ListPartsInput;
+    let c: TestCluster<FaultKv<MemKv>> = TestCluster::start_with(
+        Arc::new(FaultKv::new(MemKv::default())),
+        ClusterOptions::rs(3, 2, 1, MIB, 0),
+    )
+    .await;
+    let s3 = &c.backend;
+    s3::create_bucket(s3, BUCKET).await.unwrap();
+    let upload_id = create_upload(s3).await;
+    c.meta
+        .inject(matcher(Target::Seal), CommitFault::TimeoutDelayed, 1);
+    c.meta.inject(
+        matcher(Target::Seal),
+        CommitFault::Conflict,
+        arca_lake_metadata::kv::MAX_ATTEMPTS,
+    );
+    c.meta
+        .inject(matcher(Target::Abort), CommitFault::Unavailable, 8);
+    let r = upload_part(s3, &upload_id, 1).await;
+    c.meta.clear_rules();
+    let late = c.meta.apply_delayed().await;
+    let listed = s3
+        .list_parts(request(ListPartsInput {
+            bucket: BUCKET.into(),
+            key: KEY.into(),
+            upload_id: upload_id.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .output
+        .parts
+        .unwrap_or_default()
+        .iter()
+        .any(|p| p.part_number == Some(1));
+    if let Err(e) = &r
+        && listed
+    {
+        assert_ne!(
+            e.code(),
+            &s3s::S3ErrorCode::SlowDown,
+            "answered SlowDown, then the part was sealed (late {late:?}): {e:?}"
+        );
+    }
+    c.shutdown().await;
+}
+
+/// A versioned PUT whose commit was applied but answered with an unknown
+/// outcome, while another PUT became current before the outcome was
+/// resolved, is answered with its own version id, not `null` (Phase 4.1
+/// review of R-112).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resolved_versioned_put_answers_its_own_version_id() {
+    use arca_lake_metadata::ops::object::{self, CommitInfo, Precondition};
+    use s3s::dto::{
+        BucketVersioningStatus, PutBucketVersioningInput, PutObjectInput, VersioningConfiguration,
+    };
+    let c: TestCluster<FaultKv<MemKv>> = TestCluster::start_with(
+        Arc::new(FaultKv::new(MemKv::default())),
+        ClusterOptions::rs(3, 2, 1, MIB, 0),
+    )
+    .await;
+    let s3 = &c.backend;
+    s3::create_bucket(s3, BUCKET).await.unwrap();
+    let mut vb = PutBucketVersioningInput::builder();
+    vb.set_bucket(BUCKET.into());
+    vb.set_versioning_configuration(VersioningConfiguration {
+        status: Some(BucketVersioningStatus::from_static(
+            BucketVersioningStatus::ENABLED,
+        )),
+        ..Default::default()
+    });
+    s3.put_bucket_versioning(request(vb.build().unwrap()))
+        .await
+        .unwrap();
+    let b = arca_lake_metadata::ops::bucket::get_bucket(c.meta.as_ref(), BUCKET)
+        .await
+        .unwrap();
+    c.meta.inject_on_key(
+        keys::object_current(b.id, KEY),
+        CommitFault::UnknownAfterApply,
+        1,
+    );
+    // Between the lost reply and the resolution, another PUT lands.
+    let meta = Arc::clone(&c.meta);
+    c.meta.interleave_next(move || {
+        std::thread::spawn(move || {
+            futures::executor::block_on(async {
+                let now = now_ms();
+                let p = object::begin_put(meta.as_ref(), BUCKET, KEY, now, 60_000)
+                    .await
+                    .unwrap();
+                object::commit_put(
+                    meta.as_ref(),
+                    &p.generation,
+                    &CommitInfo {
+                        size: 0,
+                        etag: "d41d8cd98f00b204e9800998ecf8427e".into(),
+                        ..Default::default()
+                    },
+                    &Precondition::default(),
+                    now,
+                )
+                .await
+                .unwrap();
+            });
+        })
+        .join()
+        .unwrap();
+    });
+    let data = part(3);
+    let out = s3
+        .put_object(request(PutObjectInput {
+            bucket: BUCKET.into(),
+            key: KEY.into(),
+            body: Some(StreamingBlob::from_bytes(data.clone())),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .output;
+    let vid = out.version_id.expect("a version id");
+    let got = s3
+        .get_object(request(s3s::dto::GetObjectInput {
+            bucket: BUCKET.into(),
+            key: KEY.into(),
+            version_id: Some(vid.clone()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_or_else(|e| panic!("version {vid} answered: {e:?}"))
+        .output;
+    let mut body = Vec::new();
+    let mut stream = got.body.expect("a body");
+    while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+        body.extend_from_slice(&chunk.unwrap());
+    }
+    assert_eq!(
+        body,
+        data.to_vec(),
+        "the version id answered is not this PUT's"
+    );
+    c.shutdown().await;
+}
+
+/// A part whose seal was not applied (outcome unknown) and whose pending
+/// write then expired is not reported stored: "retiring while the upload is
+/// open" proves supersession only if the part had been sealed (Phase 4.1
+/// review of R-112).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_expired_unsealed_part_is_not_reported_stored() {
+    use s3s::dto::ListPartsInput;
+    let c: TestCluster<FaultKv<MemKv>> = TestCluster::start_with(
+        Arc::new(FaultKv::new(MemKv::default())),
+        ClusterOptions::rs(3, 2, 1, MIB, 0),
+    )
+    .await;
+    let s3 = &c.backend;
+    s3::create_bucket(s3, BUCKET).await.unwrap();
+    let upload_id = create_upload(s3).await;
+    c.meta
+        .inject(matcher(Target::Seal), CommitFault::TimeoutWithoutApply, 1);
+    // Between the lost seal and its resolution, the pending part expires.
+    let meta = Arc::clone(&c.meta);
+    c.meta.interleave_next(move || {
+        std::thread::spawn(move || {
+            futures::executor::block_on(async {
+                let gone = arca_lake_metadata::ops::gc::expire_pending(
+                    meta.as_ref(),
+                    now_ms() + 86_400_000,
+                    100,
+                )
+                .await
+                .unwrap();
+                assert!(!gone.is_empty(), "nothing expired");
+            });
+        })
+        .join()
+        .unwrap();
+    });
+    let r = upload_part(s3, &upload_id, 1).await;
+    let listed = s3
+        .list_parts(request(ListPartsInput {
+            bucket: BUCKET.into(),
+            key: KEY.into(),
+            upload_id: upload_id.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .output
+        .parts
+        .unwrap_or_default()
+        .iter()
+        .any(|p| p.part_number == Some(1));
+    assert!(
+        r.is_err() || listed,
+        "UploadPart answered {r:?} but the part is not stored"
+    );
+    c.shutdown().await;
+}
+
+/// CompleteMultipartUpload and DELETE: after an attempt whose outcome was
+/// unknown (held, applied later), a retry that conflicts until the loop
+/// gives up is not answered `SlowDown` if the first attempt then takes
+/// effect (Phase 4.1 review of R-112).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn complete_and_delete_with_unknown_outcomes_are_never_answered_slowdown() {
+    let max = arca_lake_metadata::kv::MAX_ATTEMPTS;
+    // Complete.
+    let c: TestCluster<FaultKv<MemKv>> = TestCluster::start_with(
+        Arc::new(FaultKv::new(MemKv::default())),
+        ClusterOptions::rs(3, 2, 1, MIB, 0),
+    )
+    .await;
+    let s3 = &c.backend;
+    s3::create_bucket(s3, BUCKET).await.unwrap();
+    let upload_id = create_upload(s3).await;
+    let etag = upload_part(s3, &upload_id, 1).await.unwrap();
+    c.meta
+        .inject(matcher(Target::Complete), CommitFault::TimeoutDelayed, 1);
+    c.meta
+        .inject(matcher(Target::Complete), CommitFault::Conflict, max);
+    let r = complete(s3, &upload_id, &[(1, etag)]).await;
+    c.meta.clear_rules();
+    let late = c.meta.apply_delayed().await;
+    let visible = s3::head(s3, BUCKET, KEY).await.is_ok();
+    if let Err(e) = &r
+        && visible
+    {
+        assert_ne!(
+            e.code(),
+            &s3s::S3ErrorCode::SlowDown,
+            "complete answered SlowDown, then the object appeared (late {late:?})"
+        );
+    }
+    c.shutdown().await;
+
+    // Delete.
+    let c: TestCluster<FaultKv<MemKv>> = TestCluster::start_with(
+        Arc::new(FaultKv::new(MemKv::default())),
+        ClusterOptions::rs(3, 2, 1, MIB, 0),
+    )
+    .await;
+    let s3 = &c.backend;
+    s3::create_bucket(s3, BUCKET).await.unwrap();
+    s3::put(s3, BUCKET, KEY, part(1), &s3::PutOptions::default())
+        .await
+        .unwrap();
+    let b = arca_lake_metadata::ops::bucket::get_bucket(c.meta.as_ref(), BUCKET)
+        .await
+        .unwrap();
+    let current = keys::object_current(b.id, KEY);
+    let cur = current.clone();
+    c.meta.inject(
+        move |w: &[Vec<u8>]| w.contains(&cur),
+        CommitFault::TimeoutDelayed,
+        1,
+    );
+    c.meta.inject(
+        move |w: &[Vec<u8>]| w.contains(&current),
+        CommitFault::Conflict,
+        max,
+    );
+    let r = s3::delete(s3, BUCKET, KEY).await;
+    c.meta.clear_rules();
+    let late = c.meta.apply_delayed().await;
+    let gone = s3::head(s3, BUCKET, KEY).await.is_err();
+    if let Err(e) = &r
+        && gone
+    {
+        assert_ne!(
+            e.code(),
+            &s3s::S3ErrorCode::SlowDown,
+            "delete answered SlowDown, then the object was gone (late {late:?})"
+        );
+    }
+    c.shutdown().await;
+}

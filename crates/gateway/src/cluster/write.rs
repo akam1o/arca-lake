@@ -15,7 +15,7 @@ use arca_lake_metadata::ops::multipart::{self, PartInfo};
 use arca_lake_metadata::ops::object::{self, CommitInfo, CommitOutcome, Precondition};
 use arca_lake_metadata::records::{
     Checksum, ChecksumAlgorithm, ChecksumType, ChunkRecord, DurablePlacement, GenId, GroupRecord,
-    MultipartState, UploadId,
+    MultipartState, NULL_VERSION_ID, UploadId, Versioning,
 };
 use arca_lake_metadata::{KvError, KvStore, MetaError};
 use arca_lake_placement::WritableGroup;
@@ -354,7 +354,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// pending means the commit is retried a bounded number of times, after
     /// which the generation is aborted so that a late commit is rejected by
     /// the store. If the abort finds the generation committed, the PUT
-    /// succeeded after all. Returns the version id published.
+    /// succeeded after all. Once an attempt's outcome was unknown, a later
+    /// attempt's error is not the answer either (that attempt may still be
+    /// applied): the generation is fenced the same way (Phase 4.1, R-112: a
+    /// `SlowDown` after an unknown attempt could become visible). Returns
+    /// the version id published.
     async fn commit_resolving(
         &self,
         generation: GenId,
@@ -364,14 +368,22 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         const MAX_COMMIT_ATTEMPTS: usize = 4;
         let meta = self.meta.as_ref();
         let mut reason = String::new();
+        let mut unknown = false;
         for attempt in 1..=MAX_COMMIT_ATTEMPTS {
             match object::commit_put(meta, &generation, info, pre, now_ms()).await {
                 Ok(c) => return Ok(c.version_id),
-                Err(MetaError::Kv(KvError::CommitUnknown(r))) => reason = r,
-                Err(e) => return Err(meta_err(e).into()),
+                Err(MetaError::Kv(KvError::CommitUnknown(r))) => {
+                    reason = r;
+                    unknown = true;
+                }
+                Err(e) if !unknown => return Err(meta_err(e).into()),
+                Err(e) => {
+                    reason = format!("{reason}; then {e}");
+                    break;
+                }
             }
             match object::resolve_commit(meta, &generation, now_ms()).await {
-                Ok(CommitOutcome::Committed(_)) => return Ok(self.version_of(generation).await),
+                Ok(CommitOutcome::Committed(_)) => return self.version_of(generation).await,
                 Ok(CommitOutcome::Pending) if attempt < MAX_COMMIT_ATTEMPTS => {}
                 Ok(CommitOutcome::Pending | CommitOutcome::PendingExpired) => break,
                 Ok(CommitOutcome::Retiring | CommitOutcome::Missing) => {
@@ -395,36 +407,52 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             }
         }
         self.fence_unknown(generation, &reason).await?;
-        Ok(self.version_of(generation).await)
+        self.version_of(generation).await
     }
 
-    /// Version id of a committed generation (the pointer's, or its version
-    /// record's; `null` when unknown).
-    async fn version_of(&self, generation: GenId) -> String {
-        let Ok(h) = object::get_generation(self.meta.as_ref(), &generation).await else {
-            return "null".into();
+    /// Version id of a committed generation: the current pointer's if it
+    /// is still current, otherwise its version record's (a later PUT may
+    /// have become current before the outcome was resolved). In a bucket
+    /// that never had versioning it is `null`, and in a suspended one when
+    /// no record names it (a later `null` write replaced it). Anything else (a read that
+    /// fails, no version naming it any more) is not answered with an
+    /// invented id: the write was applied, its id is unknown, and the answer
+    /// says so (503) (Phase 4.1 review of R-112).
+    async fn version_of(&self, generation: GenId) -> Result<String, WriteFailure> {
+        let unresolved = |why: String| WriteFailure {
+            error: s3_error!(
+                ServiceUnavailable,
+                "the write was applied but its version id could not be resolved ({why})"
+            ),
+            abort: false,
         };
-        match object::head_version(
-            self.meta.as_ref(),
-            &self.bucket_name(h.bucket_id).await,
-            &h.key,
-            None,
-        )
-        .await
-        {
-            Ok(object::Found::Object(i)) if i.pointer.generation == generation => {
-                i.pointer.version_id
-            }
-            _ => "null".into(),
-        }
-    }
-
-    /// Bucket name of a bucket id (for resolution paths only).
-    async fn bucket_name(&self, bucket_id: u64) -> String {
-        multipart::bucket_of(self.meta.as_ref(), bucket_id)
+        let meta = self.meta.as_ref();
+        let h = object::get_generation(meta, &generation)
             .await
-            .map(|b| b.name)
-            .unwrap_or_default()
+            .map_err(|e| unresolved(e.to_string()))?;
+        let b = multipart::bucket_of(meta, h.bucket_id)
+            .await
+            .map_err(|e| unresolved(e.to_string()))?;
+        if b.versioning == Versioning::Disabled {
+            return Ok(NULL_VERSION_ID.into());
+        }
+        if let object::Found::Object(i) = object::head_version(meta, &b.name, &h.key, None)
+            .await
+            .map_err(|e| unresolved(e.to_string()))?
+            && i.pointer.generation == generation
+        {
+            return Ok(i.pointer.version_id);
+        }
+        match object::version_id_of(meta, h.bucket_id, &h.key, &generation)
+            .await
+            .map_err(|e| unresolved(e.to_string()))?
+        {
+            Some(v) => Ok(v),
+            // Suspended: a write publishes the `null` version, which a later
+            // `null` write may have replaced (review).
+            None if b.versioning == Versioning::Suspended => Ok(NULL_VERSION_ID.into()),
+            None => Err(unresolved("no version record names it any more".into())),
+        }
     }
 
     /// Seal a part, resolving an unknown outcome (RFC-007 §5.3.2): sealed
@@ -442,28 +470,61 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         const MAX_ATTEMPTS: usize = 4;
         let meta = self.meta.as_ref();
         let mut reason = String::new();
+        let mut unknown = false;
         for attempt in 1..=MAX_ATTEMPTS {
             match multipart::seal_part(meta, &generation, info, now_ms()).await {
                 Ok(_) => return Ok(()),
-                Err(MetaError::Kv(KvError::CommitUnknown(r))) => reason = r,
-                Err(e) => return Err(meta_err(e).into()),
+                Err(MetaError::Kv(KvError::CommitUnknown(r))) => {
+                    reason = r;
+                    unknown = true;
+                }
+                // As in `commit_resolving`: after an unknown attempt, a
+                // later error is not a definite answer.
+                Err(e) if !unknown => return Err(meta_err(e).into()),
+                Err(e) => {
+                    reason = format!("{reason}; then {e}");
+                    break;
+                }
             }
             match object::resolve_commit(meta, &generation, now_ms()).await {
                 Ok(CommitOutcome::Committed(_)) => return Ok(()),
                 Ok(CommitOutcome::Pending) if attempt < MAX_ATTEMPTS => {}
                 Ok(CommitOutcome::Pending | CommitOutcome::PendingExpired) => break,
                 Ok(CommitOutcome::Retiring) => {
+                    // A read that fails proves nothing: the outcome stays
+                    // unknown (Phase 4.1 review).
+                    let unknown = |e: MetaError| WriteFailure {
+                        error: s3_error!(
+                            ServiceUnavailable,
+                            "seal outcome unknown ({reason}) and unresolved ({e})"
+                        ),
+                        abort: false,
+                    };
                     let open = multipart::get_upload(meta, bucket, key, upload_id)
                         .await
-                        .ok()
-                        .flatten()
+                        .map_err(unknown)?
                         .is_some_and(|u| u.state == MultipartState::Open);
-                    if open {
-                        // Superseded by a later upload of the same part.
+                    if !open {
+                        return Err(WriteFailure {
+                            error: s3_error!(NoSuchUpload),
+                            abort: false,
+                        });
+                    }
+                    // Superseded by a later upload of the same part only if
+                    // it was sealed first: a seal writes the part's ETag into
+                    // the header, a pending part has none. An expired pending
+                    // part is retiring too, never sealed (Phase 4.1 review).
+                    let h = object::get_generation(meta, &generation)
+                        .await
+                        .map_err(unknown)?;
+                    if !h.etag.is_empty() && h.etag == info.etag {
                         return Ok(());
                     }
                     return Err(WriteFailure {
-                        error: s3_error!(NoSuchUpload),
+                        error: s3_error!(
+                            InternalError,
+                            "the part expired before it was sealed ({reason}); upload it again"
+                        ),
                         abort: false,
                     });
                 }

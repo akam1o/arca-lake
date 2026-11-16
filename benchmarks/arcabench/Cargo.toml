@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "nodebench"
 path = "src/nodebench.rs"
 
+[[bin]]
+name = "contend"
+path = "src/contend.rs"
+
 [dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 hyper = { workspace = true, features = ["client", "http1"] }

@@ -6,6 +6,26 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Fixed (Phase 4.1)
+
+- Write-path answers after a metadata commit with an unknown outcome
+  (R-114, found while reproducing R-112): PUT, UploadPart,
+  CompleteMultipartUpload and DELETE no longer answer a later attempt's
+  error (503 SlowDown, 412, 500) when the first attempt may still apply;
+  the write is fenced (committed → success, aborted → 503 not visible) or
+  answered 503 "outcome unknown". A resolved versioned PUT answers its own
+  version id (not `null`) when another PUT became current first, and 503
+  if the id cannot be read. An UploadPart whose pending write expired
+  unsealed is no longer answered as stored. No format or protocol change.
+
+### Added (Phase 4.1)
+
+- `contend` in `benchmarks/arcabench`: concurrent overwrites of a few
+  keys through S3 and a linearizability-style check of what became
+  visible (acknowledged, definitely refused and unknown outcomes;
+  versioned buckets), used for R-112 (`docs/verification/phase-4.1-r112.md`).
+- `CommitFault::Conflict` (metadata fault injection, tests).
+
 ### Added (Phase 4.0)
 
 - Benchmark tools: `benchmarks/arcabench` (`arcabench`: S3 PUT, GET,
