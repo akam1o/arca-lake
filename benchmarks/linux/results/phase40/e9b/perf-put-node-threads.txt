@@ -1,0 +1,15 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 28
+#
+# Samples: 2K of event 'cpu/cycles/P'
+# Event count (approx.): 10433778932
+#
+# Overhead  Command        
+# ........  ...............
+#
+   100.00%  tokio-rt-worker
+#
+# (Cannot load tips.txt file, please install perf!)
+#

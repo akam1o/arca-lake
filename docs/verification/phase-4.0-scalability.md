@@ -748,6 +748,7 @@ and in ten runs of the Phase 3.14 tree with the same crate sources; the
 failing code path is not touched by Phase 4.0. Recorded as intermittent;
 CI is the gate.
 
-Raw results stayed on the operator's machine (they hold host-specific
-data); the summaries in this report were produced by
-`benchmarks/linux/summarize_bench.py` from them.
+The summaries this report is built from are in
+`benchmarks/linux/results/phase40/` (sanitized; produced by
+`benchmarks/linux/summarize_bench.py`); the raw per-run sampler output was
+not committed.

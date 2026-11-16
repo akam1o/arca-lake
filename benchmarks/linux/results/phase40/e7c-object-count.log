@@ -1,0 +1,10 @@
+2026-11-15T14:43:27Z populate 0..100000
+2026-11-15T15:11:28Z scrub at 100000
+2026-11-15T15:21:37Z populate 100000..1000000
+2026-11-15T15:56:56Z scrub at 1000000
+2026-11-15T17:23:05Z done
+2026-11-15T17:30:00Z restart nodes with 11 GiB allotments
+2026-11-15T17:40:42Z admission state 4
+2026-11-15T18:05:12Z unplanned: the four nodes restarted at 17:30 without ARCA_INSECURE_PLAINTEXT (the restart took /proc cmdline, which lacks the env prefix) exited at once; all four down 17:30-18:03; restarted 18:03 with the env and 11 GiB
+2026-11-15T18:07:47Z admission state 0
+2026-11-15T18:23:08Z e7d done

@@ -1,0 +1,18 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cpu/cycles/P'
+# Event count (approx.): 50630613950
+#
+# Overhead  Command        
+# ........  ...............
+#
+    98.13%  fdbserver      
+     1.86%  fdbserver/eio  
+     0.01%  fdb-loopprofile
+     0.00%  fdb-trace-log  
+#
+# (Cannot load tips.txt file, please install perf!)
+#

@@ -1,0 +1,4 @@
+1794774504 kill controller
+1794774514 start controller
+1794774414 kill d1
+1794774444 start d1
