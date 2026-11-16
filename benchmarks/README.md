@@ -52,6 +52,37 @@ Results are written by criterion to `target/criterion/`.
   results are committed. Results: `linux/results/` (RFC-009 §6).
 - `transfer/`: shard transfer floors (raw framed TCP versus gRPC, with
   and without TLS), usable across hosts.
+- `arcabench/` (Phase 4.0): `arcabench`, the S3 workload generator of
+  the scalability baseline. Workloads `put`, `get`, `head`, `delete`,
+  `list`, `multipart`, `mixed`, `verify`, `create-buckets`; size or size
+  range, object count, concurrency, buckets, key layout
+  (`sequential`/`hashed`), key distribution (`uniform`, `zipf`, `hot`,
+  `sequential`), read/write/delete/list ratios, a fixed seed. Integrity:
+  one writer per key; a body is a 16-byte header (index, version, size)
+  and a stream of `(seed, index, version)`; a read accepts only a version
+  acknowledged or in flight while it ran, of that version's full length
+  (ranges: the exact bytes and length); a 404 only when a delete or no
+  write was possible; `--state-file` carries every key's versions across
+  runs (the same `--objects` throughout). The seed defines the bodies: a
+  run that checks another run's objects must use the same `--seed`
+  (`--client-id` varies the key choices instead). `verify` exits non-zero
+  when a key could not be read (an error other than an allowed 404). The
+  generator is closed-loop: latency under saturation is that of the
+  requests the clients managed to send (no coordinated-omission
+  correction); failed requests are counted by class, not in the
+  histogram. `nodebench`: one storage node's `PutShard`/`GetShard` per
+  size and concurrency (reads hit shards just written: page cache).
+- `metabench/` `metaops` (Phase 4.0): object metadata operations
+  (`populate`, `put`, `overwrite`, `get`, `head`, `delete`, `list-page`,
+  `map-version`, `access`) through the gateway's functions on
+  FoundationDB, with transaction attempts, reads, rows, bytes and
+  conflicts per operation from a counting store.
+- `linux/bench-cluster.sh` (Phase 4.0): a two-host cluster on a private
+  FoundationDB, `run` (generators detached, samplers on both hosts,
+  results stripped of addresses), `quiesce`, `snapshot`, `scrub`,
+  `restart-gateways`; `linux/object-count.sh` the object-count campaign;
+  `linux/summarize_bench.py` per-run summaries over the generator's
+  measurement window.
 
 ## Reports
 

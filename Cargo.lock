@@ -122,6 +122,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "arca-lake-arcabench"
+version = "0.0.0"
+dependencies = [
+ "arca-lake-protocol",
+ "bytes",
+ "clap",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "arca-lake-common"
 version = "0.0.0"
 dependencies = [

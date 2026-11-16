@@ -987,7 +987,10 @@ async fn scheduler<S, F, Fut>(
             }
             continue;
         }
-        match pass().await {
+        let pass_started = std::time::Instant::now();
+        let result = pass().await;
+        metrics.note_pass(name, pass_started.elapsed());
+        match result {
             Ok(()) => failures = 0,
             Err(e) => {
                 metrics.task_errors_total.fetch_add(1, Ordering::Relaxed);

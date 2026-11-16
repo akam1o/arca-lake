@@ -664,3 +664,42 @@ async fn deletes_decided_before_a_migration_back_do_not_remove_its_shards() {
     assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
     c.shutdown().await;
 }
+
+/// Phase 4.0: a gateway with access records off writes none on GET (the
+/// default records one per generation, for tiering).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gateway_without_access_records_writes_none_on_get() {
+    use arca_lake_metadata::ops::object;
+    for record in [true, false] {
+        let c = TestCluster::start(ClusterOptions {
+            record_access: record,
+            ..ClusterOptions::rs(3, 2, 1, 1 << 20, 0)
+        })
+        .await;
+        s3::create_bucket(&c.backend, "acc").await.unwrap();
+        s3::put(
+            &c.backend,
+            "acc",
+            "k",
+            payload(4096, 1),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+        let generation = c.manifest("acc", "k").await.pointer.generation;
+        let _ = s3::get(&c.backend, "acc", "k").await.unwrap();
+        // The record is written by a spawned task.
+        let mut found = None;
+        for _ in 0..50 {
+            found = object::access_of(c.meta.as_ref(), &generation)
+                .await
+                .unwrap();
+            if found.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(found.is_some(), record, "record_access {record}: {found:?}");
+        c.shutdown().await;
+    }
+}

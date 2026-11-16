@@ -169,6 +169,7 @@ where
                 },
                 _ = &mut rx => break,
             };
+            accepted(&socket);
             let svc = Audited {
                 inner: service.clone(),
                 peer: Some(peer),
@@ -192,6 +193,14 @@ where
         shutdown: tx,
         task,
     })
+}
+
+/// Socket options of an accepted connection. Responses are written in
+/// pieces (headers, then body frames as they arrive): with Nagle's
+/// algorithm a small piece waits for the client's delayed ACK (Phase 4.0:
+/// about 40 ms per small range GET).
+fn accepted(socket: &tokio::net::TcpStream) {
+    let _ = socket.set_nodelay(true);
 }
 
 /// The access key id named by a SigV4 `Authorization` header or a presigned
@@ -297,5 +306,21 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
             }
             res
         })
+    }
+}
+
+#[cfg(test)]
+mod socket_tests {
+    /// Phase 4.0: accepted connections have `TCP_NODELAY` (a small range
+    /// GET took about 40 ms without it).
+    #[tokio::test]
+    async fn accepted_connections_have_nodelay() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (socket, _) = l.accept().await.unwrap();
+        assert!(!socket.nodelay().unwrap());
+        super::accepted(&socket);
+        assert!(socket.nodelay().unwrap());
     }
 }

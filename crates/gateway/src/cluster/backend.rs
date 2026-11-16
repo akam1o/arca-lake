@@ -95,6 +95,13 @@ pub struct ClusterConfig {
     /// (test clusters that run no controller). Off in deployments: without
     /// a record, writes are throttled and then refused (Phase 3.8).
     pub admission_without_controller: bool,
+    /// Record reads of generations for automatic tiering (RFC-006 §5.8):
+    /// at most one metadata write per generation per second, and one at
+    /// the first read of each (Phase 4.0: a GET-only workload over many
+    /// objects then writes about once per GET). Off saves that write; then
+    /// tiering sees no reads from this gateway (objects it serves look
+    /// unread: candidates for demotion once a lower tier exists).
+    pub record_access: bool,
 }
 
 /// Fault-injection points in the write path (tests only).

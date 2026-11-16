@@ -14,6 +14,7 @@
 //! so run them with `--test-threads=1`.
 
 mod background_cursor;
+mod background_scale;
 mod backup_verify;
 mod cache;
 mod cache_ec;

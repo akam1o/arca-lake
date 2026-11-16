@@ -318,6 +318,10 @@ pub struct Metrics {
     /// Repairs whose target was replaced because it was gone or kept
     /// failing (Phase 3.13, R-104).
     pub repair_retargets_total: AtomicU64,
+    /// Per scheduled task (Phase 4.0): passes run, the last pass's
+    /// duration and the longest, ms. The next pass starts an interval after
+    /// one ends: a pass as long as its interval halves its rate.
+    pub passes: std::sync::Mutex<std::collections::BTreeMap<&'static str, (u64, u64, u64)>>,
     /// `Repairing` groups by the reason of their status at the last repair
     /// pass (Phase 3.14; index: [`REPAIR_REASONS`], the last one "none":
     /// no status yet).
@@ -453,6 +457,19 @@ pub const FINDING_LABELS: [&str; 8] = [
 ];
 
 impl Metrics {
+    /// Record one pass of the scheduled task `task` (Phase 4.0).
+    pub fn note_pass(&self, task: &'static str, took: std::time::Duration) {
+        let ms = u64::try_from(took.as_millis()).unwrap_or(u64::MAX);
+        let mut p = self
+            .passes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let e = p.entry(task).or_insert((0, 0, 0));
+        e.0 += 1;
+        e.1 = ms;
+        e.2 = e.2.max(ms);
+    }
+
     /// Prometheus text exposition.
     #[must_use]
     #[allow(clippy::too_many_lines)]
@@ -658,6 +675,28 @@ impl Metrics {
             "arca_controller_groups_repair_waiting",
             self.groups_repair_waiting.load(Ordering::Relaxed),
         );
+        {
+            let p = self
+                .passes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let _ = writeln!(out, "# TYPE arca_controller_passes_total counter");
+            for (task, (n, _, _)) in &p {
+                let _ = writeln!(out, "arca_controller_passes_total{{task=\"{task}\"}} {n}");
+            }
+            #[allow(clippy::cast_precision_loss)]
+            for (name, idx) in [
+                ("arca_controller_pass_last_seconds", 1),
+                ("arca_controller_pass_max_seconds", 2),
+            ] {
+                let _ = writeln!(out, "# TYPE {name} gauge");
+                for (task, v) in &p {
+                    let ms = if idx == 1 { v.1 } else { v.2 };
+                    let _ = writeln!(out, "{name}{{task=\"{task}\"}} {}", ms as f64 / 1000.0);
+                }
+            }
+        }
         let _ = writeln!(out, "# TYPE arca_controller_repair_groups gauge");
         for (i, reason) in REPAIR_REASONS.iter().enumerate() {
             let _ = writeln!(

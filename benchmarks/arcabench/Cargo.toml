@@ -1,0 +1,32 @@
+[package]
+name = "arca-lake-arcabench"
+description = "Reproducible S3 workload generator for arca-lake scalability measurements (Phase 4.0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "arcabench"
+path = "src/main.rs"
+
+[[bin]]
+name = "nodebench"
+path = "src/nodebench.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util.workspace = true
+http.workspace = true
+bytes.workspace = true
+clap.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+arca-lake-protocol.workspace = true
+
+[lints]
+workspace = true

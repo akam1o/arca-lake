@@ -126,6 +126,8 @@ pub struct ClusterOptions {
     pub populations_per_node: usize,
     /// Chunk placements in flight per PUT (see `ClusterConfig::write_pipeline`).
     pub write_pipeline: usize,
+    /// Gateway access records for tiering (`ClusterConfig::record_access`).
+    pub record_access: bool,
     /// Minimum multipart part size (see `ClusterConfig::multipart_min_part_bytes`);
     /// test clusters default to 1 KiB so that small parts are usable.
     pub multipart_min_part_bytes: u64,
@@ -214,6 +216,7 @@ impl ClusterOptions {
             population_queue_depth: 64,
             populations_per_node: 4,
             write_pipeline: 2,
+            record_access: true,
             multipart_min_part_bytes: 1024,
             authorize: false,
             principals: Vec::new(),
@@ -406,6 +409,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             heartbeat: opts.heartbeat,
             // Test clusters run no controller unless a test spawns one.
             admission_without_controller: true,
+            record_access: opts.record_access,
         };
         let backend = ClusterBackend::new(Arc::clone(&meta), cluster_cfg.clone())
             .await

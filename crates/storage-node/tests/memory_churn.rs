@@ -105,6 +105,20 @@ async fn rss_under_sustained_churn() {
     let addr = node.local_addr.to_string();
     let clients = NodeClients::new(Duration::from_secs(30));
     open_fence(&clients, &addr).await;
+    // The fence lapses without the leader's pushes (Phase 3.10 rejoin
+    // lease, 30 s): pushed again every 10 s, as a leader would (Phase 4.0:
+    // without it every delete after the first 30 s was refused, and the
+    // `unique` mode's live set grew until the disk was full).
+    let delete_errors = Arc::new(AtomicU64::new(0));
+    let fence = tokio::spawn({
+        let (c, addr) = (clients.clone(), addr.clone());
+        async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let _ = c.push_delete_fence(&addr, 1, true).await;
+            }
+        }
+    });
     let ops = Arc::new(AtomicU64::new(0));
     let bytes = Arc::new(AtomicU64::new(0));
     let lat_put = Arc::new(Mutex::new(Vec::<f64>::new()));
@@ -122,6 +136,7 @@ async fn rss_under_sustained_churn() {
     let mut tasks = Vec::new();
     let workers = if mode == "idle" { 0 } else { 16u64 };
     for w in 0..workers {
+        let delete_errors = Arc::clone(&delete_errors);
         let (c, addr, ops, bytes, lp, lg, mode) = (
             clients.clone(),
             addr.clone(),
@@ -167,7 +182,9 @@ async fn rss_under_sustained_churn() {
                         window.push_back(id);
                         if window.len() > 64 {
                             let old = window.pop_front().unwrap();
-                            let _ = c.delete_shard(&addr, shard(old), 0).await;
+                            if c.delete_shard(&addr, shard(old), 0).await.is_err() {
+                                delete_errors.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                     "put" => put(w * 64 + next() % 64).await,
@@ -175,7 +192,9 @@ async fn rss_under_sustained_churn() {
                     _ => {
                         let id = w * 64 + next() % 64;
                         if next() % 4 == 0 {
-                            let _ = c.delete_shard(&addr, shard(id), 0).await;
+                            if c.delete_shard(&addr, shard(id), 0).await.is_err() {
+                                delete_errors.fetch_add(1, Ordering::Relaxed);
+                            }
                         } else {
                             put(id).await;
                             get(id).await;
@@ -193,6 +212,7 @@ async fn rss_under_sustained_churn() {
         let stats = Arc::clone(node.service().compaction_stats());
         let store = Arc::clone(node.service().store());
         let mode = mode.clone();
+        let delete_errors = Arc::clone(&delete_errors);
         async move {
             loop {
                 let m = arca_lake_common::process::memory();
@@ -208,6 +228,7 @@ async fn rss_under_sustained_churn() {
                     "{}",
                     serde_json::json!({
                         "t_s": start.elapsed().as_secs(), "mode": mode, "compaction": compaction,
+                        "delete_errors": delete_errors.load(Ordering::Relaxed),
                         "anon_mib": m.anon as f64 / 1_048_576.0,
                         "heap_in_use_mib": m.heap_in_use as f64 / 1_048_576.0,
                         "heap_free_mib": m.heap_free as f64 / 1_048_576.0,
@@ -235,5 +256,6 @@ async fn rss_under_sustained_churn() {
         t.await.unwrap();
     }
     reporter.await.unwrap();
+    fence.abort();
     node.shutdown().await;
 }

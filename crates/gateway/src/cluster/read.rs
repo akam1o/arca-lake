@@ -1049,6 +1049,9 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
 
     /// Coalesced access record for automatic tiering (RFC-006 §5.8).
     pub(super) fn note_access(&self, generation: GenId) {
+        if !self.cfg.record_access {
+            return;
+        }
         let now = now_ms();
         let Some(reads) = self.cache_state.flush_access(generation, now) else {
             return;

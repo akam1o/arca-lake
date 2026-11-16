@@ -6,6 +6,34 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 
 ## [Unreleased]
 
+### Added (Phase 4.0)
+
+- Benchmark tools: `benchmarks/arcabench` (`arcabench`: S3 PUT, GET,
+  HEAD, DELETE, ListObjectsV2, multipart and mixed workloads with
+  verifiable bodies, a per-key version state that survives runs
+  (`--state-file`), per-second timeline and latency histogram;
+  `nodebench`: a storage node's `PutShard`/`GetShard` without a gateway),
+  `metaops` in `benchmarks/metabench` (object metadata operations through
+  the gateway's own functions, with per-operation transaction, read and
+  write counts), `benchmarks/linux/bench-cluster.sh` (two-host cluster,
+  samplers, quiescence check, snapshot, timed scrub),
+  `benchmarks/linux/object-count.sh`, `summarize_bench.py`.
+- Controller metrics `arca_controller_passes_total{task}`,
+  `arca_controller_pass_last_seconds{task}`,
+  `arca_controller_pass_max_seconds{task}`.
+- `gateway --access-records on|off` (default `on`, unchanged): `off`
+  writes no access record for tiering on GET (one metadata transaction
+  fewer per GET of an object not read in the last second).
+- `controller --admission-horizon-secs` (default 3600, unchanged): the
+  write admission's time-to-full horizon.
+
+### Changed (Phase 4.0)
+
+- The gateway sets `TCP_NODELAY` on accepted connections: a small range
+  GET no longer waits for the client's delayed ACK (measured 184 → 716
+  ranged GETs/s of 1 KiB at concurrency 8, p50 43.2 → 10.8 ms;
+  `docs/verification/phase-4.0-scalability.md`).
+
 ### Added (Phase 3.14)
 
 - Differential verification of repair targets (ADR-0031): `VerifyShards`

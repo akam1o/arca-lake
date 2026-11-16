@@ -10,6 +10,10 @@ description = "Metadata hot-key micro-benchmark: concurrent cache insert / remov
 name = "metabench"
 path = "src/main.rs"
 
+[[bin]]
+name = "metaops"
+path = "src/metaops.rs"
+
 [features]
 fdb = ["arca-lake-metadata/fdb"]
 

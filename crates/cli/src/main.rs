@@ -538,6 +538,11 @@ struct GatewayArgs {
     /// 5 MiB; smaller values are a non-AWS extension for small labs.
     #[arg(long, default_value_t = 5 << 20)]
     multipart_min_part_bytes: u64,
+    /// Record reads for automatic tiering (`on`, the default) or not
+    /// (`off`: one metadata write fewer per GET of an object not read in
+    /// the last second; tiering then sees no reads through this gateway).
+    #[arg(long, default_value = "on", value_parser = ["on", "off"])]
+    access_records: String,
     /// Serve gateway cache counters as Prometheus text on this address
     /// (`GET /metrics`); cluster backend only.
     #[arg(long)]
@@ -709,6 +714,12 @@ struct ControllerArgs {
     /// moves to it (one step at a time).
     #[arg(long, default_value_t = 60)]
     admission_dwell_secs: u64,
+    /// Write admission: throttle when the tier would be full within this
+    /// many seconds at the recent rate (warning at four times it). The
+    /// default suits deployments; small test clusters written fast reach
+    /// it with most of their space free (Phase 4.0).
+    #[arg(long, default_value_t = 3600)]
+    admission_horizon_secs: u64,
     /// Write admission: largest chunk the gateways write (bytes); a group
     /// whose fullest member has room for fewer than
     /// `--admission-group-min-shards` of its shards leaves placement.
@@ -1593,6 +1604,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 process_id: format!("gateway@{}", args.listen),
                 heartbeat: Some(Duration::from_secs(30)),
                 admission_without_controller: false,
+                record_access: args.access_records == "on",
             },
         )
         .await
@@ -1979,6 +1991,10 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.min_orphan_age = Duration::from_secs(args.min_orphan_age_secs);
     cfg.gc_interval = Duration::from_secs(args.gc_interval_secs);
     cfg.admission.dwell_ms = args.admission_dwell_secs.saturating_mul(1000);
+    #[allow(clippy::cast_precision_loss)]
+    {
+        cfg.admission.horizon_s = args.admission_horizon_secs.max(1) as f64;
+    }
     cfg.admission.group_min_shards = args.admission_group_min_shards.max(1);
     cfg.admission.allow_shared_filesystem = args.allow_shared_filesystem;
     cfg.admission_max_chunk_bytes = args.admission_max_chunk_bytes.max(1);

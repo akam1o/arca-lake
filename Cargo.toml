@@ -17,6 +17,7 @@ members = [
     "benchmarks/s3load",
     "benchmarks/metabench",
     "benchmarks/soakload",
+    "benchmarks/arcabench",
 ]
 
 [workspace.package]
