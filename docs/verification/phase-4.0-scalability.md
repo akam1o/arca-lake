@@ -726,7 +726,7 @@ environment, runs, scale, evidence and gaps. Environment for all: §1.
 | Y13 | Profiling and bottleneck analysis | Verified with limitations | E9b 6 profiles; thread CPU | §12, §15 | CPU only (no allocation or off-CPU profile); controller not profiled (pass metrics and code analysis instead) |
 | Y14 | Limited optimisations with A/B and regression tests | Verified | E4c | §14 | — |
 | Y15 | Benchmark reliability (criteria fixed, rotation, ≥ 3 samples, invalid runs recorded) | Verified with limitations | all | §1, §3 | three cells with two valid samples; one wording erratum to rule 8 |
-| Y16 | Two independent reviews, gates, documents | Verified with limitations | 2 reviewers × 2 rounds + follow-ups | §16; CI | see the final report for CI; a flaky test seen locally (below) |
+| Y16 | Two independent reviews, gates, documents | Verified with limitations | 2 reviewers × 2 rounds + follow-ups | §16; CI | intermittent `managed_restore` failures not classified (§20, R-113) |
 
 ## 19. Phase 4.1 and 4.2
 
@@ -741,12 +741,32 @@ physical disks; open-loop latency; ListObjectVersions and lifecycle;
 tiering and repair at object scale; allocation and off-CPU profiles; the
 24 h soak and power loss (not conditions of this phase).
 
-Local test observation: three `managed_restore` integration tests failed
-together twice on host A in this tree (`cluster incarnation changed since
-this gateway started`) and passed in eight other runs of the same tree,
-and in ten runs of the Phase 3.14 tree with the same crate sources; the
-failing code path is not touched by Phase 4.0. Recorded as intermittent;
-CI is the gate.
+Local test observation, **not classified** (R-113). The
+`managed_restore` integration tests failed intermittently on host A with
+the Phase 4.0 tree, each failure a gateway refusing with `cluster
+incarnation changed since this gateway started; restart it`. The record
+of runs, as made:
+
+| Tree | Runs | Failing runs |
+| --- | --- | --- |
+| Phase 4.0 tree (first run inside a workspace test run, the rest `--test it managed_restore::`) | 8 | 3: twice the same three tests (`a_restore_tool_reaching_another_database_clears_nothing`, `another_clusters_backup_is_refused_and_amended`, `the_cluster_uid_is_kept_across_a_restore_of_a_backup_without_one`), once one test (its name was not recorded) |
+| Phase 3.14 tree (`88732f1`) as checked out | 1 | 0 |
+| Phase 3.14 tree with Phase 4.0's controller sources copied in | 1 | 0 |
+| the same with Phase 4.0's gateway and testkit sources also copied in (then differing from the Phase 4.0 tree only outside what the test links: the CLI, `memory_churn`, the benchmark crates and the workspace manifest and lock) | 12 | 0 |
+
+An earlier version of this section said the tests "passed in ten runs of
+the Phase 3.14 tree with the same crate sources" and that the failing
+path "is not touched by Phase 4.0": both were wrong. Only one run was of
+the unmodified Phase 3.14 tree; the twelve passing runs were of a mixed
+tree; and Phase 4.0 changed the gateway and the testkit that these tests
+use (the refusing check itself, `ClusterBackend` admission in
+`crates/gateway/src/cluster/backend.rs`, is unchanged). The runs were not
+alternated under equal load (the first failure was inside a workspace
+test run). So nothing here tells a test-timing problem from a recovery
+defect, nor shows whether Phase 4.0 changed the rate. CI passed on the
+final commits; that does not classify it. Classification is Phase 4.1's
+second item (`docs/roadmap/phase-4.md`: same host, same conditions, both
+trees; expected protection or recovery defect; no relaxed assertion).
 
 The summaries this report is built from are in
 `benchmarks/linux/results/phase40/` (sanitized; produced by
