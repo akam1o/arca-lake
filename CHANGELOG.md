@@ -25,6 +25,30 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   visible (acknowledged, definitely refused and unknown outcomes;
   versioned buckets), used for R-112 (`docs/verification/phase-4.1-r112.md`).
 - `CommitFault::Conflict` (metadata fault injection, tests).
+- `controller --reconcile-parallel-pairs` (default 4, at most 8) and
+  `--reclaim-parallel-nodes` (default 4) (ADR-0033).
+- Controller metrics `arca_controller_pass_running_since_seconds{task}`,
+  `arca_controller_reconcile_sweep_last_seconds`,
+  `arca_controller_rebalance_settle_seconds`.
+- `bench-cluster.sh`: `CTL_BIN` and `restart-controller` (controller A/B
+  on one populated cluster).
+
+### Changed (Phase 4.1)
+
+- Reconciliation and the reclaim pass at object scale (ADR-0033): a
+  listing page's shards are judged in one read-only metadata transaction
+  (the same reads and rules, issued at once on FoundationDB) instead of
+  one per shard; pairs and nodes are worked on a few at once. At 10⁶
+  objects a reconcile pass took 146 s instead of 2,733 s and the reclaim
+  pass 0.55 ms per record instead of 2.74 ms
+  (`docs/verification/phase-4.1-adr33.md`). Deletes, their checks and
+  deferred reclamation are unchanged; no metadata, format or protocol
+  change.
+- Rebalancing's settle time is at least the measured reconcile cycle plus
+  the reconcile interval and the minimum orphan age (never shorter than
+  `--rebalance-settle-secs`).
+- `deny.toml` ignores RUSTSEC-2026-0543 (chrono unmaintained, only through
+  s3s 0.17; R-115); every other advisory still fails the check.
 
 ### Added (Phase 4.0)
 
