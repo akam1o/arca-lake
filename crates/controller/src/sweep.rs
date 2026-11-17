@@ -58,9 +58,50 @@ pub fn next_pairs(
     Batch { pairs, wraps: true }
 }
 
+/// Pairs at or before `after`, and all pairs: how far a sweep is, counted
+/// without listing the pairs (`groups` and `nodes` in any order).
+#[must_use]
+pub fn progress(after: Option<(u64, u64)>, groups: &[u64], nodes: &[u64]) -> (usize, usize) {
+    let mut g: Vec<u64> = groups.to_vec();
+    g.sort_unstable();
+    g.dedup();
+    let mut n: Vec<u64> = nodes.to_vec();
+    n.sort_unstable();
+    n.dedup();
+    let total = g.len() * n.len();
+    let Some((ag, an)) = after else {
+        return (0, total);
+    };
+    let before = g.partition_point(|&x| x < ag) * n.len();
+    let within = if g.binary_search(&ag).is_ok() {
+        n.partition_point(|&x| x <= an)
+    } else {
+        0
+    };
+    (before + within, total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_counts_the_pairs_a_batch_would_not_list() {
+        let groups = [5, 1, 9, 3];
+        let nodes = [20, 10, 30];
+        for ag in 0..11 {
+            for an in [0, 10, 15, 30, 40] {
+                let after = Some((ag, an));
+                let left = next_pairs(after, &groups, &nodes, usize::MAX).pairs.len();
+                assert_eq!(
+                    progress(after, &groups, &nodes),
+                    (12 - left, 12),
+                    "{after:?}"
+                );
+            }
+        }
+        assert_eq!(progress(None, &groups, &nodes), (0, 12));
+    }
     use std::collections::{BTreeMap, BTreeSet};
 
     #[test]

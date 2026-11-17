@@ -1276,39 +1276,61 @@ async fn reconcile_pass<S: KvStore>(
         }
         let work: Vec<_> = slice
             .iter()
-            .map(|&(gid, nid)| {
+            .enumerate()
+            .map(|(k, &(gid, nid))| {
                 let (g, n) = (by_group.get(&gid).copied(), by_node.get(&nid).copied());
                 Box::pin(async move {
                     let (Some(g), Some(n)) = (g, n) else {
-                        return None;
+                        return (k, None);
                     };
-                    Some(
-                        gc::reconcile_node(
-                            meta,
-                            clients,
-                            n.id,
-                            &n.address,
-                            g,
-                            now_ms(),
-                            ms(cfg.min_orphan_age),
-                            cfg.page_size,
-                        )
-                        .await,
+                    (
+                        k,
+                        Some(
+                            gc::reconcile_node(
+                                meta,
+                                clients,
+                                n.id,
+                                &n.address,
+                                g,
+                                now_ms(),
+                                ms(cfg.min_orphan_age),
+                                cfg.page_size,
+                            )
+                            .await,
+                        ),
                     )
                 })
             })
             .collect();
-        // Results in pair order as they come; a store or leadership error
+        // Results as they come, in any order; a store or leadership error
         // returns at once, dropping the slice's pairs still running (review:
-        // as a crash there; every decision is re-made by a later pass).
-        let mut results = futures::stream::iter(work).buffered(parallel).enumerate();
+        // as a crash there; every decision is re-made by a later pass), with
+        // the cursor after the pairs that all finished before it.
+        let mut finished = vec![false; slice.len()];
+        let mut results = futures::stream::iter(work).buffer_unordered(parallel);
         while let Some((k, result)) = results.next().await {
             let i = first + k;
             let (gid, nid) = batch.pairs[i];
             let Some(result) = result else {
+                finished[k] = true;
                 continue;
             };
             done += 1;
+            if let Err(e) = &result
+                && (is_fenced(e)
+                    || matches!(e, ControlError::Meta(m) if !matches!(m, MetaError::Codec(_))))
+            {
+                let through = first + finished.iter().take_while(|f| **f).count();
+                if through > 0 {
+                    cursor.after = bg_cursor::pair_position(
+                        batch.pairs[through - 1].0,
+                        batch.pairs[through - 1].1,
+                    );
+                    let _ = bg_cursor::put(meta, bg_cursor::RECONCILE, &cursor).await;
+                }
+                return result.map(|_| ());
+            }
+            finished[k] = true;
             match result {
                 Ok(r) => {
                     deleted += r.deleted();
@@ -1318,21 +1340,7 @@ async fn reconcile_pass<S: KvStore>(
                 }
                 Err(ControlError::Node { .. }) => unreachable += 1,
                 // A record of this pair that cannot be decoded is this pair's
-                // problem (review): passed over below, as any other.
-                Err(e)
-                    if is_fenced(&e)
-                        || matches!(&e, ControlError::Meta(m) if !matches!(m, MetaError::Codec(_))) =>
-                {
-                    // The store or the leadership: stop here, the cursor
-                    // before this pair (the slice's later pairs are done
-                    // again).
-                    if i > 0 {
-                        cursor.after =
-                            bg_cursor::pair_position(batch.pairs[i - 1].0, batch.pairs[i - 1].1);
-                        let _ = bg_cursor::put(meta, bg_cursor::RECONCILE, &cursor).await;
-                    }
-                    return Err(e);
-                }
+                // problem (review): passed over, as any other.
                 Err(e) => {
                     warn!(group = gid, node = nid, error = %e, "reconcile of a node's shards failed; passed over until the next sweep");
                     errors += 1;
@@ -3336,22 +3344,11 @@ async fn rebalance_pass<S: KvStore>(
         .iter()
         .map(|n| n.id)
         .collect();
-    let total = crate::sweep::next_pairs(None, &groups, &nodes, usize::MAX)
-        .pairs
-        .len();
-    let left = crate::sweep::next_pairs(
-        bg_cursor::parse_pair(&cursor.after),
-        &groups,
-        &nodes,
-        usize::MAX,
-    )
-    .pairs
-    .len();
     let cycle = reconcile_cycle_ms(
         &cursor,
         metrics.reconcile_sweep_ms.load(Ordering::Relaxed),
         now_ms(),
-        (total.saturating_sub(left), total),
+        crate::sweep::progress(bg_cursor::parse_pair(&cursor.after), &groups, &nodes),
     );
     let settle_ms = policy.settle_ms.max(
         cycle

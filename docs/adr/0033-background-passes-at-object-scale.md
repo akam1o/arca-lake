@@ -100,10 +100,11 @@ node RPC or metadata layout change.
 - Pairs: `--reconcile-parallel-pairs` (default 4, at most 8) at once, in
   slices of 8 pairs: before each slice the lineage advances (as before:
   every 8 pairs) and the cursor records the pairs before it. Results are
-  taken in pair order as they come; on a store or leadership error the
+  taken as they come, in any order; on a store or leadership error the
   pass returns at once (the slice's pairs still running are dropped, as in
-  a crash), the cursor stops before the failing pair and the slice's later
-  pairs are done again next pass. A new sweep's start is recorded in the
+  a crash: their deletes were each decided with token, epoch and fence),
+  the cursor stops after the pairs that all finished before it, and the
+  rest of the slice is done again next pass. A new sweep's start is recorded in the
   cursor when its first pass begins.
 - Reclaim (`gc::reclaim_node`): per page, after the observation stamp and
   the group read, the reference checks of the page's due records in
@@ -114,7 +115,15 @@ node RPC or metadata layout change.
   from the share of pairs before its cursor, which is what a leader that
   took over in the middle of a sweep has) plus
   the reconcile interval (a pair visited just before a move is visited
-  again only a sweep and an interval later) plus the minimum orphan age; gauges
+  again only a sweep and an interval later) plus the minimum orphan age.
+  The extrapolation is an estimate, not a bound (reviews): it is linear in
+  pairs while a pair's cost follows its shards, so a large group late in
+  the sweep makes it short; pairs added or removed during the sweep skew
+  it; a settle deadline is fixed when a plan finishes and is not extended
+  by a later, longer estimate; and a leader taking over before the first
+  slice of a sweep has only the time elapsed (the cursor keeps no length
+  of the previous sweep; adding one is a record change, not made here).
+  The effect of a short estimate is rebalancing churn, not data risk; gauges
   `arca_controller_rebalance_settle_seconds`,
   `arca_controller_reconcile_sweep_last_seconds`.
 - `arca_controller_pass_running_since_seconds{task}` (unix seconds; 0

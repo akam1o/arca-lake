@@ -809,7 +809,8 @@ async fn attribute_page<S: KvStore>(
 }
 
 /// [`gc::attribute_shards`]; a batch whose transaction keeps failing for
-/// its size (too old, retries exhausted, a backend error) is split in two,
+/// its size (too old, retries exhausted, too large, a backend error) is
+/// split in two,
 /// down to one shard, whose error is then returned as before (review: one
 /// heavy page must not stop every pass at its pair).
 async fn attribute_halving<S: KvStore>(
@@ -822,7 +823,11 @@ async fn attribute_halving<S: KvStore>(
         match gc::attribute_shards(meta, q).await {
             Ok(r) => out.extend(r),
             Err(
-                MetaError::TooManyRetries | MetaError::Kv(arca_lake_metadata::KvError::Backend(_)),
+                MetaError::TooManyRetries
+                | MetaError::Kv(
+                    arca_lake_metadata::KvError::Backend(_)
+                    | arca_lake_metadata::KvError::TooLarge { .. },
+                ),
             ) if q.len() > 1 => {
                 let (a, b) = q.split_at(q.len() / 2);
                 todo.push(b);
@@ -1368,7 +1373,16 @@ mod tests {
         }
         async fn get_many(&mut self, keys: &[Key]) -> Result<Vec<Option<Value>>, KvError> {
             if keys.len() > self.max {
-                return Err(KvError::Backend("transaction too large".into()));
+                // Both ways a store refuses a batch for its size.
+                return Err(if self.max % 2 == 1 {
+                    KvError::Backend("transaction too large".into())
+                } else {
+                    KvError::TooLarge {
+                        what: "transaction",
+                        limit: self.max,
+                        actual: keys.len(),
+                    }
+                });
             }
             self.inner.get_many(keys).await
         }
@@ -1444,6 +1458,16 @@ mod tests {
             let got = attribute_halving(&kv, &queries).await.unwrap();
             let want = gc::attribute_shards(&kv.inner, &queries).await.unwrap();
             assert_eq!(got, want);
+            // The same store refusing with the size error (two shards).
+            let kv = Picky {
+                inner: kv.inner,
+                max: 6,
+            };
+            assert!(matches!(
+                gc::attribute_shards(&kv, &queries).await,
+                Err(MetaError::Kv(KvError::TooLarge { .. }))
+            ));
+            assert_eq!(attribute_halving(&kv, &queries).await.unwrap(), want);
             assert!(want.contains(&Ok(gc::ShardAttribution::Referenced)));
             assert!(want.contains(&Ok(gc::ShardAttribution::Unreferenced)));
             // One shard that the store refuses: its error, as before.
@@ -1457,7 +1481,7 @@ mod tests {
             let (prefix, _) = split_chunk_id(&arca_lake_common::chunk_id(&[1; 16], 0));
             assert!(matches!(
                 attribute_halving(&tiny, &[(prefix, 0, 1), (prefix, 0, 2)]).await,
-                Err(MetaError::Kv(KvError::Backend(_)))
+                Err(MetaError::Kv(KvError::TooLarge { .. }))
             ));
         });
     }
