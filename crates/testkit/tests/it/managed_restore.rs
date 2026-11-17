@@ -264,6 +264,64 @@ async fn run(
         .map_err(|e| e.to_string())
 }
 
+/// After a restore: a gateway started before it is fenced, and a gateway
+/// started after it serves (RFC-013 §10.6c, the backup-restore guide:
+/// gateways are restarted after a restore). The old gateway learns the new
+/// incarnation by its cluster-state refresh (every `CLUSTER_REFRESH`); the
+/// refresh is applied here at once instead of being raced (Phase 4.1,
+/// R-113: the tests that read through the old gateway passed only when
+/// they ran before its next refresh).
+async fn restart_gateway_after_restore(c: &mut TestCluster) {
+    let rec = arca_lake_metadata::ops::compat::cluster_state(c.meta.as_ref())
+        .await
+        .unwrap()
+        .expect("a cluster state after the restore");
+    assert_ne!(
+        rec.incarnation,
+        c.incarnation(),
+        "the restore gave the cluster a new incarnation"
+    );
+    // Whatever its cluster-state refresh saw, every writing metadata
+    // transaction of the old gateway is refused at commit: its stores are
+    // guarded with the incarnation it started under (checked here on such a
+    // store directly, without racing the gateway's refresher).
+    let old = arca_lake_metadata::guard::GuardedKv::new(
+        Arc::clone(&c.meta),
+        c.incarnation(),
+        arca_lake_metadata::guard::OpClass::ClientWrite,
+    );
+    let e =
+        arca_lake_metadata::ops::object::begin_put(&old, BUCKET, "from-before", now_ms(), 60_000)
+            .await
+            .expect_err("a store guarded with the old incarnation wrote to the restored cluster");
+    assert!(
+        e.to_string()
+            .contains("cluster incarnation changed (process started under"),
+        "{e:?}"
+    );
+    c.backend.cluster().set(Some(rec));
+    for r in [
+        s3::get(&c.backend, BUCKET, "kept").await.map(|_| ()),
+        s3::put(
+            &c.backend,
+            BUCKET,
+            "from-the-old-gateway",
+            Bytes::from_static(b"x"),
+            &PutOptions::default(),
+        )
+        .await
+        .map(|_| ()),
+    ] {
+        let e = r.expect_err("the gateway started before the restore served a request");
+        assert!(
+            e.to_string()
+                .contains("incarnation changed since this gateway started"),
+            "{e:?}"
+        );
+    }
+    c.restart_backend().await.unwrap();
+}
+
 async fn finish(c: &TestCluster, path: &std::path::Path) -> Result<mr::Journal, String> {
     mr::finish(
         c.meta.as_ref(),
@@ -331,7 +389,7 @@ async fn a_managed_restore_applies_no_delete_decided_before_it() {
     let j = finish(&c, &path).await.unwrap();
     assert_eq!(j.last(), Some(Step::Reopened));
     assert_eq!(deliver(&old, &deletes).await, 0, "after finish");
-    c.restart_backend().await.unwrap();
+    restart_gateway_after_restore(&mut c).await;
     assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
     assert!(s3::get(&c.backend, BUCKET, "post").await.is_err(), "RPO");
     // Writes and GC work again.
@@ -1577,7 +1635,7 @@ impl Restorer for Elsewhere<'_> {
 /// journal then completes with the right tool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restore_tool_reaching_another_database_clears_nothing() {
-    let c = cluster().await;
+    let mut c = cluster().await;
     let kept = put(&c, "kept", 30).await;
     let backup = Snapshot::take(&c.meta).await;
     let dir = tempfile::tempdir().unwrap();
@@ -1614,6 +1672,7 @@ async fn a_restore_tool_reaching_another_database_clears_nothing() {
         .await
         .unwrap();
     finish(&c, &path).await.unwrap();
+    restart_gateway_after_restore(&mut c).await;
     assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
     ctl.shutdown().await;
     c.shutdown().await;
@@ -1648,7 +1707,7 @@ impl Restorer for Foreign<'_> {
 /// amend is refused before the clear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_clusters_backup_is_refused_and_amended() {
-    let c = cluster().await;
+    let mut c = cluster().await;
     let kept = put(&c, "kept", 31).await;
     arca_lake_metadata::ops::compat::ensure_cluster_uid(c.meta.as_ref())
         .await
@@ -1717,6 +1776,7 @@ async fn another_clusters_backup_is_refused_and_amended() {
         .await
         .unwrap();
     finish(&c, &path).await.unwrap();
+    restart_gateway_after_restore(&mut c).await;
     assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
     ctl.shutdown().await;
     c.shutdown().await;
@@ -1884,7 +1944,7 @@ async fn a_node_that_stopped_deferring_since_the_plan_stops_the_run() {
 /// another cluster's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_cluster_uid_is_kept_across_a_restore_of_a_backup_without_one() {
-    let c = cluster().await;
+    let mut c = cluster().await;
     let kept = put(&c, "kept", 41).await;
     let uid = arca_lake_metadata::ops::compat::ensure_cluster_uid(c.meta.as_ref())
         .await
@@ -1908,6 +1968,7 @@ async fn the_cluster_uid_is_kept_across_a_restore_of_a_backup_without_one() {
         .await
         .unwrap();
     finish(&c, &path).await.unwrap();
+    restart_gateway_after_restore(&mut c).await;
     assert_eq!(s3::get(&c.backend, BUCKET, "kept").await.unwrap().0, kept);
     ctl.shutdown().await;
     c.shutdown().await;

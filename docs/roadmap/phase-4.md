@@ -7,7 +7,7 @@ limits are measured and then raised. Phase 4.0 measured; Phases 4.1 and
 | Sub-phase | Scope | Completion criteria | Status |
 | --- | --- | --- | --- |
 | 4.0 Scalability baseline | benchmark framework (`arcabench`, `nodebench`, `metaops`, `bench-cluster.sh`), validity rules, object count 10³–10⁶ through S3 and 10⁷ metadata-only, gateway, FoundationDB processes, storage node, concurrency and tail, background passes, metadata operations, profiles, failures under load, R-108 heap, three limited changes with A/B (gateway `TCP_NODELAY`, `--access-records`, `--admission-horizon-secs`), controller pass metrics, two reviews in two rounds | Y1–Y16 with evidence (`docs/verification/phase-4.0-scalability.md`) | delivered with limitations (see the report): 10⁷ through S3 and 10⁸ estimated; one 4-vCPU host for nodes and gateways; virtual disks; intermittent `managed_restore` failures not yet classified (R-113) |
-| 4.1 Metadata scalability and background processing optimization | below | below | in progress: P0-1 (R-112) done — `docs/verification/phase-4.1-r112.md`: no data effect through S3; answer defects found on the way fixed (R-114); hot-key availability stays (R-112, Medium) |
+| 4.1 Metadata scalability and background processing optimization | below | below | in progress: P0-1 (R-112) done — `docs/verification/phase-4.1-r112.md`: no data effect through S3; answer defects found on the way fixed (R-114); hot-key availability stays (R-112, Medium). P0-2 (R-113) done — `docs/verification/phase-4.1-r113.md`: a race of three tests against the gateway's refresh, the refusal is the intended fencing; tests corrected, no product change |
 | 4.2 Scale-out validation and capacity efficiency | below | below | not started |
 
 ## How Phase 4.0's figures are to be read
@@ -51,7 +51,9 @@ limits are measured and then raised. Phase 4.0 measured; Phases 4.1 and
    becomes visible. Only then the fix (fair per-key commit ordering with a
    bounded wait, keeping the transactional pointer read and write,
    preconditions, version order and retirement).
-2. **R-113, intermittent `managed_restore` failures.** Classify before
+2. **R-113, intermittent `managed_restore` failures** — *done
+   (`docs/verification/phase-4.1-r113.md`): expected protection met by a
+   test race; tests synchronized, no product change.* Classify before
    changing anything (criteria below).
 3. **Reconciliation and reclaim at object scale (ADR-0033, R-110).**
    Batched read-only judgments per listing page, bounded parallelism,
