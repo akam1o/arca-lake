@@ -720,13 +720,34 @@ pub async fn reconcile_node<S: KvStore>(
                 addr: node_addr.to_string(),
                 status,
             })?;
-        for (shard, _) in page.entries.iter().chain(&page.quarantined) {
-            // Retired already under this incarnation (Phase 3.12 liveness
-            // audit): another delete changes nothing; reclamation ends it.
-            if page.retired.contains(shard) {
-                report.already_retired += 1;
-                continue;
-            }
+        // Retired already under this incarnation (Phase 3.12 liveness
+        // audit): another delete changes nothing; reclamation ends it.
+        let listed: Vec<ShardRef> = page
+            .entries
+            .iter()
+            .chain(&page.quarantined)
+            .map(|(shard, _)| *shard)
+            .filter(|shard| {
+                let retired = page.retired.contains(shard);
+                report.already_retired += usize::from(retired);
+                !retired
+            })
+            .collect();
+        // The shards a member holds at its own position are judged by
+        // metadata reference, the page's at once (ADR-0033); the others by
+        // membership, each with its own group read.
+        let mut judged = attribute_page(meta, node_id, group, &listed)
+            .await?
+            .into_iter();
+        for shard in listed {
+            let judgement = if at_position(group, node_id, &shard) {
+                match judged.next() {
+                    Some(j) => Some(j?),
+                    None => None,
+                }
+            } else {
+                None
+            };
             reconcile_shard(
                 meta,
                 clients,
@@ -735,8 +756,9 @@ pub async fn reconcile_node<S: KvStore>(
                 group,
                 now_ms,
                 min_age_ms,
-                *shard,
-                page.sequences.get(shard).copied().unwrap_or_default(),
+                shard,
+                page.sequences.get(&shard).copied().unwrap_or_default(),
+                judgement,
                 &mut report,
             )
             .await?;
@@ -746,6 +768,70 @@ pub async fn reconcile_node<S: KvStore>(
             None => return Ok(report),
         }
     }
+}
+
+/// Shards attributed in one metadata transaction at most (ADR-0033).
+pub const ATTRIBUTE_BATCH: usize = 512;
+
+/// Whether `node_id` is a member of `group` holding `shard` at its own
+/// position: the shards judged by metadata reference.
+fn at_position(group: &GroupRecord, node_id: u64, shard: &ShardRef) -> bool {
+    group
+        .members
+        .iter()
+        .position(|m| m.node_id == node_id)
+        .is_some_and(|p| usize::from(shard.shard_index) == p)
+}
+
+/// The attribution of every shard of `shards` that `node_id` holds at its
+/// position in `group`, in order, [`ATTRIBUTE_BATCH`] per read-only
+/// transaction (ADR-0033: the reads and rules of `attribute_shard`, at one
+/// read version per batch). A record that does not decode fails its shard.
+async fn attribute_page<S: KvStore>(
+    meta: &S,
+    node_id: u64,
+    group: &GroupRecord,
+    shards: &[ShardRef],
+) -> Result<Vec<Result<gc::ShardAttribution, MetaError>>, MetaError> {
+    let queries: Vec<gc::ShardQuery> = shards
+        .iter()
+        .filter(|s| at_position(group, node_id, s))
+        .map(|s| {
+            let (prefix, index) = split_chunk_id(&s.chunk_id);
+            (prefix, index, group.id)
+        })
+        .collect();
+    let mut out = Vec::with_capacity(queries.len());
+    for batch in queries.chunks(ATTRIBUTE_BATCH) {
+        out.extend(attribute_halving(meta, batch).await?);
+    }
+    Ok(out)
+}
+
+/// [`gc::attribute_shards`]; a batch whose transaction keeps failing for
+/// its size (too old, retries exhausted, a backend error) is split in two,
+/// down to one shard, whose error is then returned as before (review: one
+/// heavy page must not stop every pass at its pair).
+async fn attribute_halving<S: KvStore>(
+    meta: &S,
+    queries: &[gc::ShardQuery],
+) -> Result<Vec<Result<gc::ShardAttribution, MetaError>>, MetaError> {
+    let mut out = Vec::with_capacity(queries.len());
+    let mut todo = vec![queries];
+    while let Some(q) = todo.pop() {
+        match gc::attribute_shards(meta, q).await {
+            Ok(r) => out.extend(r),
+            Err(
+                MetaError::TooManyRetries | MetaError::Kv(arca_lake_metadata::KvError::Backend(_)),
+            ) if q.len() > 1 => {
+                let (a, b) = q.split_at(q.len() / 2);
+                todo.push(b);
+                todo.push(a);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -759,6 +845,7 @@ async fn reconcile_shard<S: KvStore>(
     min_age_ms: u64,
     shard: ShardRef,
     sequence: RecordToken,
+    judged: Option<gc::ShardAttribution>,
     report: &mut ReconcileReport,
 ) -> Result<(), ControlError> {
     // Every delete below names the record the listing showed: one written
@@ -829,7 +916,11 @@ async fn reconcile_shard<S: KvStore>(
         return Ok(());
     }
     let (prefix, index) = split_chunk_id(&shard.chunk_id);
-    match gc::attribute_shard(meta, &prefix, index, group.id).await? {
+    let attribution = match judged {
+        Some(a) => a,
+        None => gc::attribute_shard(meta, &prefix, index, group.id).await?,
+    };
+    match attribution {
         gc::ShardAttribution::Referenced => {
             report.kept_referenced += 1;
             return Ok(());
@@ -898,23 +989,79 @@ pub async fn shard_needed_in<S: KvStore>(
     shard: ShardRef,
     group: Option<&GroupRecord>,
 ) -> Result<bool, ControlError> {
+    if let Some(needed) = needed_by_membership(node_id, &shard, group) {
+        return Ok(needed);
+    }
+    let (prefix, index) = split_chunk_id(&shard.chunk_id);
+    Ok(matches!(
+        gc::attribute_shard(meta, &prefix, index, group.map_or(shard.group_id, |g| g.id)).await?,
+        gc::ShardAttribution::Referenced
+    ))
+}
+
+/// Whether the shard needs no metadata reference check: `Some(needed)`
+/// from membership alone (as [`shard_needed_in`]), `None` when it must be
+/// attributed.
+fn needed_by_membership(
+    node_id: u64,
+    shard: &ShardRef,
+    group: Option<&GroupRecord>,
+) -> Option<bool> {
     let Some(group) = group else {
-        return Ok(false);
+        return Some(false);
     };
-    let position = group.members.iter().position(|m| m.node_id == node_id);
-    Ok(match position {
+    match group.members.iter().position(|m| m.node_id == node_id) {
         // A former member: its shards are a repair source while the group
         // rebuilds.
-        None => group.state == GroupState::Repairing,
-        Some(p) if usize::from(shard.shard_index) != p => false,
-        Some(_) => {
-            let (prefix, index) = split_chunk_id(&shard.chunk_id);
-            matches!(
-                gc::attribute_shard(meta, &prefix, index, group.id).await?,
-                gc::ShardAttribution::Referenced
-            )
+        None => Some(group.state == GroupState::Repairing),
+        Some(p) if usize::from(shard.shard_index) != p => Some(false),
+        Some(_) => None,
+    }
+}
+
+/// [`shard_needed_in`] for every record of `due`, in order, the metadata
+/// reference checks [`ATTRIBUTE_BATCH`] per read-only transaction.
+async fn needed_page<S: KvStore>(
+    meta: &S,
+    node_id: u64,
+    groups: &HashMap<u64, GroupRecord>,
+    due: &[(ShardRef, RecordToken, u64)],
+) -> Vec<Result<bool, ControlError>> {
+    let mut out: Vec<Option<Result<bool, ControlError>>> = due
+        .iter()
+        .map(|(shard, _, _)| {
+            needed_by_membership(node_id, shard, groups.get(&shard.group_id)).map(Ok)
+        })
+        .collect();
+    let pending: Vec<usize> = (0..due.len()).filter(|&i| out[i].is_none()).collect();
+    for batch in pending.chunks(ATTRIBUTE_BATCH) {
+        let queries: Vec<gc::ShardQuery> = batch
+            .iter()
+            .map(|&i| {
+                let shard = &due[i].0;
+                let (prefix, index) = split_chunk_id(&shard.chunk_id);
+                (prefix, index, shard.group_id)
+            })
+            .collect();
+        match attribute_halving(meta, &queries).await {
+            Ok(judged) => {
+                for (&i, j) in batch.iter().zip(judged) {
+                    out[i] = Some(
+                        j.map(|a| matches!(a, gc::ShardAttribution::Referenced))
+                            .map_err(ControlError::from),
+                    );
+                }
+            }
+            Err(e) => {
+                for &i in batch {
+                    out[i] = Some(Err(ControlError::Meta(e.clone())));
+                }
+            }
         }
-    })
+    }
+    out.into_iter()
+        .map(|o| o.unwrap_or_else(|| Err(ControlError::Other("not judged".into()))))
+        .collect()
 }
 
 /// [`shard_needed_in`], reading the group.
@@ -1019,12 +1166,16 @@ pub async fn reclaim_node<S: KvStore>(
             }
         };
         let groups = &groups;
-        let outcomes: Vec<ReclaimOutcome> = futures::stream::iter(due)
-            .map(|(shard, token, _)| {
+        // Every judgement of the page after the observation, the metadata
+        // reference checks together (ADR-0033); a failed read fails the
+        // records it judged, retried next pass.
+        let needed = needed_page(meta, node_id, groups, &due).await;
+        let outcomes: Vec<ReclaimOutcome> = futures::stream::iter(due.into_iter().zip(needed))
+            .map(|((shard, token, _), needed)| {
                 let epochs = &epochs;
                 async move {
                     let group = groups.get(&shard.group_id);
-                    match shard_needed_in(meta, node_id, shard, group).await {
+                    match needed {
                         Ok(true) => {
                             // Needed: the retirement ends (Phase 3.12
                             // review), so that it is not judged again every
@@ -1179,5 +1330,135 @@ fn tier_err(e: arca_lake_tiering::TierError) -> ControlError {
         arca_lake_tiering::TierError::Meta(m) => ControlError::Meta(m),
         arca_lake_tiering::TierError::Node { addr, status } => ControlError::Node { addr, status },
         other => ControlError::Other(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arca_lake_metadata::kv::{Key, KeyRange, KvError, Limits, Value};
+    use arca_lake_metadata::mem::MemKv;
+    use arca_lake_metadata::records::{DurablePlacement, GenKind, encode};
+
+    /// A store whose batched point reads fail above `max` keys, as a
+    /// transaction too large for the backend would.
+    struct Picky {
+        inner: MemKv,
+        max: usize,
+    }
+    struct PickyTx {
+        inner: <MemKv as KvStore>::Tx,
+        max: usize,
+    }
+    impl KvStore for Picky {
+        type Tx = PickyTx;
+        async fn begin(&self) -> Result<PickyTx, KvError> {
+            Ok(PickyTx {
+                inner: self.inner.begin().await?,
+                max: self.max,
+            })
+        }
+        fn limits(&self) -> Limits {
+            self.inner.limits()
+        }
+    }
+    impl Txn for PickyTx {
+        async fn get(&mut self, key: &[u8]) -> Result<Option<Value>, KvError> {
+            self.inner.get(key).await
+        }
+        async fn get_many(&mut self, keys: &[Key]) -> Result<Vec<Option<Value>>, KvError> {
+            if keys.len() > self.max {
+                return Err(KvError::Backend("transaction too large".into()));
+            }
+            self.inner.get_many(keys).await
+        }
+        async fn get_range(
+            &mut self,
+            range: &KeyRange,
+            limit: usize,
+            reverse: bool,
+        ) -> Result<Vec<(Key, Value)>, KvError> {
+            self.inner.get_range(range, limit, reverse).await
+        }
+        fn set(&mut self, key: &[u8], value: &[u8]) {
+            self.inner.set(key, value);
+        }
+        fn clear(&mut self, key: &[u8]) {
+            self.inner.clear(key);
+        }
+        fn clear_range(&mut self, range: &KeyRange) {
+            self.inner.clear_range(range);
+        }
+        async fn commit(self) -> Result<u64, KvError> {
+            self.inner.commit().await
+        }
+    }
+
+    #[test]
+    fn a_batch_too_large_for_the_store_is_split_down_to_what_it_takes() {
+        futures::executor::block_on(async {
+            let kv = Picky {
+                inner: MemKv::default(),
+                max: 9,
+            };
+            // Ten committed generations, chunk 0 placed in group 1.
+            let mut tx = kv.inner.begin().await.unwrap();
+            let mut queries = Vec::new();
+            for g in 0..10u8 {
+                let id = [g + 1; 16];
+                let h = GenerationHeader {
+                    state: GenState::Committed,
+                    bucket_id: 1,
+                    key: format!("k{g}"),
+                    size: 1,
+                    etag: String::new(),
+                    content_type: None,
+                    user_metadata: Vec::new(),
+                    chunk_count: 1,
+                    created_ms: 1,
+                    kind: GenKind::Object,
+                    checksum: None,
+                };
+                tx.set(&keys::gen_header(&id), &encode(&h).unwrap());
+                let c = ChunkRecord {
+                    chunk_id: arca_lake_common::chunk_id(&id, 0),
+                    offset: 0,
+                    len: 1,
+                    scheme: "rep-3".into(),
+                    data_shards: 1,
+                    parity_shards: 2,
+                    crc32c: 0,
+                    placement: DurablePlacement {
+                        group_id: 1,
+                        epoch: 1,
+                    },
+                };
+                tx.set(&keys::gen_chunk(&id, 0), &encode(&c).unwrap());
+                let (prefix, _) = split_chunk_id(&c.chunk_id);
+                queries.push((prefix, 0, u64::from(g % 2) + 1));
+            }
+            tx.commit().await.unwrap();
+            // The whole batch reads 30 keys: refused; halves of 5 shards
+            // (15 keys) too; 2 and 3 shards (6 and 9 keys) pass.
+            assert!(gc::attribute_shards(&kv, &queries).await.is_err());
+            let got = attribute_halving(&kv, &queries).await.unwrap();
+            let want = gc::attribute_shards(&kv.inner, &queries).await.unwrap();
+            assert_eq!(got, want);
+            assert!(want.contains(&Ok(gc::ShardAttribution::Referenced)));
+            assert!(want.contains(&Ok(gc::ShardAttribution::Unreferenced)));
+            // One shard that the store refuses: its error, as before.
+            let tiny = Picky {
+                inner: MemKv::default(),
+                max: 0,
+            };
+            let mut tx = tiny.inner.begin().await.unwrap();
+            tx.set(&keys::gen_header(&[1; 16]), b"x");
+            tx.commit().await.unwrap();
+            let (prefix, _) = split_chunk_id(&arca_lake_common::chunk_id(&[1; 16], 0));
+            assert!(matches!(
+                attribute_halving(&tiny, &[(prefix, 0, 1), (prefix, 0, 2)]).await,
+                Err(MetaError::Kv(KvError::Backend(_)))
+            ));
+        });
     }
 }

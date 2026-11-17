@@ -37,6 +37,9 @@ use arca_lake_metadata::records::{
 use arca_lake_metadata::{KvError, MetaError};
 use futures::{StreamExt, stream};
 
+#[path = "support/attribute.rs"]
+mod attribute;
+
 fn run<T>(f: impl Future<Output = T>) -> T {
     futures::executor::block_on(f)
 }
@@ -382,4 +385,39 @@ fn ten_thousand_part_complete_is_one_transaction_on_foundationdb() {
             10_000
         );
     });
+}
+
+/// Phase 4.1 (ADR-0033): the batched shard attribution, whose reads the
+/// FoundationDB backend issues at once (`get_many`, `get_first_many`),
+/// answers as `attribute_shard` alone on random metadata, prefixes with
+/// zero bytes included; the cases of `attribute_batch.rs`, from fixed
+/// seeds.
+#[test]
+fn batched_attribution_agrees_with_one_shard_at_a_time_on_foundationdb() {
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+    let Some(kv) = open() else { return };
+    let strategy = (
+        proptest::collection::vec(attribute::generation(), 0..8),
+        proptest::collection::vec((0..7u8, 0..4u32, 0..3u64), 0..4),
+        proptest::collection::vec((0..7u8, 0..4u32, 1..3u64), 1..24),
+    );
+    let mut runner = TestRunner::new_with_rng(
+        Config::default(),
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[41; 32]),
+    );
+    for case in 0..64 {
+        let (gens, intents, queries) = strategy.new_tree(&mut runner).unwrap().current();
+        run(kv.clear_range_blocking(&KeyRange::prefix(&foundationdb_tuple::pack(&("al",)))))
+            .unwrap();
+        run(attribute::load(&kv, &gens, &intents));
+        if let Some(diff) = run(attribute::compare(&kv, &queries)) {
+            panic!("case {case}: {diff}");
+        }
+    }
+    // One batch at the size reconciliation uses.
+    let queries: Vec<(u8, u32, u64)> = (0..512u32)
+        .map(|i| ((i % 7) as u8, i % 4, u64::from(i % 2) + 1))
+        .collect();
+    assert_eq!(run(attribute::compare(&kv, &queries)), None);
 }

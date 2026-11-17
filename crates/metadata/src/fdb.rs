@@ -326,6 +326,42 @@ impl Txn for FdbTx {
         }
     }
 
+    async fn get_many(&mut self, keys: &[Key]) -> Result<Vec<Option<Value>>, KvError> {
+        let trx = &self.trx;
+        let values = futures::future::try_join_all(keys.iter().map(|k| trx.get(k, false)))
+            .await
+            .map_err(map_err)?;
+        Ok(values.into_iter().map(|v| v.map(|s| s.to_vec())).collect())
+    }
+
+    async fn get_first_many(
+        &mut self,
+        ranges: &[KeyRange],
+    ) -> Result<Vec<Option<(Key, Value)>>, KvError> {
+        let trx = &self.trx;
+        let firsts = futures::future::try_join_all(ranges.iter().map(|r| async move {
+            if r.is_empty() {
+                return Ok(None);
+            }
+            let opt = RangeOption {
+                begin: KeySelector::first_greater_or_equal(r.begin.clone()),
+                end: KeySelector::first_greater_or_equal(r.end.clone()),
+                limit: Some(1),
+                ..RangeOption::default()
+            };
+            let values = trx.get_range(&opt, 1, false).await?;
+            Ok::<_, FdbError>(
+                values
+                    .iter()
+                    .next()
+                    .map(|kv| (kv.key().to_vec(), kv.value().to_vec())),
+            )
+        }))
+        .await
+        .map_err(map_err)?;
+        Ok(firsts)
+    }
+
     fn set(&mut self, key: &[u8], value: &[u8]) {
         self.trx.set(key, value);
     }

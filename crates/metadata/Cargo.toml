@@ -12,13 +12,14 @@ publish = false
 default = []
 # FoundationDB backend. Requires the FoundationDB client library
 # (libfdb_c) at build and run time; see deploy/dev/README.md.
-fdb = ["dep:foundationdb"]
+fdb = ["dep:foundationdb", "dep:futures"]
 
 [dependencies]
 arca-lake-common.workspace = true
 thiserror.workspace = true
 foundationdb-tuple.workspace = true
 foundationdb = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 serde.workspace = true
 postcard.workspace = true
 uuid.workspace = true

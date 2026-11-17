@@ -7,6 +7,7 @@
 #   HOST_A=user@a HOST_B=user@b bench-cluster.sh setup
 #   HOST_A=... HOST_B=... bench-cluster.sh run <label> <arcabench args...>
 #   HOST_A=... HOST_B=... bench-cluster.sh restart-gateways
+#   HOST_A=... HOST_B=... bench-cluster.sh restart-controller
 #   HOST_A=... HOST_B=... bench-cluster.sh teardown
 # CLIENTS (run): generator processes [1] (client ids from CLIENT_BASE [0]:
 # key choices differ, bodies do not); NO_SAMPLER=1: no samplers (to
@@ -22,7 +23,8 @@
 #   [6 GiB], RETENTION (--reclaim-retention-secs; empty = the release's
 #   default) [], CACHE (none | repl: two cache nodes and a cache tier) [none],
 #   FDB_PROCS [1], GW_BIN (another arca-lake binary for the gateways, for
-#   A/B runs of a gateway change),
+#   A/B runs of a gateway change), CTL_BIN (likewise for the controller,
+#   applied by setup and restart-controller),
 #   CONTROLLER_EXTRA_ARGS, GW_EXTRA_ARGS, NODE_EXTRA_ARGS.
 # Paths: REMOTE_REPO [/mnt/arca-fdb/p40-src] (release build of arca-lake
 #   with --features fdb and arcabench), RUN_DIR [/mnt/arca-fdb/p40-run],
@@ -81,6 +83,11 @@ gateway_cmd() { # <i>
   local bin="$BIN"; [ -n "${GW_BIN:-}" ] && bin="env ARCA_INSECURE_PLAINTEXT=1 ARCA_FDB_INSECURE_PLAINTEXT=1 $GW_BIN"
   echo "$bin gateway --backend cluster --cluster-file $CF --allow-anonymous --listen $(addr "$GW_HOST"):$((9000 + $1)) --metrics-listen 127.0.0.1:$((9500 + $1)) --k $K --m $M --chunk-bytes $CHUNK --small-threshold $SMALL --failure-domain node $cache ${GW_EXTRA_ARGS:-}"
 }
+controller_cmd() {
+  local cache=""; [ "$CACHE" = repl ] && cache="--cache-tier fast --cache-capacity-bytes 0 --cache-high-watermark 0.9 --cache-low-watermark 0.8"
+  local bin="$BIN"; [ -n "${CTL_BIN:-}" ] && bin="env ARCA_INSECURE_PLAINTEXT=1 ARCA_FDB_INSECURE_PLAINTEXT=1 $CTL_BIN"
+  echo "$bin controller --allow-shared-filesystem --cluster-file $CF --id ctl-a --http 127.0.0.1:9901 --failure-domain node $cache ${CONTROLLER_EXTRA_ARGS:-}"
+}
 endpoints() { local e=""; for i in $(seq 0 $((GATEWAYS - 1))); do e="$e --endpoint http://$(addr "$GW_HOST"):$((9000 + i))"; done; echo "$e"; }
 
 cmd_setup() {
@@ -123,13 +130,11 @@ cmd_setup() {
     done
   done
   once a "$RUN_DIR/.admin/groups" "$ADMIN create-groups --tier default --device-class hdd --failure-domain node --count $GROUP_COUNT --k $K --m $M --chunk-bytes $CHUNK --small-threshold $SMALL" > /dev/null
-  local cache=""
   if [ "$CACHE" = repl ]; then
     for c in 0 1; do once a "$RUN_DIR/.admin/register-c$c" "$ADMIN register-node --address $ADDR_A:$((9200 + c)) --label node=c$c --label device_class=nvme" > /dev/null; done
     once a "$RUN_DIR/.admin/cache-groups" "$ADMIN create-cache-groups --tier fast --device-class nvme --protection replication --replicas 2 --failure-domain node --count 1" > /dev/null
-    cache="--cache-tier fast --cache-capacity-bytes 0 --cache-high-watermark 0.9 --cache-low-watermark 0.8"
   fi
-  start a controller "$BIN controller --allow-shared-filesystem --cluster-file $CF --id ctl-a --http 127.0.0.1:9901 --failure-domain node $cache ${CONTROLLER_EXTRA_ARGS:-}"
+  start a controller "$(controller_cmd)"
   for g in $(seq 0 $((GATEWAYS - 1))); do start "$GW_HOST" "gw$g" "$(gateway_cmd "$g")"; done
   sleep 4
   for g in $(seq 0 $((GATEWAYS - 1))); do on "$LOAD_HOST" "for i in \$(seq 1 60); do curl -s -o /dev/null http://$(addr "$GW_HOST"):$((9000 + g))/ && break; sleep 1; done"; done
@@ -144,6 +149,14 @@ cmd_setup() {
 cmd_restart_gateways() {
   for g in $(seq 0 $((GATEWAYS - 1))); do on "$GW_HOST" "p=\$(cat $RUN_DIR/gw$g.pid); kill \$p 2>/dev/null; for i in \$(seq 1 60); do kill -0 \$p 2>/dev/null || break; sleep 1; done; rm -rf $RUN_DIR/.started/gw$g"; start "$GW_HOST" "gw$g" "$(gateway_cmd "$g")"; done
   sleep 4
+}
+
+# Stop the controller (waiting for it to exit) and start it again, with
+# CTL_BIN and CONTROLLER_EXTRA_ARGS as they are now.
+cmd_restart_controller() {
+  sa "p=\$(cat $RUN_DIR/controller.pid 2>/dev/null); [ -n \"\$p\" ] && kill \$p 2>/dev/null; for i in \$(seq 1 60); do [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null || break; sleep 1; done; rm -rf $RUN_DIR/.started/controller"
+  start a controller "$(controller_cmd)"
+  sleep 2
 }
 
 metrics_urls() { # <host>
@@ -270,6 +283,7 @@ case "$cmd" in
   setup) cmd_setup ;;
   run) cmd_run "$@" ;;
   restart-gateways) cmd_restart_gateways ;;
+  restart-controller) cmd_restart_controller ;;
   snapshot) cmd_snapshot "$@" ;;
   quiesce) cmd_quiesce ;;
   scrub) cmd_scrub "$@" ;;

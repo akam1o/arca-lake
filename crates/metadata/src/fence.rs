@@ -88,6 +88,17 @@ impl<T: Txn> Txn for FencedTx<T> {
         self.inner.get_snapshot(key).await
     }
 
+    async fn get_many(&mut self, keys: &[Key]) -> Result<Vec<Option<Value>>, KvError> {
+        self.inner.get_many(keys).await
+    }
+
+    async fn get_first_many(
+        &mut self,
+        ranges: &[KeyRange],
+    ) -> Result<Vec<Option<(Key, Value)>>, KvError> {
+        self.inner.get_first_many(ranges).await
+    }
+
     async fn atomic_add(&mut self, key: &[u8], delta: i64) -> Result<(), KvError> {
         self.inner.atomic_add(key, delta).await
     }

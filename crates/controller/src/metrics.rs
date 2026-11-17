@@ -322,6 +322,14 @@ pub struct Metrics {
     /// duration and the longest, ms. The next pass starts an interval after
     /// one ends: a pass as long as its interval halves its rate.
     pub passes: std::sync::Mutex<std::collections::BTreeMap<&'static str, (u64, u64, u64)>>,
+    /// Per scheduled task (Phase 4.1, ADR-0033): when its running pass
+    /// started, unix ms (0: none running).
+    pub running: std::sync::Mutex<std::collections::BTreeMap<&'static str, u64>>,
+    /// The last full reconciliation sweep this process measured, ms (0:
+    /// none yet; Phase 4.1, ADR-0033: rebalancing's settle time).
+    pub reconcile_sweep_ms: AtomicU64,
+    /// Rebalancing's settle time in effect at its last pass, ms (ADR-0033).
+    pub rebalance_settle_ms: AtomicU64,
     /// `Repairing` groups by the reason of their status at the last repair
     /// pass (Phase 3.14; index: [`REPAIR_REASONS`], the last one "none":
     /// no status yet).
@@ -457,8 +465,20 @@ pub const FINDING_LABELS: [&str; 8] = [
 ];
 
 impl Metrics {
+    /// A pass of the scheduled task `task` starts at `now_ms` (Phase 4.1).
+    pub fn note_pass_start(&self, task: &'static str, now_ms: u64) {
+        self.running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(task, now_ms);
+    }
+
     /// Record one pass of the scheduled task `task` (Phase 4.0).
     pub fn note_pass(&self, task: &'static str, took: std::time::Duration) {
+        self.running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(task, 0);
         let ms = u64::try_from(took.as_millis()).unwrap_or(u64::MAX);
         let mut p = self
             .passes
@@ -697,6 +717,34 @@ impl Metrics {
                 }
             }
         }
+        {
+            let r = self
+                .running
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let _ = writeln!(
+                out,
+                "# TYPE arca_controller_pass_running_since_seconds gauge"
+            );
+            for (task, since) in &r {
+                let _ = writeln!(
+                    out,
+                    "arca_controller_pass_running_since_seconds{{task=\"{task}\"}} {}",
+                    since / 1000
+                );
+            }
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let sweep = self.reconcile_sweep_ms.load(Ordering::Relaxed) as f64 / 1000.0;
+        let _ = writeln!(
+            out,
+            "# TYPE arca_controller_reconcile_sweep_last_seconds gauge\narca_controller_reconcile_sweep_last_seconds {sweep}"
+        );
+        out += &g(
+            "arca_controller_rebalance_settle_seconds",
+            self.rebalance_settle_ms.load(Ordering::Relaxed) / 1000,
+        );
         let _ = writeln!(out, "# TYPE arca_controller_repair_groups gauge");
         for (i, reason) in REPAIR_REASONS.iter().enumerate() {
             let _ = writeln!(

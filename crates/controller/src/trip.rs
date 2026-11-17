@@ -256,6 +256,19 @@ impl<T: Txn> Txn for TripTx<T> {
         self.seen(r)
     }
 
+    async fn get_many(&mut self, keys: &[Key]) -> Result<Vec<Option<Value>>, KvError> {
+        let r = self.inner.get_many(keys).await;
+        self.seen(r)
+    }
+
+    async fn get_first_many(
+        &mut self,
+        ranges: &[KeyRange],
+    ) -> Result<Vec<Option<(Key, Value)>>, KvError> {
+        let r = self.inner.get_first_many(ranges).await;
+        self.seen(r)
+    }
+
     async fn atomic_add(&mut self, key: &[u8], delta: i64) -> Result<(), KvError> {
         let r = self.inner.atomic_add(key, delta).await;
         self.seen(r)

@@ -1,8 +1,9 @@
-# ADR-0033: Background passes at object scale (proposal)
+# ADR-0033: Background passes at object scale
 
-Status: **proposed** (Phase 4.0). Not implemented. To be decided and
-implemented in Phase 4.1. Concerns reconciliation and the reclaim pass
-(ADR-0028, ADR-0030); no change to deferred reclamation's rules.
+Status: **accepted** (Phase 4.1; proposed in Phase 4.0). Concerns
+reconciliation and the reclaim pass (ADR-0028, ADR-0030); no change to
+deferred reclamation's rules, to the metadata layout, to the node
+protocol or to what a judgment reads.
 
 ## Context (measured, Phase 4.0)
 
@@ -39,7 +40,7 @@ than the measured cycle, so it can plan again before the space of its
 last moves came back; reconciliation's metadata reads are a constant load
 on FoundationDB during client traffic.
 
-## Decision (proposed)
+## Decision
 
 1. **Batch the judgments, same rules.** Attribute up to `B` shards (one
    listing page) in one read-only metadata transaction (point reads of
@@ -60,6 +61,91 @@ on FoundationDB during client traffic.
 Not decided here, and would need its own ADR: a persisted cursor inside a
 pair, any change to what a judgment reads or to the retention rules, any
 node RPC or metadata layout change.
+
+## Implementation (Phase 4.1)
+
+- `Txn::get_many` and `Txn::get_first_many` (`crates/metadata/src/kv.rs`):
+  several point reads, or the first pair of several ranges, at the
+  transaction's read version. The default runs them one after another
+  (every wrapper and the in-memory store keep their behavior); the
+  FoundationDB backend issues them at once. The fence, guard, fault and
+  trip wrappers forward them unchanged, so a batch's transaction is
+  checked at commit as any other (the delete-class guard checks the
+  cluster state even for a read-only transaction).
+- `ops::gc::attribute_shards`: per batch, one read-only transaction:
+  the first generation of every prefix; then for each shard with one the
+  header, the chunk's migration intent, the chunk record and whether a
+  second generation shares the prefix — the reads `attribute_shard` makes
+  for a prefix with one generation, issued together. A prefix with two
+  generations (practically never) is judged by `attribute_shard`'s own
+  sequence of reads in the same transaction. The rules are one function
+  shared with `attribute_shard`. A record that does not decode is an error
+  of its shard in the batch's answer (the reclaim pass counts that record
+  as an error and goes on); reconciliation, as before, passes over the
+  rest of the pair at that shard until the next sweep. Any other error
+  fails the batch. A batch whose transaction keeps failing (retries
+  exhausted, as when it outlives the store's transaction age, or a
+  backend error) is split in two, down to one shard, whose error then
+  counts as before (review: one heavy page must not stop every pass at
+  its pair). Differential tests against `attribute_shard`: on memory
+  (`crates/metadata/tests/attribute_batch.rs`, 512 random cases) and on
+  FoundationDB (`fdb.rs`, 64 fixed-seed cases and one 512-shard batch,
+  prefixes with zero bytes).
+- Reconciliation (`gc::reconcile_node`): the shards a member holds at its
+  own position are attributed per listing page, `ATTRIBUTE_BATCH` (512)
+  per transaction, before the page's deletes; former members and
+  misdirected copies keep their own group read before each delete.
+  Deletes stay one by one, in listing order, each with its group epoch
+  and record token.
+- Pairs: `--reconcile-parallel-pairs` (default 4, at most 8) at once, in
+  slices of 8 pairs: before each slice the lineage advances (as before:
+  every 8 pairs) and the cursor records the pairs before it. Results are
+  taken in pair order as they come; on a store or leadership error the
+  pass returns at once (the slice's pairs still running are dropped, as in
+  a crash), the cursor stops before the failing pair and the slice's later
+  pairs are done again next pass. A new sweep's start is recorded in the
+  cursor when its first pass begins.
+- Reclaim (`gc::reclaim_node`): per page, after the observation stamp and
+  the group read, the reference checks of the page's due records in
+  batches; `--reclaim-parallel-nodes` (default 4) nodes at once.
+- Settle time: rebalancing's effective settle time is the largest of the
+  configured one and the measured reconcile cycle (the last full sweep the
+  cursor or this process recorded, or the sweep in progress extrapolated
+  from the share of pairs before its cursor, which is what a leader that
+  took over in the middle of a sweep has) plus
+  the reconcile interval (a pair visited just before a move is visited
+  again only a sweep and an interval later) plus the minimum orphan age; gauges
+  `arca_controller_rebalance_settle_seconds`,
+  `arca_controller_reconcile_sweep_last_seconds`.
+- `arca_controller_pass_running_since_seconds{task}` (unix seconds; 0
+  when no pass of the task runs).
+
+### Why batching keeps the delete rules (code analysis)
+
+A judgment now reads at the batch's read version, up to one page's
+deletes before its own delete (before: just before it). Nothing a delete
+relies on depends on that interval:
+
+- the decision is the same function of the same values at one read
+  version (differential test: `crates/metadata/tests/attribute_batch.rs`);
+- every delete names the record the listing showed (record token): a shard
+  written again under the same key since the listing is refused by the
+  node (`kept_changed`), whatever the metadata said;
+- `NoGeneration` deletes only shards older than the minimum orphan age,
+  which is at least the pending lease: a generation with that prefix
+  cannot be created later;
+- `Unreferenced` means generations with the prefix exist, none pending
+  and none places the chunk here; generation states only move forward
+  (no recipe makes a retiring generation committed, or a committed one
+  pending), and a migration into this group writes new records (refused
+  by the token) after its intent;
+- deletes carry the group epoch read for the decision (a node fenced to a
+  newer epoch refuses) and go through the delete fence (incarnation,
+  generation), unchanged; the lineage advances every 8 pairs as before.
+
+The reclaim pass's observation stamp still precedes every metadata read
+that judges its page (ADR-0028), and the node still decides on the
+retention from that stamp: R-94(b) is not touched.
 
 ## Expected effect (estimated, to be measured)
 

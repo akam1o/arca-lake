@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use futures::StreamExt as _;
+
 use arca_lake_metadata::fence::FencedKv;
 use arca_lake_metadata::guard::{GuardedKv, OpClass};
 use arca_lake_metadata::ops::cluster;
@@ -114,6 +116,12 @@ pub struct ControllerConfig {
     /// (the default: rebalancing's settle time and in-transit credit assume
     /// a whole sweep per reconcile interval; review).
     pub reconcile_pairs_per_pass: usize,
+    /// `(group, node)` pairs reconciled at once (Phase 4.1, ADR-0033; at
+    /// least 1, at most [`LINEAGE_PAIRS`]).
+    pub reconcile_parallel_pairs: usize,
+    /// Nodes a reclaim pass works on at once (Phase 4.1, ADR-0033; at
+    /// least 1).
+    pub reclaim_parallel_nodes: usize,
     /// Generations a tiering pass examines at most (Phase 3.14): the sweep
     /// resumes at its persisted cursor; 0 = every generation.
     pub tiering_generations_per_pass: usize,
@@ -182,6 +190,8 @@ impl ControllerConfig {
             cache_repair_chunks_per_pass: 256,
             planned_move_chunks_per_pass: 512,
             reconcile_pairs_per_pass: 0,
+            reconcile_parallel_pairs: 4,
+            reclaim_parallel_nodes: 4,
             tiering_generations_per_pass: 4096,
             failure_repair_chunks_per_pass: 4096,
             scrub: crate::integrity::ScrubOptions::default(),
@@ -988,6 +998,7 @@ async fn scheduler<S, F, Fut>(
             continue;
         }
         let pass_started = std::time::Instant::now();
+        metrics.note_pass_start(name, now_ms());
         let result = pass().await;
         metrics.note_pass(name, pass_started.elapsed());
         match result {
@@ -1023,6 +1034,9 @@ fn is_state_refusal(e: &ControlError) -> bool {
         ControlError::Meta(MetaError::Kv(KvError::ClusterState(_)))
     )
 }
+
+/// Pairs a reconciliation pass decides between two lineage advances.
+pub const LINEAGE_PAIRS: usize = 8;
 
 /// Generations collected per GC batch.
 const GC_BATCH: usize = 1000;
@@ -1139,14 +1153,31 @@ async fn reclaim_pass<S: KvStore>(
         .map(|r| r.node_id)
         .collect();
     let mut not_deferring = 0;
-    for n in cluster::list_nodes(meta)
+    let nodes: Vec<NodeRecord> = cluster::list_nodes(meta)
         .await?
         .into_iter()
         .filter(|n| !retired.contains(&n.id))
-    {
+        .collect();
+    // Nodes are independent (ADR-0033): a few at once.
+    let work: Vec<_> = nodes
+        .iter()
+        .map(|n| {
+            Box::pin(async move {
+                (
+                    n.id,
+                    crate::gc::reclaim_node(meta, clients, n.id, &n.address, cfg.page_size, now_ms)
+                        .await,
+                )
+            })
+        })
+        .collect();
+    let results: Vec<_> = futures::stream::iter(work)
+        .buffered(cfg.reclaim_parallel_nodes.max(1))
+        .collect()
+        .await;
+    for (node, result) in results {
         // One node's failure never stops the others (review).
-        match crate::gc::reclaim_node(meta, clients, n.id, &n.address, cfg.page_size, now_ms).await
-        {
+        match result {
             Ok(r) => {
                 not_deferring += r.nodes_not_deferring;
                 metrics
@@ -1167,7 +1198,7 @@ async fn reclaim_pass<S: KvStore>(
             }
             Err(e) => {
                 metrics.reclaim_errors_total.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(node = n.id, error = %e, "reclaim pass: node skipped until the next pass");
+                tracing::debug!(node, error = %e, "reclaim pass: node skipped until the next pass");
             }
         }
     }
@@ -1218,7 +1249,10 @@ async fn reconcile_pass<S: KvStore>(
         budget,
     );
     if cursor.after.is_empty() {
+        // Recorded at once (review): the settle time reads a sweep in
+        // progress from it, whoever leads.
         cursor.sweep_started_ms = now_ms();
+        bg_cursor::put(meta, bg_cursor::RECONCILE, &cursor).await?;
     }
     let by_group: HashMap<u64, &GroupRecord> = groups.iter().map(|g| (g.id, g)).collect();
     let by_node: HashMap<u64, &NodeRecord> = nodes.iter().map(|n| (n.id, n)).collect();
@@ -1226,58 +1260,83 @@ async fn reconcile_pass<S: KvStore>(
     let mut unreachable = 0usize;
     let mut errors = 0u64;
     let mut done = 0u64;
-    for (i, &(gid, nid)) in batch.pairs.iter().enumerate() {
-        // Every few node listings: the batch a restore under this leader
-        // could leave undetected stays small, at a commit per batch, not
-        // per (group, node) pair (re-review). The cursor goes with it.
-        if i % 8 == 0 {
-            advance_lineage(meta, metrics).await?;
-            if i > 0 {
-                cursor.after = bg_cursor::pair_position(batch.pairs[i - 1].0, batch.pairs[i - 1].1);
-                bg_cursor::put(meta, bg_cursor::RECONCILE, &cursor).await?;
-            }
+    // A few pairs at once (ADR-0033), in slices of `LINEAGE_PAIRS`: before
+    // each slice the lineage advances (the batch a restore under this
+    // leader could leave undetected stays small, at a commit per slice, not
+    // per (group, node) pair; re-review) and the cursor records the pairs
+    // before it, all done.
+    let parallel = cfg.reconcile_parallel_pairs.clamp(1, LINEAGE_PAIRS);
+    for (c, slice) in batch.pairs.chunks(LINEAGE_PAIRS).enumerate() {
+        let first = c * LINEAGE_PAIRS;
+        advance_lineage(meta, metrics).await?;
+        if first > 0 {
+            cursor.after =
+                bg_cursor::pair_position(batch.pairs[first - 1].0, batch.pairs[first - 1].1);
+            bg_cursor::put(meta, bg_cursor::RECONCILE, &cursor).await?;
         }
-        let (Some(g), Some(n)) = (by_group.get(&gid), by_node.get(&nid)) else {
-            continue;
-        };
-        done += 1;
-        match gc::reconcile_node(
-            meta,
-            clients,
-            n.id,
-            &n.address,
-            g,
-            now_ms(),
-            ms(cfg.min_orphan_age),
-            cfg.page_size,
-        )
-        .await
-        {
-            Ok(r) => {
-                deleted += r.deleted();
-                metrics
-                    .delete_fence_refusals_total
-                    .fetch_add(r.kept_fenced as u64, Ordering::Relaxed);
-            }
-            Err(ControlError::Node { .. }) => unreachable += 1,
-            // A record of this pair that cannot be decoded is this pair's
-            // problem (review): passed over below, as any other.
-            Err(e)
-                if is_fenced(&e)
-                    || matches!(&e, ControlError::Meta(m) if !matches!(m, MetaError::Codec(_))) =>
-            {
-                // The store or the leadership: stop here, the cursor
-                // before this pair.
-                if i > 0 {
-                    cursor.after =
-                        bg_cursor::pair_position(batch.pairs[i - 1].0, batch.pairs[i - 1].1);
-                    let _ = bg_cursor::put(meta, bg_cursor::RECONCILE, &cursor).await;
+        let work: Vec<_> = slice
+            .iter()
+            .map(|&(gid, nid)| {
+                let (g, n) = (by_group.get(&gid).copied(), by_node.get(&nid).copied());
+                Box::pin(async move {
+                    let (Some(g), Some(n)) = (g, n) else {
+                        return None;
+                    };
+                    Some(
+                        gc::reconcile_node(
+                            meta,
+                            clients,
+                            n.id,
+                            &n.address,
+                            g,
+                            now_ms(),
+                            ms(cfg.min_orphan_age),
+                            cfg.page_size,
+                        )
+                        .await,
+                    )
+                })
+            })
+            .collect();
+        // Results in pair order as they come; a store or leadership error
+        // returns at once, dropping the slice's pairs still running (review:
+        // as a crash there; every decision is re-made by a later pass).
+        let mut results = futures::stream::iter(work).buffered(parallel).enumerate();
+        while let Some((k, result)) = results.next().await {
+            let i = first + k;
+            let (gid, nid) = batch.pairs[i];
+            let Some(result) = result else {
+                continue;
+            };
+            done += 1;
+            match result {
+                Ok(r) => {
+                    deleted += r.deleted();
+                    metrics
+                        .delete_fence_refusals_total
+                        .fetch_add(r.kept_fenced as u64, Ordering::Relaxed);
                 }
-                return Err(e);
-            }
-            Err(e) => {
-                warn!(group = gid, node = nid, error = %e, "reconcile of a node's shards failed; passed over until the next sweep");
-                errors += 1;
+                Err(ControlError::Node { .. }) => unreachable += 1,
+                // A record of this pair that cannot be decoded is this pair's
+                // problem (review): passed over below, as any other.
+                Err(e)
+                    if is_fenced(&e)
+                        || matches!(&e, ControlError::Meta(m) if !matches!(m, MetaError::Codec(_))) =>
+                {
+                    // The store or the leadership: stop here, the cursor
+                    // before this pair (the slice's later pairs are done
+                    // again).
+                    if i > 0 {
+                        cursor.after =
+                            bg_cursor::pair_position(batch.pairs[i - 1].0, batch.pairs[i - 1].1);
+                        let _ = bg_cursor::put(meta, bg_cursor::RECONCILE, &cursor).await;
+                    }
+                    return Err(e);
+                }
+                Err(e) => {
+                    warn!(group = gid, node = nid, error = %e, "reconcile of a node's shards failed; passed over until the next sweep");
+                    errors += 1;
+                }
             }
         }
     }
@@ -1285,6 +1344,12 @@ async fn reconcile_pass<S: KvStore>(
         cursor.after.clear();
         cursor.sweeps += 1;
         cursor.last_sweep_ms = now_ms();
+        if cursor.sweep_started_ms > 0 {
+            metrics.reconcile_sweep_ms.store(
+                cursor.last_sweep_ms.saturating_sub(cursor.sweep_started_ms),
+                Ordering::Relaxed,
+            );
+        }
     } else if let Some(&(g, n)) = batch.pairs.last() {
         cursor.after = bg_cursor::pair_position(g, n);
     }
@@ -3213,6 +3278,34 @@ async fn evict_pass<S: KvStore>(
     Ok(())
 }
 
+/// The reconciliation cycle as measured (ADR-0033), ms: the longest of the
+/// last full sweep this process saw, the last one the cursor records, and
+/// the sweep in progress: its time so far, extrapolated to every pair from
+/// the pairs before its cursor (`progress`: done, total; the cursor lags
+/// the work by up to a slice, so this errs long). A leader that took over
+/// in the middle of a sweep has only that (review).
+fn reconcile_cycle_ms(
+    c: &bg_cursor::BackgroundCursor,
+    seen_ms: u64,
+    now_ms: u64,
+    progress: (usize, usize),
+) -> u64 {
+    let recorded = if c.sweep_started_ms > 0 && c.last_sweep_ms >= c.sweep_started_ms {
+        c.last_sweep_ms - c.sweep_started_ms
+    } else if c.sweep_started_ms > 0 {
+        let elapsed = now_ms.saturating_sub(c.sweep_started_ms);
+        match progress {
+            (done, total) if done > 0 && total >= done => {
+                elapsed.saturating_mul(total as u64) / done as u64
+            }
+            _ => elapsed,
+        }
+    } else {
+        0
+    };
+    recorded.max(seen_ms)
+}
+
 /// Capacity rebalancing pass (Phase 3.8).
 async fn rebalance_pass<S: KvStore>(
     meta: &S,
@@ -3227,9 +3320,51 @@ async fn rebalance_pass<S: KvStore>(
     // restore can make the referenced ones): no pass on metadata that went
     // back (re-review).
     advance_lineage(meta, metrics).await?;
+    // A plan's sources are freed by reconciliation: the settle time covers
+    // the reconciliation cycle as measured (a sweep, and the interval
+    // before the next: a pair visited just before a move is visited again
+    // only then; review) and the minimum orphan age (ADR-0033), never less
+    // than configured.
+    let cursor = bg_cursor::get(meta, bg_cursor::RECONCILE).await?;
+    let groups: Vec<u64> = cluster::list_groups(meta)
+        .await?
+        .iter()
+        .map(|g| g.id)
+        .collect();
+    let nodes: Vec<u64> = cluster::list_nodes(meta)
+        .await?
+        .iter()
+        .map(|n| n.id)
+        .collect();
+    let total = crate::sweep::next_pairs(None, &groups, &nodes, usize::MAX)
+        .pairs
+        .len();
+    let left = crate::sweep::next_pairs(
+        bg_cursor::parse_pair(&cursor.after),
+        &groups,
+        &nodes,
+        usize::MAX,
+    )
+    .pairs
+    .len();
+    let cycle = reconcile_cycle_ms(
+        &cursor,
+        metrics.reconcile_sweep_ms.load(Ordering::Relaxed),
+        now_ms(),
+        (total.saturating_sub(left), total),
+    );
+    let settle_ms = policy.settle_ms.max(
+        cycle
+            .saturating_add(ms(cfg.reconcile_interval))
+            .saturating_add(ms(cfg.min_orphan_age)),
+    );
+    metrics
+        .rebalance_settle_ms
+        .store(settle_ms, Ordering::Relaxed);
     // The admission's placement threshold, and what the rest of the
     // controller is doing: rebalancing yields to them (R-93).
     let policy = crate::rebalance::RebalancePolicy {
+        settle_ms,
         max_chunk_bytes: cfg.admission_max_chunk_bytes,
         group_min_shards: cfg.admission.group_min_shards,
         // A record the leader republishes every health pass.
@@ -3342,4 +3477,46 @@ async fn tiering_pass<S: KvStore>(
         info!(?r, "tiering pass");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_reconcile_cycle_is_the_longest_measured() {
+        let c = |started, last| bg_cursor::BackgroundCursor {
+            sweep_started_ms: started,
+            last_sweep_ms: last,
+            ..bg_cursor::BackgroundCursor::default()
+        };
+        let none = (0, 0);
+        // Never swept: what this process saw, else nothing.
+        assert_eq!(reconcile_cycle_ms(&c(0, 0), 0, 9_000, none), 0);
+        assert_eq!(reconcile_cycle_ms(&c(0, 0), 700, 9_000, none), 700);
+        // A sweep completed: its length.
+        assert_eq!(reconcile_cycle_ms(&c(1_000, 4_000), 0, 9_000, none), 3_000);
+        assert_eq!(
+            reconcile_cycle_ms(&c(1_000, 4_000), 5_000, 9_000, none),
+            5_000
+        );
+        // A sweep in progress: at least as long as it has run.
+        assert_eq!(
+            reconcile_cycle_ms(&c(5_000, 4_000), 2_000, 9_000, none),
+            4_000
+        );
+        assert_eq!(
+            reconcile_cycle_ms(&c(5_000, 4_000), 6_000, 9_000, none),
+            6_000
+        );
+        // ... extrapolated from its cursor: 4 s for a quarter of the pairs.
+        assert_eq!(
+            reconcile_cycle_ms(&c(5_000, 4_000), 0, 9_000, (8, 32)),
+            16_000
+        );
+        assert_eq!(
+            reconcile_cycle_ms(&c(5_000, 4_000), 0, 9_000, (32, 32)),
+            4_000
+        );
+    }
 }

@@ -208,6 +208,37 @@ pub trait Txn: Send {
         self.get(key)
     }
 
+    /// Read several keys at this transaction's read version: the same reads
+    /// as [`Txn::get`] one after another (the default), which a backend may
+    /// issue at once (Phase 4.1, ADR-0033: FoundationDB).
+    fn get_many(
+        &mut self,
+        keys: &[Key],
+    ) -> impl Future<Output = Result<Vec<Option<Value>>, KvError>> + Send {
+        async move {
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                out.push(self.get(k).await?);
+            }
+            Ok(out)
+        }
+    }
+
+    /// The first pair of each range (`get_range(range, 1, false)`), as
+    /// [`Txn::get_many`].
+    fn get_first_many(
+        &mut self,
+        ranges: &[KeyRange],
+    ) -> impl Future<Output = Result<Vec<Option<(Key, Value)>>, KvError>> + Send {
+        async move {
+            let mut out = Vec::with_capacity(ranges.len());
+            for r in ranges {
+                out.push(self.get_range(r, 1, false).await?.into_iter().next());
+            }
+            Ok(out)
+        }
+    }
+
     /// Add `delta` to the little-endian `i64` at `key` (missing = 0) as an
     /// atomic mutation: no read conflict, and concurrent adds commute.
     /// Backends without atomic mutations fall back to read-modify-write

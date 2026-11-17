@@ -818,10 +818,16 @@ struct ControllerArgs {
     #[arg(long, default_value_t = 4096)]
     failure_repair_chunks_per_pass: usize,
     /// (group, node) pairs a reconciliation pass lists at most; the sweep
-    /// resumes at its persisted cursor (0 = every pair, the default:
-    /// rebalancing's settle time assumes a sweep per interval).
+    /// resumes at its persisted cursor (0 = every pair, the default).
+    /// Rebalancing's settle time covers the measured sweep.
     #[arg(long, default_value_t = 0)]
     reconcile_pairs_per_pass: usize,
+    /// (group, node) pairs reconciled at once (1–8).
+    #[arg(long, default_value_t = 4)]
+    reconcile_parallel_pairs: usize,
+    /// Nodes a reclaim pass works on at once (at least 1).
+    #[arg(long, default_value_t = 4)]
+    reclaim_parallel_nodes: usize,
     /// Generations a tiering pass examines at most; the sweep resumes at
     /// its persisted cursor (0 = every generation).
     #[arg(long, default_value_t = 4096)]
@@ -2043,6 +2049,8 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.cache_repair_chunks_per_pass = args.cache_repair_chunks_per_pass;
     cfg.planned_move_chunks_per_pass = args.planned_move_chunks_per_pass;
     cfg.reconcile_pairs_per_pass = args.reconcile_pairs_per_pass;
+    cfg.reconcile_parallel_pairs = args.reconcile_parallel_pairs;
+    cfg.reclaim_parallel_nodes = args.reclaim_parallel_nodes;
     cfg.tiering_generations_per_pass = args.tiering_generations_per_pass;
     cfg.failure_repair_chunks_per_pass = args.failure_repair_chunks_per_pass;
     cfg.scrub = arca_lake_controller::integrity::ScrubOptions {

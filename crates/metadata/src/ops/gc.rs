@@ -374,36 +374,168 @@ pub async fn attribute_shard<S: KvStore>(
     transact(store, (*prefix, index, group_id), |tx, env| {
         Box::pin(async move {
             let (prefix, index, group_id) = *env;
-            let gens = generations_with_prefix(tx, &prefix).await?;
-            if gens.is_empty() {
-                return Ok(ShardAttribution::NoGeneration);
-            }
-            // A tier migration copying this chunk into this group
-            // (Phase 3.5 audit CON-1): its target is kept until the switch
-            // makes the record name it, or the intent is dropped or stale.
-            let mut cid = [0u8; 16];
-            cid[..12].copy_from_slice(&prefix);
-            cid[12..].copy_from_slice(&index.to_be_bytes());
-            let intent: Option<crate::ops::object::MigrationIntent> =
-                crate::ops::read(tx, &keys::migration(&cid)).await?;
-            if intent.is_some_and(|i| i.target_group == group_id) {
-                return Ok(ShardAttribution::Referenced);
-            }
-            for (generation, header) in &gens {
-                if is_pending(header.as_ref()) {
-                    return Ok(ShardAttribution::Referenced);
-                }
-                if let Some(v) = tx.get(&keys::gen_chunk(generation, index)).await? {
-                    let record: ChunkRecord = decode(&v)?;
-                    if record.placement.group_id == group_id {
-                        return Ok(ShardAttribution::Referenced);
-                    }
-                }
-            }
-            Ok(ShardAttribution::Unreferenced)
+            attribute_one(tx, &prefix, index, group_id).await
         })
     })
     .await
+}
+
+/// One shard to classify: generation prefix, chunk index, group.
+pub type ShardQuery = ([u8; 12], u32, u64);
+
+/// [`attribute_shard`] for many shards in one read-only transaction (Phase
+/// 4.1, ADR-0033): the same reads, issued together at one read version,
+/// and the same rules. A record of one shard that does not decode fails
+/// that shard only.
+///
+/// # Errors
+///
+/// Backend errors (the whole batch).
+pub async fn attribute_shards<S: KvStore>(
+    store: &S,
+    shards: &[ShardQuery],
+) -> Result<Vec<Result<ShardAttribution>>> {
+    transact(store, shards, |tx, shards| {
+        Box::pin(async move { attribute_in_tx(tx, shards).await })
+    })
+    .await
+}
+
+fn chunk_id_of(prefix: &[u8; 12], index: u32) -> [u8; 16] {
+    let mut cid = [0u8; 16];
+    cid[..12].copy_from_slice(prefix);
+    cid[12..].copy_from_slice(&index.to_be_bytes());
+    cid
+}
+
+async fn attribute_in_tx<X: Txn>(
+    tx: &mut X,
+    shards: &[ShardQuery],
+) -> Result<Vec<Result<ShardAttribution>>> {
+    // The first generation with each prefix (the first step of
+    // `generations_with_prefix`).
+    let firsts = tx
+        .get_first_many(
+            &shards
+                .iter()
+                .map(|(p, _, _)| keys::gen_prefix_range(p))
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    let firsts: Vec<Option<GenId>> = firsts
+        .into_iter()
+        .map(|f| f.and_then(|(k, _)| keys::gen_from_gen_key(&k)))
+        .collect();
+    // For a shard with a generation: its header, the migration intent of
+    // its chunk, its chunk record, and whether a second generation shares
+    // the prefix (the next step of `generations_with_prefix`).
+    let mut point = Vec::new();
+    let mut after = Vec::new();
+    for ((prefix, index, _), first) in shards.iter().zip(&firsts) {
+        if let Some(g) = first {
+            point.push(keys::gen_header(g));
+            point.push(keys::migration(&chunk_id_of(prefix, *index)));
+            point.push(keys::gen_chunk(g, *index));
+            after.push(KeyRange::new(
+                keys::gen_range(g).end,
+                keys::gen_prefix_range(prefix).end,
+            ));
+        }
+    }
+    let values = tx.get_many(&point).await?;
+    let seconds = tx.get_first_many(&after).await?;
+    let mut values = values.into_iter();
+    let mut seconds = seconds.into_iter();
+    let mut out = Vec::with_capacity(shards.len());
+    for (&(prefix, index, group_id), first) in shards.iter().zip(&firsts) {
+        if first.is_none() {
+            out.push(Ok(ShardAttribution::NoGeneration));
+            continue;
+        }
+        let (header, intent, chunk) = (
+            values.next().flatten(),
+            values.next().flatten(),
+            values.next().flatten(),
+        );
+        if seconds.next().flatten().is_some() {
+            // Two generations share the prefix (practically never): the
+            // reads of `attribute_shard`, one after another.
+            out.push(per_shard(
+                attribute_one(tx, &prefix, index, group_id).await,
+            )?);
+            continue;
+        }
+        out.push(per_shard(decide_one(header, intent, chunk, group_id))?);
+    }
+    Ok(out)
+}
+
+/// A codec error is the shard's; any other fails the batch.
+fn per_shard(r: Result<ShardAttribution>) -> Result<Result<ShardAttribution>> {
+    match r {
+        Err(MetaError::Codec(e)) => Ok(Err(MetaError::Codec(e))),
+        Err(e) => Err(e),
+        ok => Ok(ok),
+    }
+}
+
+/// The rules of [`attribute_shard`] for a prefix with exactly one
+/// generation, from the values read.
+fn decide_one(
+    header: Option<Vec<u8>>,
+    intent: Option<Vec<u8>>,
+    chunk: Option<Vec<u8>>,
+    group_id: u64,
+) -> Result<ShardAttribution> {
+    let header = header.map(|h| decode::<GenerationHeader>(&h)).transpose()?;
+    let intent = intent
+        .map(|i| decode::<crate::ops::object::MigrationIntent>(&i))
+        .transpose()?;
+    if intent.is_some_and(|i| i.target_group == group_id) {
+        return Ok(ShardAttribution::Referenced);
+    }
+    if is_pending(header.as_ref()) {
+        return Ok(ShardAttribution::Referenced);
+    }
+    if let Some(v) = chunk {
+        let record: ChunkRecord = decode(&v)?;
+        if record.placement.group_id == group_id {
+            return Ok(ShardAttribution::Referenced);
+        }
+    }
+    Ok(ShardAttribution::Unreferenced)
+}
+
+async fn attribute_one<X: Txn>(
+    tx: &mut X,
+    prefix: &[u8; 12],
+    index: u32,
+    group_id: u64,
+) -> Result<ShardAttribution> {
+    let gens = generations_with_prefix(tx, prefix).await?;
+    if gens.is_empty() {
+        return Ok(ShardAttribution::NoGeneration);
+    }
+    // A tier migration copying this chunk into this group
+    // (Phase 3.5 audit CON-1): its target is kept until the switch
+    // makes the record name it, or the intent is dropped or stale.
+    let intent: Option<crate::ops::object::MigrationIntent> =
+        crate::ops::read(tx, &keys::migration(&chunk_id_of(prefix, index))).await?;
+    if intent.is_some_and(|i| i.target_group == group_id) {
+        return Ok(ShardAttribution::Referenced);
+    }
+    for (generation, header) in &gens {
+        if is_pending(header.as_ref()) {
+            return Ok(ShardAttribution::Referenced);
+        }
+        if let Some(v) = tx.get(&keys::gen_chunk(generation, index)).await? {
+            let record: ChunkRecord = decode(&v)?;
+            if record.placement.group_id == group_id {
+                return Ok(ShardAttribution::Referenced);
+            }
+        }
+    }
+    Ok(ShardAttribution::Unreferenced)
 }
 
 /// Whether a pending or committed generation with `prefix` exists (a
