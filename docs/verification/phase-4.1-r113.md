@@ -112,6 +112,9 @@ can no longer pass by timing.
 
 ## 6. Risk register
 
-R-113: **resolved** (test synchronization defect; intended protection).
+R-113: **Low** (was Medium): cause found, tests fixed (test
+synchronization defect; intended protection). The read and heartbeat
+residuals of §5 are tracked separately as R-116 (Low), since this change
+does not touch them.
 R-77: the `parallel_read` flake recurred once (Phase 3.14 tree, full
 `it` run); unrelated to R-113.

@@ -6,7 +6,18 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# Each exception names one advisory, why it is taken and when it ends
+# (docs/architecture/risks.md). Nothing else is relaxed: every other
+# advisory, vulnerability or not, still fails the check.
+ignore = [
+    # chrono is unmaintained (an informational notice, not a vulnerability);
+    # it comes only through s3s 0.17, no workspace crate uses it, and no s3s
+    # release without it is stable yet. R-115: removed when a stable s3s no
+    # longer pulls chrono (checked with `cargo tree -i chrono`), reconsidered
+    # at once if a vulnerability is reported against chrono, re-checked at
+    # the start of Phase 4.2.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, only via s3s 0.17; R-115" },
+]
 
 [licenses]
 version = 2
