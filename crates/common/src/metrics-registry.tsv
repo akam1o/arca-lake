@@ -127,6 +127,25 @@ arca_controller_tls_reloads_total	counter	controller	reloads	-	TLS material relo
 arca_controller_tls_rpcs_denied_total	counter	controller	rpcs	-	RPCs refused by the role authorization table
 arca_controller_upgrade_step	gauge	controller	enum	-	rolling-upgrade finalize step (0 none … 5)
 arca_gateway_admission_charged_bytes_total	counter	gateway	bytes	-	client bytes charged to write admission chunk by chunk as they were placed (every PUT, UploadPart and copy)
+arca_gateway_access_queue_entries	gauge	gateway	entries	-	generations pending in the access-record table (ADR-0034)
+arca_gateway_access_queue_capacity	gauge	gateway	entries	-	generations the access-record table and the batch in flight may hold together
+arca_gateway_access_queue_in_flight	gauge	gateway	entries	-	generations of the access-record batch being written
+arca_gateway_access_queue_oldest_seconds	gauge	gateway	seconds	-	age of the oldest pending read in the access-record table
+arca_gateway_access_isolated_generations	gauge	gateway	entries	-	generations written alone after contention (bounded)
+arca_gateway_access_flush_batch_max	gauge	gateway	entries	-	largest access-record batch written
+arca_gateway_access_reads_total	counter	gateway	reads	-	reads offered to the access-record table
+arca_gateway_access_coalesced_total	counter	gateway	reads	-	reads merged into a pending access-record entry
+arca_gateway_access_inserted_total	counter	gateway	reads	-	reads that started a new access-record entry
+arca_gateway_access_dropped_total	counter	gateway	reads	reason=full|stale|error|shutdown	reads not recorded: table full, older than the age bound when written, failed twice, pending at a graceful stop
+arca_gateway_access_uncertain_total	counter	gateway	reads	-	reads of access-record batches whose commit outcome is unknown (written or not; never retried)
+arca_gateway_access_uncertain_batches_total	counter	gateway	batches	-	access-record batches whose commit outcome is unknown
+arca_gateway_access_flushes_total	counter	gateway	transactions	-	access-record flush transactions committed
+arca_gateway_access_flushed_generations_total	counter	gateway	generations	-	generations whose access record was written
+arca_gateway_access_flushed_reads_total	counter	gateway	reads	-	reads written to access records
+arca_gateway_access_skipped_finished_total	counter	gateway	generations	-	generations not written: GC had finished them
+arca_gateway_access_skipped_finished_reads_total	counter	gateway	reads	-	reads of generations GC had finished
+arca_gateway_access_flush_errors_total	counter	gateway	attempts	kind=conflict|backend|too_large|other	failed access-record flush attempts by kind
+arca_gateway_access_flush_seconds	histogram	gateway	seconds	-	access-record flush transaction time per (sub-)batch, its conflict retries included
 arca_gateway_admission_record_age_seconds	gauge	gateway	seconds	-	seconds since the admission record last changed (0 = no record)
 arca_gateway_admission_rejected_total	counter	gateway	requests	-	requests refused with SlowDown because the tier refuses new data
 arca_gateway_admission_state	gauge	gateway	state	-	write admission state this gateway applies to its tier (0 normal, 1 warning, 2 throttled, 3 write rejected, 4 recovery only; includes escalation of a stale record)

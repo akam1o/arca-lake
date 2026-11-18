@@ -703,3 +703,188 @@ async fn a_gateway_without_access_records_writes_none_on_get() {
         c.shutdown().await;
     }
 }
+
+/// Phase 4.1 (ADR-0034 decision 5): an object in an upper tier whose
+/// reads were never recorded (never read, or every read lost) counts as
+/// touched when it was written: not demoted before `demote_after` from
+/// its write (earlier, a missing record read as time 0 and the first pass
+/// demoted it).
+#[tokio::test]
+async fn an_object_without_an_access_record_is_not_demoted_before_demote_after() {
+    use arca_lake_metadata::kv::{KvStore as _, Txn as _};
+    let (c, fast) = cluster().await;
+    let data = payload(usize::try_from(MIB / 2).unwrap(), 41);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let generation = c.manifest(BUCKET, "o").await.pointer.generation;
+    object::record_access(c.meta.as_ref(), &generation, now_ms(), 10)
+        .await
+        .unwrap();
+    let policy = arca_lake_controller::tiering::TieringPolicy {
+        tiers: vec!["default".into(), "fast-durable".into()],
+        promote_reads: 5,
+        promote_window: Duration::from_mins(10),
+        demote_after: Duration::from_mins(30),
+    };
+    let report =
+        arca_lake_controller::tiering::run_once(c.meta.as_ref(), &c.clients, &policy, now_ms())
+            .await
+            .unwrap();
+    assert_eq!(report.promoted_chunks, 1, "{report:?}");
+    // Its record lost: as if never read.
+    let mut tx = c.meta.begin().await.unwrap();
+    tx.clear(&arca_lake_metadata::keys::access(&generation));
+    tx.commit().await.unwrap();
+    assert_eq!(
+        object::access_of(c.meta.as_ref(), &generation)
+            .await
+            .unwrap(),
+        None
+    );
+    // Ten minutes after its write: kept where it is.
+    let report = arca_lake_controller::tiering::run_once(
+        c.meta.as_ref(),
+        &c.clients,
+        &policy,
+        now_ms() + 600_000,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.demoted_chunks, 0, "{report:?}");
+    assert_eq!(
+        c.manifest(BUCKET, "o").await.chunks[0].1.placement.group_id,
+        fast.id
+    );
+    // Past `demote_after` from its write: demoted.
+    let report = arca_lake_controller::tiering::run_once(
+        c.meta.as_ref(),
+        &c.clients,
+        &policy,
+        now_ms() + 7_200_000,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.demoted_chunks, 1, "{report:?}");
+    assert_ne!(
+        c.manifest(BUCKET, "o").await.chunks[0].1.placement.group_id,
+        fast.id
+    );
+    c.backend.refresh_map().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    c.shutdown().await;
+}
+
+/// Phase 4.1 (ADR-0034): GETs through the gateway are recorded in batches:
+/// the records hold every read, in far fewer commits than GETs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gets_are_recorded_exactly_in_few_batched_commits() {
+    let c = TestCluster::start(ClusterOptions::rs(3, 2, 1, MIB, 0)).await;
+    s3::create_bucket(&c.backend, "acc").await.unwrap();
+    let mut gens = Vec::new();
+    for i in 0..50u64 {
+        let key = format!("k{i}");
+        s3::put(
+            &c.backend,
+            "acc",
+            &key,
+            payload(1024, i),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+        gens.push(c.manifest("acc", &key).await.pointer.generation);
+    }
+    let before = c.backend.access_stats();
+    for _ in 0..4 {
+        for i in 0..50u64 {
+            let _ = s3::get(&c.backend, "acc", &format!("k{i}")).await.unwrap();
+        }
+    }
+    // Every read written within a few flush intervals (100 ms here).
+    let mut done = false;
+    for _ in 0..100 {
+        let s = c.backend.access_stats();
+        if s.flushed_reads - before.flushed_reads >= 200 {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let s = c.backend.access_stats();
+    assert!(done, "{s:?}");
+    for g in &gens {
+        let r = object::access_of(c.meta.as_ref(), g)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.count, 4, "{r:?}");
+    }
+    let commits = s.flushes - before.flushes;
+    assert!(commits * 10 <= 200, "{commits} commits for 200 GETs");
+    assert_eq!(
+        s.dropped_full + s.dropped_error + s.dropped_stale + s.uncertain,
+        0,
+        "{s:?}"
+    );
+    c.shutdown().await;
+}
+
+/// Phase 4.1 (ADR-0034 decision 4): a graceful stop of the gateway writes
+/// the reads still pending; a gateway started after it records anew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gateway_stop_flushes_pending_reads_and_a_restart_records_anew() {
+    let mut c = TestCluster::start(ClusterOptions {
+        access: arca_lake_gateway::cluster::access::AccessConfig {
+            flush_interval: Duration::from_secs(3600),
+            ..Default::default()
+        },
+        ..ClusterOptions::rs(3, 2, 1, MIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, "acc").await.unwrap();
+    s3::put(
+        &c.backend,
+        "acc",
+        "k",
+        payload(1024, 1),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let generation = c.manifest("acc", "k").await.pointer.generation;
+    for _ in 0..3 {
+        let _ = s3::get(&c.backend, "acc", "k").await.unwrap();
+    }
+    assert_eq!(
+        object::access_of(c.meta.as_ref(), &generation)
+            .await
+            .unwrap(),
+        None
+    );
+    c.backend.shutdown().await;
+    assert_eq!(
+        object::access_of(c.meta.as_ref(), &generation)
+            .await
+            .unwrap()
+            .map(|r| r.count),
+        Some(3)
+    );
+    c.restart_backend().await.unwrap();
+    let _ = s3::get(&c.backend, "acc", "k").await.unwrap();
+    c.backend.shutdown().await;
+    assert_eq!(
+        object::access_of(c.meta.as_ref(), &generation)
+            .await
+            .unwrap()
+            .map(|r| r.count),
+        Some(4)
+    );
+    c.shutdown().await;
+}

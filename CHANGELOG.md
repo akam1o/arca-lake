@@ -32,6 +32,11 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   `arca_controller_rebalance_settle_seconds`.
 - `bench-cluster.sh`: `CTL_BIN` and `restart-controller` (controller A/B
   on one populated cluster).
+- Gateway options `--access-capacity`, `--access-batch`,
+  `--access-flush-interval-ms`, `--access-high-watermark`,
+  `--access-max-age-ms`, `--access-shutdown-flush-ms`; metrics
+  `arca_gateway_access_*` (queue, coalesced, dropped by reason,
+  uncertain, flushes, flush time, errors by kind).
 - `arcabench` retry options: `--retry-max-time-ms`, `--retry-base-ms`,
   `--retry-max-delay-ms`, `--retry-jitter`, `--retry-honor-retry-after`,
   `--retry-max-concurrency`, `--retry-max-rate`, `--retry-burst`,
@@ -59,8 +64,17 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   exponential backoff with full jitter from 100 ms to 3.2 s (was 200 ms
   doubling, no jitter); every wait ends at the run's deadline. Runs under
   refusal are therefore a different load from earlier ones.
-- ADR-0034 (access records at scale) accepted as a design; not
-  implemented.
+- Access records at scale (ADR-0034): the gateway records reads in a
+  bounded table per process (the reads of a generation merged; table and
+  batch in flight within `--access-capacity`) written by one flusher in
+  batches of up to `--access-batch` generations per transaction, which
+  checks that each generation still exists (no record recreated after
+  GC) and never resends a batch whose commit outcome is unknown; every
+  loss is counted (`arca_gateway_access_*`). No task per GET.
+  `--access-records legacy` keeps the earlier per-GET write for one
+  release. Tiering's reset writes nothing for a finished generation, and
+  a committed generation without a record counts as touched when it was
+  written (not demoted before `demote_after` from its write).
 - `deny.toml` ignores RUSTSEC-2026-0543 (chrono unmaintained, only through
   s3s 0.17; R-115); every other advisory still fails the check.
 

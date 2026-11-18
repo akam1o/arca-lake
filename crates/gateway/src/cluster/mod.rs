@@ -1,6 +1,7 @@
 //! The distributed backend: S3 operations implemented on the metadata
 //! store, erasure coding, and storage nodes (RFC-003 §5.3, RFC-004 §5.5–5.6).
 
+pub mod access;
 pub mod admission;
 mod backend;
 mod map;

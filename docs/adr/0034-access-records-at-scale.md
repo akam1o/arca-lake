@@ -1,8 +1,9 @@
 # ADR-0034: Access records at scale
 
-Status: **accepted (design), not implemented** (Phase 4.1; proposed in
-Phase 4.0). No product code implements it yet; the performance targets
-below are targets, not results. Concerns the gateway's recording of reads
+Status: **accepted; decisions 1–5, 7 and 8 implemented** (Phase 4.1;
+proposed in Phase 4.0); decision 6 not implemented. Implementation
+notes and the deviations from the text below: §12. The performance
+targets are targets until measured (`docs/verification/phase-4.1-adr34.md`). Concerns the gateway's recording of reads
 for automatic tiering (RFC-006 §5.8) and the records tiering reads; no
 change to data safety, deletes, fencing or deferred reclamation.
 
@@ -97,10 +98,12 @@ Defects and limits of the current code (code analysis, Phase 4.0 and
    when its oldest unwritten read arrived; the flusher checks it at every
    attempt of a batch's transaction (retries and split batches included,
    against its own clock when the attempt starts) and leaves out an entry
-   older than `max_age` (default 30 s), dropped (`reason="stale"`). A
-   FoundationDB transaction cannot commit more than about 5 s after its
-   read version, so no read is written later than `max_age` + 5 s after
-   it happened (§5, reset). A hot entry keeps coalescing new reads but
+   older than `max_age` (default 30 s), dropped (`reason="stale"`). The
+   check runs when an attempt starts: on FoundationDB, whose transactions
+   cannot commit more than about 5 s after their read version, no read
+   is written later than `max_age` + 5 s after it happened (§5, reset);
+   on a backend without such a limit the bound holds at the attempt's
+   start only (an attempt stalled after it can commit later). A hot entry keeps coalescing new reads but
    ages from its oldest unwritten one: it goes stale only when flushes
    fall behind, and those drops are counted in the same reason and
    measured in the overflow accuracy test (hot objects are the ones
@@ -250,19 +253,24 @@ Per gateway, no per-object or per-generation label:
 | Metric | Kind | Meaning |
 | --- | --- | --- |
 | `arca_gateway_access_queue_entries` | gauge | generations pending in the table |
-| `arca_gateway_access_queue_capacity` | gauge | the table's capacity |
-| `arca_gateway_access_queue_oldest_seconds` | gauge | age of the oldest pending entry |
+| `arca_gateway_access_queue_capacity` | gauge | the table's capacity (table and batch in flight) |
+| `arca_gateway_access_queue_in_flight` | gauge | generations of the batch being written |
+| `arca_gateway_access_queue_oldest_seconds` | gauge | age of the oldest pending read |
+| `arca_gateway_access_isolated_generations` | gauge | generations written alone after contention (at most 64) |
 | `arca_gateway_access_reads_total` | counter | reads offered to the table |
 | `arca_gateway_access_coalesced_total` | counter | reads merged into a pending entry |
+| `arca_gateway_access_inserted_total` | counter | reads that started a new entry |
 | `arca_gateway_access_dropped_total{reason}` | counter | reads lost: `full`, `stale`, `error`, `shutdown` |
 | `arca_gateway_access_uncertain_total` | counter | reads of batches whose commit outcome is unknown (written or not) |
-| `arca_gateway_access_isolated_generations` | gauge | generations flushed apart after contention (at most 64) |
+| `arca_gateway_access_uncertain_batches_total` | counter | those batches |
 | `arca_gateway_access_flushes_total` | counter | flush transactions committed |
 | `arca_gateway_access_flushed_generations_total` | counter | generations written |
+| `arca_gateway_access_flushed_reads_total` | counter | reads written |
 | `arca_gateway_access_skipped_finished_total` | counter | generations not written: finished |
-| `arca_gateway_access_flush_batch_size` | histogram | generations per flush |
-| `arca_gateway_access_flush_seconds` | histogram | flush duration, retries included |
-| `arca_gateway_access_flush_errors_total{kind}` | counter | `conflict_exhausted`, `backend`, `too_large`, `unknown` |
+| `arca_gateway_access_skipped_finished_reads_total` | counter | their reads |
+| `arca_gateway_access_flush_batch_max` | gauge | largest batch written |
+| `arca_gateway_access_flush_seconds` | histogram | flush transaction time per (sub-)batch, its conflict retries included |
+| `arca_gateway_access_flush_errors_total{kind}` | counter | failed attempts: `conflict`, `backend`, `too_large`, `other` |
 
 Commits per GET are derived: `flushes_total` over the gateway's GET count
 (`arca_gateway_s3_requests_total` of the GET operation), alongside FoundationDB's
@@ -330,6 +338,14 @@ committed transactions in benchmarks.
 - Reads of at most `max_age` + 5 s before a tiering reset counted after
   it, per gateway (§5).
 - Clock skew between gateways shifts recency by the skew; not detected.
+- A flusher whose commit never returns keeps its batch: after a stop's
+  wait those reads are neither written nor counted (the process exits
+  with them in flight); a commit already sent may still apply after the
+  stop returned.
+- The age bound assumes a prompt read version after the attempt's check
+  (a stall between them is not covered).
+- A refused flush backs off for its interval; a back-off ends with the
+  next flush, which retries what went back.
 - Hot generations read through many gateways: one write per gateway per
   interval, with conflicts among them (retried); not measured at more
   than one gateway.
@@ -364,3 +380,33 @@ committed transactions in benchmarks.
    the measured GET rates.
 8. Two independent reviews; Critical and High findings fixed with tests
    that fail without the fix.
+
+## 12. Implementation (Phase 4.1)
+
+- `crates/gateway/src/cluster/access.rs`: `AccessTable` (one mutex
+  around a map of pending generations and their insertion order; O(1)
+  per read), `spawn_flusher` (one task per gateway; holds no strong
+  reference while it sleeps, so a dropped backend ends it), `run_flush`,
+  `flush_batch` (split on failure, one re-insertion, isolation of a
+  generation that failed by contention). `crates/metadata/src/ops/object.rs`:
+  `record_accesses` (headers and records read together with
+  `Txn::get_many`, the age checked at every attempt), `reset_access`
+  reads the header. `crates/controller/src/tiering.rs`: decision 5.
+- `--access-records on|off|legacy` (default `on`: the batched path;
+  `legacy`: the per-GET path of earlier releases, kept for one release)
+  and `--access-capacity`, `--access-batch`, `--access-flush-interval-ms`,
+  `--access-high-watermark`, `--access-max-age-ms`,
+  `--access-shutdown-flush-ms`.
+- Deviations from the text above:
+  - one mutex instead of a sharded table: each read is a map lookup and
+    at most an insertion under it; to be revisited only if the GET path
+    shows contention on it in the measurements;
+  - decision 5 uses the header's `created_ms` (the writer's clock when
+    the generation was created, a recorded field) rather than the time
+    in the id's UUIDv7 bits: the same clock and moment, without relying
+    on the id's layout; tiering reads the header anyway;
+  - the batch size is exposed as generations and flushes counted plus
+    the largest batch (`arca_gateway_access_flush_batch_max`), not as a
+    histogram (the shared histogram type measures durations);
+  - decision 6 (recording only where a tiering policy exists) is not
+    implemented: it needs a new metadata key and its own measurement.

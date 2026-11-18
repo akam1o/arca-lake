@@ -1663,6 +1663,94 @@ pub async fn record_access<S: KvStore>(
     .await
 }
 
+/// One generation's reads to add to its access record (ADR-0034).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccessUpdate {
+    /// The generation read.
+    pub generation: GenId,
+    /// Latest read time, Unix milliseconds.
+    pub last_ms: u64,
+    /// Reads to add.
+    pub reads: u64,
+    /// Time of the oldest of these reads (the age bound).
+    pub oldest_ms: u64,
+}
+
+/// What [`record_accesses`] did with one update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessWrite {
+    /// Written (`last_ms = max`, `count += reads`).
+    Written,
+    /// Not written: the generation is gone (GC finished it).
+    Finished,
+    /// Not written: its oldest read is older than the age bound at the
+    /// attempt that committed.
+    Stale,
+}
+
+/// Add many generations' reads to their access records in one transaction
+/// (ADR-0034): for each, the generation's header and its record are read
+/// together, and nothing is written for a generation whose header is gone
+/// (no record for a generation GC finished: its `finish` clears the record
+/// with the header, and conflicts with this read). An update whose oldest
+/// read is more than `max_age_ms` older than `now()` at the attempt
+/// (`0`: no bound) is left out, so that no read is written long after it
+/// happened. Returns what was done with each update, in order.
+///
+/// Not idempotent (it adds): callers must not retry after an unknown
+/// commit outcome.
+///
+/// # Errors
+///
+/// Backend and codec errors (the whole batch).
+pub async fn record_accesses<S: KvStore>(
+    store: &S,
+    updates: &[AccessUpdate],
+    max_age_ms: u64,
+    now: impl Fn() -> u64 + Send + Sync,
+) -> Result<Vec<AccessWrite>> {
+    transact(store, (updates, max_age_ms, &now), |tx, env| {
+        Box::pin(async move {
+            let (updates, max_age_ms, now) = *env;
+            let at = now();
+            let fresh: Vec<&AccessUpdate> = updates
+                .iter()
+                .filter(|u| max_age_ms == 0 || at.saturating_sub(u.oldest_ms) <= max_age_ms)
+                .collect();
+            let mut want = Vec::with_capacity(fresh.len() * 2);
+            for u in &fresh {
+                want.push(keys::gen_header(&u.generation));
+                want.push(keys::access(&u.generation));
+            }
+            let got = tx.get_many(&want).await?;
+            let mut out = Vec::with_capacity(updates.len());
+            let mut fresh_at = 0usize;
+            for u in updates {
+                if max_age_ms != 0 && at.saturating_sub(u.oldest_ms) > max_age_ms {
+                    out.push(AccessWrite::Stale);
+                    continue;
+                }
+                let (header, record) = (&got[2 * fresh_at], &got[2 * fresh_at + 1]);
+                fresh_at += 1;
+                if header.is_none() {
+                    out.push(AccessWrite::Finished);
+                    continue;
+                }
+                let mut rec: AccessRecord = match record {
+                    Some(v) => crate::records::decode(v)?,
+                    None => AccessRecord::default(),
+                };
+                rec.last_ms = rec.last_ms.max(u.last_ms);
+                rec.count = rec.count.saturating_add(u.reads);
+                write(tx, &keys::access(&u.generation), &rec)?;
+                out.push(AccessWrite::Written);
+            }
+            Ok(out)
+        })
+    })
+    .await
+}
+
 /// The access record of a generation.
 ///
 /// # Errors
@@ -1675,7 +1763,9 @@ pub async fn access_of<S: KvStore>(store: &S, generation: &GenId) -> Result<Opti
     .await
 }
 
-/// Reset the access count of a generation (after a tiering decision).
+/// Reset the access count of a generation (after a tiering decision);
+/// nothing for a generation that is gone (ADR-0034: a reset must not
+/// recreate the record of a generation GC finished).
 ///
 /// # Errors
 ///
@@ -1684,6 +1774,9 @@ pub async fn reset_access<S: KvStore>(store: &S, generation: &GenId, now_ms: u64
     transact(store, (*generation, now_ms), |tx, env| {
         Box::pin(async move {
             let (generation, now_ms) = *env;
+            if tx.get(&keys::gen_header(&generation)).await?.is_none() {
+                return Ok(());
+            }
             write(
                 tx,
                 &keys::access(&generation),

@@ -171,7 +171,10 @@ answering (no ping, no ARP resolution, from the client machine and from
 the storage host; between 00:13:40 and 00:14:10 UTC, from the last
 FoundationDB sample and the gateway's last request). Its cause is not
 known (no access to the host's console or hypervisor); whether this
-run's load contributed is not known either. The storage nodes and the
+run's load contributed is not known either. After the host's restart
+its own records were examined (`phase-4.1-adr34.md` §1): every sampled
+resource healthy to the end, no guest-side record of a problem; the cause
+is still Unknown. The storage nodes and the
 gateway, on the other host, were stopped cleanly afterwards with their
 data, logs and metrics kept (outside the repository). The drain phase,
 the recovery of admission and the final verify of every key did not run.

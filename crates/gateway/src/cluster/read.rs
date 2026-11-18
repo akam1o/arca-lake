@@ -1053,6 +1053,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             return;
         }
         let now = now_ms();
+        if !self.cfg.access.legacy {
+            self.access.note(generation, now);
+            return;
+        }
+        // Earlier releases' path (`--access-records legacy`): one task and
+        // one transaction per flushed generation.
         let Some(reads) = self.cache_state.flush_access(generation, now) else {
             return;
         };

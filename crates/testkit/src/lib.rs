@@ -128,6 +128,9 @@ pub struct ClusterOptions {
     pub write_pipeline: usize,
     /// Gateway access records for tiering (`ClusterConfig::record_access`).
     pub record_access: bool,
+    /// How they are recorded (`ClusterConfig::access`); test clusters
+    /// flush every 100 ms.
+    pub access: arca_lake_gateway::cluster::access::AccessConfig,
     /// Minimum multipart part size (see `ClusterConfig::multipart_min_part_bytes`);
     /// test clusters default to 1 KiB so that small parts are usable.
     pub multipart_min_part_bytes: u64,
@@ -217,6 +220,10 @@ impl ClusterOptions {
             populations_per_node: 4,
             write_pipeline: 2,
             record_access: true,
+            access: arca_lake_gateway::cluster::access::AccessConfig {
+                flush_interval: Duration::from_millis(100),
+                ..Default::default()
+            },
             multipart_min_part_bytes: 1024,
             authorize: false,
             principals: Vec::new(),
@@ -410,6 +417,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             // Test clusters run no controller unless a test spawns one.
             admission_without_controller: true,
             record_access: opts.record_access,
+            access: opts.access.clone(),
         };
         let backend = ClusterBackend::new(Arc::clone(&meta), cluster_cfg.clone())
             .await

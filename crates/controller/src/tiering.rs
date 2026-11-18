@@ -171,7 +171,15 @@ async fn sweep<S: KvStore>(
             let records = async {
                 let access = object::access_of(meta, generation).await?;
                 let manifest = object::read_manifest_of(meta, generation).await?;
-                Ok::<_, arca_lake_metadata::MetaError>((access.unwrap_or_default(), manifest))
+                // A generation never read (or whose reads were all lost)
+                // counts as touched when it was written, not at time 0
+                // (ADR-0034 decision 5): it is not demoted before
+                // `demote_after` from its write.
+                let access = access.unwrap_or(object::AccessRecord {
+                    last_ms: header.created_ms,
+                    count: 0,
+                });
+                Ok::<_, arca_lake_metadata::MetaError>((access, manifest))
             }
             .await;
             let (access, manifest) = match records {

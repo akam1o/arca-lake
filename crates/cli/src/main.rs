@@ -538,11 +538,33 @@ struct GatewayArgs {
     /// 5 MiB; smaller values are a non-AWS extension for small labs.
     #[arg(long, default_value_t = 5 << 20)]
     multipart_min_part_bytes: u64,
-    /// Record reads for automatic tiering (`on`, the default) or not
-    /// (`off`: one metadata write fewer per GET of an object not read in
-    /// the last second; tiering then sees no reads through this gateway).
-    #[arg(long, default_value = "on", value_parser = ["on", "off"])]
+    /// Record reads for automatic tiering: `on` (the default: a bounded
+    /// table flushed in batches, ADR-0034), `off` (no record; tiering then
+    /// sees no reads through this gateway) or `legacy` (one write per
+    /// generation per second, as earlier releases; for one release).
+    #[arg(long, default_value = "on", value_parser = ["on", "off", "legacy"])]
     access_records: String,
+    /// Generations pending at most in the access-record table (table and
+    /// batch in flight); reads of new generations beyond it are dropped
+    /// and counted.
+    #[arg(long, default_value_t = 65_536)]
+    access_capacity: usize,
+    /// Generations per access-record flush transaction at most.
+    #[arg(long, default_value_t = 512)]
+    access_batch: usize,
+    /// Time between access-record flushes, ms (±20 % at random).
+    #[arg(long, default_value_t = 1000)]
+    access_flush_interval_ms: u64,
+    /// Fraction of the capacity at which a flush starts at once.
+    #[arg(long, default_value_t = 0.5)]
+    access_high_watermark: f64,
+    /// Reads older than this when their flush is attempted are dropped
+    /// (counted stale), ms.
+    #[arg(long, default_value_t = 30_000)]
+    access_max_age_ms: u64,
+    /// Time a graceful stop spends flushing pending reads, ms.
+    #[arg(long, default_value_t = 2000)]
+    access_shutdown_flush_ms: u64,
     /// Serve gateway cache counters as Prometheus text on this address
     /// (`GET /metrics`); cluster backend only.
     #[arg(long)]
@@ -1610,7 +1632,17 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 process_id: format!("gateway@{}", args.listen),
                 heartbeat: Some(Duration::from_secs(30)),
                 admission_without_controller: false,
-                record_access: args.access_records == "on",
+                record_access: args.access_records != "off",
+                access: arca_lake_gateway::cluster::access::AccessConfig {
+                    legacy: args.access_records == "legacy",
+                    capacity: args.access_capacity.max(1),
+                    batch: args.access_batch.max(1),
+                    flush_interval: Duration::from_millis(args.access_flush_interval_ms.max(1)),
+                    high_watermark: args.access_high_watermark.clamp(0.01, 1.0),
+                    max_age: Duration::from_millis(args.access_max_age_ms),
+                    shutdown_flush: Duration::from_millis(args.access_shutdown_flush_ms),
+                    ..Default::default()
+                },
             },
         )
         .await
@@ -1634,6 +1666,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 render_queue_and_txn_stats(&mut out, &stats_backend.population_queue_stats());
                 render_integrity_stats(&mut out, &stats_backend.integrity_stats());
                 render_admission_stats(&mut out, &stats_backend.cluster().admission.snapshot());
+                render_access_stats(&mut out, &stats_backend.access_stats());
                 s3_stats.render(&mut out);
                 out += &arca_lake_protocol::tls::render_metrics(
                     "arca_gateway",
@@ -5187,6 +5220,98 @@ fn render_admission_stats(
     }
 }
 
+/// Access-record table of a gateway (ADR-0034): bounded labels only.
+#[allow(clippy::cast_precision_loss)]
+fn render_access_stats(
+    out: &mut String,
+    a: &arca_lake_gateway::cluster::access::AccessStatsSnapshot,
+) {
+    use std::fmt::Write as _;
+    for (name, kind, value) in [
+        ("arca_gateway_access_queue_entries", "gauge", a.entries),
+        ("arca_gateway_access_queue_capacity", "gauge", a.capacity),
+        ("arca_gateway_access_queue_in_flight", "gauge", a.in_flight),
+        (
+            "arca_gateway_access_isolated_generations",
+            "gauge",
+            a.isolated,
+        ),
+        ("arca_gateway_access_flush_batch_max", "gauge", a.batch_max),
+        ("arca_gateway_access_reads_total", "counter", a.reads),
+        (
+            "arca_gateway_access_coalesced_total",
+            "counter",
+            a.coalesced,
+        ),
+        ("arca_gateway_access_inserted_total", "counter", a.inserted),
+        (
+            "arca_gateway_access_uncertain_total",
+            "counter",
+            a.uncertain,
+        ),
+        (
+            "arca_gateway_access_uncertain_batches_total",
+            "counter",
+            a.uncertain_batches,
+        ),
+        ("arca_gateway_access_flushes_total", "counter", a.flushes),
+        (
+            "arca_gateway_access_flushed_generations_total",
+            "counter",
+            a.flushed_generations,
+        ),
+        (
+            "arca_gateway_access_flushed_reads_total",
+            "counter",
+            a.flushed_reads,
+        ),
+        (
+            "arca_gateway_access_skipped_finished_total",
+            "counter",
+            a.skipped_finished,
+        ),
+        (
+            "arca_gateway_access_skipped_finished_reads_total",
+            "counter",
+            a.skipped_finished_reads,
+        ),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} {kind}\n{name} {value}");
+    }
+    let _ = writeln!(
+        out,
+        "# TYPE arca_gateway_access_queue_oldest_seconds gauge\narca_gateway_access_queue_oldest_seconds {}",
+        a.oldest_age_ms as f64 / 1000.0
+    );
+    let _ = writeln!(out, "# TYPE arca_gateway_access_dropped_total counter");
+    for (reason, v) in [
+        ("full", a.dropped_full),
+        ("stale", a.dropped_stale),
+        ("error", a.dropped_error),
+        ("shutdown", a.dropped_shutdown),
+    ] {
+        let _ = writeln!(
+            out,
+            "arca_gateway_access_dropped_total{{reason=\"{reason}\"}} {v}"
+        );
+    }
+    let _ = writeln!(out, "# TYPE arca_gateway_access_flush_errors_total counter");
+    for (kind, v) in [
+        ("conflict", a.errors_conflict),
+        ("backend", a.errors_backend),
+        ("too_large", a.errors_too_large),
+        ("other", a.errors_other),
+    ] {
+        let _ = writeln!(
+            out,
+            "arca_gateway_access_flush_errors_total{{kind=\"{kind}\"}} {v}"
+        );
+    }
+    let _ = writeln!(out, "# TYPE arca_gateway_access_flush_seconds histogram");
+    a.flush_time
+        .render_prometheus(out, "arca_gateway_access_flush_seconds", "");
+}
+
 fn render_device_space(out: &mut String, space: Option<(u64, u64)>) {
     use std::fmt::Write as _;
     let (free, total) = space.unwrap_or((0, 0));
@@ -5413,6 +5538,7 @@ mod metrics_registry {
         render_queue_and_txn_stats(&mut out, &Default::default());
         render_integrity_stats(&mut out, &Default::default());
         render_admission_stats(&mut out, &Default::default());
+        render_access_stats(&mut out, &Default::default());
         let s3 = arca_lake_gateway::requests::S3Stats::default();
         s3.record("PutObject", 200, 10, 0, Duration::from_millis(3));
         s3.record("", 403, 0, 0, Duration::from_millis(1));

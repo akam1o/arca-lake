@@ -102,6 +102,8 @@ pub struct ClusterConfig {
     /// tiering sees no reads from this gateway (objects it serves look
     /// unread: candidates for demotion once a lower tier exists).
     pub record_access: bool,
+    /// How reads are recorded when `record_access` is on (ADR-0034).
+    pub access: super::access::AccessConfig,
 }
 
 /// Fault-injection points in the write path (tests only).
@@ -139,6 +141,8 @@ pub struct ClusterBackend<S> {
     fault: Arc<Mutex<Option<FaultPoint>>>,
     pub(super) cache_stats: Arc<CacheStats>,
     pub(super) cache_state: Arc<CacheState>,
+    /// Reads recorded for tiering, flushed in batches (ADR-0034).
+    pub(super) access: Arc<super::access::AccessTable>,
     pub(super) put_stats: Arc<PutStats>,
     pub(super) pop_queue: Arc<PopulationQueue>,
     pub(super) integrity: Arc<IntegrityState>,
@@ -628,6 +632,7 @@ impl<S> Clone for ClusterBackend<S> {
             fault: Arc::clone(&self.fault),
             cache_stats: Arc::clone(&self.cache_stats),
             cache_state: Arc::clone(&self.cache_state),
+            access: Arc::clone(&self.access),
         }
     }
 }
@@ -680,6 +685,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// # Errors
     ///
     /// Metadata errors or an invalid profile.
+    #[allow(clippy::too_many_lines)]
     pub async fn new(meta: Arc<S>, cfg: ClusterConfig) -> Result<Self, MetaError> {
         cfg.profile
             .validate()
@@ -756,6 +762,10 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             clients.clone(),
         );
         note_node_ids(&clients, &map);
+        let access_table = Arc::new(super::access::AccessTable::new(cfg.access.clone()));
+        if cfg.record_access && !cfg.access.legacy {
+            super::access::spawn_flusher(Arc::clone(&meta), &access_table);
+        }
         let pop_queue = Arc::new(PopulationQueue::new(
             clients.clone(),
             permits,
@@ -785,6 +795,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             integrity: Arc::new(IntegrityState::default()),
             put_stats: Arc::new(PutStats::default()),
             cache_state: Arc::new(CacheState::with_population_permits(permits)),
+            access: access_table,
         })
     }
 
@@ -978,6 +989,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// are dropped and counted. Call after the HTTP server has stopped.
     pub async fn shutdown(&self) {
         self.pop_queue.shutdown().await;
+        self.access.shutdown().await;
+    }
+
+    /// Counters and state of the access-record table (ADR-0034).
+    #[must_use]
+    pub fn access_stats(&self) -> super::access::AccessStatsSnapshot {
+        self.access.snapshot(now_ms())
     }
 }
 
