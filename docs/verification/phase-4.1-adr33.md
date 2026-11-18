@@ -4,7 +4,10 @@ Status: measured. Reconciliation at 10⁶ objects: pass 2,733 s → 146 s
 (A/B, 3 runs per arm at 10⁵ and 10⁶); reclaim pass: 2.74 → 0.55 ms per
 record, capacity back 492 s → 114 s (3 runs per arm); retained bytes
 level for an hour at 10⁶ under sustained deletes (§4b; at a rate below
-the reclaim pass's capacity, see §6). Code: commits `f632905`, `0304151`.
+the reclaim pass's capacity, see §6). The reclaim-at-capacity run (§4c)
+is **incomplete**: the load host stopped answering during its pressure
+phase; its partial results are recorded, no conclusion is drawn from
+them. Code: commits `f632905`, `0304151`.
 
 ## 1. Change
 
@@ -159,6 +162,96 @@ pass: it is below the base code's measured capacity too (206–467 records
 per second, §4), so this run shows the level at 10⁶ objects, not a
 difference between the arms.
 
+## 4c. Reclaim at capacity (incomplete)
+
+**Incomplete. The run did not finish and is not a result of the
+criterion.** About 24 minutes into its capacity-pressure phase the host
+running FoundationDB, the controller and the load generator stopped
+answering (no ping, no ARP resolution, from the client machine and from
+the storage host; between 00:13:40 and 00:14:10 UTC, from the last
+FoundationDB sample and the gateway's last request). Its cause is not
+known (no access to the host's console or hypervisor); whether this
+run's load contributed is not known either. The storage nodes and the
+gateway, on the other host, were stopped cleanly afterwards with their
+data, logs and metrics kept (outside the repository). The drain phase,
+the recovery of admission and the final verify of every key did not run.
+
+Plan: on the 10⁶-object cluster of §3 (after §4b), the ADR-0033
+controller with its defaults; PUT/DELETE churn (half each) over 50,000
+further 1 KiB keys at concurrency 8, 16 and 32 (20 min each, 11 GiB
+allotments); the nodes restarted one at a time on allotments computed to
+leave about 15 % usable free (10.45 GB each), then churn at 16 for 30
+min; a 20 min drain; a verify of every key. Samples every 15 s: the
+nodes' retained bytes, waiting records, capacity and damage, the
+controller's GC and reclaim progress and passes, the gateway's admission
+state and refusals, FoundationDB's counters. Sanitized aggregates and a
+per-minute series: `benchmarks/linux/results/phase41-adr33/capacity-incomplete.json`.
+Figures below marked ¹ come from the 15 s samples, the nodes' and the
+gateway's logs and the run's settings, kept outside the repository with
+the rest of the evidence; the others are in that file.
+
+Measured while the host answered:
+
+| Phase | Reclaimed | GC | Retained bytes | Gateway refusals |
+| --- | --- | --- | --- | --- |
+| churn c8 (20 min) | 1.4 records/s (records still inside their retention) | 44 generations/s | 0 → 158 MB | 0 |
+| churn c16 (20 min) | 213 records/s | 69 generations/s | 158 → 151 MB (max 217) | 0 |
+| churn c32 (20 min) | 126 records/s | 80 generations/s | 160 → 168 MB (max 242) | 0 |
+| capacity pressure (24 of 30 min) | 107 records/s | 71 generations/s | 241 → 261 MB (max 360) | about 1.59 million |
+
+Capacity pressure phase:
+
+- Usable free 12.7 % → 12.0 % (allotments of 10.45 GB ¹). The gateway's
+  state was write rejected in 74 of the 88 samples of 15 s and throttled
+  in the other 14; reason
+  "no group has room": a group's fullest member had less headroom than
+  64 of the largest shards (8 MiB / k = 512 MiB for the replicated
+  groups).
+- Reclaim and GC kept working (GC backlog 83 → 5 MB; longest reclaim
+  pass 592 s, during the node restarts); a stable return of writes was
+  not observed.
+- The three ways capacity comes back moved differently (per node, mean
+  of the four):
+  1. *logical release* (records reclaimed, live data): live 0.93 →
+     0.86 GB; retained bytes 241 → 261 MB (records still inside their
+     600 s retention ¹ are not reclaimable);
+  2. *physical return* (compaction): allocated 3.93 → 4.20 GB; each node
+     reported about 3 GB "reclaimable" ¹ (garbage in segments awaiting
+     compaction); the nodes' logs show compaction running ¹ (segments of
+     about 220 MB rewritten, about 50,000 live records each) until the
+     host stopped;
+  3. *admission headroom* (available − reserve): 574 → 573 MB, between
+     567 and 591 MB; available fell (6.50 → 6.24 GB) while the reserve
+     fell with the live record count (5.93 → 5.67 GB; the delete reserve
+     is proportional to it, `storage-node/src/capacity.rs`), which kept
+     the difference flat; the
+     fullest members stayed near the 537 MB a group needs.
+  Reclaim progressing is therefore not evidence that writes return:
+  that needs compaction to return space faster than writes and retained
+  records take it, which was not shown.
+- The load: the churn ran without retries (`--retries 0`) and without a
+  pause after a refusal: each of 16 workers sent its next operation as
+  soon as the last was refused (answered in 20–45 µs ¹), about 1,100
+  refusals per second over the phase (1.59 million in 24 min) and more
+  requests than that. That offered load was set by
+  refusal latency, not by the workload; the generator now paces itself
+  after a refusal by default (`benchmarks/README.md`), so a rerun is a
+  different load and not comparable sample for sample.
+
+Safety, as observed (not a final check): 0 integrity violations in every
+churn and probe run that finished; node damage 0; reclaim refusals 0;
+855 reclaim errors, all while the storage nodes were being restarted
+one at a time (none after).
+
+Client effect (not isolated): GET at concurrency 4 went from 655 ops/s
+(p99 25 ms) on the idle cluster to 81 ops/s (p99 224 ms) during churn at
+16, PUT at concurrency 2 from 54 to 7 ops/s; the churn is itself client
+load, so this is not the effect of reconciliation, reclaim or compaction
+alone.
+
+Reconciliation is not a source of pile-up here: a pass starts an
+interval after the previous one ended, so passes do not accumulate.
+
 ## 5. Not verified
 
 - The settle time on a cluster with rebalancing enabled (this harness
@@ -171,6 +264,11 @@ difference between the arms.
   §4b holds the level at 149 per second. A run at or near the capacity,
   where GC (about 330 generations per second in §4's GC stages, not
   measured as a limit) may be the first limit, is open.
+- The criterion's hour at the reclaim pass's capacity (§4c incomplete):
+  a stable return from capacity pressure; retained bytes and allocated
+  capacity converging; the final integrity of every key after it; the
+  separate effects of reconciliation, reclaim and compaction on client
+  latency.
 - The slice-cancellation path of the parallel pairs (a fatal error while
   other pairs of its slice run) is covered by code analysis and the
   reviews, not by a test.
@@ -181,6 +279,6 @@ difference between the arms.
 | --- | --- |
 | Reconciliation cycle consistent with the minimum orphan age and the settle time | Met (measured): at 10⁶ the cycle is 146 s + 300 s interval, inside 900 s and 1,500 s; the settle time now also follows the measured cycle |
 | Bounded pass resumes and covers every pair | Unchanged cursor and budget semantics, now per slice of 8 pairs; `background_cursor` tests (budgets of 1 and 4 pairs, leader changes) and the sweep simulator pass with 4 pairs at once; no new budget |
-| Reclaim rate measured; retained bytes level ≥ 1 h at 10⁶ at that rate | Partly: rate measured on bursts (§4); level for an hour at 10⁶ (§4b) but at a lower rate than the capacity (§5) |
+| Reclaim rate measured; retained bytes level ≥ 1 h at 10⁶ at that rate | **Not met**: rate measured on bursts (§4); level for an hour at 10⁶ (§4b) at a lower rate than the capacity; the run at capacity (§4c) incomplete |
 | R-94(b) tests and model seeds unchanged | Met |
 | Two independent reviews | Met (two rounds each; no High; Medium fixed) |

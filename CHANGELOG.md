@@ -32,6 +32,12 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
   `arca_controller_rebalance_settle_seconds`.
 - `bench-cluster.sh`: `CTL_BIN` and `restart-controller` (controller A/B
   on one populated cluster).
+- `arcabench` retry options: `--retry-max-time-ms`, `--retry-base-ms`,
+  `--retry-max-delay-ms`, `--retry-jitter`, `--retry-honor-retry-after`,
+  `--retry-max-concurrency`, `--retry-max-rate`, `--retry-burst`,
+  `--reject-pause`; the summary separates logical operations from
+  requests and HTTP attempts (`requests`, `ops_rejected`,
+  `retry_policy`).
 
 ### Changed (Phase 4.1)
 
@@ -47,6 +53,14 @@ will follow [Semantic Versioning](https://semver.org/) once it has releases.
 - Rebalancing's settle time is at least the measured reconcile cycle plus
   the reconcile interval and the minimum orphan age (never shorter than
   `--rebalance-settle-secs`).
+- `arcabench`: a worker whose operation ended refused (`503`) now waits a
+  growing backoff before its next operation (`--reject-pause on`, the
+  default; `off` restores the earlier behaviour), and `--retries` uses
+  exponential backoff with full jitter from 100 ms to 3.2 s (was 200 ms
+  doubling, no jitter); every wait ends at the run's deadline. Runs under
+  refusal are therefore a different load from earlier ones.
+- ADR-0034 (access records at scale) accepted as a design; not
+  implemented.
 - `deny.toml` ignores RUSTSEC-2026-0543 (chrono unmaintained, only through
   s3s 0.17; R-115); every other advisory still fails the check.
 

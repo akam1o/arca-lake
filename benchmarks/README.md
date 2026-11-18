@@ -72,6 +72,40 @@ Results are written by criterion to `target/criterion/`.
   correction); failed requests are counted by class, not in the
   histogram. `nodebench`: one storage node's `PutShard`/`GetShard` per
   size and concurrency (reads hit shards just written: page cache).
+  Refusals (Phase 4.1, `arcabench/src/retry.rs`): a `503` is retried only
+  with `--retries N` (exponential backoff from `--retry-base-ms` to
+  `--retry-max-delay-ms`, `--retry-jitter none|full|equal`,
+  `--retry-max-time-ms` from the first refusal, `--retry-honor-retry-after`;
+  over the process `--retry-max-concurrency` retries in flight and
+  `--retry-max-rate`/`--retry-burst` retries per second; a retry a limit
+  would delay past the time budget is not sent). A worker whose operation
+  ended refused waits the same backoff before its next one
+  (`--reject-pause on`, the default; `off`: at once, the Phase 4.0
+  behaviour, under which a refusing cluster sees the whole concurrency as
+  a stream of requests). Every wait ends at the run's deadline. The
+  summary separates logical operations (`ops`, `ops_rejected`) from the
+  requests they made and the HTTP attempts those took (`requests`:
+  `requests`, `http_attempts`, `retries`, `retryable_failures`,
+  `non_retryable_failures`, `retry_exhausted`, `retry_denied_*`,
+  `retry_wait_us_*`, `reject_pauses`; the measured window, as `ops`;
+  `requests_whole_run` and `ops_rejected_whole_run` include warm-up and
+  drain) and records the policy (`retry_policy`). Operations still
+  waiting or in flight at the deadline are ended and counted in
+  `ops_cancelled`; their latencies are not in `ops` (with retries or
+  pacing, report it next to the percentiles). Ending them leaves work on
+  the server: a PUT whose body was sent may still commit (the key's
+  version stays pending, so a later verify accepts either outcome), and
+  a multipart upload cut between its start and its completion stays
+  incomplete until aborted; quiesce between runs of a series. Window
+  boundaries are taken by timers, not per request: ratios between
+  `ops`, `ops_rejected` and `requests` are exact over long windows and
+  approximate at their edges. Every `503` is retried
+  alike, including the gateway's "outcome unknown" (R-114): a retried PUT
+  then sends the same version again, which the integrity check accepts;
+  in a versioned bucket it may leave one more version. A successful
+  operation's latency includes its retries' waits. Runs with pacing are
+  not the same load as Phase 4.0 or the first Phase 4.1 runs: compare
+  offered, attempted and completed rates, not one figure.
 - `arcabench/` `contend` (Phase 4.1): many writers on a few keys through
   S3 (every request and retry attempt logged with its times and answer),
   then a check of what every gateway shows against the log: no

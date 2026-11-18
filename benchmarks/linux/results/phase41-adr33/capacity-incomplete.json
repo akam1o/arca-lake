@@ -1,0 +1,1809 @@
+{
+ "status": "incomplete: the load host stopped answering during the pressure phase; no drain, no final verify",
+ "sampling": "every 15 s; this file: phase aggregates and a per-minute series of the samples taken while the load host answered",
+ "phases": [
+  {
+   "phase": "start",
+   "minutes": 1.1,
+   "reclaimed_per_s": 0.0,
+   "gc_generations_per_s": 0.0,
+   "retained_mb": [
+    0,
+    0
+   ],
+   "retained_mb_max": 0,
+   "waiting_records": [
+    0,
+    0
+   ],
+   "gc_backlog_mb": [
+    0,
+    0
+   ],
+   "usable_free_pct": [
+    40.8,
+    40.8
+   ],
+   "per_node_allocated_gb": [
+    3.84,
+    3.84
+   ],
+   "per_node_live_gb": [
+    0.776,
+    0.776
+   ],
+   "per_node_headroom_mb_mean": [
+    2649,
+    2649
+   ],
+   "gateway_admission_states": [
+    0
+   ],
+   "gateway_rejected": 0,
+   "reclaim_errors_cumulative": 0,
+   "reclaim_refused_cumulative": 0,
+   "node_damaged_max": 0,
+   "longest_reclaim_pass_s": 0,
+   "fdb_tx_started_per_s": 56,
+   "fdb_tx_committed_per_s": 2,
+   "fdb_reads_per_s": 82074,
+   "per_node_available_gb": [
+    7.971,
+    7.971
+   ],
+   "per_node_reserved_gb": [
+    5.322,
+    5.322
+   ],
+   "per_node_headroom_mb_mean_range": [
+    2649,
+    2649
+   ],
+   "gateway_admission_state_samples_15s": {
+    "0": 5
+   }
+  },
+  {
+   "phase": "probe-idle",
+   "minutes": 5.1,
+   "reclaimed_per_s": 0.0,
+   "gc_generations_per_s": 0.0,
+   "retained_mb": [
+    0,
+    0
+   ],
+   "retained_mb_max": 0,
+   "waiting_records": [
+    0,
+    0
+   ],
+   "gc_backlog_mb": [
+    0,
+    1
+   ],
+   "usable_free_pct": [
+    40.8,
+    39.5
+   ],
+   "per_node_allocated_gb": [
+    3.842,
+    3.892
+   ],
+   "per_node_live_gb": [
+    0.776,
+    0.789
+   ],
+   "per_node_headroom_mb_mean": [
+    2646,
+    2545
+   ],
+   "gateway_admission_states": [
+    0
+   ],
+   "gateway_rejected": 0,
+   "reclaim_errors_cumulative": 0,
+   "reclaim_refused_cumulative": 0,
+   "node_damaged_max": 0,
+   "longest_reclaim_pass_s": 0,
+   "fdb_tx_started_per_s": 2170,
+   "fdb_tx_committed_per_s": 805,
+   "fdb_reads_per_s": 26681,
+   "per_node_available_gb": [
+    7.969,
+    7.919
+   ],
+   "per_node_reserved_gb": [
+    5.323,
+    5.373
+   ],
+   "per_node_headroom_mb_mean_range": [
+    2545,
+    2646
+   ],
+   "gateway_admission_state_samples_15s": {
+    "0": 20
+   }
+  },
+  {
+   "phase": "churn-c8",
+   "minutes": 19.9,
+   "reclaimed_per_s": 1.4,
+   "gc_generations_per_s": 43.6,
+   "retained_mb": [
+    0,
+    158
+   ],
+   "retained_mb_max": 158,
+   "waiting_records": [
+    0,
+    154194
+   ],
+   "gc_backlog_mb": [
+    1,
+    72
+   ],
+   "usable_free_pct": [
+    39.4,
+    39.7
+   ],
+   "per_node_allocated_gb": [
+    3.897,
+    3.605
+   ],
+   "per_node_live_gb": [
+    0.79,
+    0.901
+   ],
+   "per_node_headroom_mb_mean": [
+    2535,
+    2380
+   ],
+   "gateway_admission_states": [
+    0
+   ],
+   "gateway_rejected": 0,
+   "reclaim_errors_cumulative": 0,
+   "reclaim_refused_cumulative": 0,
+   "node_damaged_max": 0,
+   "longest_reclaim_pass_s": 3,
+   "fdb_tx_started_per_s": 893,
+   "fdb_tx_committed_per_s": 533,
+   "fdb_reads_per_s": 30144,
+   "per_node_available_gb": [
+    7.914,
+    8.202
+   ],
+   "per_node_reserved_gb": [
+    5.378,
+    5.822
+   ],
+   "per_node_headroom_mb_mean_range": [
+    2042,
+    2735
+   ],
+   "gateway_admission_state_samples_15s": {
+    "0": 75
+   }
+  },
+  {
+   "phase": "churn-c16",
+   "minutes": 20.0,
+   "reclaimed_per_s": 213.3,
+   "gc_generations_per_s": 69.3,
+   "retained_mb": [
+    158,
+    151
+   ],
+   "retained_mb_max": 217,
+   "waiting_records": [
+    154194,
+    147664
+   ],
+   "gc_backlog_mb": [
+    72,
+    76
+   ],
+   "usable_free_pct": [
+    39.6,
+    34.3
+   ],
+   "per_node_allocated_gb": [
+    3.612,
+    3.92
+   ],
+   "per_node_live_gb": [
+    0.902,
+    0.905
+   ],
+   "per_node_headroom_mb_mean": [
+    2367,
+    2048
+   ],
+   "gateway_admission_states": [
+    0
+   ],
+   "gateway_rejected": 0,
+   "reclaim_errors_cumulative": 0,
+   "reclaim_refused_cumulative": 0,
+   "node_damaged_max": 0,
+   "longest_reclaim_pass_s": 333,
+   "fdb_tx_started_per_s": 743,
+   "fdb_tx_committed_per_s": 387,
+   "fdb_reads_per_s": 29051,
+   "per_node_available_gb": [
+    8.195,
+    7.888
+   ],
+   "per_node_reserved_gb": [
+    5.829,
+    5.84
+   ],
+   "per_node_headroom_mb_mean_range": [
+    2048,
+    2367
+   ],
+   "gateway_admission_state_samples_15s": {
+    "0": 74
+   }
+  },
+  {
+   "phase": "churn-c32",
+   "minutes": 19.9,
+   "reclaimed_per_s": 125.9,
+   "gc_generations_per_s": 79.8,
+   "retained_mb": [
+    160,
+    168
+   ],
+   "retained_mb_max": 242,
+   "waiting_records": [
+    156065,
+    163721
+   ],
+   "gc_backlog_mb": [
+    76,
+    141
+   ],
+   "usable_free_pct": [
+    34.0,
+    29.9
+   ],
+   "per_node_allocated_gb": [
+    3.929,
+    4.03
+   ],
+   "per_node_live_gb": [
+    0.907,
+    0.958
+   ],
+   "per_node_headroom_mb_mean": [
+    2029,
+    1722
+   ],
+   "gateway_admission_states": [
+    0
+   ],
+   "gateway_rejected": 0,
+   "reclaim_errors_cumulative": 0,
+   "reclaim_refused_cumulative": 0,
+   "node_damaged_max": 0,
+   "longest_reclaim_pass_s": 333,
+   "fdb_tx_started_per_s": 1063,
+   "fdb_tx_committed_per_s": 611,
+   "fdb_reads_per_s": 27163,
+   "per_node_available_gb": [
+    7.878,
+    7.773
+   ],
+   "per_node_reserved_gb": [
+    5.849,
+    6.05
+   ],
+   "per_node_headroom_mb_mean_range": [
+    1579,
+    2029
+   ],
+   "gateway_admission_state_samples_15s": {
+    "0": 73
+   }
+  },
+  {
+   "phase": "restart-nodes-10446241687",
+   "minutes": 3.8,
+   "reclaimed_per_s": 628.5,
+   "gc_generations_per_s": 247.6,
+   "retained_mb": [
+    127,
+    236
+   ],
+   "retained_mb_max": 271,
+   "waiting_records": [
+    124084,
+    230783
+   ],
+   "gc_backlog_mb": [
+    141,
+    83
+   ],
+   "usable_free_pct": [
+    30.2,
+    12.7
+   ],
+   "per_node_allocated_gb": [
+    3.013,
+    3.93
+   ],
+   "per_node_live_gb": [
+    0.717,
+    0.928
+   ],
+   "per_node_headroom_mb_mean": [
+    1308,
+    574
+   ],
+   "gateway_admission_states": [
+    0,
+    1,
+    3
+   ],
+   "gateway_rejected": 0,
+   "reclaim_errors_cumulative": 855,
+   "reclaim_refused_cumulative": 0,
+   "node_damaged_max": 0,
+   "longest_reclaim_pass_s": 592,
+   "fdb_tx_started_per_s": 780,
+   "fdb_tx_committed_per_s": 250,
+   "fdb_reads_per_s": 4085,
+   "per_node_available_gb": [
+    5.84,
+    6.507
+   ],
+   "per_node_reserved_gb": [
+    4.532,
+    5.933
+   ],
+   "per_node_headroom_mb_mean_range": [
+    472,
+    1393
+   ],
+   "gateway_admission_state_samples_15s": {
+    "0": 1,
+    "1": 2,
+    "3": 12
+   }
+  },
+  {
+   "phase": "pressure-c16",
+   "minutes": 24.0,
+   "reclaimed_per_s": 107.3,
+   "gc_generations_per_s": 71.4,
+   "retained_mb": [
+    241,
+    261
+   ],
+   "retained_mb_max": 360,
+   "waiting_records": [
+    235630,
+    255250
+   ],
+   "gc_backlog_mb": [
+    83,
+    5
+   ],
+   "usable_free_pct": [
+    12.7,
+    12.0
+   ],
+   "per_node_allocated_gb": [
+    3.933,
+    4.198
+   ],
+   "per_node_live_gb": [
+    0.928,
+    0.862
+   ],
+   "per_node_headroom_mb_mean": [
+    574,
+    573
+   ],
+   "gateway_admission_states": [
+    2,
+    3
+   ],
+   "gateway_rejected": 1590077,
+   "reclaim_errors_cumulative": 855,
+   "reclaim_refused_cumulative": 0,
+   "node_damaged_max": 0,
+   "longest_reclaim_pass_s": 592,
+   "fdb_tx_started_per_s": 2490,
+   "fdb_tx_committed_per_s": 1202,
+   "fdb_reads_per_s": 33115,
+   "per_node_available_gb": [
+    6.504,
+    6.238
+   ],
+   "per_node_reserved_gb": [
+    5.93,
+    5.665
+   ],
+   "per_node_headroom_mb_mean_range": [
+    567,
+    591
+   ],
+   "gateway_admission_state_samples_15s": {
+    "2": 14,
+    "3": 74
+   }
+  }
+ ],
+ "series": [
+  {
+   "t_s": 0,
+   "phase": "start",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 0.0,
+   "usable_free_pct": 40.82,
+   "per_node_allocated_gb": 3.84,
+   "per_node_headroom_mb_mean": 2649,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 65,
+   "phase": "start",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 0.0,
+   "usable_free_pct": 40.82,
+   "per_node_allocated_gb": 3.84,
+   "per_node_headroom_mb_mean": 2649,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 129,
+   "phase": "probe-idle",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 0.0,
+   "usable_free_pct": 40.54,
+   "per_node_allocated_gb": 3.852,
+   "per_node_headroom_mb_mean": 2626,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 193,
+   "phase": "probe-idle",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 0.1,
+   "usable_free_pct": 40.27,
+   "per_node_allocated_gb": 3.863,
+   "per_node_headroom_mb_mean": 2604,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 258,
+   "phase": "probe-idle",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 0.3,
+   "usable_free_pct": 40.02,
+   "per_node_allocated_gb": 3.873,
+   "per_node_headroom_mb_mean": 2584,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 322,
+   "phase": "probe-idle",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 0.5,
+   "usable_free_pct": 39.77,
+   "per_node_allocated_gb": 3.883,
+   "per_node_headroom_mb_mean": 2564,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 387,
+   "phase": "probe-idle",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 0.7,
+   "usable_free_pct": 39.54,
+   "per_node_allocated_gb": 3.892,
+   "per_node_headroom_mb_mean": 2545,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 451,
+   "phase": "churn-c8",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 2.9,
+   "usable_free_pct": 38.2,
+   "per_node_allocated_gb": 3.946,
+   "per_node_headroom_mb_mean": 2439,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 516,
+   "phase": "churn-c8",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 12.3,
+   "usable_free_pct": 37.15,
+   "per_node_allocated_gb": 3.987,
+   "per_node_headroom_mb_mean": 2357,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 580,
+   "phase": "churn-c8",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 16.7,
+   "usable_free_pct": 36.67,
+   "per_node_allocated_gb": 4.005,
+   "per_node_headroom_mb_mean": 2319,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 646,
+   "phase": "churn-c8",
+   "retained_mb": 0.0,
+   "waiting": 0,
+   "gc_backlog_mb": 21.4,
+   "usable_free_pct": 36.18,
+   "per_node_allocated_gb": 4.024,
+   "per_node_headroom_mb_mean": 2281,
+   "reclaimed_total": 0,
+   "gc_collected_total": 0,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 710,
+   "phase": "churn-c8",
+   "retained_mb": 0.1,
+   "waiting": 51,
+   "gc_backlog_mb": 29.4,
+   "usable_free_pct": 35.63,
+   "per_node_allocated_gb": 4.045,
+   "per_node_headroom_mb_mean": 2239,
+   "reclaimed_total": 0,
+   "gc_collected_total": 17,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 774,
+   "phase": "churn-c8",
+   "retained_mb": 0.3,
+   "waiting": 285,
+   "gc_backlog_mb": 36.1,
+   "usable_free_pct": 34.98,
+   "per_node_allocated_gb": 4.07,
+   "per_node_headroom_mb_mean": 2190,
+   "reclaimed_total": 0,
+   "gc_collected_total": 95,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 838,
+   "phase": "churn-c8",
+   "retained_mb": 0.6,
+   "waiting": 624,
+   "gc_backlog_mb": 42.9,
+   "usable_free_pct": 34.34,
+   "per_node_allocated_gb": 4.094,
+   "per_node_headroom_mb_mean": 2141,
+   "reclaimed_total": 0,
+   "gc_collected_total": 208,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 902,
+   "phase": "churn-c8",
+   "retained_mb": 1.1,
+   "waiting": 1080,
+   "gc_backlog_mb": 50.0,
+   "usable_free_pct": 33.68,
+   "per_node_allocated_gb": 4.119,
+   "per_node_headroom_mb_mean": 2092,
+   "reclaimed_total": 0,
+   "gc_collected_total": 360,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 966,
+   "phase": "churn-c8",
+   "retained_mb": 1.7,
+   "waiting": 1668,
+   "gc_backlog_mb": 57.1,
+   "usable_free_pct": 33.02,
+   "per_node_allocated_gb": 4.144,
+   "per_node_headroom_mb_mean": 2042,
+   "reclaimed_total": 0,
+   "gc_collected_total": 556,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1030,
+   "phase": "churn-c8",
+   "retained_mb": 3.3,
+   "waiting": 3255,
+   "gc_backlog_mb": 63.5,
+   "usable_free_pct": 41.54,
+   "per_node_allocated_gb": 3.606,
+   "per_node_headroom_mb_mean": 2562,
+   "reclaimed_total": 0,
+   "gc_collected_total": 1085,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1095,
+   "phase": "churn-c8",
+   "retained_mb": 15.6,
+   "waiting": 15255,
+   "gc_backlog_mb": 65.7,
+   "usable_free_pct": 44.02,
+   "per_node_allocated_gb": 3.442,
+   "per_node_headroom_mb_mean": 2708,
+   "reclaimed_total": 0,
+   "gc_collected_total": 5085,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1159,
+   "phase": "churn-c8",
+   "retained_mb": 27.9,
+   "waiting": 27255,
+   "gc_backlog_mb": 65.7,
+   "usable_free_pct": 43.56,
+   "per_node_allocated_gb": 3.46,
+   "per_node_headroom_mb_mean": 2671,
+   "reclaimed_total": 0,
+   "gc_collected_total": 9085,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1224,
+   "phase": "churn-c8",
+   "retained_mb": 62.2,
+   "waiting": 60783,
+   "gc_backlog_mb": 61.9,
+   "usable_free_pct": 42.98,
+   "per_node_allocated_gb": 3.482,
+   "per_node_headroom_mb_mean": 2626,
+   "reclaimed_total": 0,
+   "gc_collected_total": 20261,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1288,
+   "phase": "churn-c8",
+   "retained_mb": 78.1,
+   "waiting": 76230,
+   "gc_backlog_mb": 65.3,
+   "usable_free_pct": 42.35,
+   "per_node_allocated_gb": 3.507,
+   "per_node_headroom_mb_mean": 2577,
+   "reclaimed_total": 0,
+   "gc_collected_total": 25410,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1352,
+   "phase": "churn-c8",
+   "retained_mb": 101.7,
+   "waiting": 99279,
+   "gc_backlog_mb": 66.2,
+   "usable_free_pct": 41.74,
+   "per_node_allocated_gb": 3.53,
+   "per_node_headroom_mb_mean": 2530,
+   "reclaimed_total": 51,
+   "gc_collected_total": 33110,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1416,
+   "phase": "churn-c8",
+   "retained_mb": 114.7,
+   "waiting": 111978,
+   "gc_backlog_mb": 66.4,
+   "usable_free_pct": 41.12,
+   "per_node_allocated_gb": 3.553,
+   "per_node_headroom_mb_mean": 2484,
+   "reclaimed_total": 285,
+   "gc_collected_total": 37421,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1480,
+   "phase": "churn-c8",
+   "retained_mb": 140.5,
+   "waiting": 137238,
+   "gc_backlog_mb": 66.3,
+   "usable_free_pct": 40.52,
+   "per_node_allocated_gb": 3.576,
+   "per_node_headroom_mb_mean": 2438,
+   "reclaimed_total": 624,
+   "gc_collected_total": 45954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1545,
+   "phase": "churn-c8",
+   "retained_mb": 149.3,
+   "waiting": 145782,
+   "gc_backlog_mb": 69.5,
+   "usable_free_pct": 40.05,
+   "per_node_allocated_gb": 3.593,
+   "per_node_headroom_mb_mean": 2403,
+   "reclaimed_total": 1080,
+   "gc_collected_total": 48954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1610,
+   "phase": "churn-c16",
+   "retained_mb": 157.9,
+   "waiting": 154194,
+   "gc_backlog_mb": 71.8,
+   "usable_free_pct": 39.56,
+   "per_node_allocated_gb": 3.612,
+   "per_node_headroom_mb_mean": 2367,
+   "reclaimed_total": 1668,
+   "gc_collected_total": 51954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1676,
+   "phase": "churn-c16",
+   "retained_mb": 168.6,
+   "waiting": 164607,
+   "gc_backlog_mb": 77.5,
+   "usable_free_pct": 38.64,
+   "per_node_allocated_gb": 3.646,
+   "per_node_headroom_mb_mean": 2300,
+   "reclaimed_total": 3255,
+   "gc_collected_total": 55954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1743,
+   "phase": "churn-c16",
+   "retained_mb": 165.1,
+   "waiting": 161279,
+   "gc_backlog_mb": 83.5,
+   "usable_free_pct": 38.03,
+   "per_node_allocated_gb": 3.678,
+   "per_node_headroom_mb_mean": 2260,
+   "reclaimed_total": 15583,
+   "gc_collected_total": 58954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1808,
+   "phase": "churn-c16",
+   "retained_mb": 214.7,
+   "waiting": 209641,
+   "gc_backlog_mb": 75.4,
+   "usable_free_pct": 37.17,
+   "per_node_allocated_gb": 3.706,
+   "per_node_headroom_mb_mean": 2196,
+   "reclaimed_total": 15583,
+   "gc_collected_total": 75954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1873,
+   "phase": "churn-c16",
+   "retained_mb": 204.0,
+   "waiting": 199219,
+   "gc_backlog_mb": 78.5,
+   "usable_free_pct": 36.94,
+   "per_node_allocated_gb": 3.727,
+   "per_node_headroom_mb_mean": 2187,
+   "reclaimed_total": 15583,
+   "gc_collected_total": 78954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 1939,
+   "phase": "churn-c16",
+   "retained_mb": 193.0,
+   "waiting": 188449,
+   "gc_backlog_mb": 78.0,
+   "usable_free_pct": 36.98,
+   "per_node_allocated_gb": 3.732,
+   "per_node_headroom_mb_mean": 2194,
+   "reclaimed_total": 15583,
+   "gc_collected_total": 81954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2005,
+   "phase": "churn-c16",
+   "retained_mb": 182.6,
+   "waiting": 178277,
+   "gc_backlog_mb": 77.5,
+   "usable_free_pct": 37.11,
+   "per_node_allocated_gb": 3.731,
+   "per_node_headroom_mb_mean": 2206,
+   "reclaimed_total": 15583,
+   "gc_collected_total": 84954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2070,
+   "phase": "churn-c16",
+   "retained_mb": 187.8,
+   "waiting": 183429,
+   "gc_backlog_mb": 79.2,
+   "usable_free_pct": 36.56,
+   "per_node_allocated_gb": 3.75,
+   "per_node_headroom_mb_mean": 2166,
+   "reclaimed_total": 80433,
+   "gc_collected_total": 87954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2135,
+   "phase": "churn-c16",
+   "retained_mb": 181.3,
+   "waiting": 177018,
+   "gc_backlog_mb": 83.1,
+   "usable_free_pct": 36.45,
+   "per_node_allocated_gb": 3.764,
+   "per_node_headroom_mb_mean": 2161,
+   "reclaimed_total": 80433,
+   "gc_collected_total": 90954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2201,
+   "phase": "churn-c16",
+   "retained_mb": 171.3,
+   "waiting": 167326,
+   "gc_backlog_mb": 82.7,
+   "usable_free_pct": 36.41,
+   "per_node_allocated_gb": 3.773,
+   "per_node_headroom_mb_mean": 2163,
+   "reclaimed_total": 80433,
+   "gc_collected_total": 93954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2266,
+   "phase": "churn-c16",
+   "retained_mb": 161.6,
+   "waiting": 157815,
+   "gc_backlog_mb": 82.2,
+   "usable_free_pct": 36.38,
+   "per_node_allocated_gb": 3.781,
+   "per_node_headroom_mb_mean": 2166,
+   "reclaimed_total": 80433,
+   "gc_collected_total": 96954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2332,
+   "phase": "churn-c16",
+   "retained_mb": 150.5,
+   "waiting": 146971,
+   "gc_backlog_mb": 81.6,
+   "usable_free_pct": 36.35,
+   "per_node_allocated_gb": 3.791,
+   "per_node_headroom_mb_mean": 2168,
+   "reclaimed_total": 80433,
+   "gc_collected_total": 99954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2397,
+   "phase": "churn-c16",
+   "retained_mb": 148.0,
+   "waiting": 144568,
+   "gc_backlog_mb": 81.2,
+   "usable_free_pct": 35.92,
+   "per_node_allocated_gb": 3.808,
+   "per_node_headroom_mb_mean": 2139,
+   "reclaimed_total": 164294,
+   "gc_collected_total": 102954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2462,
+   "phase": "churn-c16",
+   "retained_mb": 190.0,
+   "waiting": 185595,
+   "gc_backlog_mb": 77.0,
+   "usable_free_pct": 35.16,
+   "per_node_allocated_gb": 3.843,
+   "per_node_headroom_mb_mean": 2088,
+   "reclaimed_total": 164294,
+   "gc_collected_total": 119954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2528,
+   "phase": "churn-c16",
+   "retained_mb": 179.4,
+   "waiting": 175223,
+   "gc_backlog_mb": 76.5,
+   "usable_free_pct": 35.12,
+   "per_node_allocated_gb": 3.852,
+   "per_node_headroom_mb_mean": 2090,
+   "reclaimed_total": 164294,
+   "gc_collected_total": 122954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2594,
+   "phase": "churn-c16",
+   "retained_mb": 170.1,
+   "waiting": 166084,
+   "gc_backlog_mb": 75.9,
+   "usable_free_pct": 34.93,
+   "per_node_allocated_gb": 3.87,
+   "per_node_headroom_mb_mean": 2082,
+   "reclaimed_total": 164294,
+   "gc_collected_total": 125954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2660,
+   "phase": "churn-c16",
+   "retained_mb": 160.7,
+   "waiting": 156888,
+   "gc_backlog_mb": 75.4,
+   "usable_free_pct": 34.86,
+   "per_node_allocated_gb": 3.881,
+   "per_node_headroom_mb_mean": 2082,
+   "reclaimed_total": 164294,
+   "gc_collected_total": 128954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2726,
+   "phase": "churn-c16",
+   "retained_mb": 151.5,
+   "waiting": 147956,
+   "gc_backlog_mb": 74.9,
+   "usable_free_pct": 34.63,
+   "per_node_allocated_gb": 3.901,
+   "per_node_headroom_mb_mean": 2072,
+   "reclaimed_total": 164294,
+   "gc_collected_total": 131954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2792,
+   "phase": "churn-c16",
+   "retained_mb": 151.2,
+   "waiting": 147664,
+   "gc_backlog_mb": 75.7,
+   "usable_free_pct": 34.38,
+   "per_node_allocated_gb": 3.917,
+   "per_node_headroom_mb_mean": 2054,
+   "reclaimed_total": 257198,
+   "gc_collected_total": 134954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2857,
+   "phase": "churn-c32",
+   "retained_mb": 142.9,
+   "waiting": 139511,
+   "gc_backlog_mb": 77.1,
+   "usable_free_pct": 32.53,
+   "per_node_allocated_gb": 3.991,
+   "per_node_headroom_mb_mean": 1938,
+   "reclaimed_total": 289351,
+   "gc_collected_total": 142954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2922,
+   "phase": "churn-c32",
+   "retained_mb": 194.4,
+   "waiting": 189839,
+   "gc_backlog_mb": 87.0,
+   "usable_free_pct": 30.81,
+   "per_node_allocated_gb": 4.066,
+   "per_node_headroom_mb_mean": 1813,
+   "reclaimed_total": 289351,
+   "gc_collected_total": 160954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 2987,
+   "phase": "churn-c32",
+   "retained_mb": 218.2,
+   "waiting": 213074,
+   "gc_backlog_mb": 89.6,
+   "usable_free_pct": 29.22,
+   "per_node_allocated_gb": 4.126,
+   "per_node_headroom_mb_mean": 1706,
+   "reclaimed_total": 299788,
+   "gc_collected_total": 170954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3052,
+   "phase": "churn-c32",
+   "retained_mb": 235.5,
+   "waiting": 230000,
+   "gc_backlog_mb": 98.9,
+   "usable_free_pct": 28.17,
+   "per_node_allocated_gb": 4.172,
+   "per_node_headroom_mb_mean": 1639,
+   "reclaimed_total": 299788,
+   "gc_collected_total": 180954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3118,
+   "phase": "churn-c32",
+   "retained_mb": 225.6,
+   "waiting": 220320,
+   "gc_backlog_mb": 100.8,
+   "usable_free_pct": 27.68,
+   "per_node_allocated_gb": 4.203,
+   "per_node_headroom_mb_mean": 1612,
+   "reclaimed_total": 299788,
+   "gc_collected_total": 183954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3184,
+   "phase": "churn-c32",
+   "retained_mb": 216.7,
+   "waiting": 211633,
+   "gc_backlog_mb": 103.0,
+   "usable_free_pct": 27.22,
+   "per_node_allocated_gb": 4.232,
+   "per_node_headroom_mb_mean": 1586,
+   "reclaimed_total": 299788,
+   "gc_collected_total": 186954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3249,
+   "phase": "churn-c32",
+   "retained_mb": 211.0,
+   "waiting": 206026,
+   "gc_backlog_mb": 105.8,
+   "usable_free_pct": 32.65,
+   "per_node_allocated_gb": 3.908,
+   "per_node_headroom_mb_mean": 1899,
+   "reclaimed_total": 360836,
+   "gc_collected_total": 188954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3315,
+   "phase": "churn-c32",
+   "retained_mb": 213.6,
+   "waiting": 208577,
+   "gc_backlog_mb": 116.3,
+   "usable_free_pct": 33.76,
+   "per_node_allocated_gb": 3.826,
+   "per_node_headroom_mb_mean": 1955,
+   "reclaimed_total": 360836,
+   "gc_collected_total": 191954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3381,
+   "phase": "churn-c32",
+   "retained_mb": 202.5,
+   "waiting": 197737,
+   "gc_backlog_mb": 118.3,
+   "usable_free_pct": 33.5,
+   "per_node_allocated_gb": 3.843,
+   "per_node_headroom_mb_mean": 1941,
+   "reclaimed_total": 360836,
+   "gc_collected_total": 193954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3447,
+   "phase": "churn-c32",
+   "retained_mb": 193.7,
+   "waiting": 189182,
+   "gc_backlog_mb": 120.1,
+   "usable_free_pct": 33.27,
+   "per_node_allocated_gb": 3.859,
+   "per_node_headroom_mb_mean": 1929,
+   "reclaimed_total": 360836,
+   "gc_collected_total": 196954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3514,
+   "phase": "churn-c32",
+   "retained_mb": 231.1,
+   "waiting": 225682,
+   "gc_backlog_mb": 118.1,
+   "usable_free_pct": 31.91,
+   "per_node_allocated_gb": 3.903,
+   "per_node_headroom_mb_mean": 1834,
+   "reclaimed_total": 407180,
+   "gc_collected_total": 210954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3580,
+   "phase": "churn-c32",
+   "retained_mb": 233.2,
+   "waiting": 227737,
+   "gc_backlog_mb": 129.5,
+   "usable_free_pct": 30.98,
+   "per_node_allocated_gb": 3.944,
+   "per_node_headroom_mb_mean": 1776,
+   "reclaimed_total": 407180,
+   "gc_collected_total": 215954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3645,
+   "phase": "churn-c32",
+   "retained_mb": 224.4,
+   "waiting": 219153,
+   "gc_backlog_mb": 131.1,
+   "usable_free_pct": 30.93,
+   "per_node_allocated_gb": 3.957,
+   "per_node_headroom_mb_mean": 1775,
+   "reclaimed_total": 407180,
+   "gc_collected_total": 218954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3712,
+   "phase": "churn-c32",
+   "retained_mb": 216.1,
+   "waiting": 210998,
+   "gc_backlog_mb": 132.7,
+   "usable_free_pct": 30.8,
+   "per_node_allocated_gb": 3.967,
+   "per_node_headroom_mb_mean": 1768,
+   "reclaimed_total": 407180,
+   "gc_collected_total": 221954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3779,
+   "phase": "churn-c32",
+   "retained_mb": 208.1,
+   "waiting": 203192,
+   "gc_backlog_mb": 134.4,
+   "usable_free_pct": 28.57,
+   "per_node_allocated_gb": 4.097,
+   "per_node_headroom_mb_mean": 1641,
+   "reclaimed_total": 407180,
+   "gc_collected_total": 224954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3846,
+   "phase": "churn-c32",
+   "retained_mb": 196.1,
+   "waiting": 191490,
+   "gc_backlog_mb": 136.4,
+   "usable_free_pct": 30.51,
+   "per_node_allocated_gb": 3.988,
+   "per_node_headroom_mb_mean": 1754,
+   "reclaimed_total": 407180,
+   "gc_collected_total": 226954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3913,
+   "phase": "churn-c32",
+   "retained_mb": 184.6,
+   "waiting": 180254,
+   "gc_backlog_mb": 138.4,
+   "usable_free_pct": 30.31,
+   "per_node_allocated_gb": 4.003,
+   "per_node_headroom_mb_mean": 1744,
+   "reclaimed_total": 407180,
+   "gc_collected_total": 228954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 3980,
+   "phase": "churn-c32",
+   "retained_mb": 175.8,
+   "waiting": 171703,
+   "gc_backlog_mb": 140.5,
+   "usable_free_pct": 30.08,
+   "per_node_allocated_gb": 4.018,
+   "per_node_headroom_mb_mean": 1732,
+   "reclaimed_total": 407180,
+   "gc_collected_total": 231954,
+   "gw_admission_state": 0,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 4050,
+   "phase": "restart-nodes-10446241687",
+   "retained_mb": 167.4,
+   "waiting": 163503,
+   "gc_backlog_mb": 140.7,
+   "usable_free_pct": 25.68,
+   "per_node_allocated_gb": 4.025,
+   "per_node_headroom_mb_mean": 1393,
+   "reclaimed_total": 407180,
+   "gc_collected_total": 234240,
+   "gw_admission_state": 1,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 4119,
+   "phase": "restart-nodes-10446241687",
+   "retained_mb": 171.1,
+   "waiting": 167042,
+   "gc_backlog_mb": 137.0,
+   "usable_free_pct": 16.1,
+   "per_node_allocated_gb": 3.98,
+   "per_node_headroom_mb_mean": 765,
+   "reclaimed_total": 407180,
+   "gc_collected_total": 237905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 4183,
+   "phase": "restart-nodes-10446241687",
+   "retained_mb": 271.4,
+   "waiting": 265080,
+   "gc_backlog_mb": 103.2,
+   "usable_free_pct": 11.82,
+   "per_node_allocated_gb": 3.881,
+   "per_node_headroom_mb_mean": 522,
+   "reclaimed_total": 551733,
+   "gc_collected_total": 270905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 4248,
+   "phase": "restart-nodes-10446241687",
+   "retained_mb": 238.6,
+   "waiting": 232985,
+   "gc_backlog_mb": 82.7,
+   "usable_free_pct": 12.74,
+   "per_node_allocated_gb": 3.926,
+   "per_node_headroom_mb_mean": 574,
+   "reclaimed_total": 551733,
+   "gc_collected_total": 290905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 0
+  },
+  {
+   "t_s": 4312,
+   "phase": "pressure-c16",
+   "retained_mb": 244.2,
+   "waiting": 238468,
+   "gc_backlog_mb": 87.5,
+   "usable_free_pct": 12.69,
+   "per_node_allocated_gb": 3.935,
+   "per_node_headroom_mb_mean": 574,
+   "reclaimed_total": 653345,
+   "gc_collected_total": 295905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 48433
+  },
+  {
+   "t_s": 4378,
+   "phase": "pressure-c16",
+   "retained_mb": 250.7,
+   "waiting": 244873,
+   "gc_backlog_mb": 94.3,
+   "usable_free_pct": 12.68,
+   "per_node_allocated_gb": 3.938,
+   "per_node_headroom_mb_mean": 573,
+   "reclaimed_total": 653345,
+   "gc_collected_total": 298905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 103317
+  },
+  {
+   "t_s": 4445,
+   "phase": "pressure-c16",
+   "retained_mb": 243.7,
+   "waiting": 238033,
+   "gc_backlog_mb": 95.3,
+   "usable_free_pct": 12.63,
+   "per_node_allocated_gb": 3.954,
+   "per_node_headroom_mb_mean": 573,
+   "reclaimed_total": 653345,
+   "gc_collected_total": 301905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 175667
+  },
+  {
+   "t_s": 4510,
+   "phase": "pressure-c16",
+   "retained_mb": 247.6,
+   "waiting": 241777,
+   "gc_backlog_mb": 93.5,
+   "usable_free_pct": 12.6,
+   "per_node_allocated_gb": 3.96,
+   "per_node_headroom_mb_mean": 573,
+   "reclaimed_total": 677036,
+   "gc_collected_total": 304905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 241985
+  },
+  {
+   "t_s": 4576,
+   "phase": "pressure-c16",
+   "retained_mb": 245.6,
+   "waiting": 239827,
+   "gc_backlog_mb": 90.8,
+   "usable_free_pct": 12.56,
+   "per_node_allocated_gb": 3.971,
+   "per_node_headroom_mb_mean": 572,
+   "reclaimed_total": 677036,
+   "gc_collected_total": 307905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 316255
+  },
+  {
+   "t_s": 4641,
+   "phase": "pressure-c16",
+   "retained_mb": 290.6,
+   "waiting": 283747,
+   "gc_backlog_mb": 77.5,
+   "usable_free_pct": 12.53,
+   "per_node_allocated_gb": 3.973,
+   "per_node_headroom_mb_mean": 571,
+   "reclaimed_total": 690527,
+   "gc_collected_total": 322905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 422392
+  },
+  {
+   "t_s": 4707,
+   "phase": "pressure-c16",
+   "retained_mb": 299.7,
+   "waiting": 292704,
+   "gc_backlog_mb": 67.3,
+   "usable_free_pct": 12.48,
+   "per_node_allocated_gb": 3.987,
+   "per_node_headroom_mb_mean": 570,
+   "reclaimed_total": 690527,
+   "gc_collected_total": 330905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 525676
+  },
+  {
+   "t_s": 4771,
+   "phase": "pressure-c16",
+   "retained_mb": 341.2,
+   "waiting": 333231,
+   "gc_backlog_mb": 56.1,
+   "usable_free_pct": 12.44,
+   "per_node_allocated_gb": 3.989,
+   "per_node_headroom_mb_mean": 569,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 345905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 634028
+  },
+  {
+   "t_s": 4838,
+   "phase": "pressure-c16",
+   "retained_mb": 355.3,
+   "waiting": 346959,
+   "gc_backlog_mb": 43.8,
+   "usable_free_pct": 12.39,
+   "per_node_allocated_gb": 4.002,
+   "per_node_headroom_mb_mean": 568,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 353905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 735647
+  },
+  {
+   "t_s": 4905,
+   "phase": "pressure-c16",
+   "retained_mb": 350.8,
+   "waiting": 342574,
+   "gc_backlog_mb": 39.7,
+   "usable_free_pct": 12.34,
+   "per_node_allocated_gb": 4.018,
+   "per_node_headroom_mb_mean": 568,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 357905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 824916
+  },
+  {
+   "t_s": 4971,
+   "phase": "pressure-c16",
+   "retained_mb": 344.9,
+   "waiting": 336845,
+   "gc_backlog_mb": 36.6,
+   "usable_free_pct": 12.28,
+   "per_node_allocated_gb": 4.034,
+   "per_node_headroom_mb_mean": 567,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 361905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 902308
+  },
+  {
+   "t_s": 5038,
+   "phase": "pressure-c16",
+   "retained_mb": 339.1,
+   "waiting": 331148,
+   "gc_backlog_mb": 33.5,
+   "usable_free_pct": 12.23,
+   "per_node_allocated_gb": 4.051,
+   "per_node_headroom_mb_mean": 567,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 364905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 980390
+  },
+  {
+   "t_s": 5106,
+   "phase": "pressure-c16",
+   "retained_mb": 333.1,
+   "waiting": 325273,
+   "gc_backlog_mb": 30.5,
+   "usable_free_pct": 12.36,
+   "per_node_allocated_gb": 4.058,
+   "per_node_headroom_mb_mean": 575,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 368905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 1056244
+  },
+  {
+   "t_s": 5172,
+   "phase": "pressure-c16",
+   "retained_mb": 327.0,
+   "waiting": 319369,
+   "gc_backlog_mb": 27.4,
+   "usable_free_pct": 12.37,
+   "per_node_allocated_gb": 4.072,
+   "per_node_headroom_mb_mean": 577,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 371905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 1129415
+  },
+  {
+   "t_s": 5238,
+   "phase": "pressure-c16",
+   "retained_mb": 321.8,
+   "waiting": 314238,
+   "gc_backlog_mb": 21.5,
+   "usable_free_pct": 12.26,
+   "per_node_allocated_gb": 4.09,
+   "per_node_headroom_mb_mean": 574,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 375905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 1209007
+  },
+  {
+   "t_s": 5306,
+   "phase": "pressure-c16",
+   "retained_mb": 318.8,
+   "waiting": 311292,
+   "gc_backlog_mb": 21.5,
+   "usable_free_pct": 12.21,
+   "per_node_allocated_gb": 4.105,
+   "per_node_headroom_mb_mean": 573,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 378905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 1314690
+  },
+  {
+   "t_s": 5373,
+   "phase": "pressure-c16",
+   "retained_mb": 315.5,
+   "waiting": 308080,
+   "gc_backlog_mb": 17.6,
+   "usable_free_pct": 12.21,
+   "per_node_allocated_gb": 4.12,
+   "per_node_headroom_mb_mean": 575,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 382905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 1420641
+  },
+  {
+   "t_s": 5439,
+   "phase": "pressure-c16",
+   "retained_mb": 312.7,
+   "waiting": 305366,
+   "gc_backlog_mb": 13.6,
+   "usable_free_pct": 12.42,
+   "per_node_allocated_gb": 4.131,
+   "per_node_headroom_mb_mean": 587,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 386905,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 1522924
+  },
+  {
+   "t_s": 5505,
+   "phase": "pressure-c16",
+   "retained_mb": 303.1,
+   "waiting": 296023,
+   "gc_backlog_mb": 9.5,
+   "usable_free_pct": 12.44,
+   "per_node_allocated_gb": 4.14,
+   "per_node_headroom_mb_mean": 590,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 389905,
+   "gw_admission_state": 2,
+   "gw_rejected_total": 1545010
+  },
+  {
+   "t_s": 5571,
+   "phase": "pressure-c16",
+   "retained_mb": 292.5,
+   "waiting": 285618,
+   "gc_backlog_mb": 6.5,
+   "usable_free_pct": 12.44,
+   "per_node_allocated_gb": 4.15,
+   "per_node_headroom_mb_mean": 591,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 392905,
+   "gw_admission_state": 2,
+   "gw_rejected_total": 1545010
+  },
+  {
+   "t_s": 5637,
+   "phase": "pressure-c16",
+   "retained_mb": 276.7,
+   "waiting": 270191,
+   "gc_backlog_mb": 3.3,
+   "usable_free_pct": 12.16,
+   "per_node_allocated_gb": 4.174,
+   "per_node_headroom_mb_mean": 579,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 394605,
+   "gw_admission_state": 2,
+   "gw_rejected_total": 1545010
+  },
+  {
+   "t_s": 5704,
+   "phase": "pressure-c16",
+   "retained_mb": 265.5,
+   "waiting": 259293,
+   "gc_backlog_mb": 5.4,
+   "usable_free_pct": 11.99,
+   "per_node_allocated_gb": 4.194,
+   "per_node_headroom_mb_mean": 573,
+   "reclaimed_total": 706180,
+   "gc_collected_total": 396654,
+   "gw_admission_state": 3,
+   "gw_rejected_total": 1584609
+  }
+ ],
+ "client_runs": {
+  "probe-idle-get": {
+   "workload": "get",
+   "concurrency": 4,
+   "measured_s": 300,
+   "ops": {
+    "get": {
+     "ok": 196353,
+     "ok_per_s": 654.5,
+     "errors": 0,
+     "p50_ms": 5.0,
+     "p99_ms": 25.3
+    }
+   },
+   "integrity_violations": 0,
+   "retries": 0
+  },
+  "probe-idle-put": {
+   "workload": "put",
+   "concurrency": 2,
+   "measured_s": 300,
+   "ops": {
+    "put": {
+     "ok": 16250,
+     "ok_per_s": 54.2,
+     "errors": 0,
+     "p50_ms": 36.1,
+     "p99_ms": 69.5
+    }
+   },
+   "integrity_violations": 0,
+   "retries": 0
+  },
+  "probe-loaded-get": {
+   "workload": "get",
+   "concurrency": 4,
+   "measured_s": 300,
+   "ops": {
+    "get": {
+     "ok": 24401,
+     "ok_per_s": 81.3,
+     "errors": 0,
+     "p50_ms": 16.7,
+     "p99_ms": 223.5
+    }
+   },
+   "integrity_violations": 0,
+   "retries": 0
+  },
+  "probe-loaded-put": {
+   "workload": "put",
+   "concurrency": 2,
+   "measured_s": 300,
+   "ops": {
+    "put": {
+     "ok": 2219,
+     "ok_per_s": 7.4,
+     "errors": 0,
+     "p50_ms": 338.8,
+     "p99_ms": 664.2
+    }
+   },
+   "integrity_violations": 0,
+   "retries": 0
+  },
+  "cap-c8": {
+   "workload": "mixed",
+   "concurrency": 8,
+   "measured_s": 1200,
+   "ops": {
+    "delete": {
+     "ok": 145965,
+     "ok_per_s": 121.6,
+     "errors": 0,
+     "p50_ms": 9.4,
+     "p99_ms": 43.2
+    },
+    "put": {
+     "ok": 146466,
+     "ok_per_s": 122.1,
+     "errors": 0,
+     "p50_ms": 54.8,
+     "p99_ms": 107.4
+    }
+   },
+   "integrity_violations": 0,
+   "retries": 0
+  },
+  "cap-c16": {
+   "workload": "mixed",
+   "concurrency": 16,
+   "measured_s": 1200,
+   "ops": {
+    "delete": {
+     "ok": 88798,
+     "ok_per_s": 74.0,
+     "errors": 0,
+     "p50_ms": 13.4,
+     "p99_ms": 64.2
+    },
+    "put": {
+     "ok": 88849,
+     "ok_per_s": 74.0,
+     "errors": 0,
+     "p50_ms": 83.0,
+     "p99_ms": 664.2
+    }
+   },
+   "integrity_violations": 0,
+   "retries": 0
+  },
+  "cap-c32": {
+   "workload": "mixed",
+   "concurrency": 32,
+   "measured_s": 1200,
+   "ops": {
+    "delete": {
+     "ok": 161239,
+     "ok_per_s": 134.4,
+     "errors": 0,
+     "p50_ms": 13.7,
+     "p99_ms": 59.3
+    },
+    "put": {
+     "ok": 160569,
+     "ok_per_s": 133.8,
+     "errors": 0,
+     "p50_ms": 89.9,
+     "p99_ms": 1006.7
+    }
+   },
+   "integrity_violations": 0,
+   "retries": 0
+  }
+ },
+ "client_runs_note": "cap-* : PUT/DELETE churn (half each) over 50,000 extra keys of 1 KiB, closed loop, no retries, no pause after a refusal; probe-*-get: GET of the populated keys at concurrency 4 (one read in ten checked); probe-*-put: PUT of fresh keys at concurrency 2; 'loaded' ran during the last 5 min of cap-c16. The pressure phase's churn (cap-pressure) has no summary: its generator ran on the host that stopped."
+}

@@ -49,6 +49,8 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 
+mod retry;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Workload {
     /// Create the buckets.
@@ -182,9 +184,41 @@ struct Args {
     /// Request timeout.
     #[arg(long, default_value_t = 60)]
     timeout_secs: u64,
-    /// Retries of a request answered `503` (each counted).
+    /// Retries of a request answered `503` at most (each counted; 0:
+    /// none). See `retry.rs` for the policy.
     #[arg(long, default_value_t = 0)]
     retries: u32,
+    /// Time from a request's first `503` within which its retries must
+    /// start, ms (0: only `--retries` limits them).
+    #[arg(long, default_value_t = 0)]
+    retry_max_time_ms: u64,
+    /// Backoff before the first retry, doubled for each next one, ms.
+    #[arg(long, default_value_t = 100)]
+    retry_base_ms: u64,
+    /// Largest backoff, ms.
+    #[arg(long, default_value_t = 3200)]
+    retry_max_delay_ms: u64,
+    #[arg(long, value_enum, default_value_t = retry::Jitter::Full)]
+    retry_jitter: retry::Jitter,
+    /// Wait at least a `503`'s `Retry-After` (up to the largest backoff).
+    #[arg(long)]
+    retry_honor_retry_after: bool,
+    /// Retries in flight at once over the process (0: no limit).
+    #[arg(long, default_value_t = 0)]
+    retry_max_concurrency: usize,
+    /// Retries started per second over the process (0: no limit), with a
+    /// burst of `--retry-burst`.
+    #[arg(long, default_value_t = 0.0)]
+    retry_max_rate: f64,
+    #[arg(long, default_value_t = 1)]
+    retry_burst: u32,
+    /// A worker whose operation ended refused (`503`) waits the backoff
+    /// before its next operation (consecutive refusals: growing), so that
+    /// a refusing cluster does not see the whole concurrency as a stream
+    /// of requests; `off`: the next operation at once (Phase 4.0
+    /// behaviour).
+    #[arg(long, value_enum, default_value_t = OnOff::On)]
+    reject_pause: OnOff,
     /// Per-key versions: read at the start when the file exists (instead
     /// of `--base-version`), written at the end. Runs that change keys and
     /// runs that check them share it.
@@ -205,7 +239,47 @@ struct Args {
     tcp_nodelay: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
 type HttpClient = Client<HttpConnector, Full<Bytes>>;
+
+tokio::task_local! {
+    /// Set by `send` when a request of the current operation ended
+    /// refused (`503`), with its `Retry-After`: the worker counts the
+    /// operation as rejected and paces itself.
+    static REFUSED: std::cell::Cell<Option<Option<Duration>>>;
+    /// Set by `send` when a request of the current operation was ended by
+    /// the run's end: counted apart, never as rejected (review).
+    static CANCELLED: std::cell::Cell<bool>;
+}
+
+fn retry_after(h: &http::HeaderMap) -> Option<Duration> {
+    h.get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+fn retrier(a: &Args) -> retry::Retrier {
+    retry::Retrier::new(
+        retry::Policy {
+            max_retries: a.retries,
+            max_retry_time: Duration::from_millis(a.retry_max_time_ms),
+            base: Duration::from_millis(a.retry_base_ms.max(1)),
+            max_delay: Duration::from_millis(a.retry_max_delay_ms.max(a.retry_base_ms.max(1))),
+            jitter: a.retry_jitter,
+            honor_retry_after: a.retry_honor_retry_after,
+            seed: mix(a.seed ^ 0x005E_ED0F_8E78 ^ mix(a.client_id + 1)),
+        },
+        a.retry_max_concurrency,
+        a.retry_max_rate,
+        a.retry_burst,
+    )
+}
 
 // ---------- deterministic bodies and choices
 
@@ -572,8 +646,23 @@ struct Ctx {
     rr: AtomicU64,
     stop: AtomicBool,
     seq: AtomicU64,
-    retries_total: AtomicU64,
+    retry: retry::Retrier,
+    cancel: retry::Cancel,
+    /// Logical operations that ended refused (`503`), whole run and
+    /// measured window, and those ended by the run's end (the pauses after
+    /// refusals are counted by `retry`).
+    ops_rejected: AtomicU64,
+    ops_rejected_measured: AtomicU64,
+    ops_cancelled: AtomicU64,
+    /// `retry`'s counters at the start and the end of the measured window.
+    window: Mutex<Window>,
 }
+
+/// Snapshots of the request counters bounding the measured window.
+type Window = (
+    Option<Vec<(&'static str, u64)>>,
+    Option<Vec<(&'static str, u64)>>,
+);
 
 impl Ctx {
     fn endpoint(&self) -> &str {
@@ -588,41 +677,64 @@ impl Ctx {
         headers: &[(&str, String)],
         body: Bytes,
     ) -> Result<(http::StatusCode, http::HeaderMap, Bytes), String> {
-        let mut attempt = 0;
-        loop {
+        let once = || {
             let mut b = http::Request::builder().method(method).uri(uri);
             for (k, v) in headers {
                 b = b.header(*k, v);
             }
             b = b.header("content-length", body.len());
-            let req = b.body(Full::new(body.clone())).map_err(|e| e.to_string())?;
-            let fut = async {
-                let resp = self
-                    .client
-                    .request(req)
+            let req = b.body(Full::new(body.clone()));
+            async move {
+                let req = req.map_err(|e| e.to_string())?;
+                let fut = async {
+                    let resp = self
+                        .client
+                        .request(req)
+                        .await
+                        .map_err(|e| format!("transport: {e}"))?;
+                    let status = resp.status();
+                    let headers = resp.headers().clone();
+                    let body = resp
+                        .into_body()
+                        .collect()
+                        .await
+                        .map_err(|e| format!("transport: {e}"))?
+                        .to_bytes();
+                    Ok::<_, String>((status, headers, body))
+                };
+                tokio::time::timeout(Duration::from_secs(self.args.timeout_secs), fut)
                     .await
-                    .map_err(|e| format!("transport: {e}"))?;
-                let status = resp.status();
-                let headers = resp.headers().clone();
-                let body = resp
-                    .into_body()
-                    .collect()
-                    .await
-                    .map_err(|e| format!("transport: {e}"))?
-                    .to_bytes();
-                Ok::<_, String>((status, headers, body))
-            };
-            let r = tokio::time::timeout(Duration::from_secs(self.args.timeout_secs), fut)
-                .await
-                .map_err(|_| "timeout".to_string())??;
-            if r.0.as_u16() == 503 && attempt < self.args.retries {
-                attempt += 1;
-                self.retries_total.fetch_add(1, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_millis(100 << attempt.min(5))).await;
-                continue;
+                    .map_err(|_| "timeout".to_string())?
             }
-            return Ok(r);
+        };
+        let (last, end) = self
+            .retry
+            .run(&self.cancel, once, |r| match r {
+                Ok((s, h, _)) if s.as_u16() == 503 => retry::Class::Retryable(retry_after(h)),
+                Ok(_) => retry::Class::Done,
+                Err(_) => retry::Class::NonRetryable,
+            })
+            .await;
+        match end {
+            retry::End::Cancelled => {
+                let _ = CANCELLED.try_with(|c| c.set(true));
+            }
+            retry::End::Refused | retry::End::Exhausted => {
+                if let Some(Ok((s, h, _))) = &last
+                    && s.as_u16() == 503
+                {
+                    let ra = retry_after(h);
+                    let _ = REFUSED.try_with(|c| c.set(Some(ra)));
+                }
+            }
+            retry::End::Done | retry::End::Failed => {}
         }
+        // Cancelled: the outcome of the attempt in flight is unknown; an
+        // earlier refusal is not the answer (review).
+        if end == retry::End::Cancelled {
+            return Err("cancelled".into());
+        }
+        last.unwrap_or_else(|| Err("cancelled".into()))
     }
 
     fn uri(&self, bucket: &str, key: &str) -> String {
@@ -1007,6 +1119,19 @@ fn self_usage() -> SelfUsage {
 // ---------- workers
 
 async fn worker(ctx: Arc<Ctx>, w: usize, deadline: Option<Instant>, next: Arc<AtomicU64>) {
+    REFUSED
+        .scope(
+            std::cell::Cell::new(None),
+            CANCELLED.scope(
+                std::cell::Cell::new(false),
+                worker_loop(ctx, w, deadline, next),
+            ),
+        )
+        .await;
+}
+
+async fn worker_loop(ctx: Arc<Ctx>, w: usize, deadline: Option<Instant>, next: Arc<AtomicU64>) {
+    let mut pacer = retry::Pacer::default();
     let a = &ctx.args;
     let mut rng = Rng(mix(a.seed ^ ((w as u64 + 1) << 48) ^ mix(a.client_id + 1)));
     let c = a.concurrency.max(1) as u64;
@@ -1108,6 +1233,29 @@ async fn worker(ctx: Arc<Ctx>, w: usize, deadline: Option<Instant>, next: Arc<At
             Workload::CreateBuckets => {}
         }
         ctx.stats.in_flight.fetch_sub(1, Ordering::Relaxed);
+        let refused = REFUSED.with(std::cell::Cell::take);
+        if CANCELLED.with(std::cell::Cell::take) {
+            ctx.ops_cancelled.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if refused.is_some() {
+            ctx.ops_rejected.fetch_add(1, Ordering::Relaxed);
+            if ctx.stats.measuring.load(Ordering::Relaxed) {
+                ctx.ops_rejected_measured.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if ctx.args.reject_pause == OnOff::On
+            && !pacer
+                .after(
+                    &ctx.retry,
+                    refused.is_some(),
+                    refused.flatten(),
+                    &ctx.cancel,
+                )
+                .await
+        {
+            return;
+        }
     }
 }
 
@@ -1171,7 +1319,31 @@ fn summary(
         "ops": per,
         "total_ops": total_ops,
         "total_errors": total_err,
-        "retries": ctx.retries_total.load(Ordering::Relaxed),
+        // Logical operations (`ops`, `total_ops`: completed, by kind;
+        // `ops_rejected`: ended refused) against the requests they made and
+        // the HTTP attempts those took (`requests`).
+        // `requests` and `ops_rejected`: the measured window, as `ops`;
+        // `*_whole_run`: warm-up and drain included. `ops_cancelled`:
+        // operations ended by the run's end (their latencies are not in
+        // `ops`).
+        "retries": window_json(ctx)["retries"].clone(),
+        "ops_rejected": ctx.ops_rejected_measured.load(Ordering::Relaxed),
+        "ops_rejected_whole_run": ctx.ops_rejected.load(Ordering::Relaxed),
+        "ops_cancelled": ctx.ops_cancelled.load(Ordering::Relaxed),
+        "requests": window_json(ctx),
+        "requests_whole_run": ctx.retry.counters.json(),
+        "retry_policy": {
+            "max_retries": a.retries,
+            "max_time_ms": a.retry_max_time_ms,
+            "base_ms": a.retry_base_ms,
+            "max_delay_ms": a.retry_max_delay_ms,
+            "jitter": format!("{:?}", a.retry_jitter).to_lowercase(),
+            "honor_retry_after": a.retry_honor_retry_after,
+            "max_concurrency": a.retry_max_concurrency,
+            "max_rate": a.retry_max_rate,
+            "burst": a.retry_burst,
+            "reject_pause": a.reject_pause == OnOff::On,
+        },
         "integrity_violations": ctx.stats.integrity_violations.load(Ordering::Relaxed),
         "unverified": ctx.stats.unverified.load(Ordering::Relaxed),
         "client": {
@@ -1185,6 +1357,23 @@ fn summary(
             "client_saturated": cpu_util > 0.85,
         },
     })
+}
+
+/// The request counters of the measured window.
+fn window_json(ctx: &Ctx) -> serde_json::Value {
+    let w = ctx.window.lock().unwrap();
+    match (&w.0, &w.1) {
+        (Some(a), Some(b)) => {
+            let mut v = serde_json::Map::new();
+            for (k, x) in b {
+                let base = a.iter().find(|(n, _)| n == k).map_or(0, |(_, y)| *y);
+                v.insert((*k).into(), x.saturating_sub(base).into());
+            }
+            serde_json::Value::Object(v)
+        }
+        (Some(a), None) => ctx.retry.counters.json_since(Some(a)),
+        _ => ctx.retry.counters.json(),
+    }
 }
 
 fn main() {
@@ -1262,6 +1451,8 @@ async fn run(args: Args) -> i32 {
                 },
             )
         });
+    let (canceller, cancel) = retry::cancellation();
+    let canceller = Arc::new(canceller);
     let ctx = Arc::new(Ctx {
         chooser,
         keys,
@@ -1270,7 +1461,12 @@ async fn run(args: Args) -> i32 {
         rr: AtomicU64::new(0),
         stop: AtomicBool::new(false),
         seq: AtomicU64::new(0),
-        retries_total: AtomicU64::new(0),
+        retry: retrier(&args),
+        cancel,
+        ops_rejected: AtomicU64::new(0),
+        ops_rejected_measured: AtomicU64::new(0),
+        ops_cancelled: AtomicU64::new(0),
+        window: Mutex::new((None, None)),
         args,
     });
     let timed = ctx.args.duration_secs > 0;
@@ -1280,6 +1476,30 @@ async fn run(args: Args) -> i32 {
     ctx.stats
         .measuring
         .store(!timed || ctx.args.warmup_secs == 0, Ordering::Relaxed);
+    if ctx.stats.measuring.load(Ordering::Relaxed) {
+        ctx.window.lock().unwrap().0 = Some(ctx.retry.counters.values());
+    } else if timed {
+        // The start of the window exactly at the end of the warm-up, as
+        // its end (review); the tick below only notes the CPU.
+        let ctx = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(warm_end)).await;
+            ctx.window.lock().unwrap().0 = Some(ctx.retry.counters.values());
+            ctx.stats.measuring.store(true, Ordering::Relaxed);
+        });
+    }
+    // The end of the window exactly at the deadline (not at the next
+    // tick): measurement stops, the counters are taken, every retry and
+    // pause ends (review).
+    if let Some(d) = deadline {
+        let (ctx, canceller) = (Arc::clone(&ctx), Arc::clone(&canceller));
+        tokio::spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await;
+            ctx.stats.measuring.store(false, Ordering::Relaxed);
+            ctx.window.lock().unwrap().1 = Some(ctx.retry.counters.values());
+            canceller.cancel();
+        });
+    }
     let next = Arc::new(AtomicU64::new(0));
     let mut handles = Vec::new();
     for w in 0..ctx.args.concurrency.max(1) {
@@ -1326,9 +1546,10 @@ async fn run(args: Args) -> i32 {
         let now = Instant::now();
         if deadline.is_some_and(|d| now >= d) {
             ctx.stats.measuring.store(false, Ordering::Relaxed);
+            // The run is over: no retry or pause outlives it.
+            canceller.cancel();
         }
         if cpu_at_measure.is_none() && now >= warm_end && deadline.is_none_or(|d| now < d) {
-            ctx.stats.measuring.store(true, Ordering::Relaxed);
             cpu_at_measure = Some((now, self_usage()));
         }
         let u = self_usage();
@@ -1353,12 +1574,16 @@ async fn run(args: Args) -> i32 {
                     "client_cpu": u.cpu_s - last.cpu_s,
                     "client_rss_mib": u.rss_mib,
                     "client_fds": u.fds,
+                    "http_attempts": ctx.retry.counters.attempts.load(Ordering::Relaxed),
+                    "retries": ctx.retry.counters.retries.load(Ordering::Relaxed),
+                    "ops_rejected": ctx.ops_rejected.load(Ordering::Relaxed),
                 })
             );
         }
         last = u;
         if deadline.is_some_and(|d| now >= d + Duration::from_secs(ctx.args.timeout_secs + 5)) {
             ctx.stop.store(true, Ordering::Relaxed);
+            canceller.cancel();
             break;
         }
     }
@@ -1416,7 +1641,12 @@ mod tests {
             rr: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             seq: AtomicU64::new(0),
-            retries_total: AtomicU64::new(0),
+            retry: retrier(&args),
+            cancel: retry::cancellation().1,
+            ops_rejected: AtomicU64::new(0),
+            ops_rejected_measured: AtomicU64::new(0),
+            ops_cancelled: AtomicU64::new(0),
+            window: Mutex::new((None, None)),
             args,
         }
     }
@@ -1479,7 +1709,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.as_u16(), 200);
-        assert_eq!(c.retries_total.load(Ordering::Relaxed), 2);
+        assert_eq!(c.retry.counters.retries.load(Ordering::Relaxed), 2);
         let ep = server(5).await;
         let c = ctx(Args::parse_from([
             "arcabench",
@@ -1497,7 +1727,157 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.as_u16(), 503);
-        assert_eq!(c.retries_total.load(Ordering::Relaxed), 2);
+        assert_eq!(c.retry.counters.retries.load(Ordering::Relaxed), 2);
+    }
+
+    /// Phase 4.1 (capacity run): against a cluster refusing every write,
+    /// closed-loop workers without pacing send a request as soon as the
+    /// last was refused; with pacing (the default) each waits a growing
+    /// backoff. Both end at the deadline; every operation is counted
+    /// rejected, every request is one HTTP attempt (no retries asked).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refused_workers_pace_themselves_and_stop_at_the_deadline() {
+        let mut attempts = Vec::new();
+        for pause in ["off", "on"] {
+            let ep = server(usize::MAX).await;
+            let c = Arc::new(ctx(Args::parse_from([
+                "arcabench",
+                "--endpoint",
+                &ep,
+                "--workload",
+                "put",
+                "--size",
+                "1",
+                "--objects",
+                "64",
+                "--concurrency",
+                "4",
+                "--retry-base-ms",
+                "100",
+                "--retry-max-delay-ms",
+                "400",
+                "--retry-jitter",
+                "none",
+                "--reject-pause",
+                pause,
+            ])));
+            c.stats.measuring.store(true, Ordering::Relaxed);
+            let t0 = Instant::now();
+            let deadline = t0 + Duration::from_secs(1);
+            let next = Arc::new(AtomicU64::new(0));
+            let hs: Vec<_> = (0..4)
+                .map(|w| tokio::spawn(worker(Arc::clone(&c), w, Some(deadline), Arc::clone(&next))))
+                .collect();
+            for h in hs {
+                h.await.unwrap();
+            }
+            // Ends by the deadline plus at most one pause (400 ms) and one
+            // request.
+            assert!(
+                t0.elapsed() < Duration::from_millis(1600),
+                "{pause}: {:?}",
+                t0.elapsed()
+            );
+            let k = &c.retry.counters;
+            let n = k.attempts.load(Ordering::Relaxed);
+            assert_eq!(n, k.requests.load(Ordering::Relaxed), "{pause}");
+            assert_eq!(k.retries.load(Ordering::Relaxed), 0);
+            assert_eq!(k.refused.load(Ordering::Relaxed), n);
+            assert_eq!(c.ops_rejected.load(Ordering::Relaxed), n);
+            assert_eq!(
+                c.stats.ops.lock().unwrap().get("put").map_or(0, |s| s.ops),
+                0
+            );
+            attempts.push(n);
+        }
+        // Paced: each worker sends at t = 0, 100, 300, 700 ms (the backoff
+        // capped at 400 ms after), so at most 5 attempts per worker in 1 s.
+        assert!(attempts[1] <= 4 * 5, "paced: {}", attempts[1]);
+        assert!(
+            attempts[0] > 4 * attempts[1],
+            "unpaced {} vs paced {}",
+            attempts[0],
+            attempts[1]
+        );
+    }
+
+    /// Review: a request cancelled while retrying answers "cancelled", not
+    /// the 503 of an earlier attempt; one cancelled before it starts sends
+    /// nothing.
+    #[tokio::test]
+    async fn a_cancelled_request_answers_cancelled_not_a_stale_refusal() {
+        let ep = server(usize::MAX).await;
+        let mut c = ctx(Args::parse_from([
+            "arcabench",
+            "--endpoint",
+            &ep,
+            "--workload",
+            "put",
+            "--retries",
+            "5",
+            "--retry-base-ms",
+            "60000",
+            "--retry-max-delay-ms",
+            "60000",
+            "--retry-jitter",
+            "none",
+        ]));
+        let (canceller, cancel) = retry::cancellation();
+        c.cancel = cancel;
+        let c = Arc::new(c);
+        let task = {
+            let c = Arc::clone(&c);
+            let ep = ep.clone();
+            tokio::spawn(
+                async move { c.send("PUT", &format!("{ep}/b/k"), &[], Bytes::new()).await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        canceller.cancel();
+        let r = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.unwrap_err(), "cancelled");
+        assert_eq!(c.retry.counters.attempts.load(Ordering::Relaxed), 1);
+        let r = c.send("PUT", &format!("{ep}/b/k"), &[], Bytes::new()).await;
+        assert_eq!(r.unwrap_err(), "cancelled");
+        assert_eq!(c.retry.counters.attempts.load(Ordering::Relaxed), 1);
+    }
+
+    /// Review: the request counters reported with `ops` are those of the
+    /// measured window; warm-up and drain are in `requests_whole_run`.
+    #[test]
+    fn request_counters_are_reported_for_the_measured_window() {
+        let c = ctx(Args::parse_from([
+            "arcabench",
+            "--endpoint",
+            "http://127.0.0.1:1",
+            "--workload",
+            "put",
+        ]));
+        let k = &c.retry.counters;
+        // Warm-up: 40 refused attempts.
+        k.attempts.fetch_add(40, Ordering::Relaxed);
+        k.retryable_failures.fetch_add(40, Ordering::Relaxed);
+        c.window.lock().unwrap().0 = Some(k.values());
+        // Measured: 10 clean requests.
+        k.requests.fetch_add(10, Ordering::Relaxed);
+        k.attempts.fetch_add(10, Ordering::Relaxed);
+        c.window.lock().unwrap().1 = Some(k.values());
+        // Drain: 5 more refusals.
+        k.attempts.fetch_add(5, Ordering::Relaxed);
+        k.retryable_failures.fetch_add(5, Ordering::Relaxed);
+        let w = window_json(&c);
+        assert_eq!(w["http_attempts"], 10);
+        assert_eq!(w["requests"], 10);
+        assert_eq!(w["retryable_failures"], 0);
+        let all = c.retry.counters.json();
+        assert_eq!(all["http_attempts"], 55);
+        assert_eq!(all["retryable_failures"], 45);
+        // A window still open counts up to now.
+        c.window.lock().unwrap().1 = None;
+        assert_eq!(window_json(&c)["retryable_failures"], 5);
     }
 
     /// Phase 4.0 review: an empty or cut-short body, whole or ranged, is

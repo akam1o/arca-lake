@@ -32,5 +32,8 @@ serde = { workspace = true }
 serde_json.workspace = true
 arca-lake-protocol.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util", "net", "io-util"] }
+
 [lints]
 workspace = true
