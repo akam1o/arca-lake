@@ -424,6 +424,8 @@ async fn sweep<S: KvStore>(
                 // the reads recorded since are kept and the pass ends.
                 tracing::info!("tiering: the tiering record changed, pass stopped before a reset");
                 report.policy_changed = true;
+                // Examined again under the new policy.
+                report.last = before;
                 return Ok(());
             }
         }
