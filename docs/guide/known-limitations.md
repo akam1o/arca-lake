@@ -19,30 +19,38 @@ The full register is [risks.md](../architecture/risks.md).
 | Capacity admission at the storage node (reserve, write classes) | Verified |
 | Tier backpressure (throttling, refusal, recovery, failover terms) | Experimental: verified by deterministic tests and short runs; thresholds and rates may change |
 | Capacity-aware group choice | Experimental |
-| Capacity rebalancing between the groups of a tier (`--rebalance`) | Experimental: verified by in-process tests (concurrent reads, writes, deletes and GC; crash and leader-change resume; repair first; target reserve); off by default; not run on the validation hosts under load |
+| Capacity rebalancing between the groups of a tier (`--rebalance`) | Experimental: in-process tests and process-level load/failover comparisons on validation VMs ([Phase 3.14](../verification/phase-3.14-operational-hardening.md)); off by default; large-scale rebalancing with data remains unverified |
 | Shared file system detection | Experimental; overlay, FUSE and network file systems cannot be checked: nodes on them need `--capacity-bytes` allotments (else refused like shared ones), and their sum is then the operator's responsibility |
 | Rolling upgrades, cluster recovery, backup verification | Verified within one compatibility window (RFC-014, RFC-015) |
-| Managed metadata restore (`admin restore`) | Verified in process and on real FoundationDB with `fdbrestore` (Phase 3.11), under its stated conditions (ADR-0026) |
-| Restores done outside `admin restore` | **Not safe**: deletes decided before the restore can still apply (R-94(b), High); the trip wire (ADR-0025) and the rejoin lease only narrow it |
+| Managed metadata restore (`admin restore`) | Verified with limitations: in-process tests, real FoundationDB restores and mixed-version drills; requires the documented retention, clock, node and recovery conditions ([Backup and restore](backup-restore.md)) |
+| Restores done outside `admin restore` | Bounded protection from deferred reclamation under [ADR-0028](../adr/0028-deferred-reclamation.md), not a general safety guarantee. Backup age, clock skew, every durable node's retention and a new incarnation are conditions; older backups and the documented repeated-restore case are outside protection. Follow [Backup and restore](backup-restore.md) |
 | Node lifecycle and identity (`admin node ...`) | Verified by in-process tests (Phase 3.11, ADR-0027) |
 | mTLS for node RPCs, FoundationDB TLS, SigV4, bucket policy subset | Verified |
+| Batched access records for automatic tiering | Experimental: bounded work and fault behavior tested; the commit-count target is met, but the GET throughput target is not ([details below](#access-record-performance)) |
 
 ## Not verified
 
-- Operation longer than about 13 hours under load (the 24 h soaks of
-  Phase 3.4/3.5 stopped on FoundationDB I/O timeouts of the shared
-  virtual storage, R-79); long-duration behaviour of backpressure.
+- A completed 24-hour soak and sustained operation beyond the reported
+  runs. The [Phase 3.14 soak](../verification/phase-3.14-operational-hardening.md)
+  stopped by decision after 14 h 13 min 43 s (12 h 50 min 10 s with
+  faults); earlier soaks stopped on FoundationDB I/O timeouts (R-79).
+  Long-duration behaviour of backpressure remains unverified.
 - Physical storage devices; real disk failures during capacity
   exhaustion.
 - Clusters larger than a few nodes per host and a few hosts; WAN.
 - Multi-tenant performance isolation.
+- Production-scale throughput and object counts. The
+  [scalability report](../verification/phase-4.0-scalability.md) distinguishes
+  measured S3 runs, metadata-only measurements, in-process tests and
+  estimates; none establishes production-scale performance.
 
 ## Not supported
 
 - Several storage nodes on one file system without fitting
   `--capacity-bytes` allotments (refused; R-80).
 - Encryption at rest, KMS, object ACLs, lifecycle rules, tagging,
-  Object Lock, replication (see the matrix).
+  Object Lock and S3 bucket replication (see the matrix). Storage-level
+  replication profiles are a separate, implemented mechanism.
 - Windows; container images (none published).
 
 ## Known behaviours to plan for
@@ -61,3 +69,21 @@ The full register is [risks.md](../architecture/risks.md).
 - A refused body larger than 16 MiB from a client that does not use
   `100-continue` may be seen as a closed connection on slow links
   (R-84; on loopback all tested clients received the 503).
+
+## Access-record performance
+
+The default `--access-records on` records reads in bounded batches, with
+`--access-batch 128`. In the final rotated comparison reported in
+[Phase 4.1](../verification/phase-4.1-adr34.md), it used
+**0.0066–0.0077 FoundationDB commits per GET**, meeting the target of at most
+0.1. GET throughput remained **7–14% below `--access-records off`**, outside
+that baseline's measured spread; this target is not met. These are results
+from the report's specified VM workloads, not general throughput guarantees.
+
+The remaining per-generation metadata work is an explanation consistent
+with the counters, not an isolated experimental proof. Disabling recording
+also removes those gateways' read observations from automatic tiering.
+Overflow, stale records, failures and shutdown can lose observations and
+affect tiering decisions; they do not reduce data durability. The configured
+bounds and metrics are described in [Configuration](configuration.md) and
+[ADR-0034](../adr/0034-access-records-at-scale.md).

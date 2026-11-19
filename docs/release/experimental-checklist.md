@@ -1,5 +1,10 @@
 # Experimental release candidate checklist
 
+> **Historical Phase 3.7 snapshot.** Findings, counts, pass results, and
+> setting descriptions below apply to that review. They are not a current
+> publication clearance. Follow [public repository readiness](public-readiness.md)
+> for the remaining work and recheck the actual publication candidate.
+
 State at the end of Phase 3.7. **No release, tag, image or publication
 has been made**; the items under "needs approval" are the maintainer's.
 

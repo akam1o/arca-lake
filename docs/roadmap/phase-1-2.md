@@ -1,6 +1,11 @@
 # Phase 1.2: Distributed operations and failover
 
-Status: **first iteration done** (see "Not verified" for what remains).
+> **Historical phase plan.** The statuses and outstanding tasks below
+> record this phase, not the current system. Later work may supersede them.
+> See the [roadmap index](README.md) for active priorities and
+> [known limitations](../guide/known-limitations.md) for current boundaries.
+
+Original status: **first iteration done** (see "Not verified" for what remains).
 Phase 1.2 makes the cluster operable as several processes on several hosts:
 a controller process with leader election, paged node APIs, repair
 completion that is a verified fact, garbage collection whose safety does

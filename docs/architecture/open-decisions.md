@@ -1,6 +1,15 @@
 # Open decisions
 
-Status: **living document**. Items that need a decision by the maintainers.
+> **Historical decision backlog.** This list records the initial design
+> review and early implementation choices. Some items described as open
+> below have since been implemented or revisited. It is retained to preserve
+> decision identifiers and references, not as the current work queue.
+> Consult the [ADR index](../adr/README.md),
+> [architecture overview](overview.md) and [roadmap](../roadmap/README.md)
+> for later decisions, implementation and active work. An implemented choice
+> does not by itself establish formal acceptance of a proposal.
+
+Original status: **living document**. Items that need a decision by the maintainers.
 Each has a recommendation; none is decided until recorded in an ADR.
 
 ## Decided (recorded in ADRs)

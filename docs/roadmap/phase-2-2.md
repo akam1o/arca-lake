@@ -1,6 +1,11 @@
 # Phase 2.2: Performance and resilience optimization
 
-Status: **complete** (measurements and documents below). Phase 2.2 acts on the Phase 2.1 measurements:
+> **Historical phase plan.** The statuses and outstanding tasks below
+> record this phase, not the current system. Later work may supersede them.
+> See the [roadmap index](README.md) for active priorities and
+> [known limitations](../guide/known-limitations.md) for current boundaries.
+
+Original status: **complete** (measurements and documents below). Phase 2.2 acts on the Phase 2.1 measurements:
 progress-based deadlines and retries for shard streams (R-47), the cache
 hit-ratio analysis, bounded parallel chunk fetch, the gRPC transport
 analysis, repeated measurements, and disk-bound runs. Design records:

@@ -1,35 +1,65 @@
 # arca-lake
 
-**arca-lake** is an S3-compatible distributed object store written in
-Rust: stateless S3 gateways, storage nodes with an append-only engine,
-FoundationDB for metadata, erasure coding or replication per profile,
-native multi-tier storage (durable tiers, read-through cache tiers,
-automatic tiering), integrity scrubbing and repair, and capacity
-admission with backpressure.
+**arca-lake** is an experimental S3-compatible distributed object store
+written in Rust. It combines stateless S3 gateways, FoundationDB metadata,
+an append-only storage engine, erasure coding or replication, and native
+multi-tier storage.
 
 > **Status: experimental, not released.** There is no release yet. The
 > code on `main` is under active development; it has been verified by
 > automated tests and short, dense load and fault-injection runs on
 > virtual machines, **not** by long-duration operation or on physical
 > storage. Do not store data you cannot afford to lose. What is and is
-> not verified is listed per feature in the RFCs, the phase reports and
+> not verified is listed per feature in the RFCs, the verification reports and
 > [Known limitations](docs/guide/known-limitations.md).
 
-## Start here
+## What it provides
+
+| Area | Current implementation |
+| --- | --- |
+| S3 access | Core bucket and object operations, multipart uploads, versioning, conditional requests, checksums, and SigV4 authentication; see the [compatibility matrix](docs/guide/s3-compatibility.md) for the supported subset and differences from AWS S3 |
+| Distributed storage | FoundationDB transactions for metadata, failure-domain-aware placement, per-profile erasure coding or replication, and storage nodes with an append-only engine |
+| Storage tiers | Durable tiers, read-through cache tiers that do not carry durability, explicit migration, prefetch, pinning, and automatic tiering |
+| Integrity and recovery | Scrubbing, repair, garbage collection, node lifecycle management, and metadata recovery with explicit [restore conditions](docs/guide/backup-restore.md) |
+| Capacity control | Node admission and controller-published backpressure; refused writes return `503 SlowDown` with `Retry-After` |
+
+These features have different verification boundaries. Implementation does
+not imply production readiness or support for every S3 API.
+
+## Try it
+
+The [quick start](docs/guide/quick-start.md) walks through a local S3 smoke
+test and a development cluster on one Linux host, including an AWS CLI
+round trip and cleanup. Build from source; no release binary or container
+image is published yet.
+
+```sh
+git clone https://github.com/akam1o/arca-lake.git
+cd arca-lake
+```
+
+Use the Rust toolchain pinned in `rust-toolchain.toml`. The distributed
+example also needs FoundationDB 7.3 and its client library. See
+[supported platforms](docs/guide/supported-platforms.md) for tested
+platforms and prerequisites.
+
+## Documentation
 
 | Document | Purpose |
 | --- | --- |
-| [Quick start](docs/guide/quick-start.md) | A development cluster on one Linux host |
 | [Architecture overview](docs/architecture/overview.md) | Components, planes, data flow |
-| [Supported platforms](docs/guide/supported-platforms.md) | Operating systems, FoundationDB, toolchain |
 | [S3 compatibility](docs/guide/s3-compatibility.md) | What is implemented, verified, not supported |
 | [Configuration](docs/guide/configuration.md) | The settings that matter and where they are documented |
 | [Operational requirements](docs/guide/operations.md) | What a deployment must provide |
 | [Security model](docs/guide/security-model.md) | Identities, TLS, authorization, threat model |
 | [Backup and restore](docs/guide/backup-restore.md) | Metadata backup, restore, recovery |
-| [Troubleshooting](docs/guide/troubleshooting.md) | Symptoms to runbooks |
 | [Known limitations](docs/guide/known-limitations.md) | What is experimental, not supported or not verified |
-| [Documentation index](docs/README.md) | RFCs, ADRs, roadmaps, verification reports |
+| [Documentation index](docs/README.md) | All guides, design decisions, verification evidence, and historical material |
+
+For development status, start with the [current roadmap](docs/roadmap/README.md)
+and [verification index](docs/verification/README.md). The
+[changelog](CHANGELOG.md) summarizes user-visible capabilities; detailed
+pre-release work records are retained in the [archive](docs/archive/README.md).
 
 ## Goals
 

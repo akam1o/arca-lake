@@ -1,6 +1,11 @@
 # Phase 1: Distributed object storage
 
-Status: **first iteration and reliability hardening done**. Phase 1 turns the Phase 0 components into
+> **Historical phase plan.** The statuses and outstanding tasks below
+> record this phase, not the current system. Later work may supersede them.
+> See the [roadmap index](README.md) for active priorities and
+> [known limitations](../guide/known-limitations.md) for current boundaries.
+
+Original status: **first iteration and reliability hardening done**. Phase 1 turns the Phase 0 components into
 one system: S3 PUT and GET through a gateway that erasure codes objects
 across storage nodes and publishes them atomically in the metadata store.
 Durability and consistency come first; performance work is Phase 4.

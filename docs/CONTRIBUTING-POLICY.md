@@ -1,6 +1,6 @@
 # Public repository and confidentiality policy
 
-arca-lake is developed and maintained in public. This policy applies to every
+All arca-lake artifacts must be suitable for public release. This policy applies to every
 artifact in the repository and every artifact produced around it: source
 code, comments, documentation, RFCs, ADRs, tests and fixtures, benchmarks,
 configuration examples, commit messages, pull request titles and bodies,
