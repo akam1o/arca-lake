@@ -3858,6 +3858,12 @@ async fn tiering_command<S: arca_lake_metadata::KvStore>(
             .and_then(|d| u64::try_from(d.as_millis()).ok())
             .unwrap_or(0)
     };
+    // Acknowledged means by the current leader (a failover or a restore
+    // leaves an earlier acknowledgment behind).
+    let leader_term = match arca_lake_metadata::ops::leader::current(meta).await {
+        Ok(l) => l.map_or(0, |l| l.token),
+        Err(e) => return fail(e),
+    };
     let r = match command {
         TieringCommand::Status => tiering::current(meta).await,
         TieringCommand::Enable { policy } => match policy.policy() {
@@ -3886,12 +3892,13 @@ async fn tiering_command<S: arca_lake_metadata::KvStore>(
         }
         Ok(Some(t)) => {
             println!(
-                "enabled {} generation {} acknowledged {} (term {} generation {}) tiers {:?} promote_reads {} promote_window_s {} demote_after_s {} grace_from_ms {} promotion_from_ms {} changed_ms {}",
+                "enabled {} generation {} acknowledged {} (last by term {} generation {}; leader term {}) tiers {:?} promote_reads {} promote_window_s {} demote_after_s {} grace_from_ms {} promotion_from_ms {} changed_ms {}",
                 t.enabled,
                 t.generation,
-                t.applied_generation == t.generation && t.applied_term != 0,
+                t.acknowledged_by(leader_term),
                 t.applied_term,
                 t.applied_generation,
+                leader_term,
                 t.policy.tiers,
                 t.policy.promote_reads,
                 t.policy.promote_window_ms / 1000,
@@ -3900,7 +3907,7 @@ async fn tiering_command<S: arca_lake_metadata::KvStore>(
                 t.promotion_from_ms,
                 t.changed_ms
             );
-            if !(t.applied_generation == t.generation && t.applied_term != 0) {
+            if !t.acknowledged_by(leader_term) {
                 println!(
                     "not applied yet: the controller leader applies a change when it acknowledges it (`acknowledged true`)"
                 );
