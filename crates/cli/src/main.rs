@@ -855,6 +855,10 @@ struct ControllerArgs {
     /// its persisted cursor (0 = every generation).
     #[arg(long, default_value_t = 4096)]
     tiering_generations_per_pass: usize,
+    /// Clock skew allowed between controllers and gateways in the grace
+    /// after tiering is enabled (ADR-0035 §10.4), seconds.
+    #[arg(long, default_value_t = 60)]
+    tiering_clock_skew_secs: u64,
     /// Scrub a group when its last pass finished this many seconds ago
     /// (RFC-008 §8.3); 0 disables background scrubbing.
     #[arg(long, default_value_t = 86_400)]
@@ -2094,6 +2098,7 @@ async fn run_controller(args: ControllerArgs) -> ExitCode {
     cfg.reconcile_parallel_pairs = args.reconcile_parallel_pairs;
     cfg.reclaim_parallel_nodes = args.reclaim_parallel_nodes;
     cfg.tiering_generations_per_pass = args.tiering_generations_per_pass;
+    cfg.tiering_clock_skew = Duration::from_secs(args.tiering_clock_skew_secs);
     cfg.failure_repair_chunks_per_pass = args.failure_repair_chunks_per_pass;
     cfg.scrub = arca_lake_controller::integrity::ScrubOptions {
         page: args.scrub_page,

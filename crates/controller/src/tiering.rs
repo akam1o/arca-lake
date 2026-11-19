@@ -15,7 +15,7 @@ use arca_lake_metadata::records::GenId;
 use arca_lake_metadata::records::{GenState, GroupRecord, GroupState, NodeRecord};
 use arca_lake_protocol::client::NodeClients;
 use arca_lake_tiering::durable::Coders;
-use arca_lake_tiering::migrate::{MigrateOutcome, migrate_chunk};
+use arca_lake_tiering::migrate::{MigrateOutcome, migrate_chunk, migrate_chunk_for_tiering};
 
 use crate::ControlError;
 
@@ -52,6 +52,48 @@ pub struct TieringReport {
     pub last: Option<GenId>,
     /// See [`Self::last`].
     pub reached_end: bool,
+    /// The pass stopped because the tiering record changed under it
+    /// (ADR-0035 §10.1: a move refused at its switch).
+    pub policy_changed: bool,
+}
+
+/// The tiering record's terms a pass runs under (ADR-0035 §10.1, §10.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyFence {
+    /// The record's generation: every move switches only while it holds.
+    pub generation: u64,
+    /// Demotion counts a generation as touched no earlier than this plus
+    /// `margin_ms`.
+    pub grace_from_ms: u64,
+    /// Counts of records last read before this do not promote.
+    pub promotion_from_ms: u64,
+    /// Propagation, flush delay and clock skew
+    /// ([`arca_lake_metadata::ops::tiering::grace_margin_ms`]).
+    pub margin_ms: u64,
+}
+
+impl TieringPolicy {
+    /// The policy a tiering record holds.
+    #[must_use]
+    pub fn from_record(r: &arca_lake_metadata::ops::tiering::TieringPolicyRecord) -> Self {
+        Self {
+            tiers: r.tiers.clone(),
+            promote_reads: r.promote_reads,
+            promote_window: Duration::from_millis(r.promote_window_ms),
+            demote_after: Duration::from_millis(r.demote_after_ms),
+        }
+    }
+
+    /// This policy as a tiering record holds it.
+    #[must_use]
+    pub fn to_record(&self) -> arca_lake_metadata::ops::tiering::TieringPolicyRecord {
+        arca_lake_metadata::ops::tiering::TieringPolicyRecord {
+            tiers: self.tiers.clone(),
+            promote_reads: self.promote_reads,
+            promote_window_ms: ms(self.promote_window),
+            demote_after_ms: ms(self.demote_after),
+        }
+    }
 }
 
 fn ms(d: Duration) -> u64 {
@@ -71,7 +113,17 @@ pub async fn run_once<S: KvStore>(
     now_ms: u64,
 ) -> Result<TieringReport, ControlError> {
     let mut report = TieringReport::default();
-    sweep(meta, clients, policy, now_ms, None, usize::MAX, &mut report).await?;
+    sweep(
+        meta,
+        clients,
+        policy,
+        now_ms,
+        None,
+        usize::MAX,
+        None,
+        &mut report,
+    )
+    .await?;
     Ok(report)
 }
 
@@ -91,6 +143,25 @@ pub async fn run_once_bounded<S: KvStore>(
     now_ms: u64,
     budget: usize,
 ) -> Result<TieringReport, ControlError> {
+    run_once_bounded_fenced(meta, clients, policy, now_ms, budget, None).await
+}
+
+/// [`run_once_bounded`] under a tiering record's terms (ADR-0035): moves
+/// switch only while the record stays at `fence.generation` (a refused
+/// switch ends the pass, nothing reset), demotion waits for the grace,
+/// counts from before the promotion cutoff do not promote.
+///
+/// # Errors
+///
+/// As [`run_once_bounded`].
+pub async fn run_once_bounded_fenced<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    policy: &TieringPolicy,
+    now_ms: u64,
+    budget: usize,
+    fence: Option<PolicyFence>,
+) -> Result<TieringReport, ControlError> {
     let mut cursor = bg_cursor::get(meta, bg_cursor::TIERING).await?;
     let after = GenId::try_from(cursor.after.as_slice()).ok();
     if after.is_none() {
@@ -100,7 +171,17 @@ pub async fn run_once_bounded<S: KvStore>(
     // The position is kept even when the pass stops on an error (review):
     // the generations before the one it stopped at are not examined again.
     let mut report = TieringReport::default();
-    let result = sweep(meta, clients, policy, now_ms, after, budget, &mut report).await;
+    let result = sweep(
+        meta,
+        clients,
+        policy,
+        now_ms,
+        after,
+        budget,
+        fence,
+        &mut report,
+    )
+    .await;
     if let Err(e) = &result
         && crate::process::is_fenced(e)
     {
@@ -120,7 +201,7 @@ pub async fn run_once_bounded<S: KvStore>(
     result.map(|()| report)
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn sweep<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -128,6 +209,7 @@ async fn sweep<S: KvStore>(
     now_ms: u64,
     start: Option<GenId>,
     budget: usize,
+    fence: Option<PolicyFence>,
     report: &mut TieringReport,
 ) -> Result<(), ControlError> {
     // Intents of migrations that crashed: their targets become reclaimable.
@@ -206,18 +288,31 @@ async fn sweep<S: KvStore>(
             let Some(current) = tier_index(&current_group.tier) else {
                 continue;
             };
-            let recent = now_ms.saturating_sub(access.last_ms) <= ms(policy.promote_window);
-            let target = if access.count >= policy.promote_reads
-                && recent
-                && current + 1 < policy.tiers.len()
-            {
-                Some((current + 1, true))
-            } else if now_ms.saturating_sub(access.last_ms) > ms(policy.demote_after) && current > 0
-            {
-                Some((current - 1, false))
-            } else {
-                None
+            // ADR-0035 §10.4: counts from before the promotion cutoff do not
+            // promote; demotion counts a generation as touched no earlier
+            // than the grace start plus the margin.
+            let (count, touched) = match fence {
+                Some(f) => (
+                    if access.last_ms < f.promotion_from_ms {
+                        0
+                    } else {
+                        access.count
+                    },
+                    access
+                        .last_ms
+                        .max(f.grace_from_ms.saturating_add(f.margin_ms)),
+                ),
+                None => (access.count, access.last_ms),
             };
+            let recent = now_ms.saturating_sub(access.last_ms) <= ms(policy.promote_window);
+            let target =
+                if count >= policy.promote_reads && recent && current + 1 < policy.tiers.len() {
+                    Some((current + 1, true))
+                } else if now_ms.saturating_sub(touched) > ms(policy.demote_after) && current > 0 {
+                    Some((current - 1, false))
+                } else {
+                    None
+                };
             let Some((target_index, promote)) = target else {
                 continue;
             };
@@ -234,20 +329,51 @@ async fn sweep<S: KvStore>(
                 let Some(source) = groups.get(&record.placement.group_id) else {
                     continue;
                 };
-                match migrate_chunk(
-                    meta,
-                    clients,
-                    &coders,
-                    &addr_of,
-                    source,
-                    target_group,
-                    generation,
-                    *index,
-                    record,
-                    None,
-                )
-                .await
-                {
+                let moved = match fence {
+                    Some(f) => {
+                        migrate_chunk_for_tiering(
+                            meta,
+                            clients,
+                            &coders,
+                            &addr_of,
+                            source,
+                            target_group,
+                            generation,
+                            *index,
+                            record,
+                            f.generation,
+                            async || {},
+                        )
+                        .await
+                    }
+                    None => {
+                        migrate_chunk(
+                            meta,
+                            clients,
+                            &coders,
+                            &addr_of,
+                            source,
+                            target_group,
+                            generation,
+                            *index,
+                            record,
+                            None,
+                        )
+                        .await
+                    }
+                };
+                match moved {
+                    // ADR-0035 §10.1: the policy changed under the pass. It
+                    // ends here and resets nothing (a reset would erase the
+                    // reads recorded since).
+                    Ok(MigrateOutcome::PolicyChanged) => {
+                        tracing::info!("tiering: the tiering record changed, pass stopped");
+                        report.skipped_chunks += 1;
+                        report.policy_changed = true;
+                        // Examined again under the new policy.
+                        report.last = before;
+                        return Ok(());
+                    }
                     Ok(MigrateOutcome::Switched { .. }) => {
                         settled = true;
                         if promote {

@@ -1378,6 +1378,17 @@ pub(crate) fn retire<X: Txn>(
     Ok(())
 }
 
+/// What [`switch_placement_fenced`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    /// The record now names the target.
+    Switched,
+    /// The record, the generation, the intent or the target changed.
+    Refused,
+    /// The tiering policy that decided the move changed or was disabled.
+    PolicyChanged,
+}
+
 /// Switch the durable placement of chunk `index` of `generation` to
 /// `new_record`, only if the generation is committed and the record still
 /// has `expected` as its placement (RFC-006 §5.8 step 4). Returns whether
@@ -1394,35 +1405,75 @@ pub async fn switch_placement<S: KvStore>(
     new_record: &ChunkRecord,
     attempt: &GenId,
 ) -> Result<bool> {
+    Ok(switch_placement_fenced(
+        store, generation, index, expected, new_record, attempt, None,
+    )
+    .await?
+        == Switch::Switched)
+}
+
+/// [`switch_placement`], refused as [`Switch::PolicyChanged`] when
+/// `policy_generation` is given and the tiering record is disabled or at
+/// another generation (a move a tiering pass started, ADR-0035 §10.1).
+///
+/// # Errors
+///
+/// Backend errors.
+#[allow(clippy::too_many_lines)]
+pub async fn switch_placement_fenced<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    index: u32,
+    expected: &crate::records::DurablePlacement,
+    new_record: &ChunkRecord,
+    attempt: &GenId,
+    policy_generation: Option<u64>,
+) -> Result<Switch> {
     transact(
         store,
-        (*generation, index, *expected, new_record, *attempt),
+        (
+            *generation,
+            index,
+            *expected,
+            new_record,
+            *attempt,
+            policy_generation,
+        ),
         |tx, env| {
             Box::pin(async move {
-                let (generation, index, expected, new_record, attempt) = *env;
+                let (generation, index, expected, new_record, attempt, policy_generation) = *env;
+                // A move a tiering pass started switches only under the
+                // policy that decided it (ADR-0035 §10.1).
+                if let Some(g) = policy_generation {
+                    let t: Option<crate::ops::tiering::TieringRecord> =
+                        read(tx, &keys::tiering()).await?;
+                    if t.is_none_or(|t| !t.enabled || t.generation != g) {
+                        return Ok(Switch::PolicyChanged);
+                    }
+                }
                 // Only the migration holding the chunk's intent switches,
                 // and the intent goes with the switch (the target is then
                 // referenced by the record itself).
                 let intent: Option<MigrationIntent> =
                     read(tx, &keys::migration(&new_record.chunk_id)).await?;
                 if intent.is_none_or(|i| i.attempt != attempt) {
-                    return Ok(false);
+                    return Ok(Switch::Refused);
                 }
                 let header = match generation_header(tx, &generation).await {
                     Ok(h) => h,
-                    Err(MetaError::NoSuchGeneration) => return Ok(false),
+                    Err(MetaError::NoSuchGeneration) => return Ok(Switch::Refused),
                     Err(e) => return Err(e),
                 };
                 if header.state != GenState::Committed {
-                    return Ok(false);
+                    return Ok(Switch::Refused);
                 }
                 let Some(current) =
                     read::<ChunkRecord, _>(tx, &keys::gen_chunk(&generation, index)).await?
                 else {
-                    return Ok(false);
+                    return Ok(Switch::Refused);
                 };
                 if current.placement != expected || current.chunk_id != new_record.chunk_id {
-                    return Ok(false);
+                    return Ok(Switch::Refused);
                 }
                 // The target as the copy wrote it (Phase 3.8 review): a
                 // membership change since (repair, replacement) bumped its
@@ -1434,11 +1485,11 @@ pub async fn switch_placement<S: KvStore>(
                     g.epoch != new_record.placement.epoch
                         || g.state != crate::records::GroupState::Active
                 }) {
-                    return Ok(false);
+                    return Ok(Switch::Refused);
                 }
                 write(tx, &keys::gen_chunk(&generation, index), new_record)?;
                 tx.clear(&keys::migration(&new_record.chunk_id));
-                Ok(true)
+                Ok(Switch::Switched)
             })
         },
     )

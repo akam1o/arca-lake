@@ -125,6 +125,9 @@ pub struct ControllerConfig {
     /// Generations a tiering pass examines at most (Phase 3.14): the sweep
     /// resumes at its persisted cursor; 0 = every generation.
     pub tiering_generations_per_pass: usize,
+    /// Clock skew allowed between controllers and gateways in the grace
+    /// after enabling tiering (ADR-0035 §10.4).
+    pub tiering_clock_skew: Duration,
     /// Background scrubbing (RFC-008 §8.3); `interval_ms = 0` disables it.
     pub scrub: crate::integrity::ScrubOptions,
     /// Interval between scrub scheduler invocations (each resumes or starts
@@ -193,6 +196,7 @@ impl ControllerConfig {
             reconcile_parallel_pairs: 4,
             reclaim_parallel_nodes: 4,
             tiering_generations_per_pass: 4096,
+            tiering_clock_skew: Duration::from_secs(60),
             failure_repair_chunks_per_pass: 4096,
             scrub: crate::integrity::ScrubOptions::default(),
             scrub_tick: Duration::from_secs(60),
@@ -760,7 +764,9 @@ fn start_leader_tasks<S: KvStore + 'static>(
                     let clients = clients.clone();
                     let cfg = cfg.clone();
                     let metrics = Arc::clone(&metrics);
-                    async move { tiering_pass(meta.as_ref(), &clients, &cfg, &metrics).await }
+                    async move {
+                        tiering_pass(meta.as_ref(), &clients, &cfg, &metrics, incarnation).await
+                    }
                 }
             },
         )),
@@ -1383,6 +1389,17 @@ async fn health_pass<S: KvStore>(
     metrics: &Metrics,
     incarnation: [u8; 16],
 ) -> Result<(), ControlError> {
+    // ADR-0035 §10.1: the tiering record is acknowledged by a pass that
+    // always runs (a tiering pass does not without a policy).
+    // A running tiering pass holds the gate: acknowledged after it.
+    if let Ok(_gate) = metrics.tiering_gate.try_lock()
+        && let Err(e) = acknowledge_tiering(meta, metrics, incarnation).await
+    {
+        if is_fenced(&e) {
+            return Err(e);
+        }
+        warn!(error = %e, "tiering record acknowledgment failed; retried at the next pass");
+    }
     let nodes = cluster::list_nodes(meta).await?;
     let now = now_ms();
     let mut unhealthy = 0u64;
@@ -3415,15 +3432,82 @@ impl Drop for TieringActive<'_> {
     }
 }
 
-/// Automatic tiering pass (RFC-006 §5.8).
+/// Acknowledge the tiering record's current generation for this term and
+/// incarnation (ADR-0035 §10.1). Returns the record as this leader may use
+/// it.
+/// The caller holds `metrics.tiering_gate`.
+async fn acknowledge_tiering<S: KvStore>(
+    meta: &S,
+    metrics: &Metrics,
+    incarnation: [u8; 16],
+) -> Result<Option<arca_lake_metadata::ops::tiering::TieringRecord>, ControlError> {
+    use arca_lake_metadata::ops::tiering;
+    let term = metrics.leader_token.load(Ordering::Relaxed);
+    let Some(r) = tiering::current(meta).await? else {
+        return Ok(None);
+    };
+    if r.acknowledged_by(term) && r.applied_incarnation == incarnation {
+        return Ok(Some(r));
+    }
+    let acked = tiering::acknowledge(meta, term, incarnation, r.generation, now_ms()).await?;
+    if let Some(a) = &acked {
+        info!(
+            generation = a.generation,
+            enabled = a.enabled,
+            term,
+            "tiering record acknowledged"
+        );
+    }
+    Ok(acked)
+}
+
+/// Automatic tiering pass (RFC-006 §5.8), under the tiering record
+/// (ADR-0035 option A): the record is the source of truth; the
+/// controller's `--tiering-*` flags only seed an absent record.
 async fn tiering_pass<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
     cfg: &ControllerConfig,
     metrics: &Metrics,
+    incarnation: [u8; 16],
 ) -> Result<(), ControlError> {
-    let Some(policy) = cfg.tiering.as_ref() else {
+    use arca_lake_metadata::ops::tiering;
+    // From the record's read to the pass's end (ADR-0035 §10.1).
+    let _gate = metrics.tiering_gate.lock().await;
+    let Some(record) = tiering::current(meta).await? else {
+        if let Some(flags) = cfg.tiering.as_ref()
+            && tiering::seed_if_absent(meta, &flags.to_record(), now_ms()).await?
+        {
+            info!("tiering record seeded from the controller's flags");
+        }
+        // It runs once a leader has acknowledged it.
         return Ok(());
+    };
+    if let Some(flags) = cfg.tiering.as_ref()
+        && flags.to_record() != record.policy
+    {
+        warn!("tiering: --tiering-* flags differ from the tiering record, which is used");
+    }
+    // Acknowledged first (this pass holds the gate).
+    let Some(record) = acknowledge_tiering(meta, metrics, incarnation).await? else {
+        return Ok(());
+    };
+    let term = metrics.leader_token.load(Ordering::Relaxed);
+    if !(record.enabled
+        && record.acknowledged_by(term)
+        && record.applied_incarnation == incarnation)
+    {
+        return Ok(());
+    }
+    let policy = crate::tiering::TieringPolicy::from_record(&record.policy);
+    let policy = &policy;
+    let fence = crate::tiering::PolicyFence {
+        generation: record.generation,
+        grace_from_ms: record.grace_from_ms,
+        promotion_from_ms: record.promotion_from_ms,
+        margin_ms: tiering::grace_margin_ms(
+            u64::try_from(cfg.tiering_clock_skew.as_millis()).unwrap_or(u64::MAX),
+        ),
     };
     advance_lineage(meta, metrics).await?;
     // Moves need room on their target: none while any tier is throttled or
@@ -3453,12 +3537,13 @@ async fn tiering_pass<S: KvStore>(
     }
     metrics.tiering_active.store(true, Ordering::Relaxed);
     let _active = TieringActive(&metrics.tiering_active);
-    let r = crate::tiering::run_once_bounded(
+    let r = crate::tiering::run_once_bounded_fenced(
         meta,
         clients,
         policy,
         now_ms(),
         cfg.tiering_generations_per_pass,
+        Some(fence),
     )
     .await?;
     metrics
@@ -3479,6 +3564,102 @@ async fn tiering_pass<S: KvStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0035 §10.1: the controller's flags only seed an absent record;
+    /// the record wins over different flags; a leader acknowledges for its
+    /// term and incarnation (a restore acknowledges again); a running pass
+    /// holds the gate the health pass acknowledges under.
+    #[tokio::test]
+    async fn the_tiering_record_is_seeded_once_and_acknowledged_per_term_and_incarnation() {
+        use arca_lake_metadata::ops::tiering;
+        let meta = arca_lake_metadata::mem::MemKv::default();
+        let clients = NodeClients::new(Duration::from_secs(1));
+        let metrics = Metrics::default();
+        metrics.leader_token.store(4, Ordering::Relaxed);
+        let inc = [3u8; 16];
+        let flags = crate::tiering::TieringPolicy {
+            tiers: vec!["default".into(), "fast".into()],
+            promote_reads: 5,
+            promote_window: Duration::from_secs(600),
+            demote_after: Duration::from_secs(1800),
+        };
+        // No flags: nothing seeded.
+        let cfg = ControllerConfig::new("c");
+        tiering_pass(&meta, &clients, &cfg, &metrics, inc)
+            .await
+            .unwrap();
+        assert_eq!(tiering::current(&meta).await.unwrap(), None);
+        // Flags: seeded, then acknowledged by the next pass.
+        let mut cfg = ControllerConfig::new("c");
+        cfg.tiering = Some(flags.clone());
+        tiering_pass(&meta, &clients, &cfg, &metrics, inc)
+            .await
+            .unwrap();
+        let r = tiering::current(&meta).await.unwrap().unwrap();
+        assert!(
+            r.enabled && r.applied_term == 0,
+            "seeded, not yet acknowledged"
+        );
+        tiering_pass(&meta, &clients, &cfg, &metrics, inc)
+            .await
+            .unwrap();
+        let r = tiering::current(&meta).await.unwrap().unwrap();
+        assert!(r.acknowledged_by(4) && r.applied_incarnation == inc);
+        // Different flags do not change the record.
+        cfg.tiering = Some(crate::tiering::TieringPolicy {
+            demote_after: Duration::from_secs(60),
+            ..flags.clone()
+        });
+        tiering_pass(&meta, &clients, &cfg, &metrics, inc)
+            .await
+            .unwrap();
+        assert_eq!(
+            tiering::current(&meta).await.unwrap().unwrap().policy,
+            flags.to_record()
+        );
+        // An admin change is acknowledged by the health path only while no
+        // pass holds the gate.
+        let g = tiering::admin_change(
+            &meta,
+            &tiering::AdminChange::SetPolicy(
+                crate::tiering::TieringPolicy {
+                    promote_reads: 9,
+                    ..flags.clone()
+                }
+                .to_record(),
+            ),
+            1,
+        )
+        .await
+        .unwrap()
+        .generation;
+        {
+            let _pass = metrics.tiering_gate.lock().await;
+            assert!(
+                metrics.tiering_gate.try_lock().is_err(),
+                "the health pass would acknowledge"
+            );
+        }
+        let r = acknowledge_tiering(&meta, &metrics, inc)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((r.applied_generation, r.applied_term), (g, 4));
+        // A new term, then a restore (another incarnation): acknowledged
+        // again; the restore restarts the grace.
+        metrics.leader_token.store(5, Ordering::Relaxed);
+        let r = acknowledge_tiering(&meta, &metrics, inc)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.applied_term, 5);
+        let grace = r.grace_from_ms;
+        let r = acknowledge_tiering(&meta, &metrics, [4u8; 16])
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(r.applied_incarnation == [4u8; 16] && r.grace_from_ms >= grace);
+    }
 
     #[test]
     fn the_reconcile_cycle_is_the_longest_measured() {
