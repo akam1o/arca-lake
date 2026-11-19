@@ -1,14 +1,18 @@
 # Phase 3: Production hardening
 
-Status: **3.1–3.6 delivered; 3.7 (admission refinement and experimental
-release preparation), 3.8 (pre-publication hardening), 3.9 (data safety
-closure) and 3.10 (recovery safety) delivered with the limitations in
-their reports and `risks.md`; 3.11 (restore consistency) conditionally
-complete, R-94(b) open (High); the release itself awaits the maintainer's
-approval**. Priorities: long-running
-operation, failure recovery, S3 compatibility, security, upgradability —
-over further performance work (the Phase 2.3 regression check guards
-what was gained).
+> **Historical phase plan.** Each row records the result of its named
+> sub-phase. Later rows and reports may supersede earlier limitations.
+> See the [roadmap index](README.md) for current work.
+
+Status at the end of Phase 3.14: **delivered with limitations**. The
+restore-safety risk R-94(b) was bounded to Medium by the deferred
+reclamation design in Phase 3.12 and remains conditional on its operating
+assumptions. The required 24-hour soak and physical-device power-loss
+validation were not completed. See the
+[Phase 3.14 report](../verification/phase-3.14-operational-hardening.md)
+and the historical [Phase 4 readiness assessment](../verification/phase-4-readiness.md).
+Phase 4 has since begun; its status is tracked in the
+[active roadmap](phase-4.md). There is no release yet.
 
 ## Sub-phases
 
@@ -24,13 +28,13 @@ what was gained).
 | 3.7 Admission refinement and release preparation | every write path charged chunk by chunk (R-81), admission terms across failovers (R-85), shared file system detection (R-80), recent-trend recovery and adaptive throttle (R-83), capacity-aware placement (R-82), refused-body client matrix (R-84), multipart under backpressure on FoundationDB; public repository audit, public CI review, experimental documentation, release checklist (ADR-0021) | A1–A18 of the Phase 3.7 plan with evidence | delivered; publication not done (needs approval) |
 | 3.8 Pre-publication hardening | delete reserve and capacity breakdown (the Phase 3.7 reserve finding explained), admission records fenced by incarnation/term/generation, recent-trend entry, capacity rebalancing with cursor and resume, system model test, node resource bounds, profiling, two-model review with fixes (ADR-0022) | H1–H16 of the Phase 3.8 plan with evidence | delivered; R-88 open (see report); publication not done |
 | 3.9 Data safety closure | delete fence enforced by storage nodes (R-88), audit of every delete path, restore and phase-transition safety, deterministic fault injection, system model with restores and leader terms, rebalancing on real FoundationDB, failover under capacity pressure, review with fixes (ADR-0023) | S1–S16 of the Phase 3.9 plan with evidence | delivered with limitations (see the Phase 3.9 report; R-90 accepted; publication not done) |
+| 3.10 Recovery safety and autonomous operations hardening | rejoin fence, opener and metadata rollback gate (R-90), sequenced incarnations (R-92), downgrade gate (schema 3, node schema floor, protocol 4) verified against the previous release's binaries, capacity-aware rebalancing (R-93), the system model on FoundationDB, capacity state × failover matrix, background-operations audit, two-model review with fixes and re-review (ADR-0024) | T1–T16 of the Phase 3.10 plan with evidence | delivered with limitations (see `docs/verification/phase-3.10-recovery.md`; R-94–R-99; publication not done) |
 | 3.11 Restore consistency and operational safety | trip wire for a running leader (ADR-0025); `admin restore` (ADR-0026 option D; option Q audited for the next phase); node lifecycle and identity (ADR-0027, R-100); M2–M4 of the Phase 3.10 audit (R-98); system model extensions; rebalancing A/B; capacity × failover with real processes; two-model review with re-reviews | U1–U16 of the Phase 3.11 plan with evidence | conditionally complete: R-94(b) stays **open (High)** (see `docs/verification/phase-3.11-restore-safety.md`); publication not done |
 | 3.12 Restore safety architecture and operational hardening | R-94(b) failure model, invariants and options compared; ADR-0028 node-enforced deferred reclamation (incarnation-bound); `admin restore` destination identity, cluster uid, protection guard; node identity audit fixes; previous-release CI with 3.10 and 3.11; rebalancing per-member accounting and in-transit room (simulator); liveness audit fixes; system model direct restores with recorded seeds; two-model review | V1–V16 of the Phase 3.12 plan with evidence (`docs/verification/phase-3.12-restore-architecture.md`) | R-94(b) **bounded** (Medium); open: R-104 (repair re-targeting High), R-105, R-106; publication not done |
 | 3.13 Repair liveness, deferred reclamation scalability and operational hardening | repair retargeting and liveness (ADR-0029, R-104 High part): reason-coded repair status, second-failure rule, isolation of stuck groups; deferred reclamation at scale (ADR-0030, R-106): group commit, background compaction, due-only listing, retention history, retained/reclaimed bytes and admission; manual-operation identity checks (R-105); deterministic repair simulator and mutation runs; real-process repair, reclaim and rebalancing runs; two-model review with re-reviews | W1–W16 of the Phase 3.13 plan with evidence (`docs/verification/phase-3.13-repair-liveness.md`) | see the verification document; R-94(b) stays bounded (Medium); publication not done |
-| 3.14 Operational hardening completion and Phase 4 readiness | differential repair verification and parallel rebuild (ADR-0031), persistent capacity reservations (ADR-0032), reconcile and tiering cursors with a deterministic simulator, repair diagnostics and operator actions, valid rebalancing A/B against 3.12 and 3.13 (retention 0 and capacity pressure separated), rollback residuals with 3.12/3.13 binaries, SIGKILL rounds against the retirement log, two-model review with re-reviews, Phase 4 readiness assessment | X1–X16 of the Phase 3.14 plan with evidence (`docs/verification/phase-3.14-operational-hardening.md`, `docs/verification/phase-4-readiness.md`) | delivered with limitations (see the verification document): 24 h soak Not Verified (14 h 13 min run), physical-disk power loss Not Verified; R-94(b) stays bounded (Medium); Phase 4 recommended, not started; not production-ready; publication not done |
-| 3.10 Recovery safety and autonomous operations hardening | rejoin fence, opener and metadata rollback gate (R-90), sequenced incarnations (R-92), downgrade gate (schema 3, node schema floor, protocol 4) verified against the previous release's binaries, capacity-aware rebalancing (R-93), the system model on FoundationDB, capacity state × failover matrix, background-operations audit, two-model review with fixes and re-review (ADR-0024) | T1–T16 of the Phase 3.10 plan with evidence | delivered with limitations (see `docs/verification/phase-3.10-recovery.md`; R-94–R-99; publication not done) |
+| 3.14 Operational hardening completion and Phase 4 readiness | differential repair verification and parallel rebuild (ADR-0031), persistent capacity reservations (ADR-0032), reconcile and tiering cursors with a deterministic simulator, repair diagnostics and operator actions, valid rebalancing A/B against 3.12 and 3.13 (retention 0 and capacity pressure separated), rollback residuals with 3.12/3.13 binaries, SIGKILL rounds against the retirement log, two-model review with re-reviews, Phase 4 readiness assessment | X1–X16 of the Phase 3.14 plan with evidence (`docs/verification/phase-3.14-operational-hardening.md`, `docs/verification/phase-4-readiness.md`) | delivered with limitations (see the verification document): 24 h soak Not Verified (14 h 13 min run), physical-disk power loss Not Verified; R-94(b) stays bounded (Medium); Phase 4 recommended at that point (subsequently started; see the active roadmap); not production-ready; publication not done |
 
-## Residual risks going in
+## Residual risks entering Phase 3 (historical)
 
 - R-19 (metadata access by cluster file) stays open (mTLS and the
   FoundationDB TLS guide moved to 3.4).

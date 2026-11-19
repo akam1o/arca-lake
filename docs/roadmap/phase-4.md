@@ -1,16 +1,23 @@
 # Phase 4 roadmap
 
 Phase 4 turns the Phase 3 system into one whose performance and scale
-limits are measured and then raised. Phase 4.0 measured; Phases 4.1 and
-4.2 act on what it found. Nothing of 4.1 or 4.2 is implemented yet.
+limits are measured and then raised. **Phase 4.0 delivered a baseline;
+Phase 4.1 is in progress; Phase 4.2 has not started.** Phase 4.1 has
+implemented the changes described below, but its remaining work and unmet
+measurement criteria are still open. See the [roadmap index](README.md)
+for a concise current-status view.
 
 | Sub-phase | Scope | Completion criteria | Status |
 | --- | --- | --- | --- |
-| 4.0 Scalability baseline | benchmark framework (`arcabench`, `nodebench`, `metaops`, `bench-cluster.sh`), validity rules, object count 10³–10⁶ through S3 and 10⁷ metadata-only, gateway, FoundationDB processes, storage node, concurrency and tail, background passes, metadata operations, profiles, failures under load, R-108 heap, three limited changes with A/B (gateway `TCP_NODELAY`, `--access-records`, `--admission-horizon-secs`), controller pass metrics, two reviews in two rounds | Y1–Y16 with evidence (`docs/verification/phase-4.0-scalability.md`) | delivered with limitations (see the report): 10⁷ through S3 and 10⁸ estimated; one 4-vCPU host for nodes and gateways; virtual disks; intermittent `managed_restore` failures not yet classified (R-113) |
-| 4.1 Metadata scalability and background processing optimization | below | below | in progress: P0-1 (R-112) done — `docs/verification/phase-4.1-r112.md`: no data effect through S3; answer defects found on the way fixed (R-114); hot-key availability stays (R-112, Medium). P0-2 (R-113) done — `docs/verification/phase-4.1-r113.md`: a race of three tests against the gateway's refresh, the refusal is the intended fencing; tests corrected, no product change. P0-3 (ADR-0033) implemented — `docs/verification/phase-4.1-adr33.md`: reconcile pass at 10⁶ objects 2,733 s → 146 s, reclaim about 5 times faster; the reclaim run at capacity incomplete (test host stopped, cause unknown; criterion not met) |
+| 4.0 Scalability baseline | benchmark framework (`arcabench`, `nodebench`, `metaops`, `bench-cluster.sh`), validity rules, object count 10³–10⁶ through S3 and 10⁷ metadata-only, gateway, FoundationDB processes, storage node, concurrency and tail, background passes, metadata operations, profiles, failures under load, R-108 heap, three limited changes with A/B (gateway `TCP_NODELAY`, `--access-records`, `--admission-horizon-secs`), controller pass metrics, two reviews in two rounds | Y1–Y16 with evidence (`docs/verification/phase-4.0-scalability.md`) | delivered with limitations (see the report): 10⁷ through S3 and 10⁸ estimated; one 4-vCPU host for nodes and gateways; virtual disks. The intermittent `managed_restore` failures (R-113) were subsequently classified in Phase 4.1 |
+| 4.1 Metadata scalability and background processing optimization | below | below | in progress: R-112 investigated through S3 and R-114 fixed; R-113 test race corrected; ADR-0033 implemented and measured, with the capacity-pressure criterion incomplete; ADR-0034 decisions 1–5, 7 and 8 implemented, with the commits-per-GET target met and GET-throughput target missed. Evidence and remaining work below |
 | 4.2 Scale-out validation and capacity efficiency | below | below | not started |
 
 ## How Phase 4.0's figures are to be read
+
+These are baseline observations from Phase 4.0, not current performance
+figures. Phase 4.1 follow-ups are linked below; measurements apply only to
+the environments described in their reports.
 
 - **Reconciliation does not pile up.** The scheduler starts a pass one
   interval (300 s) after the previous one ended; passes never overlap,
@@ -27,10 +34,11 @@ limits are measured and then raised. Phase 4.0 measured; Phases 4.1 and
   4 KiB rose 22 %; the rest of a GET's metadata cost is the map-version
   read, the manifest read and the gateway's single FoundationDB network
   thread.
-- **R-112 is measured on the metadata path only.** Through S3 it is not
-  measured; whether an acknowledged write can be lost or a wrong version
-  become visible under concurrent overwrite of one key is not yet shown
-  either way.
+- **R-112 was measured on the metadata path only in Phase 4.0.** The
+  subsequent [S3 investigation](../verification/phase-4.1-r112.md)
+  found no acknowledged write lost or wrong version visible in its
+  trials, fixed the separate R-114 answer defects, and left hot-key
+  contention as an availability issue.
 
 ## Phase 4.1 — Metadata scalability and background processing optimization
 
@@ -39,40 +47,47 @@ limits are measured and then raised. Phase 4.0 measured; Phases 4.1 and
 **P0 — correctness and liveness first**
 
 1. **R-112, concurrent overwrite of one key** — *done (Phase 4.1,
-   `docs/verification/phase-4.1-r112.md`): no acknowledged write lost and
-   no wrong version visible in 34 trials; R-114 fixed; the per-key
-   commit ordering below moves to P1 as an availability item.* Reproduce through the S3
-   path (real gateways, many concurrent PUTs of one key, with and without
-   versioning), then GC, quiescence and a full check: no acknowledged
-   write lost, no version visible that was not the last acknowledged or
-   in flight, unknown commit outcomes resolved, displaced generations
-   retired and collected exactly once. Severity is re-evaluated from the
-   result: **High** if an acknowledged write is lost or a wrong version
-   becomes visible. Only then the fix (fair per-key commit ordering with a
-   bounded wait, keeping the transactional pointer read and write,
-   preconditions, version order and retirement).
+   [report](../verification/phase-4.1-r112.md)): no acknowledged write
+   lost and no wrong version visible in 34 trials; R-114 fixed.* The
+   S3 campaign covered versioning, concurrent writes, restarts and
+   faults, followed by integrity checks. Hot-key contention remains
+   Medium (availability). Fair per-key commit ordering with a bounded
+   wait remains P1 work, preserving transactional preconditions,
+   version order and retirement.
 2. **R-113, intermittent `managed_restore` failures** — *done
-   (`docs/verification/phase-4.1-r113.md`): expected protection met by a
-   test race; tests synchronized, no product change.* Classify before
-   changing anything (criteria below).
+   ([report](../verification/phase-4.1-r113.md)): expected protection
+   met by a test race; tests synchronized, no product change.* The
+   classification method below is retained as the original criterion.
 3. **Reconciliation and reclaim at object scale (ADR-0033, R-110)** —
    *implemented and measured (`docs/verification/phase-4.1-adr33.md`):
    at 10⁶ objects a reconcile pass 2,733 s → 146 s, reclaim 2.74 → 0.55 ms
    per record, retained bytes level for an hour; the reclaim-at-capacity
    run is incomplete (load host stopped; §4c): the reclaim criterion is
-   not met, R-110 stays Medium.* Batched read-only
+   not met, R-110 stays Medium.* The implementation uses batched read-only
    judgments per listing page, bounded parallelism, settle time from the
-   measured cycle, a "pass running since" gauge.
+   measured cycle, and a "pass running since" gauge. The subsequent
+   [recovery and integrity check](../verification/phase-4.1-adr34.md)
+   verified the cluster's objects; the capacity retest was not resumed.
 
 **P1 — metadata performance**
 
-4. **Access records (ADR-0034, R-109):** bounded queue, batched writes,
-   generation checked in the same transaction, `last_ms` of unread
-   generations from their id, recording only where a tiering policy
-   exists.
+4. **Access records (ADR-0034, R-109)** — *decisions 1–5, 7 and 8
+   implemented and tested; decision 6 not implemented
+   ([report](../verification/phase-4.1-adr34.md)).* The gateway uses a
+   bounded table and batched writes, checks the generation in the same
+   transaction, and gives unread generations a last-access time from
+   their creation. In the reported VM A/B, approximately 0.007–0.008
+   FoundationDB commits per GET meets the ≤ 0.1 target; GET throughput
+   remains 7–14 % below `off`, so its target is not met. The default
+   remains `on` (the batched path) with a batch size of 128. Recording only
+   where a tiering policy applies is still deferred. Two gateways contending
+   on one hot generation and a FoundationDB stall under load remain
+   unverified on the cluster (unit tests cover these cases).
 5. **Transactions and conflicts per request:** count and reduce the
-   transactions of GET (about 3) and PUT (about 4); conflict rate under
-   overwrite.
+   remaining transactions and conflicts. Phase 4.0 observed about 3
+   transactions per GET and 4 per PUT; ADR-0034 reduced the measured
+   GET count to about 2.01. Per-key contention and the remaining GET
+   work are still open.
 6. **Map-version read per request:** cache with bounded staleness backed
    by the nodes' epoch checks (an ADR on the correctness of a cached
    map), or a watch.
@@ -113,6 +128,10 @@ samples per condition in rotated order (`docs/verification/phase-4.0-scalability
 | Reviews | Two independent reviews; Critical and High findings with failure sequences and fix-removal tests. |
 
 ### R-113 classification (before any fix)
+
+The investigation is complete; see the
+[classification and test correction](../verification/phase-4.1-r113.md).
+The original method is retained here as the basis for that conclusion.
 
 1. Run the `managed_restore` tests of the Phase 3.14 tree (`88732f1`)
    and of the Phase 4.0 tree on the same host, with the same toolchain,

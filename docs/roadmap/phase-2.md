@@ -1,6 +1,11 @@
 # Phase 2: Native multi-tier storage
 
-Status: **first iteration done** (see "Not verified" for what remains).
+> **Historical phase plan.** The statuses and outstanding tasks below
+> record this phase, not the current system. Later work may supersede them.
+> See the [roadmap index](README.md) for active priorities and
+> [known limitations](../guide/known-limitations.md) for current boundaries.
+
+Original status: **first iteration done** (see "Not verified" for what remains).
 Phase 2 adds operator-defined tiers, cache placements that are independent
 of durable placements, a transparent read-through cache with admission,
 LRU eviction, pinning and prefetch, and automatic promotion and demotion

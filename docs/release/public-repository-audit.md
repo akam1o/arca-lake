@@ -1,5 +1,10 @@
 # Public repository audit (Phase 3.7)
 
+> **Historical Phase 3.7 snapshot.** Findings, counts, pass results, and
+> setting descriptions below apply to that review. They are not a current
+> publication clearance. Follow [public repository readiness](public-readiness.md)
+> for the remaining work and recheck the actual publication candidate.
+
 Audit of what would become public with the repository. Run on the
 working tree and on every commit reachable from any ref (241 commits,
 one author identity, the maintainer's GitHub no-reply address).

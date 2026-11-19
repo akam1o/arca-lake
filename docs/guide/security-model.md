@@ -24,4 +24,23 @@ Summary of [RFC-012](../rfcs/RFC-012-security-architecture.md), the
 - **Not provided.** Encryption at rest, KMS integration, object ACLs,
   per-principal rate limits and quotas.
 
+## S3 authorization defaults
+
+Authentication and authorization are separate settings:
+
+| Configuration | Authorization behavior |
+| --- | --- |
+| `--backend cluster` with `--credentials-file` | Defaults to `owner-policy`: checks bucket ownership and the supported bucket-policy subset. |
+| Static `--access-key` and `--secret-key` | Authenticates requests; owner/policy checks require explicit `--authorize owner-policy` and the cluster backend. |
+| `--authorize none` | Every authenticated request is allowed; intended for experiments. |
+| `--backend memory` | Does not support `owner-policy`. |
+
+For experiments without configured credentials, `--allow-anonymous` permits
+unauthenticated operation. The quick start uses one public demonstration key
+on loopback; it is not a configuration for separating users or tenants.
+
+The gateway trusts `x-forwarded-proto` for policy evaluation only from
+addresses supplied by `--trusted-proxy`. Configure the TLS terminator and
+its trusted address together; the gateway itself does not provide HTTPS.
+
 Reporting vulnerabilities: [SECURITY.md](../../SECURITY.md).

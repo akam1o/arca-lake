@@ -1,6 +1,9 @@
 # Architecture Decision Records
 
-Short, immutable records of decisions. Use [the template](0000-template.md).
+Records of decisions and their amendments. Use [the template](0000-template.md).
+Design acceptance and implementation status are separate: follow the linked
+verification evidence and [known limitations](../guide/known-limitations.md)
+for what has been tested. Preserve identifiers and supersession links.
 
 | ADR | Title | Status |
 | --- | --- | --- |
@@ -37,4 +40,4 @@ Short, immutable records of decisions. Use [the template](0000-template.md).
 | [0031](0031-differential-repair-verification.md) | Differential verification of repair targets: the node's store epoch and `indexed_below` watermark let the leader read again only records written since its last pass of a slot's target; completeness still reads everything; slots rebuilt eight chunks at a time with results in walk order (Phase 3.14) | accepted |
 | [0032](0032-capacity-reservations.md) | Capacity reservations of member moves: one transaction against the node's other reservations, repair first, validity derived from the group (or its open epoch intent), swept by the leader, honoured by target choice and rebalancing; severity re-evaluated per scenario (Phase 3.14) | accepted |
 | [0033](0033-background-passes-at-object-scale.md) | Background passes at object scale: judgments of reconciliation and the reclaim pass batched per listing page in read-only transactions, bounded parallelism over pairs and nodes, rebalancing's settle time from the measured reconcile cycle, a "pass running since" gauge (Phase 4.0 measurements; implemented and measured in Phase 4.1) | accepted |
-| [0034](0034-access-records-at-scale.md) | Access records at scale: a bounded coalescing table per gateway flushed in batches by one flusher, the generation checked in the same transaction, no retry after an unknown outcome, every loss counted, `last_ms` of an unread generation from its id, recording only where a tiering policy exists (design, Phase 4.1; not implemented) | accepted (design) |
+| [0034](0034-access-records-at-scale.md) | Access records at scale: bounded per-gateway coalescing and batched generation-checked flushes; unknown outcomes are not retried, losses are counted, and unread generations use their creation time. Decisions 1–5, 7 and 8 are implemented; decision 6 (record only where a tiering policy exists) is deferred. The [verification report](../verification/phase-4.1-adr34.md) records the met commit-cost target and unmet GET-throughput target | accepted; implementation scoped as noted |

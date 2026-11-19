@@ -1,6 +1,11 @@
 # Phase 2.1: Cache protection and Linux validation
 
-Status: **first iteration done** (see "Not verified"). Phase 2.1 adds
+> **Historical phase plan.** The statuses and outstanding tasks below
+> record this phase, not the current system. Later work may supersede them.
+> See the [roadmap index](README.md) for active priorities and
+> [known limitations](../guide/known-limitations.md) for current boundaries.
+
+Original status: **first iteration done** (see "Not verified"). Phase 2.1 adds
 replicated and erasure-coded cache groups with degraded reads and
 subordinate cache repair, and runs the system on real Linux hosts: a
 three-host measurement matrix (RFC-009), transport and TLS floors, and

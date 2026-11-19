@@ -34,7 +34,9 @@ isolation requirements for the metadata store.
 
 ## Security design
 
-The security architecture (authentication, authorization, TLS,
-service-to-service identity, tenant isolation, encryption at rest, audit
-logging, resource exhaustion protection) is specified in [RFC-012](docs/rfcs/RFC-012-security-architecture.md) (design under review; see also the [threat model](docs/security/threat-model.md)). Until it is
-accepted, assume no security guarantee beyond what the code explicitly tests.
+The [security model](docs/guide/security-model.md) describes the current
+controls and their operating conditions. Detailed design rationale is in
+[RFC-012](docs/rfcs/RFC-012-security-architecture.md) and the
+[threat model](docs/security/threat-model.md). Implementation and test
+coverage are scoped to the documented configurations; there has been no
+external security audit. See [known limitations](docs/guide/known-limitations.md).

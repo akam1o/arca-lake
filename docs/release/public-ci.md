@@ -1,11 +1,16 @@
 # Public CI security review (Phase 3.7)
 
+> **Historical Phase 3.7 snapshot.** Findings, counts, pass results, and
+> setting descriptions below apply to that review. They are not a current
+> publication clearance. Follow [public repository readiness](public-readiness.md)
+> for the remaining work and recheck the actual publication candidate.
+
 The repository is private today. This page reviews what changes when it
 becomes public and proposes the workflow and settings changes to make
 first. **None of the setting changes below has been applied**; they need
 the maintainer's decision.
 
-## Current state
+## State at the Phase 3.7 review
 
 - One workflow (`.github/workflows/ci.yml`), triggered only by `push` to
   `main`; every job also checks `github.event_name == 'push'` and the

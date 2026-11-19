@@ -1,6 +1,12 @@
 # Key design decisions and alternatives
 
-Status: **draft for design review**. Each decision below lists at least two
+> **Initial design analysis.** This document preserves the original
+> alternatives, recommendations and questions. Later decisions are recorded
+> in the [ADR index](../adr/README.md); the
+> [architecture overview](overview.md) describes the current implementation.
+> Recommendations below do not imply an unimplemented or still-open choice.
+
+Original status: **draft for design review**. Each decision below lists at least two
 options, the trade-offs, a recommendation, and what would change our mind.
 Recommendations become ADRs once reviewed. Labels (*Verified*, *Assumption*,
 *Hypothesis*, *Open*) are defined in [docs/README.md](../README.md).

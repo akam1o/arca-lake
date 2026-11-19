@@ -1,6 +1,13 @@
 # Technology selection
 
-Status: **proposal**. Facts marked *Verified* were checked against the cited
+> **Initial technology survey (2026-11-01).** Recommendations and
+> alternatives below record the initial evaluation, not the current
+> dependency inventory. Later choices are recorded in the
+> [ADR index](../adr/README.md); the [architecture overview](overview.md)
+> and [workspace manifest](../../Cargo.toml) describe the implementation.
+> Version checks and proposed experiments retain their original date and scope.
+
+Original status: **proposal**. Facts marked *Verified* were checked against the cited
 primary source on 2026-11-01. Everything else is an assessment or hypothesis.
 Final selections are recorded as ADRs after Phase 0 measurements.
 

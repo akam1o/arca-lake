@@ -1,6 +1,11 @@
 # Phase 0: Architecture and performance proof of concept
 
-Status: **in progress**. Phase 0 exists to replace hypotheses with measurements
+> **Historical phase plan.** The statuses and outstanding tasks below
+> record this phase, not the current system. Later work may supersede them.
+> See the [roadmap index](README.md) for active priorities and
+> [known limitations](../guide/known-limitations.md) for current boundaries.
+
+Original status: **in progress**. Phase 0 exists to replace hypotheses with measurements
 before Phase 1 commits to a design. It produces no user-facing product.
 
 ## Progress
