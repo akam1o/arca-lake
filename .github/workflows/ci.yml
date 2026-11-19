@@ -1,17 +1,22 @@
 name: CI
 
-# Push to main only (RFC-012 §5.11): every job runs on self-hosted
-# runners, so pull requests (and above all pull requests from forks) never
-# trigger this workflow; each job also refuses any other event.
+# GitHub-hosted runners only (the repository is public; no self-hosted
+# runner is registered: docs/release/public-ci.md). Pull requests, forks
+# included, run with a read-only token and no secrets; first-time
+# contributors' runs wait for a maintainer's approval. The upgrade and
+# rollback job (several earlier releases built) runs on pushes to main and
+# on demand only.
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# Self-hosted Linux runners execute every job of this workflow; a later
-# push cancels the run still in progress for the same ref.
+# A later push cancels the run still in progress for the same ref.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -21,15 +26,15 @@ env:
   RUSTFLAGS: -D warnings
   # Test binaries at opt-level 1: the metadata multipart test that drives
   # 10 000 parts through the in-memory store is CPU-bound and ran for about
-  # three minutes unoptimized. The persistent target directory absorbs the
-  # one-time cost of the slower compile.
+  # three minutes unoptimized.
   CARGO_PROFILE_TEST_OPT_LEVEL: "1"
+  CARGO_INCREMENTAL: "0"
+  FDB_VERSION: 7.3.77
 
 jobs:
   check:
     name: fmt, clippy, test (Linux)
-    runs-on: [self-hosted, Linux, X64]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -41,7 +46,7 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
           fi
           # S3 compatibility tests drive the gateway with the AWS CLI and
-          # boto3 (they skip when the tools are absent; the runner has them).
+          # boto3 (they skip when the tools are absent; installed here).
           # The distribution's awscli package is unusable with Python 3.14
           # ("badly formed help string"), so the official AWS CLI v2 bundle
           # is installed instead, pinned by version and SHA-256.
@@ -66,20 +71,19 @@ jobs:
         with:
           toolchain: "1.99"
           components: rustfmt, clippy
-      # The runner is persistent, but actions/checkout cleans the workspace
-      # (`git clean -ffdx` removes target/). Build outside it so that the
-      # artifacts survive between runs; restoring them from the GitHub cache
-      # instead took longer than the build itself (777 MB at ~3 MB/s per job).
-      # Kept outside ~/.cache/arca-lake, which the tools cache step archives.
-      - name: build in a target directory that outlives the checkout
-        run: |
-          # One directory per runner: jobs of two runners on one host must
-          # not share it (one job's size cleanup deleted files another job
-          # was linking).
-          dir="$HOME/.cache/arca-lake-target-${RUNNER_NAME// /_}"
-          # Start over once the directory has grown past 20 GB.
-          if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
-          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
+      # Each job starts on a fresh virtual machine: dependencies and build
+      # output come from the Actions cache (one entry per job and lock file).
+      - name: cache cargo registry and build output
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
+      - run: echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
       # The `fdb` feature links libfdb_c; install the client library so that
       # --all-features builds and runs.
       - name: cache downloaded tools and packages
@@ -125,13 +129,10 @@ jobs:
 
   fdb:
     name: FoundationDB backend tests
-    runs-on: [self-hosted, Linux, X64]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    # Three earlier releases are built here (incremental once cached).
-    timeout-minutes: 75
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       FDB_VERSION: 7.3.77
-      # Per-run container name: two runners share the host.
       FDB_CONTAINER: fdb-${{ github.run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -143,7 +144,7 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
           fi
           # S3 compatibility tests drive the gateway with the AWS CLI and
-          # boto3 (they skip when the tools are absent; the runner has them).
+          # boto3 (they skip when the tools are absent; installed here).
           # The distribution's awscli package is unusable with Python 3.14
           # ("badly formed help string"), so the official AWS CLI v2 bundle
           # is installed instead, pinned by version and SHA-256.
@@ -167,20 +168,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99"
-      # The runner is persistent, but actions/checkout cleans the workspace
-      # (`git clean -ffdx` removes target/). Build outside it so that the
-      # artifacts survive between runs; restoring them from the GitHub cache
-      # instead took longer than the build itself (777 MB at ~3 MB/s per job).
-      # Kept outside ~/.cache/arca-lake, which the tools cache step archives.
-      - name: build in a target directory that outlives the checkout
-        run: |
-          # One directory per runner: jobs of two runners on one host must
-          # not share it (one job's size cleanup deleted files another job
-          # was linking).
-          dir="$HOME/.cache/arca-lake-target-${RUNNER_NAME// /_}"
-          # Start over once the directory has grown past 20 GB.
-          if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
-          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
+      # Each job starts on a fresh virtual machine: dependencies and build
+      # output come from the Actions cache (one entry per job and lock file).
+      - name: cache cargo registry and build output
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
+      - run: echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
       - name: cache downloaded tools and packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -229,6 +229,125 @@ jobs:
           set -euo pipefail
           cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
           cargo test -p arca-lake-testkit --features fdb --test it -- --nocapture --test-threads=1 e2e_fdb:: faults_fdb:: cache_fdb:: cache_ec_fdb:: rebalance_fdb:: multipart_backpressure::multipart_under_backpressure_on_foundationdb system_model::random_operation_sequences_agree_with_the_model_on_foundationdb
+      - name: metadata restore drill (fdbbackup/fdbrestore, RFC-015 §5.3.1)
+        env:
+          ARCA_FDB_TESTS: "1"
+          ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
+          ARCA_FDB_BACKUP_URL: file:///var/fdb/backup
+          ARCA_FDB_BACKUP_CLUSTER_FILE: /var/fdb/fdb.cluster
+        run: |
+          set -euo pipefail
+          # The backup agent and the backup tools live in the server
+          # container; the test drives them through `docker exec`.
+          sudo docker exec "$FDB_CONTAINER" mkdir -p /var/fdb/backup
+          sudo docker exec -d "$FDB_CONTAINER" backup_agent -C /var/fdb/fdb.cluster
+          ARCA_FDB_BACKUP_CMD="sudo docker exec $FDB_CONTAINER" \
+            cargo test -p arca-lake-testkit --features fdb --test it fdb_restore:: -- --nocapture --test-threads=1
+      - name: stop FoundationDB server
+        if: always()
+        run: sudo docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
+
+  # Five earlier releases and a version-bumped build of this tree are
+  # compiled here: pushes to main and on-demand runs only.
+  fdb-upgrade:
+    name: FoundationDB upgrade and rollback
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 120
+    env:
+      FDB_VERSION: 7.3.77
+      FDB_CONTAINER: fdb-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Seven debug builds do not fit the runner's free disk otherwise.
+      - name: free disk space (preinstalled SDKs this workflow does not use)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: prepare the runner (compiler, pkg-config; idempotent)
+        run: |
+          set -euo pipefail
+          if ! command -v cc >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
+          fi
+          # S3 compatibility tests drive the gateway with the AWS CLI and
+          # boto3 (they skip when the tools are absent; installed here).
+          # The distribution's awscli package is unusable with Python 3.14
+          # ("badly formed help string"), so the official AWS CLI v2 bundle
+          # is installed instead, pinned by version and SHA-256.
+          if ! python3 -c 'import boto3' 2>/dev/null || ! command -v unzip >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-boto3 unzip
+          fi
+          if ! aws --version 2>/dev/null | grep -q 'aws-cli/2.37.9 .*exe/x86_64'; then
+            dpkg -s awscli >/dev/null 2>&1 && sudo apt-get remove -y -qq awscli
+            tmp="$(mktemp -d)"
+            curl -sSL --retry 5 -o "$tmp/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.9.zip"
+            echo "6b3a6a3d7bb3997928f0bdf7b866914224abf242c2e54e1dcebbe84bee64f356  $tmp/awscli.zip" | sha256sum -c -
+            (cd "$tmp" && unzip -q awscli.zip && sudo ./aws/install --update >/dev/null)
+            rm -rf "$tmp"
+          fi
+          # bindgen (foundationdb-sys) needs libclang.
+          if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev
+          fi
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99"
+      # Dependencies only: seven builds' output would take the repository's
+      # whole cache quota and evict the other jobs' entries.
+      - name: cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
+      - run: echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
+      - name: cache downloaded tools and packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/arca-lake
+          key: tools-${{ runner.os }}-fdb7.3.77-v1
+      - name: install FoundationDB client library
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cache/arca-lake/fdb"
+          deb="$HOME/.cache/arca-lake/fdb/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          [ -f "$deb" ] || curl -sSL -o "$deb" \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo apt-get install -y "$deb"
+      - name: start FoundationDB server
+        run: |
+          set -euo pipefail
+          docker() { sudo docker "$@"; }
+          docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
+          # Bridge network, with the server advertising its container
+          # address (reachable from the runner host): no port shared with a
+          # concurrent run on the same host. Same topology as the failover
+          # job and deploy/dev/fdb-test.sh.
+          docker run -d --name "$FDB_CONTAINER" -e FDB_NETWORKING_MODE=container \
+            "foundationdb/foundationdb:${FDB_VERSION}"
+          # The image starts fdbserver without a database, and `status` on
+          # an unconfigured cluster prints nothing until fdbcli's timeout
+          # (polling it this way cost 30 x 30 s per run). Create the database
+          # right away and retry until the process answers.
+          for _ in $(seq 1 30); do
+            out="$(docker exec "$FDB_CONTAINER" fdbcli --timeout 10 --exec "configure new single memory" 2>&1 || true)"
+            echo "$out"
+            grep -qE "Database created|already exists" <<<"$out" && break
+            sleep 1
+          done
+          for _ in $(seq 1 60); do
+            docker exec "$FDB_CONTAINER" fdbcli --timeout 10 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+            sleep 1
+          done
+          docker exec "$FDB_CONTAINER" fdbcli --timeout 30 --exec "status minimal"
+          docker exec "$FDB_CONTAINER" cat /var/fdb/fdb.cluster | tee "$RUNNER_TEMP/fdb.cluster"
       - name: mixed-version rolling upgrade (two binaries, RFC-014 §5.7)
         env:
           ARCA_FDB_TESTS: "1"
@@ -278,33 +397,14 @@ jobs:
           ARCA_BIN_PREV_313="$CARGO_TARGET_DIR/release-313/debug/arca-lake" \
           ARCA_BIN_CUR="$CARGO_TARGET_DIR/debug/arca-lake" \
             cargo test -p arca-lake-testkit --features fdb --test it previous_release:: -- --nocapture --test-threads=1
-      - name: metadata restore drill (fdbbackup/fdbrestore, RFC-015 §5.3.1)
-        env:
-          ARCA_FDB_TESTS: "1"
-          ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
-          ARCA_FDB_BACKUP_URL: file:///var/fdb/backup
-          ARCA_FDB_BACKUP_CLUSTER_FILE: /var/fdb/fdb.cluster
-        run: |
-          set -euo pipefail
-          # The backup agent and the backup tools live in the server
-          # container; the test drives them through `docker exec`.
-          sudo docker exec "$FDB_CONTAINER" mkdir -p /var/fdb/backup
-          sudo docker exec -d "$FDB_CONTAINER" backup_agent -C /var/fdb/fdb.cluster
-          ARCA_FDB_BACKUP_CMD="sudo docker exec $FDB_CONTAINER" \
-            cargo test -p arca-lake-testkit --features fdb --test it fdb_restore:: -- --nocapture --test-threads=1
       - name: stop FoundationDB server
         if: always()
         run: sudo docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
 
   fdb-failover:
     name: FoundationDB failover (3 processes)
-    runs-on: [self-hosted, Linux, X64]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    # The failover test addresses the container as `arca-fdb` by name, so
-    # two of these jobs cannot share a host: a later run waits for this one.
-    concurrency:
-      group: fdb-failover-host
     env:
       FDB_VERSION: 7.3.77
     steps:
@@ -317,7 +417,7 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
           fi
           # S3 compatibility tests drive the gateway with the AWS CLI and
-          # boto3 (they skip when the tools are absent; the runner has them).
+          # boto3 (they skip when the tools are absent; installed here).
           # The distribution's awscli package is unusable with Python 3.14
           # ("badly formed help string"), so the official AWS CLI v2 bundle
           # is installed instead, pinned by version and SHA-256.
@@ -341,20 +441,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99"
-      # The runner is persistent, but actions/checkout cleans the workspace
-      # (`git clean -ffdx` removes target/). Build outside it so that the
-      # artifacts survive between runs; restoring them from the GitHub cache
-      # instead took longer than the build itself (777 MB at ~3 MB/s per job).
-      # Kept outside ~/.cache/arca-lake, which the tools cache step archives.
-      - name: build in a target directory that outlives the checkout
-        run: |
-          # One directory per runner: jobs of two runners on one host must
-          # not share it (one job's size cleanup deleted files another job
-          # was linking).
-          dir="$HOME/.cache/arca-lake-target-${RUNNER_NAME// /_}"
-          # Start over once the directory has grown past 20 GB.
-          if [ -d "$dir" ] && [ "$(du -sm "$dir" | cut -f1)" -gt 20480 ]; then rm -rf "$dir"; fi
-          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
+      # Each job starts on a fresh virtual machine: dependencies and build
+      # output come from the Actions cache (one entry per job and lock file).
+      - name: cache cargo registry and build output
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
+      - run: echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
       - name: cache downloaded tools and packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -447,12 +546,10 @@ jobs:
         if: always()
         run: sudo docker rm -f -v arca-fdb >/dev/null 2>&1 || true
 
-  # Four short checks in one job: their work takes seconds, and every job
-  # on the runner costs about 20 s of setup and teardown.
+  # Four short checks in one job: their work takes seconds.
   checks:
     name: licenses, secrets, DCO, links
-    runs-on: [self-hosted, Linux, X64]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
