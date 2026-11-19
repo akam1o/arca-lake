@@ -411,8 +411,20 @@ async fn sweep<S: KvStore>(
             // changed; Phase 3.12 liveness audit): a generation whose every
             // move failed keeps its access record and is tried again on the
             // next pass.
-            if settled {
-                object::reset_access(meta, generation, now_ms).await?;
+            if settled
+                && !object::reset_access_fenced(
+                    meta,
+                    generation,
+                    now_ms,
+                    fence.map(|f| f.generation),
+                )
+                .await?
+            {
+                // ADR-0035 §10.1: the policy changed after the last switch;
+                // the reads recorded since are kept and the pass ends.
+                tracing::info!("tiering: the tiering record changed, pass stopped before a reset");
+                report.policy_changed = true;
+                return Ok(());
             }
         }
         if page.len() < 256 {

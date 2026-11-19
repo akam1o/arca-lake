@@ -1391,10 +1391,7 @@ async fn health_pass<S: KvStore>(
 ) -> Result<(), ControlError> {
     // ADR-0035 §10.1: the tiering record is acknowledged by a pass that
     // always runs (a tiering pass does not without a policy).
-    // A running tiering pass holds the gate: acknowledged after it.
-    if let Ok(_gate) = metrics.tiering_gate.try_lock()
-        && let Err(e) = acknowledge_tiering(meta, metrics, incarnation).await
-    {
+    if let Err(e) = acknowledge_tiering_if_no_pass(meta, metrics, incarnation).await {
         if is_fenced(&e) {
             return Err(e);
         }
@@ -3435,6 +3432,21 @@ impl Drop for TieringActive<'_> {
 /// Acknowledge the tiering record's current generation for this term and
 /// incarnation (ADR-0035 §10.1). Returns the record as this leader may use
 /// it.
+/// The health pass's acknowledgment: only when no tiering pass holds the
+/// gate (a new generation after the pass that read the previous one);
+/// `Ok(false)` when one does.
+async fn acknowledge_tiering_if_no_pass<S: KvStore>(
+    meta: &S,
+    metrics: &Metrics,
+    incarnation: [u8; 16],
+) -> Result<bool, ControlError> {
+    let Ok(_gate) = metrics.tiering_gate.try_lock() else {
+        return Ok(false);
+    };
+    acknowledge_tiering(meta, metrics, incarnation).await?;
+    Ok(true)
+}
+
 /// The caller holds `metrics.tiering_gate`.
 async fn acknowledge_tiering<S: KvStore>(
     meta: &S,
@@ -3634,16 +3646,22 @@ mod tests {
         .unwrap()
         .generation;
         {
+            // A pass running: the health pass's acknowledgment waits.
             let _pass = metrics.tiering_gate.lock().await;
             assert!(
-                metrics.tiering_gate.try_lock().is_err(),
-                "the health pass would acknowledge"
+                !acknowledge_tiering_if_no_pass(&meta, &metrics, inc)
+                    .await
+                    .unwrap()
             );
+            let r = tiering::current(&meta).await.unwrap().unwrap();
+            assert!(!r.acknowledged_by(4), "acknowledged during a pass");
         }
-        let r = acknowledge_tiering(&meta, &metrics, inc)
-            .await
-            .unwrap()
-            .unwrap();
+        assert!(
+            acknowledge_tiering_if_no_pass(&meta, &metrics, inc)
+                .await
+                .unwrap()
+        );
+        let r = tiering::current(&meta).await.unwrap().unwrap();
         assert_eq!((r.applied_generation, r.applied_term), (g, 4));
         // A new term, then a restore (another incarnation): acknowledged
         // again; the restore restarts the grace.
