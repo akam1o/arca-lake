@@ -340,7 +340,17 @@ them early:
     counted whole (at most `max_age` of reads before it, accepted);
   `promotion_from_ms` moves only when tiering goes from disabled to
   enabled, so a widening change (a new `grace_from_ms`, demotion only)
-  keeps every object's progress towards promotion;
+  keeps every object's progress towards promotion. The cutoff is
+  approximate (an accuracy residual, R-109): an entry spanning it is
+  counted whole (at most `max_age` of earlier reads); a record whose
+  `last_ms` a gateway's clock put after the cutoff although its reads
+  were earlier keeps its count (bounded by the clock skew), and one whose
+  clock runs behind drops reads made just after enabling (for up to its
+  skew: promotion is only delayed); and `--access-records legacy`
+  writers do not apply it. Exact counts since enabling would need a
+  per-record epoch. Every flush reads the tiering record, so a change or
+  acknowledgment concurrent with a flush makes it conflict once and
+  retry (rare; ADR-0034's contention handling applies);
 - it lives in the record: a failover keeps it; disabling and enabling
   again starts a new grace period.
 

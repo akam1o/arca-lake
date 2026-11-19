@@ -246,6 +246,7 @@ impl ClusterWatch {
         !arca_lake_metadata::ops::tiering::confirmed_disabled(
             o.tiering.as_ref(),
             o.leader.as_ref(),
+            self.incarnation,
             o.read_at_ms,
             age,
             skew_ms,
@@ -933,10 +934,14 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         // The tiering and leader records together (ADR-0035
                         // §10.2); a failed read keeps the last, which ages
                         // into recording again.
+                        // Aged from the read's start (a slow read is never
+                        // fresher than its snapshot); the lease compared with
+                        // its end (later is stricter).
+                        let started = std::time::Instant::now();
                         if let Ok((t, l)) =
                             arca_lake_metadata::ops::tiering::read_with_leader(meta.as_ref()).await
                         {
-                            w.observe_tiering(t, l, now_ms(), std::time::Instant::now());
+                            w.observe_tiering(t, l, now_ms(), started);
                         }
                         // A failed read closes it here (fail closed).
                         let fence =
@@ -2643,11 +2648,45 @@ mod tiering_watch {
             ),
             "a stale confirmation kept recording off"
         );
+        // An expired or released lease, and an acknowledgment of an earlier
+        // generation: recorded.
+        let mut l = leader(7);
+        l.lease_until_ms = 1_001_000;
+        w.observe_tiering(Some(disabled.clone()), Some(l.clone()), 1_000_000, t0);
+        assert!(
+            w.access_recording_required_at(t0, 2_000),
+            "lease within the skew"
+        );
+        l.lease_until_ms = 0;
+        w.observe_tiering(Some(disabled.clone()), Some(l), 1_000_000, t0);
+        assert!(w.access_recording_required_at(t0, 2_000), "released lease");
+        let mut changed = disabled.clone();
+        changed.generation = 5;
+        w.observe_tiering(Some(changed), Some(leader(7)), 1_000_000, t0);
+        assert!(
+            w.access_recording_required_at(t0, 2_000),
+            "unacknowledged generation"
+        );
         // A new leader: recorded until it acknowledges.
         w.observe_tiering(Some(disabled), Some(leader(8)), 1_000_000, t0);
         assert!(w.access_recording_required_at(t0, 2_000));
         // No record: recorded.
         w.observe_tiering(None, Some(leader(7)), 1_000_000, t0);
         assert!(w.access_recording_required_at(t0, 2_000));
+        // A restored record whose acknowledgment names the same term in
+        // another incarnation: recorded.
+        let restored = TieringRecord {
+            enabled: false,
+            generation: 4,
+            applied_term: 7,
+            applied_generation: 4,
+            applied_incarnation: [9u8; 16],
+            ..TieringRecord::default()
+        };
+        w.observe_tiering(Some(restored), Some(leader(7)), 1_000_000, t0);
+        assert!(
+            w.access_recording_required_at(t0, 2_000),
+            "a confirmation of another incarnation kept recording off"
+        );
     }
 }

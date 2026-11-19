@@ -309,7 +309,8 @@ pub async fn acknowledge<S: KvStore>(
 
 /// Whether a gateway may stop recording reads (ADR-0035 §10.3): only when
 /// a combined read completed `age_ms` ago shows tiering disabled and
-/// acknowledged by the leader of the leader record, whose lease was
+/// acknowledged by the leader of the leader record in the gateway's
+/// `incarnation` (a restore never carries a confirmation over), whose lease was
 /// unexpired (by more than `skew_ms`) at `read_at_ms`, and the read is
 /// fresh. Anything else (no record, enabled, unacknowledged, no or an
 /// expired or released lease, a stale read) keeps recording.
@@ -317,6 +318,7 @@ pub async fn acknowledge<S: KvStore>(
 pub fn confirmed_disabled(
     tiering: Option<&TieringRecord>,
     leader: Option<&LeaderRecord>,
+    incarnation: [u8; 16],
     read_at_ms: u64,
     age_ms: u64,
     skew_ms: u64,
@@ -326,6 +328,7 @@ pub fn confirmed_disabled(
     };
     !t.enabled
         && t.acknowledged_by(l.token)
+        && t.applied_incarnation == incarnation
         && l.lease_until_ms > read_at_ms.saturating_add(skew_ms)
         && age_ms <= CONFIRMATION_STALE_MS
 }
@@ -488,40 +491,68 @@ mod tests {
             ..TieringRecord::default()
         };
         let l = leader(9, 100_000);
-        assert!(confirmed_disabled(Some(&t), Some(&l), 50_000, 0, 1_000));
+        assert!(confirmed_disabled(
+            Some(&t),
+            Some(&l),
+            [0u8; 16],
+            50_000,
+            0,
+            1_000
+        ));
         assert!(
-            !confirmed_disabled(None, Some(&l), 50_000, 0, 1_000),
+            !confirmed_disabled(None, Some(&l), [0u8; 16], 50_000, 0, 1_000),
             "no record"
         );
         assert!(
-            !confirmed_disabled(Some(&t), None, 50_000, 0, 1_000),
+            !confirmed_disabled(Some(&t), None, [0u8; 16], 50_000, 0, 1_000),
             "no leader"
         );
         assert!(
-            !confirmed_disabled(Some(&t), Some(&leader(10, 100_000)), 50_000, 0, 1_000),
+            !confirmed_disabled(
+                Some(&t),
+                Some(&leader(10, 100_000)),
+                [0u8; 16],
+                50_000,
+                0,
+                1_000
+            ),
             "new leader"
         );
         assert!(
-            !confirmed_disabled(Some(&t), Some(&leader(9, 0)), 50_000, 0, 1_000),
+            !confirmed_disabled(Some(&t), Some(&leader(9, 0)), [0u8; 16], 50_000, 0, 1_000),
             "released"
         );
         assert!(
-            !confirmed_disabled(Some(&t), Some(&leader(9, 50_500)), 50_000, 0, 1_000),
+            !confirmed_disabled(
+                Some(&t),
+                Some(&leader(9, 50_500)),
+                [0u8; 16],
+                50_000,
+                0,
+                1_000
+            ),
             "lease within the skew"
         );
         assert!(
-            !confirmed_disabled(Some(&t), Some(&l), 50_000, CONFIRMATION_STALE_MS + 1, 1_000),
+            !confirmed_disabled(
+                Some(&t),
+                Some(&l),
+                [0u8; 16],
+                50_000,
+                CONFIRMATION_STALE_MS + 1,
+                1_000
+            ),
             "stale"
         );
         t.generation = 4;
         assert!(
-            !confirmed_disabled(Some(&t), Some(&l), 50_000, 0, 1_000),
+            !confirmed_disabled(Some(&t), Some(&l), [0u8; 16], 50_000, 0, 1_000),
             "unacknowledged change"
         );
         t.generation = 3;
         t.enabled = true;
         assert!(
-            !confirmed_disabled(Some(&t), Some(&l), 50_000, 0, 1_000),
+            !confirmed_disabled(Some(&t), Some(&l), [0u8; 16], 50_000, 0, 1_000),
             "enabled"
         );
     }
