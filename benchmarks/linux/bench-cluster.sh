@@ -16,8 +16,10 @@
 #
 # Layout (environment, defaults in brackets):
 #   FoundationDB, the controller and NODES_A durable nodes on A [4];
-#   NODES_B durable nodes on B [0]; GATEWAYS gateways on GW_HOST [1, b];
-#   the load generator on LOAD_HOST [a].
+#   NODES_B durable nodes on B [0]; GATEWAYS gateways on GW_HOST [1, b],
+#   or one gateway per entry of GW_HOSTS (for example "b c", with HOST_C
+#   set: a third host for gateways only); the load generator on LOAD_HOST
+#   [a].
 # Cluster: K, M [2, 1], CHUNK [4 MiB], SMALL (small-object threshold,
 #   replicated below it) [0], GROUP_COUNT [1], NODE_CAP (allotment per node)
 #   [6 GiB], RETENTION (--reclaim-retention-secs; empty = the release's
@@ -54,7 +56,8 @@ retry_ssh() {
 }
 sa() { retry_ssh "$HOST_A" "$@"; }
 sb() { retry_ssh "$HOST_B" "$@"; }
-on() { if [ "$1" = a ]; then shift; sa "$@"; else shift; sb "$@"; fi; }
+sc() { retry_ssh "${HOST_C:?HOST_C is not set}" "$@"; }
+on() { case "$1" in a) shift; sa "$@" ;; c) shift; sc "$@" ;; *) shift; sb "$@" ;; esac; }
 # A command that must not run twice when a retried ssh repeats it (the
 # connection can drop after the remote side started it): it runs only if
 # its marker directory did not exist yet; its exit status is kept in the
@@ -64,8 +67,13 @@ once() { # <host> <marker> <command>
   on "$h" "mkdir -p \$(dirname $m); if mkdir $m 2>/dev/null; then ( $* ); echo \$? > $m/rc; fi; for i in \$(seq 1 600); do [ -f $m/rc ] && exit \$(cat $m/rc); sleep 1; done; exit 1"
 }
 addr_of() { ssh -o BatchMode=yes "$1" "hostname -I | awk '{print \$1}'"; }
-ADDR_A="$(addr_of "$HOST_A")"; ADDR_B="$(addr_of "$HOST_B")"
-addr() { if [ "$1" = a ]; then echo "$ADDR_A"; else echo "$ADDR_B"; fi; }
+ADDR_A="$(addr_of "$HOST_A")"; ADDR_B="$(addr_of "$HOST_B")"; ADDR_C=""
+[ -n "${HOST_C:-}" ] && ADDR_C="$(addr_of "$HOST_C")"
+addr() { case "$1" in a) echo "$ADDR_A" ;; c) echo "$ADDR_C" ;; *) echo "$ADDR_B" ;; esac; }
+# Gateways: one per entry of GW_HOSTS when set, else GATEWAYS on GW_HOST.
+if [ -n "${GW_HOSTS:-}" ]; then read -r -a GW_LIST <<< "$GW_HOSTS"; GATEWAYS=${#GW_LIST[@]}; fi
+gw_host() { if [ -n "${GW_HOSTS:-}" ]; then echo "${GW_LIST[$1]}"; else echo "$GW_HOST"; fi; }
+HOSTS="a b"; [ -n "${HOST_C:-}" ] && HOSTS="a b c"
 strip() { sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<addr>/g'; }
 BIN="env ARCA_INSECURE_PLAINTEXT=1 ARCA_FDB_INSECURE_PLAINTEXT=1 $REMOTE_REPO/target/release/arca-lake"
 BENCH="$REMOTE_REPO/target/release/arcabench"
@@ -81,14 +89,14 @@ stop_host() { # <host>: only this harness's processes (pid files)
 gateway_cmd() { # <i>
   local cache=""; [ "$CACHE" = repl ] && cache="--cache-tier fast --cache-capacity-bytes 0 --cache-high-watermark 0.9 --cache-low-watermark 0.8"
   local bin="$BIN"; [ -n "${GW_BIN:-}" ] && bin="env ARCA_INSECURE_PLAINTEXT=1 ARCA_FDB_INSECURE_PLAINTEXT=1 $GW_BIN"
-  echo "$bin gateway --backend cluster --cluster-file $CF --allow-anonymous --listen $(addr "$GW_HOST"):$((9000 + $1)) --metrics-listen 127.0.0.1:$((9500 + $1)) --k $K --m $M --chunk-bytes $CHUNK --small-threshold $SMALL --failure-domain node $cache ${GW_EXTRA_ARGS:-}"
+  echo "$bin gateway --backend cluster --cluster-file $CF --allow-anonymous --listen $(addr "$(gw_host "$1")"):$((9000 + $1)) --metrics-listen 127.0.0.1:$((9500 + $1)) --k $K --m $M --chunk-bytes $CHUNK --small-threshold $SMALL --failure-domain node $cache ${GW_EXTRA_ARGS:-}"
 }
 controller_cmd() {
   local cache=""; [ "$CACHE" = repl ] && cache="--cache-tier fast --cache-capacity-bytes 0 --cache-high-watermark 0.9 --cache-low-watermark 0.8"
   local bin="$BIN"; [ -n "${CTL_BIN:-}" ] && bin="env ARCA_INSECURE_PLAINTEXT=1 ARCA_FDB_INSECURE_PLAINTEXT=1 $CTL_BIN"
   echo "$bin controller --allow-shared-filesystem --cluster-file $CF --id ctl-a --http 127.0.0.1:9901 --failure-domain node $cache ${CONTROLLER_EXTRA_ARGS:-}"
 }
-endpoints() { local e=""; for i in $(seq 0 $((GATEWAYS - 1))); do e="$e --endpoint http://$(addr "$GW_HOST"):$((9000 + i))"; done; echo "$e"; }
+endpoints() { local e=""; for i in $(seq 0 $((GATEWAYS - 1))); do e="$e --endpoint http://$(addr "$(gw_host "$i")"):$((9000 + i))"; done; echo "$e"; }
 
 cmd_setup() {
   stop_host a; stop_host b
@@ -135,9 +143,9 @@ cmd_setup() {
     once a "$RUN_DIR/.admin/cache-groups" "$ADMIN create-cache-groups --tier fast --device-class nvme --protection replication --replicas 2 --failure-domain node --count 1" > /dev/null
   fi
   start a controller "$(controller_cmd)"
-  for g in $(seq 0 $((GATEWAYS - 1))); do start "$GW_HOST" "gw$g" "$(gateway_cmd "$g")"; done
+  for g in $(seq 0 $((GATEWAYS - 1))); do start "$(gw_host "$g")" "gw$g" "$(gateway_cmd "$g")"; done
   sleep 4
-  for g in $(seq 0 $((GATEWAYS - 1))); do on "$LOAD_HOST" "for i in \$(seq 1 60); do curl -s -o /dev/null http://$(addr "$GW_HOST"):$((9000 + g))/ && break; sleep 1; done"; done
+  for g in $(seq 0 $((GATEWAYS - 1))); do on "$LOAD_HOST" "for i in \$(seq 1 60); do curl -s -o /dev/null http://$(addr "$(gw_host "$g")"):$((9000 + g))/ && break; sleep 1; done"; done
   {
     echo "nodes_a=$NODES_A nodes_b=$NODES_B total_nodes=$total gateways=$GATEWAYS gw_host=$GW_HOST load_host=$LOAD_HOST"
     echo "k=$K m=$M chunk=$CHUNK small=$SMALL groups=$GROUP_COUNT node_cap=$NODE_CAP retention=${RETENTION:-default} cache=$CACHE fdb_procs=$FDB_PROCS"
@@ -147,7 +155,14 @@ cmd_setup() {
 }
 
 cmd_restart_gateways() {
-  for g in $(seq 0 $((GATEWAYS - 1))); do on "$GW_HOST" "p=\$(cat $RUN_DIR/gw$g.pid); kill \$p 2>/dev/null; for i in \$(seq 1 60); do kill -0 \$p 2>/dev/null || break; sleep 1; done; rm -rf $RUN_DIR/.started/gw$g"; start "$GW_HOST" "gw$g" "$(gateway_cmd "$g")"; done
+  local cf; cf="$(sa "cat $CF")"
+  for g in $(seq 0 $((GATEWAYS - 1))); do
+    local h; h="$(gw_host "$g")"
+    # A gateway-only host gets the cluster file from A.
+    on "$h" "mkdir -p $RUN_DIR/logs; [ -f $CF ] || echo '$cf' > $CF"
+    on "$h" "p=\$(cat $RUN_DIR/gw$g.pid 2>/dev/null); [ -n \"\$p\" ] && kill \$p 2>/dev/null; for i in \$(seq 1 60); do [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null || break; sleep 1; done; rm -rf $RUN_DIR/.started/gw$g"
+    start "$h" "gw$g" "$(gateway_cmd "$g")"
+  done
   sleep 4
 }
 
@@ -166,7 +181,7 @@ metrics_urls() { # <host>
     for j in $(seq 0 $((n - 1))); do [ "$n" -gt 0 ] || break; [ "$h" = "$1" ] && u="$u http://127.0.0.1:$((9700 + i))/metrics"; i=$((i + 1)); done
   done
   [ "$1" = a ] && u="$u http://127.0.0.1:9901/metrics"
-  if [ "$GW_HOST" = "$1" ]; then for g in $(seq 0 $((GATEWAYS - 1))); do u="$u http://127.0.0.1:$((9500 + g))/metrics"; done; fi
+  for g in $(seq 0 $((GATEWAYS - 1))); do [ "$(gw_host "$g")" = "$1" ] && u="$u http://127.0.0.1:$((9500 + g))/metrics"; done
   echo "$u"
 }
 
@@ -254,7 +269,7 @@ cmd_snapshot() {
   local label="${1:?label}" dir="$OUT/$1"; mkdir -p "$dir"
   sa "$ADMIN status 2>/dev/null" | strip > "$dir/admin-status.txt"
   sa "fdbcli -C $CF --exec 'status json' 2>/dev/null" | strip > "$dir/fdb-status.json"
-  for h in a b; do
+  for h in $HOSTS; do
     on "$h" "for u in $(metrics_urls $h); do echo \"--- \$u\"; curl -s --max-time 5 \$u; done" | strip | gzip > "$dir/metrics-$h.txt.gz"
     on "$h" "du -sb $RUN_DIR/d* $FDB_DATA 2>/dev/null || true" | strip > "$dir/du-$h.txt"
   done
