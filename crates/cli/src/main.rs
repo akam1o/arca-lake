@@ -3900,6 +3900,11 @@ async fn tiering_command<S: arca_lake_metadata::KvStore>(
                 t.promotion_from_ms,
                 t.changed_ms
             );
+            if !(t.applied_generation == t.generation && t.applied_term != 0) {
+                println!(
+                    "not applied yet: the controller leader applies a change when it acknowledges it (`acknowledged true`)"
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(e) => fail(e),
