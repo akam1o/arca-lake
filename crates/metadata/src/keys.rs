@@ -739,6 +739,12 @@ pub fn admission() -> Key {
     pack(&(ROOT, "admission"))
 }
 
+/// The tiering record (ADR-0035 option A).
+#[must_use]
+pub fn tiering() -> Key {
+    pack(&(ROOT, "tiering"))
+}
+
 /// The delete fence (Phase 3.9, ADR-0023).
 #[must_use]
 pub fn delete_fence() -> Key {
