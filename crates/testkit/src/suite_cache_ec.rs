@@ -84,6 +84,27 @@ fn member_nodes<S: KvStore + 'static>(c: &TestCluster<S>, g: &GroupRecord) -> Ve
     g.members.iter().map(|m| c.node_index(m).unwrap()).collect()
 }
 
+/// Waits for `n` cache population failures; on timeout the message carries
+/// the gateway's cache and population-queue counters, so that a CI failure
+/// tells a slow failure from a population that never ran or was skipped.
+async fn wait_for_population_failures<S: KvStore + 'static>(
+    c: &TestCluster<S>,
+    n: u64,
+    timeout: Duration,
+) {
+    let start = std::time::Instant::now();
+    while c.backend.cache_stats().population_failures < n {
+        assert!(
+            start.elapsed() < timeout,
+            "timed out waiting for population failures after {:?}: cache {:?} queue {:?}",
+            start.elapsed(),
+            c.backend.cache_stats(),
+            c.backend.population_queue_stats()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn wait_until(what: &str, timeout: Duration, mut cond: impl AsyncFnMut() -> bool) {
     let start = std::time::Instant::now();
     while !cond().await {
@@ -359,10 +380,7 @@ pub async fn population_with_a_member_down_records_nothing<S: KvStore + 'static>
     assert_eq!(got, data);
     // Background population attempts against the stopped member: a loaded
     // runner has taken over 10 s (CI); 24/24 under eight-way load on a host.
-    wait_until("population failures", Duration::from_secs(30), async || {
-        c.backend.cache_stats().population_failures >= 2
-    })
-    .await;
+    wait_for_population_failures(&c, 2, Duration::from_secs(30)).await;
     assert!(
         c.cache_placements(BUCKET, "o").await.is_empty(),
         "partial copy never recorded"
