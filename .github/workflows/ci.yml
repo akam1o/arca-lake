@@ -476,6 +476,146 @@ jobs:
         if: always()
         run: sudo docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
 
+  # The restore drill on the three-process cluster, apart from the failover
+  # suite so that both run at once (each on its own cluster). It uses the
+  # failover job's cache (same features) and saves none.
+  fdb-restore-3proc:
+    name: FoundationDB restore drill (3 processes)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      FDB_VERSION: 7.3.77
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: prepare the runner (compiler, pkg-config; idempotent)
+        run: |
+          set -euo pipefail
+          if ! command -v cc >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
+          fi
+          # S3 compatibility tests drive the gateway with the AWS CLI and
+          # boto3 (they skip when the tools are absent; installed here).
+          # boto3 is pinned in a virtual environment put first on PATH: the
+          # distribution's python3-boto3 is too old to return the multipart
+          # checksum type the conformance script checks. The distribution's
+          # awscli package is unusable with Python 3.14 ("badly formed help
+          # string"), so the official AWS CLI v2 bundle is installed instead,
+          # pinned by version and SHA-256.
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install -q boto3==1.40.0
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+          if ! command -v unzip >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip
+          fi
+          if ! aws --version 2>/dev/null | grep -q 'aws-cli/2.37.9 .*exe/x86_64'; then
+            dpkg -s awscli >/dev/null 2>&1 && sudo apt-get remove -y -qq awscli
+            tmp="$(mktemp -d)"
+            curl -sSL --retry 5 -o "$tmp/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.9.zip"
+            echo "6b3a6a3d7bb3997928f0bdf7b866914224abf242c2e54e1dcebbe84bee64f356  $tmp/awscli.zip" | sha256sum -c -
+            (cd "$tmp" && unzip -q awscli.zip && sudo ./aws/install --update >/dev/null)
+            rm -rf "$tmp"
+          fi
+          # bindgen (foundationdb-sys) needs libclang.
+          if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev
+          fi
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99"
+      # Each job starts on a fresh virtual machine: compiled dependencies
+      # come from the Actions cache, saved again by every push to main
+      # (pull requests only restore). The workspace's own crates are rebuilt
+      # every time (a fresh checkout makes them stale) and are not saved.
+      - name: restore cargo registry and compiled dependencies
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-v2-${{ runner.os }}-fdb-failover-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            cargo-v2-${{ runner.os }}-fdb-failover-${{ hashFiles('Cargo.lock') }}-
+            cargo-v2-${{ runner.os }}-fdb-failover-
+      - run: echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
+      - name: cache downloaded tools and packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/arca-lake
+          key: tools-${{ runner.os }}-fdb7.3.77-v1
+      - name: install FoundationDB client library
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cache/arca-lake/fdb"
+          deb="$HOME/.cache/arca-lake/fdb/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          [ -f "$deb" ] || curl -sSL -o "$deb" \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo dpkg -i "$deb"
+      - name: start a three-process FoundationDB cluster (bridge network)
+        run: |
+          set -euo pipefail
+          docker() { sudo docker "$@"; }
+          # Bridge network: the processes advertise the container's address,
+          # which the runner host can reach directly (same topology as the
+          # local script, where fdbcli and the test container reach it).
+          docker rm -f -v arca-fdb >/dev/null 2>&1 || true
+          docker run -d --name arca-fdb \
+            -v "$PWD/deploy/dev/fdb-multi-entrypoint.sh:/entry.sh:ro" \
+            --entrypoint bash "foundationdb/foundationdb:${FDB_VERSION}" /entry.sh
+          sleep 8
+          docker logs arca-fdb
+          for i in 1 2 3; do
+            echo "--- process $i: $(docker exec arca-fdb fdbproc status $i)"
+            docker exec arca-fdb cat /var/fdb/logs/proc-$i.out || true
+          done
+          IP="$(docker exec arca-fdb hostname -i | awk '{print $1}')"
+          echo "fdb address: $IP"
+          fdbcli() { timeout 60 sudo docker exec arca-fdb fdbcli --timeout 20 --exec "$1"; }
+          fdbcli "configure new double memory" || true
+          sleep 3
+          fdbcli "coordinators ${IP}:4500 ${IP}:4501 ${IP}:4502" || true
+          for _ in $(seq 1 20); do
+            fdbcli "status minimal" 2>/dev/null | grep -q "is available" && break
+            sleep 3
+          done
+          fdbcli "status minimal" | tee /tmp/status.txt
+          grep -q "is available" /tmp/status.txt || { echo "cluster not available"; fdbcli "status details" || true; docker logs arca-fdb; exit 1; }
+          # "available" is not "healthy": right after start some processes
+          # still report errors and transactions time out (flaky run seen on
+          # 2026-11-02). Wait for healthy data with no process messages.
+          for i in $(seq 1 30); do
+            if fdbcli "status json" 2>/dev/null | python3 -c '
+          import json,sys
+          s=json.load(sys.stdin)["cluster"]
+          ok = s.get("data",{}).get("state",{}).get("healthy", False) and all(not p.get("messages") for p in s.get("processes",{}).values())
+          sys.exit(0 if ok else 1)'; then echo "cluster healthy after $i checks"; break; fi
+            sleep 2
+          done
+          fdbcli "status details" | head -40
+          docker exec arca-fdb cat /var/fdb/fdb.cluster > /tmp/fdb.cluster
+          cat /tmp/fdb.cluster
+      - name: metadata restore drill on the three-process cluster (fdbbackup/fdbrestore)
+        env:
+          ARCA_FDB_TESTS: "1"
+          ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
+          ARCA_FDB_BACKUP_URL: file:///var/fdb/backup
+          ARCA_FDB_BACKUP_CLUSTER_FILE: /var/fdb/fdb.cluster
+        run: |
+          set -euo pipefail
+          # fdbrestore needs an empty database: this job's own cluster.
+          sudo docker exec arca-fdb mkdir -p /var/fdb/backup
+          sudo docker exec -d arca-fdb backup_agent -C /var/fdb/fdb.cluster
+          ARCA_FDB_BACKUP_CMD="sudo docker exec arca-fdb" \
+            cargo test -p arca-lake-testkit --features fdb --test it fdb_restore:: -- --nocapture --test-threads=1
+      - name: stop the cluster
+        if: always()
+        run: sudo docker rm -f -v arca-fdb >/dev/null 2>&1 || true
+
   fdb-failover:
     name: FoundationDB failover (3 processes)
     runs-on: ubuntu-24.04
@@ -602,19 +742,6 @@ jobs:
           printf '#!/usr/bin/env bash\nexec sudo /usr/bin/docker "$@"\n' > "$HOME/.local/bin/docker"
           chmod +x "$HOME/.local/bin/docker"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: metadata restore drill on the three-process cluster (fdbbackup/fdbrestore)
-        env:
-          ARCA_FDB_TESTS: "1"
-          ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
-          ARCA_FDB_BACKUP_URL: file:///var/fdb/backup
-          ARCA_FDB_BACKUP_CLUSTER_FILE: /var/fdb/fdb.cluster
-        run: |
-          set -euo pipefail
-          # Runs before the failover test: fdbrestore needs an empty database.
-          sudo docker exec arca-fdb mkdir -p /var/fdb/backup
-          sudo docker exec -d arca-fdb backup_agent -C /var/fdb/fdb.cluster
-          ARCA_FDB_BACKUP_CMD="sudo docker exec arca-fdb" \
-            cargo test -p arca-lake-testkit --features fdb --test it fdb_restore:: -- --nocapture --test-threads=1
       - name: member moves under FoundationDB process and quorum loss (Phase 3.4 §4)
         env:
           ARCA_FDB_TESTS: "1"

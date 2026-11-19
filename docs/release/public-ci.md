@@ -16,11 +16,14 @@ second one; proposal 3 is moot without self-hosted runners).
   `workflow_dispatch`. Token `contents: read`; no secrets; actions pinned
   to commit SHAs; first-time contributors' runs need a maintainer's
   approval.
-- Jobs on every trigger: format, lint and tests; the FoundationDB backend
-  tests and restore drill; the three-process FoundationDB failover suite;
-  licenses, history and tree secret scans, environment identifiers,
-  sign-off and Markdown links. The first hosted run of all four passed in
-  about 14 minutes, the longest job.
+- Jobs on every trigger, in parallel: format, lint and tests; the
+  FoundationDB backend tests and restore drill; the restore drill on a
+  three-process FoundationDB cluster; the three-process failover and
+  membership suites; licenses, history and tree secret scans, environment
+  identifiers, sign-off and Markdown links. The first hosted run took
+  about 14 minutes (its longest job); line-table debug information, a
+  dependency cache refreshed by pushes to `main` and the split of the
+  three-process jobs bring a pull request's run to about 7–9 minutes.
 - The upgrade and rollback job (`fdb-upgrade`: five earlier releases and
   a version-bumped tree built) runs on pushes to `main` and on demand,
   not on pull requests.
