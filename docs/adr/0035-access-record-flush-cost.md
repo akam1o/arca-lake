@@ -61,10 +61,10 @@ No access record is written unless a tiering policy could use it.
   `demote_after` from their write, not from the switch: a policy enabled
   on old data may demote objects read before the switch; a grace period
   from the record's `grace_from_ms` avoids it, §10.4).
-- **Format and compatibility:** one new metadata key, written by the
-  controller; no change to existing records. A gateway of an earlier
-  release ignores the key and keeps recording (correct, only slower);
-  rollback leaves an unused key.
+- **Format and compatibility:** one new metadata key and no change to
+  existing records; a schema step, so that no earlier controller can
+  lead once recording may be off (§10.1). A gateway of an earlier
+  release ignores the key and keeps recording (correct, only slower).
 
 ## 3. Option B: access records kept with atomic mutations
 
@@ -215,10 +215,12 @@ process, one or two gateways, uniform, Zipf (s = 1.1) and hot-set (1 % /
 - Written by `admin tiering enable | disable | set`; every write
   increments `generation` (so an earlier acknowledgment no longer
   matches). A controller's `--tiering-*` flags (earlier releases' only
-  configuration) seed the record when it does not exist (`enabled`,
-  `grace_from_ms` = now) and are otherwise ignored, with a warning when
-  they differ: no controller's memory is the source of truth, so a change
-  of leader cannot change the policy.
+  configuration) seed the record, `enabled`, when it does not exist, in
+  one insert-if-absent transaction (two controllers starting at once
+  seed once); a controller without those flags never seeds (an absent
+  record keeps gateways recording). Once the record exists the flags are
+  ignored, with a warning when they differ: no controller's memory is
+  the source of truth, so a change of leader cannot change the policy.
 - **A schema step.** The record comes with a new metadata schema
   version (ADR-0016, RFC-014 §5.4). `admin tiering disable` (and any
   write that leaves `enabled = false`) is refused until the cluster's
@@ -231,11 +233,21 @@ process, one or two gateways, uniform, Zipf (s = 1.1) and hot-set (1 % /
   rules (it is refused once written; ADR-0016), and an operator who
   must downgrade first enables tiering again (gateways record) and lets
   the record be acknowledged.
-- The leader reads the record at every tiering pass and acknowledges a
-  generation it has not acknowledged in its term by writing `applied =
-  (its term, generation)` in a transaction that commits only if the
-  record's `generation` is still that one (an admin change racing the
-  acknowledgment wins and is acknowledged at the next pass).
+- The leader acknowledges a generation it has not acknowledged in its
+  term by writing `applied = (its term, generation)` in a transaction
+  that commits only if the record's `generation` is still that one (an
+  admin change racing the acknowledgment wins and is acknowledged next
+  time). It does so right after taking the lease and in the health pass,
+  which always runs (the tiering pass does not run without a policy or
+  under throttled admission). It runs tiering only on a generation it has
+  acknowledged. The same transaction stamps `grace_from_ms` with the
+  leader's clock when the generation enables tiering or widens demotion
+  (§10.4), so that the grace never depends on the admin host's clock.
+- After a metadata restore (a new incarnation), the first
+  acknowledgment restarts the grace (`grace_from_ms` = now): the restored
+  access records miss the reads served after the backup point. A restore
+  that removes the record leaves gateways recording until a controller
+  with flags seeds it again.
 - **No decision on a stale policy.** A pass works on the generation it
   read, and every tier move's switch transaction (the fenced migration
   switch) reads the tiering record: the switch is refused when the
@@ -282,15 +294,21 @@ them early:
   `max(record.last_ms (or created_ms without a record), grace_from_ms +
   margin)`; promotion keeps using the record's own count and time;
 - `margin` covers the gateways' propagation (the 10 s stale bound plus
-  one refresh) and the clock skew between the writer of `grace_from_ms`
-  and the leader (a controller setting, as the reclamation skew); a
+  one refresh), the flush delay of ADR-0034 (a read is written at most
+  `max_age`, 30 s, after it happened) and the clock skew between
+  controllers and gateways (a controller setting, as the reclamation
+  skew; `grace_from_ms` is stamped by a leader, §10.1); a
   generation is therefore not demoted before `demote_after + margin`
   from the time tiering was enabled, whatever its record (no record, an
   old record, or a reset one);
-- `grace_from_ms` is set to the write's time when tiering is enabled and
-  by every change that can make more generations eligible for demotion
-  (a shorter `demote_after`, a tier added, removed or reordered); other
+- `grace_from_ms` is stamped by the leader acknowledging a change that
+  enables tiering or can make more generations eligible for demotion (a
+  shorter `demote_after`, a tier added, removed or reordered); other
   changes keep it;
+- promotion counts only reads after the grace start: a record whose
+  `last_ms` is before `grace_from_ms` counts as 0 reads (counts left from
+  before a disabled period, which ADR-0034 does not window, cannot
+  promote an object right after enabling);
 - it lives in the record: a failover keeps it; disabling and enabling
   again starts a new grace period.
 
@@ -299,8 +317,9 @@ them early:
 Gateway: each row of the table in §10.3 (a record read failure and its
 ageing, a stalled refresh, a new leader term, an acknowledgment of an
 earlier generation, an expired or released lease, a takeover between two
-refreshes); enabling and disabling reaching the gateway within one
-refresh while connectivity is healthy; a gateway restart.
+refreshes, the combined read failing); enabling and disabling reaching
+the gateway within one refresh while connectivity is healthy; a gateway
+restart.
 
 Controller: seeding from flags (absent record) and the record winning
 over different flags; the acknowledgment written once per generation and
@@ -308,9 +327,14 @@ term, and lost to a racing admin change; a pass blocked while the policy
 is disabled or changed (its moves refused at the switch, the
 acknowledgment after it); failover (the new leader acknowledges,
 gateways record in between); `admin tiering disable` refused below the
-schema step; the grace period for a generation with no record, an old
-record and a reset record, with a skewed clock, after enabling and after
-a widening change; disable then enable.
+schema step; seeding by two controllers at once, a controller without
+flags never seeding; acknowledgment by a leader without a policy (health
+pass) and right after a takeover; a restore that reverts or removes the
+record; the grace period for a generation with no record, an old record
+and a reset record, with a skewed clock (between controllers, and an
+admin host's clock not involved), after enabling and after a widening
+change, with reads still pending in a gateway's flush; old counts not
+promoting after re-enabling; disable then enable.
 
 ### 10.6 Acceptance
 
@@ -322,7 +346,9 @@ a widening change; disable then enable.
   one refresh while connectivity is healthy; otherwise gateways record
   (fail safe) once their last confirmation is stale.
 - Controller failover and gateway restarts leave no contradictory state.
-- No generation demoted during the grace period after enabling.
+- No generation demoted during the grace period after enabling, by any
+  controller that can lead once the schema step is written (every
+  controller from this release on; earlier releases cannot start).
 - R-94(b), R-112 and R-114 guarantees unchanged (the record paths of
   ADR-0034 are not changed).
 
