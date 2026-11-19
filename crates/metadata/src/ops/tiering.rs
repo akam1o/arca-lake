@@ -187,18 +187,10 @@ pub async fn admin_change<S: KvStore>(
             let mut r = before.clone().unwrap_or_default();
             match change {
                 AdminChange::Disable => {
-                    let schema = tx
-                        .get(&keys::schema_write())
-                        .await?
-                        .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
-                        .map_or(0, u64::from_le_bytes);
-                    if schema < TIERING_RECORD_SCHEMA {
-                        return Err(MetaError::InvalidArgument(format!(
-                            "tiering can be disabled once schema {TIERING_RECORD_SCHEMA} is written \
-                             (`admin upgrade finalize`); the store writes {schema}: until then a \
-                             controller of an earlier release could run tiering from its flags while \
-                             gateways stop recording"
-                        )));
+                    if before.is_none() {
+                        return Err(MetaError::InvalidArgument(
+                            "no tiering record: nothing to disable (gateways record reads)".into(),
+                        ));
                     }
                     r.enabled = false;
                 }
@@ -221,6 +213,23 @@ pub async fn admin_change<S: KvStore>(
                     }
                     r.pending_widen |= r.enabled && p.widens_demotion_from(&r.policy);
                     r.policy = p.clone();
+                }
+            }
+            // Any change that leaves tiering disabled (a disable, or a policy
+            // set on an absent record) waits for the schema step.
+            if !r.enabled {
+                let schema = tx
+                    .get(&keys::schema_write())
+                    .await?
+                    .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+                    .map_or(0, u64::from_le_bytes);
+                if schema < TIERING_RECORD_SCHEMA {
+                    return Err(MetaError::InvalidArgument(format!(
+                        "tiering can be disabled once schema {TIERING_RECORD_SCHEMA} is written \
+                         (`admin upgrade finalize`); the store writes {schema}: until then a \
+                         controller of an earlier release could run tiering from its flags while \
+                         gateways stop recording"
+                    )));
                 }
             }
             r.generation += 1;
@@ -253,6 +262,9 @@ pub async fn acknowledge<S: KvStore>(
     transact(store, (term, incarnation, generation, now_ms), |tx, env| {
         Box::pin(async move {
             let (term, incarnation, generation, now_ms) = *env;
+            if term == 0 {
+                return Ok(None);
+            }
             let Some(mut r) = read::<TieringRecord, _>(tx, &keys::tiering()).await? else {
                 return Ok(None);
             };
@@ -347,6 +359,27 @@ mod tests {
                 (true, 1, 1_800_000)
             );
             set_schema(&kv, 3).await;
+            // Every change that would leave tiering disabled is refused
+            // below the schema step: a policy set on an absent record, and a
+            // disable; a disable without a record is refused at any schema.
+            let empty = MemKv::default();
+            set_schema(&empty, TIERING_RECORD_SCHEMA).await;
+            assert!(
+                admin_change(&empty, &AdminChange::Disable, 5)
+                    .await
+                    .is_err()
+            );
+            set_schema(&empty, 3).await;
+            assert!(
+                admin_change(&empty, &AdminChange::SetPolicy(policy(60)), 5)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(current(&empty).await.unwrap(), None);
+            let r = admin_change(&empty, &AdminChange::Enable(Some(policy(60))), 6)
+                .await
+                .unwrap();
+            assert!(r.enabled, "enabling is allowed below the schema step");
             let e = admin_change(&kv, &AdminChange::Disable, 30)
                 .await
                 .unwrap_err();
@@ -477,5 +510,30 @@ mod tests {
             !confirmed_disabled(Some(&t), Some(&l), 50_000, 0, 1_000),
             "enabled"
         );
+    }
+
+    #[test]
+    fn widening_is_a_shorter_demote_after_or_any_change_of_tiers() {
+        let p = policy(1800);
+        let mut reordered = p.clone();
+        reordered.tiers.reverse();
+        assert!(reordered.widens_demotion_from(&p));
+        assert!(policy(60).widens_demotion_from(&p));
+        assert!(!policy(3600).widens_demotion_from(&p));
+        let mut promote_only = p.clone();
+        promote_only.promote_reads = 50;
+        promote_only.promote_window_ms = 1;
+        assert!(!promote_only.widens_demotion_from(&p));
+    }
+
+    #[test]
+    fn term_zero_never_acknowledges() {
+        futures::executor::block_on(async {
+            let kv = MemKv::default();
+            seed_if_absent(&kv, &policy(1800), 10).await.unwrap();
+            assert_eq!(acknowledge(&kv, 0, [1u8; 16], 1, 100).await.unwrap(), None);
+            let r = current(&kv).await.unwrap().unwrap();
+            assert!(r.pending_enable && r.applied_term == 0);
+        });
     }
 }
