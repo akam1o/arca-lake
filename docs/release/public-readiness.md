@@ -15,15 +15,14 @@ No tag or release exists.
 | --- | --- |
 | Published commit | `main` at [`55f25621d924ac445218a11bbd35e53ccfcebff1`](https://github.com/akam1o/arca-lake/tree/55f25621d924ac445218a11bbd35e53ccfcebff1) (the documentation cleanup, fast-forwarded from its pull request; author, committer and `Signed-off-by` the project's no-reply identity) |
 | Validation | the [push workflow for that commit](https://github.com/akam1o/arca-lake/actions/runs/44469503413) succeeded: format, lint and tests, the FoundationDB backend and failover suites, licenses, history and tree secret scans, environment-identifier check, DCO and Markdown links. Its first attempt failed one test on a 10-second wait (`cache::population_failure_never_fails_the_get`); the commit changed documentation only, the test passed 10 of 10 runs locally and had not failed in the 60 earlier runs, and the rerun of the job passed: classified as timing, not a regression |
-| Actions and runners | GitHub Actions disabled for the repository before publication; the three repository-scoped self-hosted runners deregistered, and their services and installations removed from their hosts. No runner is registered; no workflow runs until the public CI below is in place |
+| Actions and runners | GitHub Actions disabled for the repository before publication; the three repository-scoped self-hosted runners deregistered, and their services and installations removed from their hosts. No runner is registered |
 | Workflow logs and artifacts | 314 workflow runs: the logs of 312 were downloaded and scanned (2 could not be retrieved and are not inspected), each deleted after its scan. Within that scope: 0 tokens, keys or other credentials, 0 organisation or personal identifiers, 0 addresses of the test network. Present and accepted for publication: runner and runner-host names, runner work paths, container-network addresses of the CI's FoundationDB, and the standard work path of GitHub's hosted macOS runner. One artifact remains (a secret scan's result, with no findings) |
 | Replaced historical commit | the possibility that the replaced commit of the [incident record](../security/public-artifacts.md#record) remains retrievable by its hash is accepted: it holds a test host name, not a credential |
 | Vulnerability reporting | GitHub private vulnerability reporting enabled, the route [SECURITY](../../SECURITY.md) names |
 | Fork pull requests | workflows of first-time contributors need a maintainer's approval (GitHub's default) |
 
-Open after publication: a public CI on GitHub-hosted runners (until then
-pushes and pull requests are not checked automatically), then Actions
-enabled again.
+After publication, CI moved to GitHub-hosted runners and Actions was
+enabled again ([current arrangement](public-ci.md#current-arrangement-2026-11-19)).
 
 ## Evidence and scope
 
