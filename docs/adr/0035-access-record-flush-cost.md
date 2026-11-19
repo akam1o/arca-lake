@@ -307,7 +307,8 @@ them early:
 
 - for **demotion only**, the time a generation counts as last touched is
   `max(record.last_ms (or created_ms without a record), grace_from_ms +
-  margin)`; promotion keeps using the record's own count and time;
+  margin)`; promotion uses the record's own count and time, subject to the
+  `promotion_from_ms` cutoff below;
 - `margin` covers the gateways' propagation (the 10 s stale bound plus
   one refresh), the flush delay of ADR-0034 (a read is written at most
   `max_age`, 30 s, after it happened, under ADR-0034's assumptions: the
