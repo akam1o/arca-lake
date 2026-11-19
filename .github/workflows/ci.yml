@@ -29,6 +29,11 @@ env:
   # three minutes unoptimized.
   CARGO_PROFILE_TEST_OPT_LEVEL: "1"
   CARGO_INCREMENTAL: "0"
+  # Line tables only: backtraces keep file and line, while compiling and
+  # linking the test binaries (the longest part of every job) costs less,
+  # and the cached dependencies are smaller.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
   FDB_VERSION: 7.3.77
 
 jobs:
@@ -77,18 +82,23 @@ jobs:
         with:
           toolchain: "1.99"
           components: rustfmt, clippy
-      # Each job starts on a fresh virtual machine: dependencies and build
-      # output come from the Actions cache (one entry per job and lock file).
-      - name: cache cargo registry and build output
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      # Each job starts on a fresh virtual machine: compiled dependencies
+      # come from the Actions cache, saved again by every push to main
+      # (pull requests only restore). The workspace's own crates are rebuilt
+      # every time (a fresh checkout makes them stale) and are not saved.
+      - name: restore cargo registry and compiled dependencies
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
+          key: cargo-v2-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            cargo-v2-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-v2-${{ runner.os }}-${{ github.job }}-
       - run: echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
       # The `fdb` feature links libfdb_c; install the client library so that
       # --all-features builds and runs.
@@ -106,7 +116,7 @@ jobs:
           deb="$HOME/.cache/arca-lake/fdb/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
           [ -f "$deb" ] || curl -sSL -o "$deb" \
             "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
-          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo apt-get install -y "$deb"
+          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo dpkg -i "$deb"
       # nextest runs the test binaries concurrently; `cargo test` runs them
       # one after another, so the slowest test gated the whole step.
       - name: install cargo-nextest (pinned release)
@@ -132,6 +142,27 @@ jobs:
       - name: test (all features)
         run: cargo nextest run --workspace --all-features --no-fail-fast
       - run: cargo doc --workspace --no-deps --all-features
+      - name: save compiled dependencies (pushes to main)
+        if: success() && github.event_name == 'push'
+        run: |
+          # Keep dependencies only: the workspace's crates, test binaries and
+          # documentation are rebuilt by every run.
+          for d in target/debug target/doc; do
+            [ -d "$d" ] || continue
+            find "$d" -maxdepth 2 \( -name 'arca_lake*' -o -name 'arca-lake*' -o -name 'arcabench*' \) -prune -exec rm -rf {} + 2>/dev/null || true
+            find "$d/deps" -maxdepth 1 -type f \( -name 'arca_lake*' -o -name 'arcabench*' -o -name 'it-*' \) -delete 2>/dev/null || true
+          done
+          rm -rf target/doc target/nextest target/tmp
+          du -sh target 2>/dev/null || true
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        if: success() && github.event_name == 'push'
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   fdb:
     name: FoundationDB backend tests
@@ -180,18 +211,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99"
-      # Each job starts on a fresh virtual machine: dependencies and build
-      # output come from the Actions cache (one entry per job and lock file).
-      - name: cache cargo registry and build output
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      # Each job starts on a fresh virtual machine: compiled dependencies
+      # come from the Actions cache, saved again by every push to main
+      # (pull requests only restore). The workspace's own crates are rebuilt
+      # every time (a fresh checkout makes them stale) and are not saved.
+      - name: restore cargo registry and compiled dependencies
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
+          key: cargo-v2-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            cargo-v2-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-v2-${{ runner.os }}-${{ github.job }}-
       - run: echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
       - name: cache downloaded tools and packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -205,7 +241,7 @@ jobs:
           deb="$HOME/.cache/arca-lake/fdb/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
           [ -f "$deb" ] || curl -sSL -o "$deb" \
             "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
-          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo apt-get install -y "$deb"
+          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo dpkg -i "$deb"
       - name: start FoundationDB server
         run: |
           set -euo pipefail
@@ -255,6 +291,27 @@ jobs:
           sudo docker exec -d "$FDB_CONTAINER" backup_agent -C /var/fdb/fdb.cluster
           ARCA_FDB_BACKUP_CMD="sudo docker exec $FDB_CONTAINER" \
             cargo test -p arca-lake-testkit --features fdb --test it fdb_restore:: -- --nocapture --test-threads=1
+      - name: save compiled dependencies (pushes to main)
+        if: success() && github.event_name == 'push'
+        run: |
+          # Keep dependencies only: the workspace's crates, test binaries and
+          # documentation are rebuilt by every run.
+          for d in target/debug target/doc; do
+            [ -d "$d" ] || continue
+            find "$d" -maxdepth 2 \( -name 'arca_lake*' -o -name 'arca-lake*' -o -name 'arcabench*' \) -prune -exec rm -rf {} + 2>/dev/null || true
+            find "$d/deps" -maxdepth 1 -type f \( -name 'arca_lake*' -o -name 'arcabench*' -o -name 'it-*' \) -delete 2>/dev/null || true
+          done
+          rm -rf target/doc target/nextest target/tmp
+          du -sh target 2>/dev/null || true
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        if: success() && github.event_name == 'push'
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
       - name: stop FoundationDB server
         if: always()
         run: sudo docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
@@ -338,7 +395,7 @@ jobs:
           deb="$HOME/.cache/arca-lake/fdb/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
           [ -f "$deb" ] || curl -sSL -o "$deb" \
             "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
-          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo apt-get install -y "$deb"
+          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo dpkg -i "$deb"
       - name: start FoundationDB server
         run: |
           set -euo pipefail
@@ -465,18 +522,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99"
-      # Each job starts on a fresh virtual machine: dependencies and build
-      # output come from the Actions cache (one entry per job and lock file).
-      - name: cache cargo registry and build output
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      # Each job starts on a fresh virtual machine: compiled dependencies
+      # come from the Actions cache, saved again by every push to main
+      # (pull requests only restore). The workspace's own crates are rebuilt
+      # every time (a fresh checkout makes them stale) and are not saved.
+      - name: restore cargo registry and compiled dependencies
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
+          key: cargo-v2-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            cargo-v2-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-v2-${{ runner.os }}-${{ github.job }}-
       - run: echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
       - name: cache downloaded tools and packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -490,7 +552,7 @@ jobs:
           deb="$HOME/.cache/arca-lake/fdb/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
           [ -f "$deb" ] || curl -sSL -o "$deb" \
             "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
-          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo apt-get install -y "$deb"
+          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo dpkg -i "$deb"
       - name: start a three-process FoundationDB cluster (bridge network)
         run: |
           set -euo pipefail
@@ -566,6 +628,27 @@ jobs:
           ARCA_CHAOS_DOCKER: "1"
           ARCA_FDB_CLUSTER_FILE: /tmp/fdb.cluster
         run: "cargo test -p arca-lake-testkit --features fdb --test it fdb_failover:: -- --nocapture --test-threads=1"
+      - name: save compiled dependencies (pushes to main)
+        if: success() && github.event_name == 'push'
+        run: |
+          # Keep dependencies only: the workspace's crates, test binaries and
+          # documentation are rebuilt by every run.
+          for d in target/debug target/doc; do
+            [ -d "$d" ] || continue
+            find "$d" -maxdepth 2 \( -name 'arca_lake*' -o -name 'arca-lake*' -o -name 'arcabench*' \) -prune -exec rm -rf {} + 2>/dev/null || true
+            find "$d/deps" -maxdepth 1 -type f \( -name 'arca_lake*' -o -name 'arcabench*' -o -name 'it-*' \) -delete 2>/dev/null || true
+          done
+          rm -rf target/doc target/nextest target/tmp
+          du -sh target 2>/dev/null || true
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        if: success() && github.event_name == 'push'
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
       - name: stop the cluster
         if: always()
         run: sudo docker rm -f -v arca-fdb >/dev/null 2>&1 || true
