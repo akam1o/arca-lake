@@ -170,6 +170,20 @@ pub struct ClusterWatch {
     pub refresh_failures: std::sync::atomic::AtomicU64,
     /// Write admission from the controller's record (Phase 3.6).
     pub admission: super::admission::WriteAdmission,
+    /// The last successful combined read of the tiering and leader
+    /// records (ADR-0035 §10.2).
+    tiering: RwLock<Option<TieringObservation>>,
+}
+
+/// One combined read of the tiering and leader records.
+#[derive(Debug, Clone)]
+struct TieringObservation {
+    tiering: Option<arca_lake_metadata::ops::tiering::TieringRecord>,
+    leader: Option<arca_lake_metadata::ops::leader::LeaderRecord>,
+    /// Wall clock of the read, unix ms (compared with the lease).
+    read_at_ms: u64,
+    /// Monotonic clock of the read (its age).
+    read_at: std::time::Instant,
 }
 
 /// Interval of the cluster-state refresh.
@@ -199,6 +213,49 @@ impl ClusterWatch {
     /// without waiting for the refresh interval).
     pub fn set(&self, rec: Option<ClusterStateRecord>) {
         *self.state.write().unwrap_or_else(PoisonError::into_inner) = rec;
+    }
+
+    /// Keep a successful combined read of the tiering and leader records
+    /// (a failed read keeps the last one, which ages).
+    pub fn observe_tiering(
+        &self,
+        tiering: Option<arca_lake_metadata::ops::tiering::TieringRecord>,
+        leader: Option<arca_lake_metadata::ops::leader::LeaderRecord>,
+        read_at_ms: u64,
+        read_at: std::time::Instant,
+    ) {
+        *self.tiering.write().unwrap_or_else(PoisonError::into_inner) = Some(TieringObservation {
+            tiering,
+            leader,
+            read_at_ms,
+            read_at,
+        });
+    }
+
+    /// Whether reads must be recorded for tiering (ADR-0035 §10.3): unless
+    /// the last combined read, fresh at `now`, confirmed tiering disabled
+    /// by the current leader. No read yet: recorded.
+    #[must_use]
+    pub fn access_recording_required_at(&self, now: std::time::Instant, skew_ms: u64) -> bool {
+        let o = self.tiering.read().unwrap_or_else(PoisonError::into_inner);
+        let Some(o) = o.as_ref() else {
+            return true;
+        };
+        let age =
+            u64::try_from(now.saturating_duration_since(o.read_at).as_millis()).unwrap_or(u64::MAX);
+        !arca_lake_metadata::ops::tiering::confirmed_disabled(
+            o.tiering.as_ref(),
+            o.leader.as_ref(),
+            o.read_at_ms,
+            age,
+            skew_ms,
+        )
+    }
+
+    /// [`Self::access_recording_required_at`] now.
+    #[must_use]
+    pub fn access_recording_required(&self, skew_ms: u64) -> bool {
+        self.access_recording_required_at(std::time::Instant::now(), skew_ms)
     }
 
     /// Admission: client writes need `Active`; reads need anything but
@@ -719,6 +776,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let cluster = Arc::new(ClusterWatch {
             incarnation: state.incarnation,
             state: RwLock::new(Some(state.clone())),
+            tiering: RwLock::new(None),
             refused: std::sync::atomic::AtomicU64::new(0),
             refresh_failures: std::sync::atomic::AtomicU64::new(0),
             admission: watch_admission,
@@ -872,6 +930,14 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         {
                             w.admission.observe(rec, std::time::Instant::now());
                         }
+                        // The tiering and leader records together (ADR-0035
+                        // §10.2); a failed read keeps the last, which ages
+                        // into recording again.
+                        if let Ok((t, l)) =
+                            arca_lake_metadata::ops::tiering::read_with_leader(meta.as_ref()).await
+                        {
+                            w.observe_tiering(t, l, now_ms(), std::time::Instant::now());
+                        }
                         // A failed read closes it here (fail closed).
                         let fence =
                             arca_lake_metadata::ops::delete_fence::current(meta.as_ref()).await;
@@ -995,7 +1061,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// Counters and state of the access-record table (ADR-0034).
     #[must_use]
     pub fn access_stats(&self) -> super::access::AccessStatsSnapshot {
-        self.access.snapshot(now_ms())
+        let mut s = self.access.snapshot(now_ms());
+        s.recording = self.cfg.record_access
+            && self
+                .cluster
+                .access_recording_required(self.cfg.access.lease_skew_ms);
+        s
     }
 }
 
@@ -2521,5 +2592,62 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             encoding_type: input.encoding_type,
             ..Default::default()
         }))
+    }
+}
+
+#[cfg(test)]
+mod tiering_watch {
+    //! ADR-0035 §10.3: a gateway stops recording only on a fresh
+    //! confirmation that tiering is disabled by the current leader.
+    use std::time::{Duration, Instant};
+
+    use arca_lake_metadata::ops::leader::LeaderRecord;
+    use arca_lake_metadata::ops::tiering::{CONFIRMATION_STALE_MS, TieringRecord};
+
+    use super::*;
+
+    fn watch() -> ClusterWatch {
+        ClusterWatch {
+            incarnation: [0u8; 16],
+            state: RwLock::new(None),
+            refused: std::sync::atomic::AtomicU64::new(0),
+            refresh_failures: std::sync::atomic::AtomicU64::new(0),
+            admission: super::super::admission::WriteAdmission::new("default"),
+            tiering: RwLock::new(None),
+        }
+    }
+
+    #[test]
+    fn recording_stops_only_while_the_confirmation_is_fresh_and_current() {
+        let w = watch();
+        let t0 = Instant::now();
+        assert!(w.access_recording_required_at(t0, 2_000), "no read yet");
+        let disabled = TieringRecord {
+            enabled: false,
+            generation: 4,
+            applied_term: 7,
+            applied_generation: 4,
+            ..TieringRecord::default()
+        };
+        let leader = |token| LeaderRecord {
+            holder: "c".into(),
+            token,
+            lease_until_ms: 1_010_000,
+        };
+        w.observe_tiering(Some(disabled.clone()), Some(leader(7)), 1_000_000, t0);
+        assert!(!w.access_recording_required_at(t0 + Duration::from_secs(1), 2_000));
+        assert!(
+            w.access_recording_required_at(
+                t0 + Duration::from_millis(CONFIRMATION_STALE_MS + 1),
+                2_000
+            ),
+            "a stale confirmation kept recording off"
+        );
+        // A new leader: recorded until it acknowledges.
+        w.observe_tiering(Some(disabled), Some(leader(8)), 1_000_000, t0);
+        assert!(w.access_recording_required_at(t0, 2_000));
+        // No record: recorded.
+        w.observe_tiering(None, Some(leader(7)), 1_000_000, t0);
+        assert!(w.access_recording_required_at(t0, 2_000));
     }
 }

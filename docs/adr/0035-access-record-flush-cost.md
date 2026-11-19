@@ -2,7 +2,12 @@
 
 Status: **accepted** (Phase 4.1 follow-up): **option A adopted, option B
 rejected** (§9), on the measurements of §8. Option A as designed in §10
-is not implemented yet. It removes the cost of access recording where no
+is implemented (the tiering record and `admin tiering`, schema 4, the
+controller under the record, the gateways' refresh and stop-recording
+rule, the flush-side promotion cutoff; metrics
+`arca_gateway_access_recording`, `arca_gateway_access_unrecorded_total`,
+`arca_gateway_access_dropped_total{reason="cutoff"}`); its cluster
+measurement (§10.6) is pending. It removes the cost of access recording where no
 tiering policy acts; it does not remove it where one does (R-109 stays
 Medium). Concerns the gateway's recording of reads for automatic
 tiering (RFC-006 §5.8) and the records tiering reads; data safety,

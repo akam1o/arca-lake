@@ -1052,6 +1052,17 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         if !self.cfg.record_access {
             return;
         }
+        // ADR-0035 §10.3: no record while tiering is confirmed disabled.
+        if !self
+            .cluster
+            .access_recording_required(self.cfg.access.lease_skew_ms)
+        {
+            self.access
+                .stats
+                .unrecorded
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
         let now = now_ms();
         if !self.cfg.access.legacy {
             self.access.note(generation, now);

@@ -1737,6 +1737,9 @@ pub enum AccessWrite {
     /// Not written: its oldest read is older than the age bound at the
     /// attempt that committed.
     Stale,
+    /// Not written: its latest read is before the tiering record's
+    /// promotion cutoff (ADR-0035 §10.4).
+    BeforeCutoff,
 }
 
 /// Add many generations' reads to their access records in one transaction
@@ -1764,6 +1767,14 @@ pub async fn record_accesses<S: KvStore>(
         Box::pin(async move {
             let (updates, max_age_ms, now) = *env;
             let at = now();
+            // The promotion cutoff of the tiering record, read here (ADR-0035
+            // §10.4: no gateway's stale copy decides it): an entry whose latest
+            // read is before it is dropped, and a record last read before it
+            // has its count replaced, not added to, so that counts from before
+            // tiering was last enabled never promote.
+            let cutoff = read::<crate::ops::tiering::TieringRecord, _>(tx, &keys::tiering())
+                .await?
+                .map_or(0, |t| t.promotion_from_ms);
             let fresh: Vec<&AccessUpdate> = updates
                 .iter()
                 .filter(|u| max_age_ms == 0 || at.saturating_sub(u.oldest_ms) <= max_age_ms)
@@ -1787,10 +1798,17 @@ pub async fn record_accesses<S: KvStore>(
                     out.push(AccessWrite::Finished);
                     continue;
                 }
+                if u.last_ms < cutoff {
+                    out.push(AccessWrite::BeforeCutoff);
+                    continue;
+                }
                 let mut rec: AccessRecord = match record {
                     Some(v) => crate::records::decode(v)?,
                     None => AccessRecord::default(),
                 };
+                if rec.last_ms < cutoff {
+                    rec.count = 0;
+                }
                 rec.last_ms = rec.last_ms.max(u.last_ms);
                 rec.count = rec.count.saturating_add(u.reads);
                 write(tx, &keys::access(&u.generation), &rec)?;

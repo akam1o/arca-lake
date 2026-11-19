@@ -42,6 +42,10 @@ pub struct AccessConfig {
     pub max_age: Duration,
     /// Time a graceful stop spends flushing what is pending.
     pub shutdown_flush: Duration,
+    /// Clock skew allowed between this gateway and the leader when a
+    /// lease decides that tiering is confirmed disabled (ADR-0035 §10.3),
+    /// ms.
+    pub lease_skew_ms: u64,
     /// Flushes a generation singled out by contention is written alone.
     pub isolate_flushes: u32,
     /// Generations isolated at most.
@@ -63,6 +67,7 @@ impl Default for AccessConfig {
             high_watermark: 0.5,
             max_age: Duration::from_secs(30),
             shutdown_flush: Duration::from_secs(2),
+            lease_skew_ms: 2_000,
             isolate_flushes: 8,
             isolate_cap: 64,
             jitter: 0.2,
@@ -87,6 +92,12 @@ pub struct AccessStats {
     pub dropped_error: AtomicU64,
     /// Reads dropped: pending at the end of a graceful stop.
     pub dropped_shutdown: AtomicU64,
+    /// Reads dropped: their latest read before the tiering record's
+    /// promotion cutoff (ADR-0035 §10.4).
+    pub dropped_cutoff: AtomicU64,
+    /// Reads not offered to the table: tiering confirmed disabled
+    /// (ADR-0035 §10.3).
+    pub unrecorded: AtomicU64,
     /// Reads of batches whose commit outcome is unknown (written or not).
     pub uncertain: AtomicU64,
     /// Batches whose commit outcome is unknown.
@@ -134,6 +145,11 @@ pub struct AccessStatsSnapshot {
     pub dropped_stale: u64,
     pub dropped_error: u64,
     pub dropped_shutdown: u64,
+    pub dropped_cutoff: u64,
+    pub unrecorded: u64,
+    /// Reads are being recorded (tiering not confirmed disabled); set by
+    /// the backend.
+    pub recording: bool,
     pub uncertain: u64,
     pub uncertain_batches: u64,
     pub flushes: u64,
@@ -409,6 +425,9 @@ impl AccessTable {
             dropped_stale: g(&s.dropped_stale),
             dropped_error: g(&s.dropped_error),
             dropped_shutdown: g(&s.dropped_shutdown),
+            dropped_cutoff: g(&s.dropped_cutoff),
+            unrecorded: g(&s.unrecorded),
+            recording: true,
             uncertain: g(&s.uncertain),
             uncertain_batches: g(&s.uncertain_batches),
             flushes: g(&s.flushes),
@@ -565,6 +584,9 @@ async fn flush_batch<S: KvStore>(
                         }
                         AccessWrite::Stale => {
                             s.dropped_stale.fetch_add(e.reads, Relaxed);
+                        }
+                        AccessWrite::BeforeCutoff => {
+                            s.dropped_cutoff.fetch_add(e.reads, Relaxed);
                         }
                     }
                     t.done(e.reads);
@@ -776,6 +798,7 @@ mod tests {
             + s.dropped_stale
             + s.dropped_error
             + s.dropped_shutdown
+            + s.dropped_cutoff
             + s.dropped_full
             + s.uncertain
             + pending;
@@ -1461,6 +1484,65 @@ mod tests {
         // in their order.
         assert_eq!(order, vec![2, 3, 4, 5, 6, 1]);
         assert_eq!(t.snapshot(1_000).oldest_age_ms, 800);
+        assert_conserved(&t);
+    }
+
+    /// ADR-0035 §10.4: the flush applies the tiering record's promotion
+    /// cutoff, read in its own transaction: an entry entirely before it is
+    /// dropped (counted), one across it counted whole, a record last read
+    /// before it has its count replaced.
+    #[tokio::test]
+    async fn the_flush_applies_the_promotion_cutoff_of_the_tiering_record() {
+        use arca_lake_metadata::ops::tiering::{self, AdminChange, TieringPolicyRecord};
+        let kv = MemKv::default();
+        for i in 1..=4 {
+            put_header(&kv, g(i), GenState::Committed).await;
+        }
+        // g(4) has an old count (100 reads at 50).
+        object::record_access(&kv, &g(4), 50, 100).await.unwrap();
+        let policy = TieringPolicyRecord {
+            tiers: vec!["default".into(), "fast".into()],
+            promote_reads: 5,
+            promote_window_ms: 600_000,
+            demote_after_ms: 1_800_000,
+        };
+        let r = tiering::admin_change(&kv, &AdminChange::Enable(Some(policy)), 90)
+            .await
+            .unwrap();
+        // The leader acknowledges at 100: the cutoff.
+        let r = tiering::acknowledge(&kv, 1, [1u8; 16], r.generation, 100)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.promotion_from_ms, 100);
+        let t = AccessTable::new(cfg(64, 512));
+        t.note(g(1), 80); // entirely before the cutoff
+        t.note(g(2), 90); // across it
+        t.note(g(2), 110);
+        t.note(g(3), 120); // after it
+        t.note(g(4), 130); // after it, on an old record
+        run_flush(&kv, &t, None, &|| 140).await;
+        assert_eq!(
+            record(&kv, g(1)).await,
+            None,
+            "a read before the cutoff was written"
+        );
+        assert_eq!(record(&kv, g(2)).await.map(|r| r.count), Some(2));
+        assert_eq!(record(&kv, g(3)).await.map(|r| r.count), Some(1));
+        assert_eq!(
+            record(&kv, g(4)).await,
+            Some(object::AccessRecord {
+                last_ms: 130,
+                count: 1
+            }),
+            "the old count was added to"
+        );
+        // A record read since the cutoff is added to.
+        t.note(g(4), 150);
+        run_flush(&kv, &t, None, &|| 160).await;
+        assert_eq!(record(&kv, g(4)).await.map(|r| r.count), Some(2));
+        let s = t.snapshot(0);
+        assert_eq!(s.dropped_cutoff, 1, "{s:?}");
         assert_conserved(&t);
     }
 }
