@@ -526,6 +526,16 @@ mod tests {
         );
     }
 
+    /// The gate names the schema this build introduced (a later schema
+    /// step must not leave it pointing elsewhere).
+    #[test]
+    fn the_gate_is_the_schema_of_the_tiering_record() {
+        assert_eq!(
+            TIERING_RECORD_SCHEMA,
+            crate::keys::SCHEMA_VERSION - arca_lake_common::compat::BUMP
+        );
+    }
+
     #[test]
     fn widening_is_a_shorter_demote_after_or_any_change_of_tiers() {
         let p = policy(1800);

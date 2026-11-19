@@ -202,16 +202,17 @@ async fn population_retried_after_resets_records_each_chunk_once() {
     )
     .await
     .unwrap();
-    let cache_group = c
+    // Every cache member: which cache group a chunk goes to depends on its
+    // id (random), so a single member may receive none of them (a CI flake).
+    let cache_addrs: std::collections::HashSet<String> = c
         .groups()
         .await
         .into_iter()
-        .find(GroupRecord::is_cache)
-        .unwrap();
-    let cache_addr = c.nodes[c.node_index(&cache_group.members[0]).unwrap()]
-        .addr
-        .to_string();
-    // Every first PutShard of a chunk to the cache member is reset once.
+        .filter(GroupRecord::is_cache)
+        .flat_map(|g| g.members)
+        .map(|m| c.nodes[c.node_index(&m).unwrap()].addr.to_string())
+        .collect();
+    // Every first PutShard of a chunk to a cache member is reset once.
     let seen = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let resets = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&resets);
@@ -219,7 +220,7 @@ async fn population_retried_after_resets_records_each_chunk_once() {
         .node_clients()
         .set_fault_hook(Some(Arc::new(move |ctx| {
             if ctx.rpc == Rpc::PutShard
-                && ctx.addr == cache_addr
+                && cache_addrs.contains(ctx.addr)
                 && let Some(shard) = ctx.shard
                 && seen.lock().unwrap().insert(shard.chunk_id)
             {
