@@ -45,6 +45,11 @@ pub struct TestNode {
     /// Address (stable across restarts).
     pub addr: SocketAddr,
     handle: Option<NodeHandle>,
+    /// While the node is stopped: a listener on its address that accepts
+    /// and closes every connection, so that requests to the stopped node
+    /// fail at once and no other process (another test run in parallel)
+    /// takes the port and answers in its place.
+    held: Option<tokio::task::JoinHandle<()>>,
     tls: Option<Arc<arca_lake_protocol::tls::TlsContext>>,
     capacity: Option<u64>,
 }
@@ -330,6 +335,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 dir,
                 addr,
                 handle: Some(handle),
+                held: None,
                 tls,
                 capacity: Some(TEST_ALLOTMENT),
             });
@@ -371,6 +377,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                 dir,
                 addr,
                 handle: Some(handle),
+                held: None,
                 tls,
                 capacity: Some(TEST_ALLOTMENT),
             });
@@ -705,6 +712,18 @@ impl<S: KvStore + 'static> TestCluster<S> {
         if let Some(h) = self.nodes[i].handle.take() {
             h.shutdown().await;
         }
+        // Keep the address: tests run in parallel processes, and a port
+        // given back can be taken by another test's node, which would then
+        // accept this cluster's writes (seen on CI).
+        if self.nodes[i].held.is_none()
+            && let Ok(l) = tokio::net::TcpListener::bind(self.nodes[i].addr).await
+        {
+            self.nodes[i].held = Some(tokio::spawn(async move {
+                while let Ok((conn, _)) = l.accept().await {
+                    drop(conn);
+                }
+            }));
+        }
         // Drop the gateway's cached channel so it reconnects.
         self.backend_clients_forget(i);
     }
@@ -733,6 +752,10 @@ impl<S: KvStore + 'static> TestCluster<S> {
     /// When the node cannot be started.
     pub async fn start_node_quiet(&mut self, i: usize) {
         let n = &mut self.nodes[i];
+        if let Some(h) = n.held.take() {
+            h.abort();
+            let _ = h.await;
+        }
         let mut cfg = NodeConfig::new(n.addr, &n.dir);
         cfg.fence_lease = self.fence_lease;
         cfg.reclaim_retention = self.reclaim_retention;
@@ -794,6 +817,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             dir,
             addr,
             handle: Some(handle),
+            held: None,
             tls,
             capacity: Some(TEST_ALLOTMENT),
         });
@@ -1097,6 +1121,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             dir,
             addr,
             handle: Some(handle),
+            held: None,
             tls,
             capacity: Some(TEST_ALLOTMENT),
         });
@@ -1199,6 +1224,9 @@ impl<S: KvStore + 'static> TestCluster<S> {
             g.shutdown().await;
         }
         for n in &mut self.nodes {
+            if let Some(h) = n.held.take() {
+                h.abort();
+            }
             if let Some(h) = n.handle.take() {
                 h.shutdown().await;
             }
