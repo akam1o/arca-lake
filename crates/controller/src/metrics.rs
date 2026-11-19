@@ -273,6 +273,10 @@ pub struct Metrics {
     pub rebalance_capacity_stops_total: AtomicU64,
     /// A tiering pass is moving chunks (rebalancing yields to it, R-93).
     pub tiering_active: std::sync::atomic::AtomicBool,
+    /// Held by a tiering pass from its start to its end: the tiering record
+    /// is acknowledged only by whoever holds it (ADR-0035 §10.1: a new
+    /// generation after the pass that read the previous one).
+    pub tiering_gate: tokio::sync::Mutex<()>,
     /// Cache-group repairs started (RFC-006 §5.9).
     pub cache_repairs_started_total: AtomicU64,
     /// Cache-group repairs completed.

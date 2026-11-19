@@ -28,6 +28,10 @@ pub enum MigrateOutcome {
     /// is no longer committed); nothing was switched and the target shards
     /// were deleted.
     Skipped(&'static str),
+    /// The tiering policy that decided the move changed or was disabled
+    /// (ADR-0035 §10.1); nothing was switched and the target shards were
+    /// deleted. Only [`migrate_chunk_for_tiering`] returns it.
+    PolicyChanged,
 }
 
 /// Fault-injection points for tests.
@@ -83,7 +87,7 @@ pub async fn migrate_chunk<S: KvStore>(
 /// # Errors
 ///
 /// As [`migrate_chunk`].
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub async fn migrate_chunk_with<S: KvStore>(
     meta: &S,
     clients: &NodeClients,
@@ -95,7 +99,78 @@ pub async fn migrate_chunk_with<S: KvStore>(
     index: u32,
     record: &ChunkRecord,
     fault: Option<MigrateFault>,
+    before_switch: impl AsyncFnMut(),
+) -> Result<MigrateOutcome, TierError> {
+    migrate_inner(
+        meta,
+        clients,
+        coders,
+        addr_of,
+        source_group,
+        target,
+        generation,
+        index,
+        record,
+        fault,
+        before_switch,
+        None,
+    )
+    .await
+}
+
+/// [`migrate_chunk_with`] for a move a tiering pass decided under the
+/// tiering record's `policy_generation` (ADR-0035 §10.1): the switch is
+/// refused ([`MigrateOutcome::PolicyChanged`]) when the record moved on or
+/// tiering was disabled.
+///
+/// # Errors
+///
+/// As [`migrate_chunk`].
+#[allow(clippy::too_many_arguments)]
+pub async fn migrate_chunk_for_tiering<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    coders: &Coders,
+    addr_of: &(dyn Fn(u64) -> Option<String> + Sync),
+    source_group: &GroupRecord,
+    target: &GroupRecord,
+    generation: &GenId,
+    index: u32,
+    record: &ChunkRecord,
+    policy_generation: u64,
+    before_switch: impl AsyncFnMut(),
+) -> Result<MigrateOutcome, TierError> {
+    migrate_inner(
+        meta,
+        clients,
+        coders,
+        addr_of,
+        source_group,
+        target,
+        generation,
+        index,
+        record,
+        None,
+        before_switch,
+        Some(policy_generation),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn migrate_inner<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    coders: &Coders,
+    addr_of: &(dyn Fn(u64) -> Option<String> + Sync),
+    source_group: &GroupRecord,
+    target: &GroupRecord,
+    generation: &GenId,
+    index: u32,
+    record: &ChunkRecord,
+    fault: Option<MigrateFault>,
     mut before_switch: impl AsyncFnMut(),
+    policy_generation: Option<u64>,
 ) -> Result<MigrateOutcome, TierError> {
     if record.placement.group_id == target.id {
         return Ok(MigrateOutcome::AlreadyThere);
@@ -169,16 +244,17 @@ pub async fn migrate_chunk_with<S: KvStore>(
         },
         ..record.clone()
     };
-    let switched = arca_lake_metadata::ops::object::switch_placement(
+    let switched = arca_lake_metadata::ops::object::switch_placement_fenced(
         meta,
         generation,
         index,
         &expected_placement,
         &new_record,
         &attempt,
+        policy_generation,
     )
     .await?;
-    if !switched {
+    if switched != arca_lake_metadata::ops::object::Switch::Switched {
         // Delete the target only while this attempt still holds the intent:
         // a migration that lost it (stale) must not delete shards another
         // attempt now owns under the same keys.
@@ -186,6 +262,9 @@ pub async fn migrate_chunk_with<S: KvStore>(
             cleanup(clients, &written, target.epoch).await;
             arca_lake_metadata::ops::object::end_migration(meta, &record.chunk_id, &attempt)
                 .await?;
+        }
+        if switched == arca_lake_metadata::ops::object::Switch::PolicyChanged {
+            return Ok(MigrateOutcome::PolicyChanged);
         }
         return Ok(MigrateOutcome::Skipped(
             "record changed, generation not committed, or intent lost",

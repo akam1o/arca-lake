@@ -888,3 +888,209 @@ async fn a_gateway_stop_flushes_pending_reads_and_a_restart_records_anew() {
     );
     c.shutdown().await;
 }
+
+fn fenced_policy() -> arca_lake_controller::tiering::TieringPolicy {
+    arca_lake_controller::tiering::TieringPolicy {
+        tiers: vec!["default".into(), "fast-durable".into()],
+        promote_reads: 5,
+        promote_window: Duration::from_mins(10),
+        demote_after: Duration::from_mins(30),
+    }
+}
+
+/// A tiering record enabled and acknowledged (term 1) at `at`, as a leader
+/// leaves it: returns its fence with `margin_ms`.
+async fn enabled_record(
+    c: &TestCluster,
+    at: u64,
+    margin_ms: u64,
+) -> arca_lake_controller::tiering::PolicyFence {
+    use arca_lake_metadata::ops::tiering::{self, AdminChange};
+    let p = fenced_policy().to_record();
+    let r = tiering::admin_change(c.meta.as_ref(), &AdminChange::Enable(Some(p)), at)
+        .await
+        .unwrap();
+    let r = tiering::acknowledge(c.meta.as_ref(), 1, [9u8; 16], r.generation, at)
+        .await
+        .unwrap()
+        .unwrap();
+    arca_lake_controller::tiering::PolicyFence {
+        generation: r.generation,
+        grace_from_ms: r.grace_from_ms,
+        promotion_from_ms: r.promotion_from_ms,
+        margin_ms,
+    }
+}
+
+/// ADR-0035 §10.4: under a tiering record, counts from before the
+/// promotion cutoff do not promote, and a generation is not demoted before
+/// `demote_after + margin` from the grace start, whatever its record.
+#[tokio::test]
+async fn under_the_tiering_record_old_counts_do_not_promote_and_demotion_waits_for_the_grace() {
+    let (c, fast) = cluster().await;
+    let data = payload(usize::try_from(MIB / 2).unwrap(), 51);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let generation = c.manifest(BUCKET, "o").await.pointer.generation;
+    let t0 = now_ms();
+    let margin = 120_000;
+    let fence = enabled_record(&c, t0, margin).await;
+    let run = async |at: u64| {
+        arca_lake_controller::tiering::run_once_bounded_fenced(
+            c.meta.as_ref(),
+            &c.clients,
+            &fenced_policy(),
+            at,
+            0,
+            Some(fence),
+        )
+        .await
+        .unwrap()
+    };
+    // Ten reads, all before the cutoff: no promotion.
+    object::record_access(c.meta.as_ref(), &generation, t0 - 1_000, 10)
+        .await
+        .unwrap();
+    let report = run(t0 + 1_000).await;
+    assert_eq!(
+        report.promoted_chunks, 0,
+        "an old count promoted: {report:?}"
+    );
+    // Reads after the cutoff promote (a fresh record).
+    object::reset_access(c.meta.as_ref(), &generation, t0)
+        .await
+        .unwrap();
+    object::record_access(c.meta.as_ref(), &generation, t0 + 2_000, 6)
+        .await
+        .unwrap();
+    let report = run(t0 + 3_000).await;
+    assert_eq!(report.promoted_chunks, 1, "{report:?}");
+    assert_eq!(
+        c.manifest(BUCKET, "o").await.chunks[0].1.placement.group_id,
+        fast.id
+    );
+    // The promotion reset its record (last read t0 + 3 s). Past
+    // `demote_after` from there but within the grace margin: kept.
+    let demote = 1_800_000;
+    let report = run(t0 + 3_000 + demote + 1_000).await;
+    assert_eq!(
+        report.demoted_chunks, 0,
+        "demoted within the grace: {report:?}"
+    );
+    // Past `demote_after` from the grace start plus the margin: demoted.
+    let report = run(t0 + margin + demote + 5_000).await;
+    assert_eq!(report.demoted_chunks, 1, "{report:?}");
+    c.backend.refresh_map().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    c.shutdown().await;
+}
+
+/// ADR-0035 §10.1: a pass decided under a tiering generation that has
+/// changed switches nothing, stops, and resets no access record; a move
+/// without a policy fence (capacity rebalancing) is not affected, even
+/// with tiering disabled.
+#[tokio::test]
+async fn a_changed_policy_refuses_the_pass_but_not_rebalancing() {
+    use arca_lake_metadata::kv::{KvStore as _, Txn as _};
+    use arca_lake_metadata::ops::tiering::{self, AdminChange};
+    let (c, fast) = cluster().await;
+    let data = payload(usize::try_from(MIB / 2).unwrap(), 52);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let generation = c.manifest(BUCKET, "o").await.pointer.generation;
+    let t0 = now_ms();
+    let fence = enabled_record(&c, t0 - 10_000, 0).await;
+    object::record_access(c.meta.as_ref(), &generation, t0, 10)
+        .await
+        .unwrap();
+    // The policy changes after the pass's terms were read.
+    tiering::admin_change(
+        c.meta.as_ref(),
+        &AdminChange::SetPolicy(fenced_policy().to_record()),
+        t0,
+    )
+    .await
+    .unwrap();
+    let report = arca_lake_controller::tiering::run_once_bounded_fenced(
+        c.meta.as_ref(),
+        &c.clients,
+        &fenced_policy(),
+        t0 + 1_000,
+        0,
+        Some(fence),
+    )
+    .await
+    .unwrap();
+    assert!(report.policy_changed, "{report:?}");
+    assert_eq!(report.promoted_chunks, 0, "{report:?}");
+    let manifest = c.manifest(BUCKET, "o").await;
+    assert_ne!(manifest.chunks[0].1.placement.group_id, fast.id);
+    assert_eq!(
+        object::access_of(c.meta.as_ref(), &generation)
+            .await
+            .unwrap()
+            .map(|r| r.count),
+        Some(10),
+        "the access record was reset"
+    );
+    let on_target: usize = (3..6).map(|i| c.shard_count(i, fast.id)).sum();
+    assert_eq!(on_target, 0, "target shards left behind");
+    // Tiering disabled (at schema 4): a move without a fence still switches.
+    let mut tx = c.meta.begin().await.unwrap();
+    tx.set(
+        &arca_lake_metadata::keys::schema_write(),
+        &tiering::TIERING_RECORD_SCHEMA.to_le_bytes(),
+    );
+    tx.commit().await.unwrap();
+    tiering::admin_change(c.meta.as_ref(), &AdminChange::Disable, t0)
+        .await
+        .unwrap();
+    let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(c.meta.as_ref())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.id, n))
+        .collect();
+    let groups = cluster::list_groups(c.meta.as_ref()).await.unwrap();
+    let (index, record) = manifest.chunks[0].clone();
+    let source = groups
+        .iter()
+        .find(|g| g.id == record.placement.group_id)
+        .unwrap()
+        .clone();
+    let outcome = migrate_chunk(
+        c.meta.as_ref(),
+        &c.clients,
+        &Coders::default(),
+        &addr_of(&nodes),
+        &source,
+        &fast,
+        &generation,
+        index,
+        &record,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, MigrateOutcome::Switched { .. }),
+        "{outcome:?}"
+    );
+    c.backend.refresh_map().await.unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
+    c.shutdown().await;
+}

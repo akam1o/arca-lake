@@ -23,6 +23,20 @@ pub const TIERING_RECORD_SCHEMA: u64 = 4;
 /// (ADR-0035 §10.3).
 pub const CONFIRMATION_STALE_MS: u64 = 10_000;
 
+/// Gateways' refresh interval the margin assumes (`CLUSTER_REFRESH`).
+pub const GATEWAY_REFRESH_MS: u64 = 2_000;
+
+/// How late ADR-0034 writes a read at most (its `max_age` default).
+pub const FLUSH_DELAY_MS: u64 = 30_000;
+
+/// The grace margin of ADR-0035 §10.4: the gateways' stale bound plus one
+/// refresh, the flush delay, and the clock skew allowed between
+/// controllers and gateways.
+#[must_use]
+pub const fn grace_margin_ms(skew_ms: u64) -> u64 {
+    CONFIRMATION_STALE_MS + GATEWAY_REFRESH_MS + FLUSH_DELAY_MS + skew_ms
+}
+
 /// The policy (as `arca_lake_controller::tiering::TieringPolicy`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TieringPolicyRecord {
