@@ -30,12 +30,16 @@ static SCHEMA_WRITE: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(RECORD_WRITE_MIN);
 
 /// Record encoding version of metadata schema `schema`: schemas 1 and 2
-/// are record versions 1 and 2; schema 3 (Phase 3.10, ADR-0024) changed
-/// no record and keeps version 2, so from schema 3 on the record version
-/// is one less than the schema.
+/// are record versions 1 and 2; schemas 3 (Phase 3.10, ADR-0024) and 4
+/// (ADR-0035) changed no record and keep version 2, so from schema 4 on
+/// the record version is two less than the schema.
 #[must_use]
 pub fn record_version_of_schema(schema: u64) -> u64 {
-    if schema >= 3 { schema - 1 } else { schema }
+    match schema {
+        0..=2 => schema,
+        3 => 2,
+        _ => schema - 2,
+    }
 }
 
 /// Tell this process the cluster's `schema_write` (RFC-014 §5.4); its
