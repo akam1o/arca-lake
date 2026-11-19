@@ -999,7 +999,9 @@ enum AdminCommand {
         command: RebalanceCommand,
     },
     /// Automatic tiering (ADR-0035): the cluster's tiering record, the
-    /// source of truth for whether tiering acts and its policy.
+    /// source of truth for whether tiering acts and its policy. Honoured
+    /// by controllers that read it (from the release with metadata schema
+    /// 4); once they do, it overrides their `--tiering-*` flags.
     Tiering {
         #[command(subcommand)]
         command: TieringCommand,
