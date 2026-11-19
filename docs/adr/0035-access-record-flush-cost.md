@@ -60,7 +60,7 @@ No access record is written unless a tiering policy could use it.
   again (decision 5 of ADR-0034 keeps them from being demoted before
   `demote_after` from their write, not from the switch: a policy enabled
   on old data may demote objects read before the switch; a grace period
-  from the record's `enabled_ms` would avoid it).
+  from the record's `grace_from_ms` avoids it, §10.4).
 - **Format and compatibility:** one new metadata key, written by the
   controller; no change to existing records. A gateway of an earlier
   release ignores the key and keeps recording (correct, only slower);
@@ -182,7 +182,7 @@ process, one or two gateways, uniform, Zipf (s = 1.1) and hot-set (1 % /
   keys per generation. It fails the decision rule of §6.
 - Conflicts between two gateways reading the same keys were few (0.23–0.40
   conflicted transactions per 1,000 GETs) and all retried successfully:
-  not the cost.
+  in these runs, not a measurable cost.
 - With two gateways the one FoundationDB process was saturated in every
   arm; throughput followed FoundationDB CPU per GET.
 - Recommendation: option A (record only where a tiering policy acts);
@@ -193,9 +193,13 @@ process, one or two gateways, uniform, Zipf (s = 1.1) and hot-set (1 % /
 
 - **Option A adopted**: record reads only where tiering acts, with the
   conditions of §10.
-- **Option B rejected**: in every case measured it was slower than
-  ADR-0034 (§8), and its key-layout change and schema step buy nothing.
-  The prototype branch is not merged.
+- **Option B rejected**: in every case measured (one FoundationDB
+  process, closed-loop GET workloads of §8) it was slower than ADR-0034,
+  so its key-layout change and schema step are not justified by any
+  evidence available; a benefit on other deployments (several
+  FoundationDB processes, other workloads) is not ruled out, and the CPU
+  explanation of §8 was not isolated. The prototype branch is not
+  merged.
 - Where a tiering policy acts, the cost of ADR-0034 remains (7.5–16.7 %
   below `off` with two gateways in §8): R-109 stays Medium.
 
@@ -204,74 +208,109 @@ process, one or two gateways, uniform, Zipf (s = 1.1) and hot-set (1 % /
 ### 10.1 The tiering record is the source of truth
 
 - A metadata record `("al","tiering")` holds `enabled`, the policy
-  (tiers, `promote_reads`, `promote_window`, `demote_after`),
-  `enabled_ms` (the time of its last change from disabled to enabled),
-  a `generation` incremented by every change, and `applied_term` (the
-  leader term that last applied this generation).
-- Written by `admin tiering enable | disable | set`. A controller's
-  `--tiering-*` flags (earlier releases' only configuration) seed the
-  record when it does not exist (`enabled`, `enabled_ms` = now) and are
-  otherwise ignored with a warning when they differ: no controller's
-  memory is the source of truth, so a change of leader cannot change the
-  policy.
-- The leader reads the record at every tiering pass, runs the policy it
-  holds when `enabled`, and writes `applied_term` = its own term when
-  that differs (a write per change of generation or leader, not per
-  pass).
+  (tiers, `promote_reads`, `promote_window`, `demote_after`), a
+  `generation` incremented by every change, `grace_from_ms` (§10.4), and
+  the acknowledgment `applied = (term, generation)`: the leader term
+  that applied which generation.
+- Written by `admin tiering enable | disable | set`; every write
+  increments `generation` (so an earlier acknowledgment no longer
+  matches). A controller's `--tiering-*` flags (earlier releases' only
+  configuration) seed the record when it does not exist (`enabled`,
+  `grace_from_ms` = now) and are otherwise ignored, with a warning when
+  they differ: no controller's memory is the source of truth, so a change
+  of leader cannot change the policy.
+- **A schema step.** The record comes with a new metadata schema
+  version (ADR-0016, RFC-014 §5.4). `admin tiering disable` (and any
+  write that leaves `enabled = false`) is refused until the cluster's
+  `schema_write` has reached it: the upgrade's finalize has verified
+  that every process runs a release that reads the record, and the
+  startup gate refuses an earlier controller from then on. So no
+  controller that ignores the record (and would run tiering from its
+  flags, without the grace of §10.4) can lead while gateways may have
+  stopped recording. Rolling back below that schema follows the schema
+  rules (it is refused once written; ADR-0016), and an operator who
+  must downgrade first enables tiering again (gateways record) and lets
+  the record be acknowledged.
+- The leader reads the record at every tiering pass and acknowledges a
+  generation it has not acknowledged in its term by writing `applied =
+  (its term, generation)` in a transaction that commits only if the
+  record's `generation` is still that one (an admin change racing the
+  acknowledgment wins and is acknowledged at the next pass).
+- **No decision on a stale policy.** A pass works on the generation it
+  read, and every tier move's switch transaction (the fenced migration
+  switch) reads the tiering record: the switch is refused when the
+  record's `generation` differs from the pass's or tiering is disabled.
+  A move already copying finishes its copy and is abandoned at its
+  switch; no migration is decided by a policy that has been changed.
+  The acknowledgment of a new generation is written only after the pass
+  that read the previous one has ended (or by a new leader, whose passes
+  start from the record).
 
 ### 10.2 Distribution: the existing refresh
 
 Gateways already refresh the cluster state, the admission record and the
 delete fence every 2 s (`CLUSTER_REFRESH`). The tiering record and the
-leader record are read in that same loop; no new watch.
+leader record are read in that same loop, **in one transaction**, so
+that the acknowledgment and the leader are observed together; no new
+watch.
 
 ### 10.3 When a gateway stops recording (fail safe)
 
-A gateway notes reads unless it has **confirmed** that tiering is
-disabled:
+A gateway notes reads unless its last successful combined read
+**confirmed** that tiering is disabled:
 
-| What the gateway knows | Access records |
+| What the last combined read showed | Access records |
 | --- | --- |
-| A record with `enabled = false`, applied by the current leader (`applied_term` = the leader record's term), read within the last 10 s | not written |
-| A record with `enabled = true` | written |
+| `enabled = false`, `applied = (term, generation)` equal to the leader record's term and the record's generation, the leader's lease unexpired at that read (with the configured clock-skew margin), and the read completed within the last 10 s (monotonic clock of the gateway) | not written |
+| `enabled = true` | written |
 | No record (tiering never configured through the record; an earlier controller may run it from its flags) | written |
-| `enabled = false` not yet applied by the current leader (a new leader, or a leader of an earlier release, which never writes `applied_term`) | written |
-| The last successful read older than 10 s (metadata unreachable) | written |
+| `enabled = false` not acknowledged for this generation by the current leader (a change not yet applied, a new leader) | written |
+| No leader record, or a lease expired or released | written |
+| The last successful read older than 10 s (metadata unreachable, refresh stalled) | written |
 
-Reads are recorded whenever the state is unknown or stale: tiering's
-accuracy comes before the saving.
+Reads are recorded whenever the state is unknown, unacknowledged or
+stale: tiering's accuracy comes before the saving.
 
-### 10.4 Grace period after enabling
+### 10.4 Grace period after enabling and after widening changes
 
 Generations existing before tiering was enabled have no access records
 (none were written while it was disabled), and gateways start recording
 up to one stale bound after the change. So that this does not demote
 them early:
 
-- for demotion, a generation counts as touched no earlier than
-  `enabled_ms + margin`, where `margin` covers the gateways' propagation
-  (the 10 s stale bound plus one refresh) and the clock skew between the
-  writer of `enabled_ms` and the leader (a controller setting, as the
-  reclamation skew); a generation is therefore not demoted before
-  `demote_after + margin` from the time tiering was enabled;
-- `enabled_ms` lives in the record: a failover keeps it; disabling and
-  enabling again starts a new grace period; a change of policy while
-  enabled keeps it;
-- promotion is unaffected (it needs recorded reads).
+- for **demotion only**, the time a generation counts as last touched is
+  `max(record.last_ms (or created_ms without a record), grace_from_ms +
+  margin)`; promotion keeps using the record's own count and time;
+- `margin` covers the gateways' propagation (the 10 s stale bound plus
+  one refresh) and the clock skew between the writer of `grace_from_ms`
+  and the leader (a controller setting, as the reclamation skew); a
+  generation is therefore not demoted before `demote_after + margin`
+  from the time tiering was enabled, whatever its record (no record, an
+  old record, or a reset one);
+- `grace_from_ms` is set to the write's time when tiering is enabled and
+  by every change that can make more generations eligible for demotion
+  (a shorter `demote_after`, a tier added, removed or reordered); other
+  changes keep it;
+- it lives in the record: a failover keeps it; disabling and enabling
+  again starts a new grace period.
 
 ### 10.5 Tests required
 
-Gateway: each row of the table in §10.3 (including a record read
-failure and its ageing, a new leader term, an earlier controller that
-never acknowledges); enabling and disabling through the record reaching
-the gateway within one refresh; a gateway restart.
+Gateway: each row of the table in §10.3 (a record read failure and its
+ageing, a stalled refresh, a new leader term, an acknowledgment of an
+earlier generation, an expired or released lease, a takeover between two
+refreshes); enabling and disabling reaching the gateway within one
+refresh while connectivity is healthy; a gateway restart.
 
 Controller: seeding from flags (absent record) and the record winning
-over different flags; `applied_term` written once per generation or
-leader; failover (the new leader acknowledges, gateways record in
-between); the grace period (a generation created before enabling, with
-no record, not demoted before `enabled_ms + demote_after + margin`, with
-a skewed clock); disable then enable.
+over different flags; the acknowledgment written once per generation and
+term, and lost to a racing admin change; a pass blocked while the policy
+is disabled or changed (its moves refused at the switch, the
+acknowledgment after it); failover (the new leader acknowledges,
+gateways record in between); `admin tiering disable` refused below the
+schema step; the grace period for a generation with no record, an old
+record and a reset record, with a skewed clock, after enabling and after
+a widening change; disable then enable.
 
 ### 10.6 Acceptance
 
@@ -279,7 +318,9 @@ a skewed clock); disable then enable.
   spread of `--access-records off`.
 - With tiering enabled: no access record lost or counted twice beyond
   what ADR-0034 counts (drops and uncertain reads).
-- Enabling, disabling and changing the policy reach every gateway.
+- Enabling, disabling and changing the policy reach every gateway within
+  one refresh while connectivity is healthy; otherwise gateways record
+  (fail safe) once their last confirmation is stale.
 - Controller failover and gateway restarts leave no contradictory state.
 - No generation demoted during the grace period after enabling.
 - R-94(b), R-112 and R-114 guarantees unchanged (the record paths of
