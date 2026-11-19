@@ -512,13 +512,16 @@ fn classify(e: &MetaError) -> Option<&'static str> {
 }
 
 /// Write one batch, splitting it on failure down to one generation.
+/// Returns, in the order they would have been tried, the entries left
+/// untried when a failure no smaller batch avoids stops it (the caller
+/// puts them back).
 #[allow(clippy::many_single_char_names)]
 async fn flush_batch<S: KvStore>(
     meta: &S,
     t: &AccessTable,
     batch: Vec<(GenId, Entry)>,
     clock: &(dyn Fn() -> u64 + Send + Sync),
-) {
+) -> Vec<(GenId, Entry)> {
     let s = &t.stats;
     let max_age = u64::try_from(t.cfg.max_age.as_millis()).unwrap_or(u64::MAX);
     let mut todo = vec![batch];
@@ -601,19 +604,17 @@ async fn flush_batch<S: KvStore>(
                             t.requeue(*g, *en, kind == "conflict" && b.len() == 1);
                         }
                         if !splittable {
-                            // Sub-batches not tried yet go back unmarked.
-                            for rest in todo.drain(..) {
-                                for (g, en) in rest {
-                                    t.put_back(g, en);
-                                }
-                            }
+                            // Sub-batches not tried yet go back unmarked
+                            // (by the caller; `todo` pops from its end).
                             t.back_off();
+                            return todo.drain(..).rev().flatten().collect();
                         }
                     }
                 }
             },
         }
     }
+    Vec::new()
 }
 
 /// The flusher of `table`: every interval (jittered), at the high
@@ -696,18 +697,20 @@ async fn run_flush<S: KvStore>(
         let n: usize = batches.iter().map(Vec::len).sum();
         left = left.saturating_sub(n);
         let mut batches = batches.into_iter();
+        let mut untried = Vec::new();
         for b in batches.by_ref() {
-            flush_batch(meta, t, b, clock).await;
+            untried = flush_batch(meta, t, b, clock).await;
             if t.backing_off() {
                 break;
             }
         }
         // Backing off (review): what was taken but not sent goes back,
-        // nothing more is sent before the next interval.
-        for b in batches {
-            for (g, e) in b {
-                t.put_back(g, e);
-            }
+        // nothing more is sent before the next interval. Put back newest
+        // first, each to the front, so that the table's order (oldest
+        // first) is restored.
+        untried.extend(batches.flatten());
+        for (g, e) in untried.into_iter().rev() {
+            t.put_back(g, e);
         }
         if t.backing_off() {
             return;
@@ -1432,6 +1435,32 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(20)).await;
         assert!(t.snapshot(0).flushes > 0);
         assert_eq!(record(kv.as_ref(), g(4)).await.map(|r| r.count), Some(1));
+        assert_conserved(&t);
+    }
+
+    /// Review: entries put back after a refusal keep the table's order,
+    /// oldest first (so the oldest-age gauge reads the oldest one).
+    #[tokio::test]
+    async fn entries_put_back_after_a_refusal_keep_their_order() {
+        let kv = FaultKv::new(MemKv::default());
+        for i in 1..=6 {
+            put_header(&kv, g(i), GenState::Committed).await;
+        }
+        let t = AccessTable::new(cfg(64, 512));
+        // g(1) and g(2) isolated: batches [g1], [g2], [g3..g6].
+        for i in 1..=2 {
+            t.lock().isolated.insert(g(i), 8);
+        }
+        for i in 1..=6 {
+            t.note(g(i), 100 * u64::from(i));
+        }
+        kv.inject(|_| true, CommitFault::Unavailable, 1);
+        run_flush(&kv, &t, None, &|| 1_000).await;
+        let order: Vec<u8> = t.lock().order.iter().map(|id| id[15]).collect();
+        // The refused g(1) goes back marked, behind; the others untried,
+        // in their order.
+        assert_eq!(order, vec![2, 3, 4, 5, 6, 1]);
+        assert_eq!(t.snapshot(1_000).oldest_age_ms, 800);
         assert_conserved(&t);
     }
 }

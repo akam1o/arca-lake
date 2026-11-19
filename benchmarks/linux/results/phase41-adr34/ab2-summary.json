@@ -21,7 +21,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.969895565666329,
+  "fdb_txns_started_per_req": 2.9843466371201584,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -45,7 +49,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.976486073749385,
+  "fdb_txns_started_per_req": 2.0054056471760924,
+  "access_reads": 156487,
+  "access_coalesced": 2582
  },
  {
   "name": "get4k",
@@ -69,7 +77,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 6.006100123820018,
+  "fdb_txns_started_per_req": 2.002743351773807,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -93,7 +105,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.973055975890845,
+  "fdb_txns_started_per_req": 2.0110713122761315,
+  "access_reads": 156612,
+  "access_coalesced": 3310
  },
  {
   "name": "get4k",
@@ -117,7 +133,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.966258913560206,
+  "fdb_txns_started_per_req": 2.0041384784848173,
+  "access_reads": 224211,
+  "access_coalesced": 4531
  },
  {
   "name": "get4k",
@@ -141,7 +161,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 6.004482388142466,
+  "fdb_txns_started_per_req": 2.001960082100099,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -165,7 +189,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.9568333496254295,
+  "fdb_txns_started_per_req": 2.009881897110967,
+  "access_reads": 225031,
+  "access_coalesced": 6255
  },
  {
   "name": "get4k",
@@ -189,7 +217,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.952548645414336,
+  "fdb_txns_started_per_req": 2.9759870103168873,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -213,7 +245,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 6.003818350869327,
+  "fdb_txns_started_per_req": 2.001841187474045,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -237,7 +273,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.954882060197021,
+  "fdb_txns_started_per_req": 2.0098510413471042,
+  "access_reads": 234666,
+  "access_coalesced": 6753
  },
  {
   "name": "get4k",
@@ -261,7 +301,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.950670894102727,
+  "fdb_txns_started_per_req": 2.9749448319594167,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -285,7 +329,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.965575888051668,
+  "fdb_txns_started_per_req": 2.00421528525296,
+  "access_reads": 232218,
+  "access_coalesced": 4767
  },
  {
   "name": "get4k",
@@ -309,7 +357,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.953999610166188,
+  "fdb_txns_started_per_req": 2.0098178798125406,
+  "access_reads": 235975,
+  "access_coalesced": 6900
  },
  {
   "name": "get4k",
@@ -333,7 +385,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.950376093220123,
+  "fdb_txns_started_per_req": 2.9748693235421606,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -357,6 +413,10 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.9628715609602505,
+  "fdb_txns_started_per_req": 2.0041996068453165,
+  "access_reads": 234995,
+  "access_coalesced": 5140
  }
 ]

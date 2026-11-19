@@ -256,7 +256,7 @@ Per gateway, no per-object or per-generation label:
 | `arca_gateway_access_queue_entries` | gauge | generations pending in the table |
 | `arca_gateway_access_queue_capacity` | gauge | the table's capacity (table and batch in flight) |
 | `arca_gateway_access_queue_in_flight` | gauge | generations of the batch being written |
-| `arca_gateway_access_queue_oldest_seconds` | gauge | age of the oldest pending read |
+| `arca_gateway_access_queue_oldest_seconds` | gauge | age of the oldest pending read at the head of the table (a lower bound) |
 | `arca_gateway_access_isolated_generations` | gauge | generations written alone after contention (at most 64) |
 | `arca_gateway_access_reads_total` | counter | reads offered to the table |
 | `arca_gateway_access_coalesced_total` | counter | reads merged into a pending entry |
@@ -417,3 +417,11 @@ committed transactions in benchmarks.
     twice the base gateway's; batches of 128 brought it back to the base's
     level at 0.008 commit per GET (`docs/verification/phase-4.1-adr34.md`
     §6).
+- Measured (Phase 4.1, `docs/verification/phase-4.1-adr34.md` §6.1):
+  acceptance criterion 1 (commits per GET ≤ 0.1) met at 0.007–0.008;
+  criterion 2 (GET throughput within the spread of `off`) not met: 7–14 %
+  below `off`, 11–16 % above the earlier path. Consistent with the
+  counters (not isolated): the flush's two reads and one write per
+  generation remain (uniform keys barely coalesce); the
+  options are decision 6 and a record kept with atomic operations (a
+  format change), both left to a later phase.

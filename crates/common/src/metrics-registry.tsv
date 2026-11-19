@@ -130,7 +130,7 @@ arca_gateway_admission_charged_bytes_total	counter	gateway	bytes	-	client bytes 
 arca_gateway_access_queue_entries	gauge	gateway	entries	-	generations pending in the access-record table (ADR-0034)
 arca_gateway_access_queue_capacity	gauge	gateway	entries	-	generations the access-record table and the batch in flight may hold together
 arca_gateway_access_queue_in_flight	gauge	gateway	entries	-	generations of the access-record batch being written
-arca_gateway_access_queue_oldest_seconds	gauge	gateway	seconds	-	age of the oldest pending read in the access-record table
+arca_gateway_access_queue_oldest_seconds	gauge	gateway	seconds	-	age of the oldest pending read at the head of the access-record table (a lower bound: a returned read merged into a newer entry is not seen)
 arca_gateway_access_isolated_generations	gauge	gateway	entries	-	generations written alone after contention (bounded)
 arca_gateway_access_flush_batch_max	gauge	gateway	entries	-	largest access-record batch written
 arca_gateway_access_reads_total	counter	gateway	reads	-	reads offered to the access-record table

@@ -21,7 +21,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.950474194073592,
+  "fdb_txns_started_per_req": 2.974911470205145,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get64k",
@@ -45,7 +49,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.624881834767373,
+  "fdb_txns_started_per_req": 2.8124288750669852,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "head4k",
@@ -69,7 +77,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 5.003120403590526,
+  "fdb_txns_started_per_req": 1.00144335848901,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -93,7 +105,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.986649926097805,
+  "fdb_txns_started_per_req": 2.006055212091353,
+  "access_reads": 125825,
+  "access_coalesced": 1533
  },
  {
   "name": "get64k",
@@ -117,7 +133,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.8045480350722265,
+  "fdb_txns_started_per_req": 2.005976786728064,
+  "access_reads": 126803,
+  "access_coalesced": 13077
  },
  {
   "name": "head4k",
@@ -141,7 +161,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 5.003776073872537,
+  "fdb_txns_started_per_req": 1.0017280897023662,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -165,7 +189,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 6.005114796816677,
+  "fdb_txns_started_per_req": 2.0022492781181773,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get64k",
@@ -189,7 +217,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 6.007858137298523,
+  "fdb_txns_started_per_req": 2.0036097196905542,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "head4k",
@@ -213,7 +245,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 5.003808043792503,
+  "fdb_txns_started_per_req": 1.0018200209302408,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -237,7 +273,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.984022193869982,
+  "fdb_txns_started_per_req": 2.005526214283595,
+  "access_reads": 134788,
+  "access_coalesced": 1730
  },
  {
   "name": "get64k",
@@ -261,7 +301,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.745132298696998,
+  "fdb_txns_started_per_req": 2.0047906174700514,
+  "access_reads": 175123,
+  "access_coalesced": 23008
  },
  {
   "name": "head4k",
@@ -285,7 +329,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 5.002452859822064,
+  "fdb_txns_started_per_req": 1.0011109468685617,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -309,7 +357,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 6.004339008630854,
+  "fdb_txns_started_per_req": 2.0019769215048187,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get64k",
@@ -333,7 +385,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 6.00631361178255,
+  "fdb_txns_started_per_req": 2.002733397291257,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "head4k",
@@ -357,7 +413,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 5.004623719967095,
+  "fdb_txns_started_per_req": 1.0022368916931081,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -381,7 +441,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.981821978595667,
+  "fdb_txns_started_per_req": 2.9903315061341686,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get64k",
@@ -405,7 +469,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.768593396463588,
+  "fdb_txns_started_per_req": 2.8836629514790917,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "head4k",
@@ -429,7 +497,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 5.0036578330803465,
+  "fdb_txns_started_per_req": 1.0016758354200708,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -453,7 +525,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 6.005555741171192,
+  "fdb_txns_started_per_req": 2.0024198975719885,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get64k",
@@ -477,7 +553,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 6.005999270213999,
+  "fdb_txns_started_per_req": 2.0026884028418723,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "head4k",
@@ -501,7 +581,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 5.005566548082324,
+  "fdb_txns_started_per_req": 1.002413857668426,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -525,7 +609,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.969883366060233,
+  "fdb_txns_started_per_req": 2.9844803520310395,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get64k",
@@ -549,7 +637,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.812444052196936,
+  "fdb_txns_started_per_req": 2.9054907646725083,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "head4k",
@@ -573,7 +665,11 @@
   "queue_entries_end": null,
   "dropped": 0,
   "uncertain": null,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 5.002701495295188,
+  "fdb_txns_started_per_req": 1.001216257622076,
+  "access_reads": 0,
+  "access_coalesced": 0
  },
  {
   "name": "get4k",
@@ -597,7 +693,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.967261465179824,
+  "fdb_txns_started_per_req": 2.0043894468650763,
+  "access_reads": 216626,
+  "access_coalesced": 4305
  },
  {
   "name": "get64k",
@@ -621,7 +721,11 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 7.743775655261791,
+  "fdb_txns_started_per_req": 2.0047100063370995,
+  "access_reads": 175136,
+  "access_coalesced": 23147
  },
  {
   "name": "head4k",
@@ -645,6 +749,10 @@
   "queue_entries_end": 0,
   "dropped": 0,
   "uncertain": 0,
-  "client_saturated": false
+  "client_saturated": false,
+  "fdb_reads_per_req": 5.002652584498544,
+  "fdb_txns_started_per_req": 1.0011380871721633,
+  "access_reads": 0,
+  "access_coalesced": 0
  }
 ]
