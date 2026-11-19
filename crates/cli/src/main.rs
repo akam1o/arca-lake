@@ -1652,7 +1652,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                     batch: args.access_batch.max(1),
                     flush_interval: Duration::from_millis(args.access_flush_interval_ms.max(1)),
                     high_watermark: args.access_high_watermark.clamp(0.01, 1.0),
-                    max_age: Duration::from_millis(args.access_max_age_ms),
+                    max_age: Duration::from_millis(access_max_age_ms(args.access_max_age_ms)),
                     shutdown_flush: Duration::from_millis(args.access_shutdown_flush_ms),
                     ..Default::default()
                 },
@@ -3784,6 +3784,23 @@ enum RebalanceCommand {
         #[arg(value_parser = ["on", "off"])]
         mode: String,
     },
+}
+
+/// The access-record age bound a gateway uses: at most the flush delay the
+/// tiering grace allows for (ADR-0035 §10.4); 0 (no bound) and larger
+/// values are lowered to it, with a warning.
+fn access_max_age_ms(asked: u64) -> u64 {
+    let limit = arca_lake_metadata::ops::tiering::FLUSH_DELAY_MS;
+    if asked == 0 || asked > limit {
+        tracing::warn!(
+            asked,
+            limit,
+            "--access-max-age-ms above the tiering grace's flush bound: lowered"
+        );
+        limit
+    } else {
+        asked
+    }
 }
 
 /// A tiering policy on the command line (every field, or none).
@@ -5918,5 +5935,21 @@ mod tiering_args {
                 .is_err()
         );
         assert!(args(&[], Some(5), Some(600), Some(1800)).policy().is_err());
+    }
+}
+
+#[cfg(test)]
+mod access_age {
+    //! The gateways' access-record age bound fits the tiering grace
+    //! (ADR-0035 §10.4).
+    use super::access_max_age_ms;
+
+    #[test]
+    fn the_age_bound_is_at_most_the_graces_flush_delay() {
+        let limit = arca_lake_metadata::ops::tiering::FLUSH_DELAY_MS;
+        assert_eq!(access_max_age_ms(5_000), 5_000);
+        assert_eq!(access_max_age_ms(limit), limit);
+        assert_eq!(access_max_age_ms(limit + 1), limit);
+        assert_eq!(access_max_age_ms(0), limit, "no bound is not allowed");
     }
 }

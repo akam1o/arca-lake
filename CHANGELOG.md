@@ -56,7 +56,15 @@ has releases.
   a tiering pass started switch only under the policy that decided them;
   demotion waits for a grace after tiering is enabled
   (`--tiering-clock-skew-secs`). Disabling is refused below schema 4.
-  Gateways do not use the record yet (they record every read).
+  Gateways do not use the record yet (they record every read), so this
+  brings no saving yet; it comes with the gateway step. On an upgraded
+  cluster with `--tiering-*` flags the first pass seeds the record and
+  the next acknowledges it: tiering pauses one interval, then nothing is
+  demoted for `demote_after` plus the grace margin and earlier read
+  counts do not promote until new reads arrive.
+- The gateways' `--access-max-age-ms` is at most 30 s (the flush delay
+  the tiering grace allows for); 0 or larger values are lowered, with a
+  warning.
 - Reconciliation and reclaim judge a listing page in one read-only
   metadata transaction and use bounded parallelism. Rebalancing's settle
   time accounts for the measured reconcile cycle. The capacity-pressure

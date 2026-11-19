@@ -1822,22 +1822,53 @@ pub async fn access_of<S: KvStore>(store: &S, generation: &GenId) -> Result<Opti
 ///
 /// Backend errors.
 pub async fn reset_access<S: KvStore>(store: &S, generation: &GenId, now_ms: u64) -> Result<()> {
-    transact(store, (*generation, now_ms), |tx, env| {
-        Box::pin(async move {
-            let (generation, now_ms) = *env;
-            if tx.get(&keys::gen_header(&generation)).await?.is_none() {
-                return Ok(());
-            }
-            write(
-                tx,
-                &keys::access(&generation),
-                &AccessRecord {
-                    last_ms: now_ms,
-                    count: 0,
-                },
-            )
-        })
-    })
+    reset_access_fenced(store, generation, now_ms, None)
+        .await
+        .map(|_| ())
+}
+
+/// [`reset_access`] by a tiering pass decided under the tiering record's
+/// `policy_generation` (ADR-0035 §10.1): nothing is reset, and `false`
+/// returned, when the record moved on or tiering was disabled (the reads
+/// recorded since must not be erased by a pass of an earlier policy).
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn reset_access_fenced<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    now_ms: u64,
+    policy_generation: Option<u64>,
+) -> Result<bool> {
+    transact(
+        store,
+        (*generation, now_ms, policy_generation),
+        |tx, env| {
+            Box::pin(async move {
+                let (generation, now_ms, policy_generation) = *env;
+                if let Some(g) = policy_generation {
+                    let t: Option<crate::ops::tiering::TieringRecord> =
+                        read(tx, &keys::tiering()).await?;
+                    if t.is_none_or(|t| !t.enabled || t.generation != g) {
+                        return Ok(false);
+                    }
+                }
+                if tx.get(&keys::gen_header(&generation)).await?.is_none() {
+                    return Ok(true);
+                }
+                write(
+                    tx,
+                    &keys::access(&generation),
+                    &AccessRecord {
+                        last_ms: now_ms,
+                        count: 0,
+                    },
+                )?;
+                Ok(true)
+            })
+        },
+    )
     .await
 }
 

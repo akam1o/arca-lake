@@ -526,6 +526,42 @@ mod tests {
         );
     }
 
+    /// A tiering pass's reset is refused once the policy moved on
+    /// (ADR-0035 §10.1), and done while it holds.
+    #[test]
+    fn a_reset_by_a_pass_of_an_earlier_policy_is_refused() {
+        futures::executor::block_on(async {
+            use crate::ops::object;
+            let kv = MemKv::default();
+            let g = [5u8; 16];
+            let mut tx = kv.begin().await.unwrap();
+            tx.set(&keys::gen_header(&g), b"h");
+            tx.commit().await.unwrap();
+            object::record_access(&kv, &g, 10, 7).await.unwrap();
+            seed_if_absent(&kv, &policy(1800), 1).await.unwrap();
+            assert!(
+                object::reset_access_fenced(&kv, &g, 20, Some(1))
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(object::access_of(&kv, &g).await.unwrap().unwrap().count, 0);
+            object::record_access(&kv, &g, 30, 3).await.unwrap();
+            admin_change(&kv, &AdminChange::SetPolicy(policy(600)), 40)
+                .await
+                .unwrap();
+            assert!(
+                !object::reset_access_fenced(&kv, &g, 50, Some(1))
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                object::access_of(&kv, &g).await.unwrap().unwrap().count,
+                3,
+                "reads recorded since were erased"
+            );
+        });
+    }
+
     /// The gate names the schema this build introduced (a later schema
     /// step must not leave it pointing elsewhere).
     #[test]
