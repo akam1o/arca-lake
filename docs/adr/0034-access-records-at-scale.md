@@ -1,7 +1,10 @@
 # ADR-0034: Access records at scale
 
-Status: **accepted; decisions 1–5, 7 and 8 implemented** (Phase 4.1;
-proposed in Phase 4.0); decision 6 not implemented. Implementation
+Status: **accepted; decisions 1–5, 7 and 8 implemented, the
+implementation accepted** (Phase 4.1; proposed in Phase 4.0); decision 6
+not implemented. Its commit target is met; its GET-throughput target is
+not, and the remaining cost is the subject of
+[ADR-0035](0035-access-record-flush-cost.md). Implementation
 notes and the deviations from the text below: §12. The performance
 targets are targets until measured (`docs/verification/phase-4.1-adr34.md`). Concerns the gateway's recording of reads
 for automatic tiering (RFC-006 §5.8) and the records tiering reads; no
