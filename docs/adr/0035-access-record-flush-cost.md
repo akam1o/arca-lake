@@ -322,11 +322,16 @@ them early:
   enables tiering or can make more generations eligible for demotion (a
   shorter `demote_after`, a tier added, removed or reordered); other
   changes keep it;
-- counts from before a disabled period do not promote: the flush's
-  read-modify-write of ADR-0034, finding a record whose `last_ms` is
-  before `promotion_from_ms` (gateways read it in the same refresh),
-  replaces its count instead of adding to it, so the count only holds
-  reads recorded since tiering was last enabled; no format change.
+- counts from before a disabled period do not promote, enforced on both
+  sides with the record's own `promotion_from_ms` (no format change):
+  - tiering, deciding a promotion, counts a record whose `last_ms` is
+    before `promotion_from_ms` as 0 reads (before any new flush);
+  - the flush reads the tiering record in its own transaction (one read
+    per batch, so a gateway's stale copy plays no part) and, for a
+    record whose `last_ms` is before the cutoff, replaces its count
+    instead of adding to it; a pending entry whose latest read is before
+    the cutoff is dropped as stale, and one spanning the cutoff is
+    counted whole (at most `max_age` of reads before it, accepted);
   `promotion_from_ms` moves only when tiering goes from disabled to
   enabled, so a widening change (a new `grace_from_ms`, demotion only)
   keeps every object's progress towards promotion;
@@ -352,7 +357,10 @@ schema step; seeding by two controllers at once, a controller without
 flags never seeding; a switch refused for a changed policy not resetting the access record
 (and ending the pass); capacity rebalancing while tiering is disabled
 and while its policy changes (unaffected); an old count followed by one
-read after re-enabling (no promotion: the count replaced); a widening
+read after re-enabling (no promotion: the count replaced), a pass
+before any new flush (the old count ignored), a batch with entries
+before, across and after the cutoff, a gateway whose copy of the cutoff
+is stale (the transaction's value used); a widening
 change keeping promotion progress; acknowledgment by a
 leader without a policy (health
 pass) and right after a takeover; a restore that reverts or removes the
