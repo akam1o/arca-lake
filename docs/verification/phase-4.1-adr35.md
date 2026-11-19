@@ -177,9 +177,10 @@ counters around each run).
   work of `off`. Four runs per arm with overlapping ranges show no
   measurable difference; they are not a statistical proof of
   equivalence. The result holds for this quiet setup (controller
-  background passes held off, §6.1); with those passes running, both
-  arms pay their cost alike, which the discarded campaign could not
-  resolve from noise.
+  background passes held off, §6.1). With those passes running, both
+  arms are expected to pay their cost alike (the passes do not depend on
+  recording), but that is an assumption: the discarded campaign could not
+  resolve it from noise.
 - Gateways counted every read as unrecorded in `dis` (about 2.8 × 10⁵ per
   run per gateway layout) and none as recorded; in `rec` every read was
   recorded and flushed (reads equal flushed reads in every run; no read
