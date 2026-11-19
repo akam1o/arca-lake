@@ -62,6 +62,55 @@ pub(super) struct Env {
     pub(super) tmp: tempfile::TempDir,
 }
 
+/// On a failure (a panic while the environment is dropped), the processes'
+/// logs are copied to `$ARCA_TEST_ARTIFACTS/<test name>/` when that is
+/// set, since the temporary directory goes with the environment (CI
+/// uploads them).
+impl Drop for Env {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let Some(root) = std::env::var_os("ARCA_TEST_ARTIFACTS") else {
+            return;
+        };
+        let name = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .replace("::", "-");
+        if let Some(out) = keep_logs(self.tmp.path(), Path::new(&root), &name) {
+            eprintln!("process logs kept in {}", out.display());
+        }
+    }
+}
+
+/// Copy the `*.log` files of `from` to `root/name/`; the directory made.
+fn keep_logs(from: &Path, root: &Path, name: &str) -> Option<PathBuf> {
+    let out = root.join(name);
+    std::fs::create_dir_all(&out).ok()?;
+    for e in std::fs::read_dir(from).ok()?.flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "log") {
+            std::fs::copy(&p, out.join(e.file_name())).ok()?;
+        }
+    }
+    Some(out)
+}
+
+#[test]
+fn the_logs_of_a_failed_run_are_kept() {
+    let from = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(from.path().join("ctl-cur.log"), "leader").unwrap();
+    std::fs::write(from.path().join("data.bin"), "x").unwrap();
+    let out = keep_logs(from.path(), root.path(), "previous_release-x").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(out.join("ctl-cur.log")).unwrap(),
+        "leader"
+    );
+    assert!(!out.join("data.bin").exists());
+}
+
 impl Env {
     fn from_env() -> Option<Self> {
         std::env::var_os("ARCA_FDB_TESTS")?;
