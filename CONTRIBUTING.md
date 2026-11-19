@@ -27,7 +27,8 @@ and recovery behavior, documentation, and design review. Start with the
   every non-merge commit of a pull request for the trailer.
 - Pull requests are merged with *rebase and merge* or *squash and merge*
   (merge commits are disabled). Either keeps each commit's author and
-  `Signed-off-by:`; GitHub becomes the committer. A squash keeps the
+  `Signed-off-by:`; the committer is set by GitHub (the merging account
+  for a rebase, GitHub for a squash). A squash keeps the
   trailers because the squashed message lists every commit's message: do
   not delete them when editing it.
 - Report vulnerabilities through [SECURITY.md](SECURITY.md), rather than a
