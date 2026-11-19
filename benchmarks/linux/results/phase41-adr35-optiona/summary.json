@@ -1,5 +1,5 @@
 {
- "description": "ADR-0035 option A, section 10.6: GET 4 KiB uniform over 10^5 objects, 60 s after 10 s warm-up, concurrency 32 per gateway; arms off (--access-records off), rec (tiering enabled: gateways record), dis (tiering disabled and acknowledged: gateways do not record); disposable schema-4 cluster; controller running with background passes every 7200 s; one warm-up round discarded, four rounds in rotated order",
+ "description": "ADR-0035 option A, section 10.6: GET 4 KiB uniform over 10^5 objects, 60 s after 10 s warm-up, concurrency 32 per gateway; arms off (--access-records off), rec (tiering enabled: gateways record), dis (tiering disabled and acknowledged: gateways do not record); disposable schema-4 cluster; controller running with background passes every 7200 s; one warm-up round discarded, four rounds in rotated order; round orders off/rec/dis, rec/dis/off, dis/off/rec, off/dis/rec",
  "medians": {
   "1gw/off": {
    "ops_per_s": 3919.177776331532,
@@ -122,7 +122,8 @@
    "access_reads": 0,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -141,7 +142,8 @@
    "access_reads": 0,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -160,7 +162,8 @@
    "access_reads": 241342,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -179,7 +182,8 @@
    "access_reads": 245258,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -198,7 +202,8 @@
    "access_reads": 0,
    "access_unrecorded": 278250,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -217,7 +222,8 @@
    "access_reads": 0,
    "access_unrecorded": 292842,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -236,7 +242,8 @@
    "access_reads": 242377,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -255,7 +262,8 @@
    "access_reads": 242828,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -274,7 +282,8 @@
    "access_reads": 0,
    "access_unrecorded": 277571,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -293,7 +302,8 @@
    "access_reads": 0,
    "access_unrecorded": 298724,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -312,7 +322,8 @@
    "access_reads": 0,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -331,7 +342,8 @@
    "access_reads": 0,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -350,7 +362,8 @@
    "access_reads": 0,
    "access_unrecorded": 278273,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -369,7 +382,8 @@
    "access_reads": 0,
    "access_unrecorded": 297862,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -388,7 +402,8 @@
    "access_reads": 0,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -407,7 +422,8 @@
    "access_reads": 0,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -426,7 +442,8 @@
    "access_reads": 244617,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -445,7 +462,8 @@
    "access_reads": 248337,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -464,7 +482,8 @@
    "access_reads": 0,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -483,7 +502,8 @@
    "access_reads": 0,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -502,7 +522,8 @@
    "access_reads": 0,
    "access_unrecorded": 277986,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -521,7 +542,8 @@
    "access_reads": 0,
    "access_unrecorded": 293898,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "1gw",
@@ -540,7 +562,8 @@
    "access_reads": 240304,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   },
   {
    "layout": "2gw",
@@ -559,7 +582,8 @@
    "access_reads": 243377,
    "access_unrecorded": 0,
    "errors": 0,
-   "violations": 0
+   "violations": 0,
+   "client_saturated": false
   }
  ]
 }

@@ -148,9 +148,15 @@ counters around each run).
   mismatch would void the run; none did).
 - Workload as §1: GET 4 KiB, uniform over 10⁵ objects, 60 s after 10 s
   of warm-up, one read in ten checked, concurrency 32 per gateway; one
-  and two gateways. One discarded warm-up round, then four rounds in
-  rotated arm order (24 runs). The watchdog did not trigger; no run had
-  errors, integrity violations or a saturated generator.
+  and two gateways. One discarded warm-up round, then four rounds (24
+  runs) in the arm orders off/rec/dis, rec/dis/off, dis/off/rec and
+  off/dis/rec. The watchdog did not trigger; no run had errors,
+  integrity violations or a saturated generator (`client_saturated` in
+  `summary.json`).
+- Per-GET FoundationDB figures are counter differences from 30 s of idle
+  before a run to 3 s after it; FoundationDB's status counters did not
+  always refresh within those 3 s, so the windows carry a few seconds of
+  slack, alike in every arm.
 - An earlier campaign with the controller's default intervals was
   discarded: its background passes added 2.7–8.9 FoundationDB reads per
   GET to about half of the runs, in every arm, making the comparison
@@ -182,14 +188,17 @@ counters around each run).
   recording), but that is an assumption: the discarded campaign could not
   resolve it from noise.
 - Gateways counted every read as unrecorded in `dis` (about 2.8 × 10⁵ per
-  run per gateway layout) and none as recorded; in `rec` every read was
+  run with one gateway, 2.9–3.0 × 10⁵ with two together) and none as
+  recorded; in `rec` every read was
   recorded and flushed (reads equal flushed reads in every run; no read
   dropped or uncertain).
 - Where tiering acts (`rec`), the cost of ADR-0034 remains (−12.4 % and
-  −18.6 % against `off`, as §2 measured on the retained cluster): option
+  −18.6 % against `off`, close to §2's −13.7 % and −16.7 % on the
+  retained cluster): option
   A removes it only where no policy acts, as decided (R-109 stays
   Medium).
-- Also observed on this cluster: after `admin tiering disable` and
+- Also observed by the operator on this cluster (not in the committed
+  data): after `admin tiering disable` and
   `enable` both gateways' gauges had changed when checked 10 s later
   (the checks were not finer: this bounds the propagation at 10 s, not at
   one 2 s refresh), and after a controller restart (a new term) the new
