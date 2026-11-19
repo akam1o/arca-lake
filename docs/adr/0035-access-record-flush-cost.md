@@ -1,8 +1,9 @@
 # ADR-0035: The remaining cost of access-record flushes
 
-Status: **proposed** (Phase 4.1 follow-up). Compares two ways to close the GET
-throughput gap ADR-0034 left; chooses neither until the measurements in
-§6 are made. Concerns the gateway's recording of reads for automatic
+Status: **proposed; measured** (Phase 4.1 follow-up). Compares two ways
+to close the GET throughput gap ADR-0034 left. The measurements of §6
+were made (§8): option B is slower than ADR-0034 in every case, so the
+data supports option A alone; the choice is the maintainer's. Concerns the gateway's recording of reads for automatic
 tiering (RFC-006 §5.8) and the records tiering reads; data safety,
 deletes, fencing and deferred reclamation are not to change.
 
@@ -159,3 +160,31 @@ run on resource limits and checks of the shared system FoundationDB:
 
 Until a decision, ADR-0034 stays as implemented, R-109 stays Medium, and
 the GET-throughput target of ADR-0034 stays not met.
+
+## 8. Results (Phase 4.1 follow-up)
+
+`docs/verification/phase-4.1-adr35.md`: three hosts, one FoundationDB
+process, one or two gateways, uniform, Zipf (s = 1.1) and hot-set (1 % /
+90 %) GETs of 4 KiB over 10⁵ objects, three rounds per arm.
+
+| GET/s against `off` | ADR-0034 (`on`) | option B (`atomic`) |
+| --- | --- | --- |
+| 1 gateway, uniform | −13.7 % | −18.3 % |
+| 2 gateways, uniform | −16.7 % | −22.8 % |
+| 2 gateways, Zipf | −7.5 % | −11.9 % |
+| 2 gateways, hot set | −9.4 % | −11.2 % |
+
+- Option B removed one FoundationDB read per flushed generation and every
+  conflict between gateways, but used more FoundationDB CPU per GET
+  (0.226 against 0.194 s per 1,000 with one gateway): an atomic mutation
+  is applied with a read at the storage server, and the layout writes two
+  keys per generation. It fails the decision rule of §6.
+- Conflicts between two gateways reading the same keys were few (0.23–0.40
+  conflicted transactions per 1,000 GETs) and all retried successfully:
+  not the cost.
+- With two gateways the one FoundationDB process was saturated in every
+  arm; throughput followed FoundationDB CPU per GET.
+- Recommendation: option A (record only where a tiering policy acts);
+  option B not pursued. Where a policy acts, the cost stays that of
+  ADR-0034 (smaller under skewed access, where reads coalesce).
+
