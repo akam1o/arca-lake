@@ -56,8 +56,14 @@ has releases.
   a tiering pass started switch only under the policy that decided them;
   demotion waits for a grace after tiering is enabled
   (`--tiering-clock-skew-secs`). Disabling is refused below schema 4.
-  Gateways do not use the record yet (they record every read), so this
-  brings no saving yet; it comes with the gateway step. On an upgraded
+  Gateways read the tiering and leader records in their two-second
+  refresh and stop recording reads only while tiering is confirmed
+  disabled by the current leader (unknown, unacknowledged or stale:
+  recorded); `--tiering-lease-skew-ms`, `arca_gateway_access_recording`,
+  `arca_gateway_access_unrecorded_total`. The flush applies the record's
+  promotion cutoff (`arca_gateway_access_dropped_total{reason="cutoff"}`),
+  so read counts from before tiering was last enabled never promote
+  (`--access-records legacy` does not apply it). On an upgraded
   cluster with `--tiering-*` flags the first pass seeds the record and
   the next acknowledges it: tiering pauses one interval, then nothing is
   demoted for `demote_after` plus the grace margin and earlier read

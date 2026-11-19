@@ -136,7 +136,7 @@ arca_gateway_access_flush_batch_max	gauge	gateway	entries	-	largest access-recor
 arca_gateway_access_reads_total	counter	gateway	reads	-	reads offered to the access-record table
 arca_gateway_access_coalesced_total	counter	gateway	reads	-	reads merged into a pending access-record entry
 arca_gateway_access_inserted_total	counter	gateway	reads	-	reads that started a new access-record entry
-arca_gateway_access_dropped_total	counter	gateway	reads	reason=full|stale|error|shutdown	reads not recorded: table full, older than the age bound when written, failed twice, pending at a graceful stop
+arca_gateway_access_dropped_total	counter	gateway	reads	reason=full|stale|error|shutdown|cutoff	reads not recorded: table full, older than the age bound when written, failed twice, pending at a graceful stop, before the tiering record's promotion cutoff
 arca_gateway_access_uncertain_total	counter	gateway	reads	-	reads of access-record batches whose commit outcome is unknown (written or not; never retried)
 arca_gateway_access_uncertain_batches_total	counter	gateway	batches	-	access-record batches whose commit outcome is unknown
 arca_gateway_access_flushes_total	counter	gateway	transactions	-	access-record flush transactions committed
@@ -144,6 +144,8 @@ arca_gateway_access_flushed_generations_total	counter	gateway	generations	-	gene
 arca_gateway_access_flushed_reads_total	counter	gateway	reads	-	reads written to access records
 arca_gateway_access_skipped_finished_total	counter	gateway	generations	-	generations not written: GC had finished them
 arca_gateway_access_skipped_finished_reads_total	counter	gateway	reads	-	reads of generations GC had finished
+arca_gateway_access_unrecorded_total	counter	gateway	reads	-	reads not offered to the access-record table: tiering confirmed disabled by the current leader (ADR-0035)
+arca_gateway_access_recording	gauge	gateway	state	-	1 while this gateway records reads for tiering, 0 while tiering is confirmed disabled
 arca_gateway_access_flush_errors_total	counter	gateway	attempts	kind=conflict|backend|too_large|other	failed access-record flush attempts by kind
 arca_gateway_access_flush_seconds	histogram	gateway	seconds	-	access-record flush transaction time per (sub-)batch, its conflict retries included
 arca_gateway_admission_record_age_seconds	gauge	gateway	seconds	-	seconds since the admission record last changed (0 = no record)

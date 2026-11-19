@@ -566,6 +566,12 @@ struct GatewayArgs {
     /// Time a graceful stop spends flushing pending reads, ms.
     #[arg(long, default_value_t = 2000)]
     access_shutdown_flush_ms: u64,
+    /// Clock skew allowed between this gateway and the controller leader
+    /// when its lease confirms that tiering is disabled (ADR-0035; reads
+    /// are then not recorded), ms. Keep it below a third of the leader
+    /// lease.
+    #[arg(long, default_value_t = 2000)]
+    tiering_lease_skew_ms: u64,
     /// Serve gateway cache counters as Prometheus text on this address
     /// (`GET /metrics`); cluster backend only.
     #[arg(long)]
@@ -1654,6 +1660,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                     high_watermark: args.access_high_watermark.clamp(0.01, 1.0),
                     max_age: Duration::from_millis(access_max_age_ms(args.access_max_age_ms)),
                     shutdown_flush: Duration::from_millis(args.access_shutdown_flush_ms),
+                    lease_skew_ms: args.tiering_lease_skew_ms,
                     ..Default::default()
                 },
             },
@@ -5446,6 +5453,16 @@ fn render_access_stats(
             "counter",
             a.skipped_finished_reads,
         ),
+        (
+            "arca_gateway_access_unrecorded_total",
+            "counter",
+            a.unrecorded,
+        ),
+        (
+            "arca_gateway_access_recording",
+            "gauge",
+            u64::from(a.recording),
+        ),
     ] {
         let _ = writeln!(out, "# TYPE {name} {kind}\n{name} {value}");
     }
@@ -5460,6 +5477,7 @@ fn render_access_stats(
         ("stale", a.dropped_stale),
         ("error", a.dropped_error),
         ("shutdown", a.dropped_shutdown),
+        ("cutoff", a.dropped_cutoff),
     ] {
         let _ = writeln!(
             out,

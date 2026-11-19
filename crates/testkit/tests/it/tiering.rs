@@ -1094,3 +1094,92 @@ async fn a_changed_policy_refuses_the_pass_but_not_rebalancing() {
     assert_eq!(s3::get(&c.backend, BUCKET, "o").await.unwrap().0, data);
     c.shutdown().await;
 }
+
+/// ADR-0035 §10.3: a gateway stops recording reads once its refresh
+/// confirms tiering disabled by the current leader, records again within a
+/// refresh of tiering being enabled, and records after a restart until its
+/// first refresh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gateway_records_reads_only_while_tiering_is_not_confirmed_disabled() {
+    use arca_lake_metadata::ops::{leader, tiering};
+    let mut c = TestCluster::start(ClusterOptions::rs(3, 2, 1, MIB, 0)).await;
+    s3::create_bucket(&c.backend, "acc").await.unwrap();
+    s3::put(
+        &c.backend,
+        "acc",
+        "k",
+        payload(1024, 1),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    // A leader holding a long lease, and the record disabled and acknowledged
+    // by it (the store is at schema 4).
+    let l = leader::try_acquire(c.meta.as_ref(), "ctl-test", now_ms(), 600_000)
+        .await
+        .unwrap()
+        .unwrap();
+    tiering::admin_change(
+        c.meta.as_ref(),
+        &tiering::AdminChange::Enable(Some(fenced_policy().to_record())),
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    let r = tiering::admin_change(c.meta.as_ref(), &tiering::AdminChange::Disable, now_ms())
+        .await
+        .unwrap();
+    tiering::acknowledge(
+        c.meta.as_ref(),
+        l.token,
+        c.incarnation(),
+        r.generation,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    // Within a couple of refreshes the gateway stops recording.
+    let mut stopped = false;
+    for _ in 0..100 {
+        if !c.backend.access_stats().recording {
+            stopped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        stopped,
+        "the gateway kept recording: {:?}",
+        c.backend.access_stats()
+    );
+    let before = c.backend.access_stats();
+    for _ in 0..5 {
+        let _ = s3::get(&c.backend, "acc", "k").await.unwrap();
+    }
+    let s = c.backend.access_stats();
+    assert_eq!(
+        (s.reads - before.reads, s.unrecorded - before.unrecorded),
+        (0, 5),
+        "{s:?}"
+    );
+    // A restarted gateway records until its first refresh.
+    c.restart_backend().await.unwrap();
+    assert!(
+        c.backend.access_stats().recording,
+        "recording off before any refresh"
+    );
+    // Enabled again: recording resumes within a refresh.
+    tiering::admin_change(
+        c.meta.as_ref(),
+        &tiering::AdminChange::Enable(None),
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(c.backend.access_stats().recording);
+    let before = c.backend.access_stats();
+    let _ = s3::get(&c.backend, "acc", "k").await.unwrap();
+    assert_eq!(c.backend.access_stats().reads - before.reads, 1);
+    c.shutdown().await;
+}
