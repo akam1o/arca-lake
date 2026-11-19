@@ -46,8 +46,12 @@ const ROOT: &str = "al";
 /// cluster whose deletes are fenced (ADR-0023, ADR-0024): once `upgrade
 /// finalize` raised it, no release without the delete fence (protocol
 /// below 3) and no release without the rejoin fence starts a controller or
-/// gateway on the store. 4 exists only in a `version-bump` build.
-pub const SCHEMA_VERSION: u64 = 3 + arca_lake_common::compat::BUMP;
+/// gateway on the store. 4 = the tiering record (ADR-0035 option A): no
+/// record layout changes, but once `upgrade finalize` raised it, every
+/// controller reads the tiering record (no release that would run tiering
+/// from its flags alone starts), so tiering may be disabled and gateways
+/// stop recording reads. 5 exists only in a `version-bump` build.
+pub const SCHEMA_VERSION: u64 = 4 + arca_lake_common::compat::BUMP;
 
 /// Oldest schema version this build serves (`M_cur − 1`, RFC-014 §5.4).
 pub const SCHEMA_VERSION_MIN: u64 = SCHEMA_VERSION - 1;

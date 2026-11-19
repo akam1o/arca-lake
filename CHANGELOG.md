@@ -42,11 +42,21 @@ has releases.
   the FoundationDB commits-per-GET target was met, while GET throughput
   remained 7–14 % below `off` and missed its target. See the
   [ADR-0034 verification report](docs/verification/phase-4.1-adr34.md).
+- Metadata schema 4 (ADR-0035): no record layout changes; it gates
+  disabling tiering. This build reads schemas 3 and 4, so a store of
+  schema 2 is upgraded through a release of schema 3 first, and a
+  metadata backup taken at schema 2 is restored with a release of schema
+  3 (and finalized there) before this one. After `admin upgrade
+  finalize` writes schema 4, earlier releases refuse to start and the
+  cluster cannot be downgraded below it.
 - `admin tiering status | enable | disable | set`: the tiering record,
   the cluster's source of truth for whether tiering acts and its policy
-  (ADR-0035). It is recorded only: controllers honour it from the release
-  with metadata schema 4, where it then overrides their `--tiering-*`
-  flags. Disabling is refused below schema 4.
+  (ADR-0035). Controllers run tiering from it (their `--tiering-*` flags
+  only seed an absent record) once the leader has acknowledged it; moves
+  a tiering pass started switch only under the policy that decided them;
+  demotion waits for a grace after tiering is enabled
+  (`--tiering-clock-skew-secs`). Disabling is refused below schema 4.
+  Gateways do not use the record yet (they record every read).
 - Reconciliation and reclaim judge a listing page in one read-only
   metadata transaction and use bounded parallelism. Rebalancing's settle
   time accounts for the measured reconcile cycle. The capacity-pressure

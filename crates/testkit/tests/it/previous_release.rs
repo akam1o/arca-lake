@@ -8,7 +8,16 @@
 //! 3.13: [`upgrade_and_rollback_with_the_phase_3_12_release`]),
 //! `ARCA_BIN_PREV_313` the Phase 3.13 release (Phase 3.14, with 3.12:
 //! [`rollback_residuals_with_the_phase_3_13_and_3_12_releases`]),
+//! `ARCA_BIN_PREV_41` the last release of schema 3 (Phase 4.1, before the
+//! tiering record: [`upgrade_and_finalize_to_the_tiering_schema`]),
 //! `ARCA_BIN_CUR` this one.
+//!
+//! Schema 4 (ADR-0035) reads schemas 3 and 4 only: a store of schema 2
+//! (the Phase 3.9 release) is upgraded through a release of schema 3
+//! first. [`upgrade_from_and_rollback_to_the_previous_release`] therefore
+//! runs the Phase 3.9 upgrade against `ARCA_BIN_PIVOT`, that release of
+//! schema 3 (the same one as `ARCA_BIN_PREV_41`), not this one; the next
+//! hop is [`upgrade_and_finalize_to_the_tiering_schema`].
 //! Storage nodes, controllers and gateways are separate processes on a
 //! FoundationDB cluster.
 //!
@@ -46,11 +55,13 @@ use super::mixed_version::{
     BUCKET, Env, Proc, body, client, free_addr, get, put, wait_tcp, wait_until,
 };
 
+/// The Phase 3.9 release against the last release of schema 3 (the
+/// supported first hop of that upgrade; see the module comment).
 fn env() -> Option<Env> {
     std::env::var_os("ARCA_FDB_TESTS")?;
     Some(Env {
         old: PathBuf::from(std::env::var_os("ARCA_BIN_PREV")?),
-        new: PathBuf::from(std::env::var_os("ARCA_BIN_CUR")?),
+        new: PathBuf::from(std::env::var_os("ARCA_BIN_PIVOT")?),
         cluster_file: PathBuf::from(std::env::var_os("ARCA_FDB_CLUSTER_FILE")?),
         tmp: tempfile::tempdir().ok()?,
     })
@@ -205,7 +216,7 @@ async fn gateway(env: &Env, name: &str, cur: bool) -> (Proc, Client) {
 #[tokio::test]
 async fn upgrade_from_and_rollback_to_the_previous_release() {
     let Some(env) = env() else {
-        eprintln!("ARCA_FDB_TESTS / ARCA_BIN_PREV / ARCA_BIN_CUR not set; skipping");
+        eprintln!("ARCA_FDB_TESTS / ARCA_BIN_PREV / ARCA_BIN_PIVOT not set; skipping");
         return;
     };
     let meta = arca_lake_metadata::fdb::FdbKv::open_with_timeout(env.cluster_file.to_str(), 5_000)
@@ -1816,6 +1827,172 @@ async fn rollback_residuals_with_the_phase_3_13_and_3_12_releases() {
     ctl.kill();
     gw.kill();
     for mut n in nodes {
+        n.kill();
+    }
+}
+
+/// ADR-0035: the upgrade from the last release of schema 3 to this one
+/// (schema 4, the tiering record). Before finalize the previous release
+/// still runs beside this one and tiering cannot be disabled (a controller
+/// of that release would run tiering from its flags while gateways stop
+/// recording); finalize writes schema 4, after which the previous
+/// controller and gateway refuse to start and tiering can be disabled.
+#[tokio::test]
+async fn upgrade_and_finalize_to_the_tiering_schema() {
+    let Some(env) = env_named("ARCA_BIN_PREV_41") else {
+        eprintln!("ARCA_FDB_TESTS / ARCA_BIN_PREV_41 / ARCA_BIN_CUR not set; skipping");
+        return;
+    };
+    let meta = arca_lake_metadata::fdb::FdbKv::open_with_timeout(env.cluster_file.to_str(), 5_000)
+        .expect("open FoundationDB");
+    meta.clear_range_blocking(&keys::all_range()).await.unwrap();
+    let dirs: Vec<PathBuf> = (0..3)
+        .map(|i| env.tmp.path().join(format!("node{i}")))
+        .collect();
+    let addrs: Vec<String> = (0..3).map(|_| free_addr()).collect();
+    let mut nodes: Vec<Proc> = (0..3)
+        .map(|i| {
+            env.spawn(
+                &format!("node{i}-prev"),
+                false,
+                &Env::node_args(&dirs[i], &addrs[i]),
+            )
+        })
+        .collect();
+    for a in &addrs {
+        wait_tcp(a, Duration::from_secs(20)).await;
+    }
+    env.admin_ok(false, &["init"]);
+    for (i, a) in addrs.iter().enumerate() {
+        env.admin_ok(
+            false,
+            &[
+                "register-node",
+                "--address",
+                a,
+                "--label",
+                &format!("node=n{i}"),
+                "--label",
+                "device_class=hdd",
+            ],
+        );
+    }
+    env.admin_ok(
+        false,
+        &[
+            "create-groups",
+            "--tier",
+            "default",
+            "--device-class",
+            "hdd",
+            "--failure-domain",
+            "node",
+            "--count",
+            "1",
+            "--k",
+            "2",
+            "--m",
+            "1",
+            "--chunk-bytes",
+            &(256u64 << 10).to_string(),
+            "--small-threshold",
+            "0",
+        ],
+    );
+    let mut ctl = controller(&env, "ctl-prev", false);
+    let (mut gw, s3) = gateway(&env, "gw-prev", false).await;
+    leads(&env, "ctl-prev").await;
+    s3.create_bucket().bucket(BUCKET).send().await.unwrap();
+    let mut committed: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..6u64 {
+        let d = body(300 << 10, 900 + i);
+        put(&s3, &format!("t{i}"), d.clone()).await;
+        committed.push((format!("t{i}"), d));
+    }
+
+    // ---- This release beside the previous one, before finalize.
+    for i in 0..3 {
+        nodes[i].kill();
+        nodes[i] = env.spawn(
+            &format!("node{i}-cur"),
+            true,
+            &Env::node_args(&dirs[i], &addrs[i]),
+        );
+        wait_tcp(&addrs[i], Duration::from_secs(20)).await;
+    }
+    ctl.kill();
+    ctl = controller(&env, "ctl-cur", true);
+    leads(&env, "ctl-cur").await;
+    gw.kill();
+    let (gw2, s3) = gateway(&env, "gw-cur", true).await;
+    gw = gw2;
+    for (k, d) in &committed {
+        assert_eq!(&get(&s3, k).await, d, "{k}");
+    }
+    let st = env.admin_ok(true, &["upgrade", "status"]);
+    assert!(st.contains("schema_write Some(3)"), "{st}");
+    let enabled = env.admin_ok(
+        true,
+        &[
+            "tiering",
+            "enable",
+            "--tier",
+            "default",
+            "--promote-reads",
+            "5",
+            "--promote-window-secs",
+            "600",
+            "--demote-after-secs",
+            "1800",
+        ],
+    );
+    assert!(enabled.contains("enabled true"), "{enabled}");
+    let (ok, text) = env.admin(true, &["tiering", "disable"]);
+    assert!(
+        !ok && text.contains("schema 4"),
+        "disable before finalize: {text}"
+    );
+
+    // ---- Finalize: schema 4.
+    let st = env.admin_ok(true, &["status", "--versions"]);
+    let stale: Vec<String> = st
+        .lines()
+        .filter(|l| l.starts_with("proc ") && l.contains("schema [2, 3]"))
+        .filter_map(|l| l.split_whitespace().nth(2).map(str::to_string))
+        .collect();
+    let mut args: Vec<&str> = vec!["upgrade", "finalize", "--wait", "--timeout-secs", "120"];
+    for id in &stale {
+        args.push("--ignore-absent");
+        args.push(id);
+    }
+    let fin = env.admin_ok(true, &args);
+    assert!(fin.contains("finalized"), "{fin}");
+    let st = env.admin_ok(true, &["upgrade", "status"]);
+    assert!(st.contains("schema Some(4)"), "{st}");
+    let mut refused = env.spawn(
+        "ctl-prev-after",
+        false,
+        &env.controller_args("ctl-prev-after"),
+    );
+    assert!(
+        refused.exited_within(Duration::from_secs(15)).is_some(),
+        "previous controller started after finalize: {}",
+        refused.log()
+    );
+    let mut refused_gw = env.spawn("gw-prev-after", false, &env.gateway_args(&free_addr()));
+    assert!(
+        refused_gw.exited_within(Duration::from_secs(15)).is_some(),
+        "previous gateway started after finalize: {}",
+        refused_gw.log()
+    );
+    let disabled = env.admin_ok(true, &["tiering", "disable"]);
+    assert!(disabled.contains("enabled false"), "{disabled}");
+    for (k, d) in &committed {
+        assert_eq!(&get(&s3, k).await, d, "{k}");
+    }
+    gw.kill();
+    ctl.kill();
+    for n in &mut nodes {
         n.kill();
     }
 }
