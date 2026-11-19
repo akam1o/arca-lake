@@ -121,6 +121,12 @@ so.
   requires software with M ∈ [x, x+1] (this build: M_cur)`. A build older
   than the schema never starts (downgrade prevention); a build newer
   than `schema + 1` never starts (no skipped versions).
+- **Schemas so far**: 1 (Phase 0–2), 2 (Phase 3.1, record version 2),
+  3 (Phase 3.10, ADR-0024: the delete and rejoin fences; record version
+  2), 4 (ADR-0035: the tiering record; record version 2). Each finalize
+  is one way. Since a build reads `M_cur − 1` and `M_cur`, a store of
+  schema 2 reaches schema 4 through a release of schema 3 (finalized
+  there first).
 - **Records**: every record carries its version byte (exists); a build
   decodes versions `M_cur − 1` and `M_cur` and encodes the version named
   by `schema_write` (writers read `schema_write` once per process start

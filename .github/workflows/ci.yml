@@ -452,6 +452,10 @@ jobs:
           RELEASE_312: cddd078f6c60c9ca826f21b617e4ac30dc781e58
           # Phase 3.13 (repair status; Phase 3.14 rollback residuals).
           RELEASE_313: 54c468c64a0d0547b1f1bea807de13ad3667e858
+          # Phase 4.1, the last release of schema 3 (before the tiering
+          # record, ADR-0035): the upgrade to schema 4, and the pivot of the
+          # Phase 3.9 upgrade (schema 4 does not read schema 2).
+          RELEASE_41: 12bff5dad05290e60b103386e6db7aec3882bf37
         run: |
           set -euo pipefail
           build() {
@@ -466,12 +470,15 @@ jobs:
           build "$RELEASE_311" 311
           build "$RELEASE_312" 312
           build "$RELEASE_313" 313
+          build "$RELEASE_41" 41
           cargo build -p arca-lake --features fdb
           ARCA_BIN_PREV="$CARGO_TARGET_DIR/release-39/debug/arca-lake" \
           ARCA_BIN_PREV_310="$CARGO_TARGET_DIR/release-310/debug/arca-lake" \
           ARCA_BIN_PREV_311="$CARGO_TARGET_DIR/release-311/debug/arca-lake" \
           ARCA_BIN_PREV_312="$CARGO_TARGET_DIR/release-312/debug/arca-lake" \
           ARCA_BIN_PREV_313="$CARGO_TARGET_DIR/release-313/debug/arca-lake" \
+          ARCA_BIN_PREV_41="$CARGO_TARGET_DIR/release-41/debug/arca-lake" \
+          ARCA_BIN_PIVOT="$CARGO_TARGET_DIR/release-41/debug/arca-lake" \
           ARCA_BIN_CUR="$CARGO_TARGET_DIR/debug/arca-lake" \
             cargo test -p arca-lake-testkit --features fdb --test it previous_release:: -- --nocapture --test-threads=1
       - name: keep FoundationDB state (on failure)

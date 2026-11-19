@@ -16,6 +16,7 @@ design, not a tuning hint; violating one voids a guarantee.
 | Prometheus scraping every process and the alert rules loaded | Capacity, GC, repair and integrity problems are detected by alerts | RFC-013 §7–8 |
 | Metadata backups and their verification | Restores are the only recovery from metadata loss | RFC-015, [Backup and restore](backup-restore.md) |
 | Upgrades in the documented order (storage nodes first) | Mixed versions are supported within one compatibility window only | RFC-014 |
+| A store of schema 2 upgraded (and finalized) through a release of schema 3 before this one | This release reads schemas 3 and 4 only; after its finalize (schema 4) no earlier release starts and no downgrade is possible | RFC-014 §5.4, ADR-0035 |
 | The delete fence closed (`admin delete-fence close`) before a metadata restore | Without it a delete decided before the restore can still remove shards the restored metadata needs | ADR-0023, RFC-013 §5.9 |
 | `--fence-lease-secs` (storage nodes) well above the controllers' `--health-interval-secs` (default 30 s against 5 s) | A node admits deletes only within the lease after the leader's last push; a lease shorter than a pass stops deletes | ADR-0024, RFC-013 §10.12 |
 | Every storage node reachable (or decommissioned) for `admin upgrade finalize`, and reachable or declared absent for `admin recovery begin` | Both collect the nodes' schema floor and incarnation sequence; a node that missed them could take a previous release's deletes | ADR-0024 |
