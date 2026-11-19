@@ -6,8 +6,10 @@ is implemented (the tiering record and `admin tiering`, schema 4, the
 controller under the record, the gateways' refresh and stop-recording
 rule, the flush-side promotion cutoff; metrics
 `arca_gateway_access_recording`, `arca_gateway_access_unrecorded_total`,
-`arca_gateway_access_dropped_total{reason="cutoff"}`); its cluster
-measurement (§10.6) is pending. It removes the cost of access recording where no
+`arca_gateway_access_dropped_total{reason="cutoff"}`) and measured: with
+tiering confirmed disabled, GET throughput is within the spread of `off`
+with one and two gateways ([report](../verification/phase-4.1-adr35.md)
+§6). It removes the cost of access recording where no
 tiering policy acts; it does not remove it where one does (R-109 stays
 Medium). Concerns the gateway's recording of reads for automatic
 tiering (RFC-006 §5.8) and the records tiering reads; data safety,

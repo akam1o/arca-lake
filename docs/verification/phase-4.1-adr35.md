@@ -3,7 +3,9 @@
 Status: **measured**. The atomic-mutation layout (ADR-0035 option B) is
 slower than the ADR-0034 path in every case measured; recording only where
 tiering acts (option A) is the option the data supports. Results:
-`benchmarks/linux/results/phase41-adr35/summary.json`.
+`benchmarks/linux/results/phase41-adr35/summary.json`. Option A, since
+implemented, was measured on a disposable schema-4 cluster (§6): with
+tiering confirmed disabled, GETs perform as with `off`.
 
 ## 1. Setup
 
@@ -85,8 +87,7 @@ retried within their transactions).
 ## 4. Not measured
 
 A multi-process FoundationDB; GET 64 KiB and HEAD with two gateways;
-option A itself (its cost where no policy acts is that of `off`, measured
-here; where one acts, that of `on`); flushes under a FoundationDB stall;
+option A itself here (measured once implemented, §6); flushes under a FoundationDB stall;
 a gateway restart during the runs.
 
 ## 5. Option A: the tests of ADR-0035 §10.5
@@ -117,4 +118,72 @@ removal fails its test is marked †.
 Not covered by a test: two controllers seeding at the same instant (the
 seed is one insert-if-absent transaction, tested sequentially); a real
 controller failover between two processes with gateways (each side
-tested on its own); the cluster measurement of §10.6 (pending).
+tested on its own).
+
+## 6. Option A on a cluster (ADR-0035 §10.6)
+
+Results: `benchmarks/linux/results/phase41-adr35-optiona/` (`summary.json`
+medians and every run; `ab.jsonl` the raw FoundationDB and gateway
+counters around each run).
+
+### 6.1 Setup
+
+- The same three hosts as §1, but a disposable cluster: its own
+  FoundationDB (one process, another port and directory), four storage
+  nodes on the second host, gateways on the second and third. It was
+  initialised by the current main build, so its store is at schema 4
+  from the start (no `upgrade finalize`; the retained schema-3 cluster
+  was not touched). 10⁵ × 4 KiB objects were written and every body read
+  back and checked: 0 errors, mismatches or missing.
+- The controller runs in every arm (it acknowledges the tiering record).
+  Its background passes (reconcile, GC, scrub, reclaim, rebalance,
+  repair, stripe repair, evict, tiering) run every 7,200 s; health and
+  the lease are unchanged. Idle, the store then saw about 70 reads/s
+  (under 0.02 per GET at the measured rates).
+- Arms, one binary: `off` (`--access-records off`), `rec` (tiering
+  enabled with policy tiers `default`: gateways record, no moves), `dis`
+  (`admin tiering disable`, acknowledged by the leader: gateways do not
+  record). Before and after every run the gateways'
+  `arca_gateway_access_recording` gauge was checked against the arm (a
+  mismatch would void the run; none did).
+- Workload as §1: GET 4 KiB, uniform over 10⁵ objects, 60 s after 10 s
+  of warm-up, one read in ten checked, concurrency 32 per gateway; one
+  and two gateways. One discarded warm-up round, then four rounds in
+  rotated arm order (24 runs). The watchdog did not trigger; no run had
+  errors, integrity violations or a saturated generator.
+- An earlier campaign with the controller's default intervals was
+  discarded: its background passes added 2.7–8.9 FoundationDB reads per
+  GET to about half of the runs, in every arm, making the comparison
+  noise (spreads of 8–21 %).
+
+### 6.2 Results (medians of four runs)
+
+| Layout | arm | ops/s (four runs) | vs off | p50 / p95 / p99 ms | FoundationDB reads / GET | commits / GET | FoundationDB CPU s / 1,000 GETs | gateway CPU s / 1,000 GETs |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 gateway | off | 3,919 (3,893–3,950) | — | 8.11 / 10.18 / 11.69 | 6.01 | 0.0008 | 0.148 | 0.481 |
+| | dis | 3,958 (3,946–3,969) | +1.0 % | 8.03 / 9.98 / 11.58 | 6.01 | 0.0007 | 0.146 | 0.476 |
+| | rec | 3,432 (3,401–3,471) | −12.4 % | 8.69 / 14.11 / 16.87 | 7.97 | 0.0085 | 0.196 | 0.519 |
+| 2 gateways | off | 4,250 (4,159–4,273) | — | 15.12 / 20.97 / 23.85 | 6.01 | 0.0007 | 0.219 | 0.873 |
+| | dis | 4,209 (4,150–4,248) | −1.0 % | 15.28 / 21.18 / 24.33 | 6.01 | 0.0007 | 0.221 | 0.874 |
+| | rec | 3,460 (3,451–3,511) | −18.6 % | 18.08 / 27.67 / 32.74 | 8.07 | 0.0087 | 0.284 | 0.912 |
+
+### 6.3 Findings
+
+- **Acceptance (§10.6, first criterion) met.** With tiering confirmed
+  disabled, GET throughput is within the spread of `off` in both layouts
+  (the four runs of `dis` and `off` overlap: +1.0 % and −1.0 % against
+  spreads of 1.4 % and 2.7 %), and so are latency, FoundationDB reads and
+  commits per GET and CPU per GET: `dis` does the work of `off`.
+- Gateways counted every read as unrecorded in `dis` (about 2.8 × 10⁵ per
+  run per gateway layout) and none as recorded; in `rec` every read was
+  recorded and flushed (reads equal flushed reads in every run; no read
+  dropped or uncertain).
+- Where tiering acts (`rec`), the cost of ADR-0034 remains (−12.4 % and
+  −18.6 % against `off`, as §2 measured on the retained cluster): option
+  A removes it only where no policy acts, as decided (R-109 stays
+  Medium).
+- Also observed on this cluster: `admin tiering disable` and `enable`
+  reached both gateways within one refresh (the gauge changed within
+  10 s), and after a controller restart (a new term) the new leader
+  acknowledged the record. The other criteria of §10.6 are covered by
+  the tests of §5, not by this measurement.

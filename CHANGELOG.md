@@ -63,7 +63,9 @@ has releases.
   `arca_gateway_access_unrecorded_total`. The flush applies the record's
   promotion cutoff (`arca_gateway_access_dropped_total{reason="cutoff"}`),
   so read counts from before tiering was last enabled never promote
-  (`--access-records legacy` does not apply it). On an upgraded
+  (`--access-records legacy` does not apply it). Measured with tiering
+  disabled, GET throughput is within the spread of `--access-records off`
+  ([ADR-0035 report](docs/verification/phase-4.1-adr35.md) §6). On an upgraded
   cluster with `--tiering-*` flags the first pass seeds the record and
   the next acknowledges it: tiering pauses one interval, then nothing is
   demoted for `demote_after` plus the grace margin and earlier read
