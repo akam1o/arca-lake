@@ -1497,7 +1497,11 @@ async fn rollback_residuals_with_the_phase_3_13_and_3_12_releases() {
             );
             wait_tcp(&addrs[i], Duration::from_secs(20)).await;
         };
-    env.admin_ok(true, &["init"]);
+    // The store as the 3.13 release makes it (schema 3): rolling back is
+    // allowed only to a store an earlier release could start on, before
+    // finalize (this build's `init` writes schema 4, where no earlier
+    // controller starts).
+    env.admin_ok(false, &["init"]);
     for (i, a) in addrs.iter().enumerate() {
         env.admin_ok(
             true,
@@ -1951,6 +1955,27 @@ async fn upgrade_and_finalize_to_the_tiering_schema() {
     assert!(
         !ok && text.contains("schema 4"),
         "disable before finalize: {text}"
+    );
+    let (ok, text) = env.admin(
+        true,
+        &[
+            "tiering",
+            "set",
+            "--tier",
+            "default",
+            "--promote-reads",
+            "7",
+            "--promote-window-secs",
+            "600",
+            "--demote-after-secs",
+            "1800",
+        ],
+    );
+    assert!(ok, "set while enabled: {text}");
+    let st = env.admin_ok(true, &["tiering", "status"]);
+    assert!(
+        st.contains("enabled true"),
+        "a disabled record before finalize: {st}"
     );
 
     // ---- Finalize: schema 4.

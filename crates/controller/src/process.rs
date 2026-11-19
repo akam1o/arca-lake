@@ -3580,8 +3580,8 @@ mod tests {
         let flags = crate::tiering::TieringPolicy {
             tiers: vec!["default".into(), "fast".into()],
             promote_reads: 5,
-            promote_window: Duration::from_secs(600),
-            demote_after: Duration::from_secs(1800),
+            promote_window: Duration::from_mins(10),
+            demote_after: Duration::from_mins(30),
         };
         // No flags: nothing seeded.
         let cfg = ControllerConfig::new("c");
@@ -3607,7 +3607,7 @@ mod tests {
         assert!(r.acknowledged_by(4) && r.applied_incarnation == inc);
         // Different flags do not change the record.
         cfg.tiering = Some(crate::tiering::TieringPolicy {
-            demote_after: Duration::from_secs(60),
+            demote_after: Duration::from_mins(1),
             ..flags.clone()
         });
         tiering_pass(&meta, &clients, &cfg, &metrics, inc)
