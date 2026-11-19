@@ -1,8 +1,12 @@
 # Phase 4.1: test host recovery, data integrity, and ADR-0034
 
-Status: host investigated (cause **Unknown**), the dedicated cluster and
-its 10⁶ objects **Verified**; ADR-0034 implemented and tested; the
-cluster A/B in §6.
+Status: host investigated (first stop: cause **Unknown**; a second stop
+of both hosts: a hypervisor restart, §1b), the dedicated cluster and its
+10⁶ objects **Verified**; ADR-0034 implemented and tested; cluster A/B
+(§6): **0.002–0.008 FoundationDB commit per GET** (target ≤ 0.1: met);
+GET throughput above the base gateway's but about 12 % below
+`--access-records off` (target "within the spread of off": **not met**);
+the second campaign incomplete (the hypervisor restart).
 
 ## 1. The load host's stop (incident of `phase-4.1-adr33.md` §4c)
 
@@ -28,6 +32,19 @@ hypervisor's side was not accessible, so no cause is asserted. Not ruled
 out: an event in the last 3.5 minutes, between the last 10-minute sample
 and the end, that left no trace. Whether the run's load contributed is
 not known.
+
+## 1b. A second stop: both hosts at once (hypervisor restart)
+
+During the second A/B campaign (§6) both test hosts stopped within 16 s
+of each other (their journals end mid-session, no shutdown sequence, no
+kernel message before) and came back about three hours later. The
+operator reports that the hypervisor was restarted. Classification:
+**Hypervisor / VM** (an external restart, not the guests). The sampled
+resources before it were moderate (CPU 67–82 % idle, steal below 0.1 %);
+the load was a read benchmark (GET at concurrency 32). The shared system
+FoundationDB was available and healthy after it, with the same data; the
+dedicated cluster's files were intact and its processes were not
+restarted pending a decision.
 
 ## 2. The shared system FoundationDB
 
@@ -113,7 +130,70 @@ are not changed.
 
 ## 6. Cluster A/B (performance)
 
-Pending.
+Layout of Phase 4.0 (4 storage nodes and one gateway on one host;
+FoundationDB, the load generator on the other). Gateway arms on the same
+data, nodes and FoundationDB: **base** (the gateway before ADR-0034,
+`4a1ed48`), **new** (ADR-0034, batches of 512), **new128** (batches of
+128, now the default), **off** (`--access-records off`). Data: 10⁵
+objects of 4 KiB; 10⁴ of 64 KiB (not 10⁵: the node allotments did not
+leave room for 6.4 GB more without approaching capacity pressure). Each
+run: 60 s after 10 s of warm-up, concurrency 32, uniform keys, one read
+in ten checked, the generator's bounded retries and pacing; the
+controller stopped during the runs (no background commits: 5 commits in
+30 s idle), no samplers; arms in rotated order. Commits per GET: the
+FoundationDB committed-transaction counter from the end of a 30 s idle
+baseline to 3 s after the run (the last flush included), over the
+generator's HTTP attempts. Results: `benchmarks/linux/results/phase41-adr34/`.
+
+Validity: no run had errors, refused or cancelled operations, integrity
+violations or a saturated generator; capacity was not under pressure (no
+writes). The environment was noisy: in the first campaign runs of one
+arm differed by up to 2× and HEAD (no access record in any arm) differed
+2× between arms, so its throughput is not compared; the second campaign
+(GET 4 KiB only) was quieter, and it is the one compared. The second
+campaign stopped after 15 of 24 runs (the hypervisor restart, §1b): 4
+runs per arm (3 for off).
+
+FoundationDB commits per GET (both campaigns, every run):
+
+| Workload | base | new (512) | new128 | off |
+| --- | --- | --- | --- | --- |
+| GET 4 KiB, 10⁵ objects | 0.97–0.99 | 0.0021–0.0022 | 0.0077–0.0079 | 0.0001 |
+| GET 64 KiB, 10⁴ objects | 0.81–0.90 | 0.0019–0.0021 | — | 0.0001 |
+| HEAD 4 KiB | 0.0 | 0.0 | — | 0.0001 |
+
+GET 4 KiB, second campaign (medians of 4 runs, 3 for off):
+
+| | base | new (512) | new128 (default) | off |
+| --- | --- | --- | --- | --- |
+| ops/s | 2,746 | 3,248 | 3,263 | 3,688 |
+| p50 / p95 / p99 ms | 11.6 / 15.3 / 17.4 | 8.7 / 22.7 / 36.5 | 8.9 / 16.4 / 19.2 | 8.7 / 11.0 / 12.7 |
+| worst latency per second, median (runs 2–4) | 18–19 ms | 44–45 ms | 21–22 ms | 12–14 ms |
+| gateway CPU s per 1,000 requests | 0.65 | 0.55 | 0.55 | 0.52 |
+| FoundationDB CPU s per 1,000 requests | 0.34 | 0.20 | 0.21 | 0.16 |
+| gateway RSS | 61 MiB | 63 MiB | 57 MiB | 55 MiB |
+| access table at the end | — | empty, 0 dropped | empty, 0 dropped | — |
+
+- **Commits per GET: target met** with every batch size (0.002 with 512,
+  0.008 with 128; about 125–450 times fewer than the base).
+- Batches of 512 delayed GETs about once a second (a second's reads
+  written as back-to-back batches: 1,024 reads issued at once and a
+  512-write commit each): worst latency per second near 45 ms, p99 twice
+  the base's. Batches of 128 brought both back to the base's level: the
+  default is now 128.
+- **Throughput:** the default is about 19 % above the base gateway and
+  about 12 % below `off` (runs 2–4: 3,195–3,357 against 3,688–3,874), a
+  gap larger than the spread: the target "within the spread of `off`" is
+  **not met**. Its cause (measured): the flush still reads each read
+  generation's header and record and writes the record once per flush
+  (FoundationDB CPU 0.21 against 0.16 s per 1,000 requests, the
+  gateway's about the same); for reads of distinct objects that cost is
+  per generation, not per GET coalesced. Removing it where no tiering
+  policy exists is ADR-0034 decision 6 (not implemented).
+- Not measured: GET 64 KiB and HEAD in a quiet environment, the new
+  default on 64 KiB, two gateways reading one hot generation (contention,
+  acceptance criterion 6), a FoundationDB stall under load (criterion 3,
+  covered by the unit tests only).
 
 ## 7. Tiering accuracy (simulated)
 

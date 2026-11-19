@@ -549,8 +549,9 @@ struct GatewayArgs {
     /// and counted.
     #[arg(long, default_value_t = 65_536)]
     access_capacity: usize,
-    /// Generations per access-record flush transaction at most.
-    #[arg(long, default_value_t = 512)]
+    /// Generations per access-record flush transaction at most (larger
+    /// batches commit less but their bursts delay GETs: Phase 4.1).
+    #[arg(long, default_value_t = 128)]
     access_batch: usize,
     /// Time between access-record flushes, ms (±20 % at random).
     #[arg(long, default_value_t = 1000)]

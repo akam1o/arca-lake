@@ -111,7 +111,8 @@ Defects and limits of the current code (code analysis, Phase 4.0 and
    per GET; the GET path never waits on FoundationDB for this.
 2. **A single flusher per gateway.** Every `flush_interval` (default 1 s),
    or at once when the table reaches `high_watermark` (default 50 % of
-   capacity), the flusher takes up to `batch_size` (default 512) entries,
+   capacity), the flusher takes up to `batch_size` (default 128; 512 in
+   the first design, see §12) entries,
    oldest first, and writes them in one transaction: for each generation
    it reads the header and the access record, and writes
    `{max(last_ms), count + reads}` only if the header exists (R5). At most
@@ -409,4 +410,10 @@ committed transactions in benchmarks.
     the largest batch (`arca_gateway_access_flush_batch_max`), not as a
     histogram (the shared histogram type measures durations);
   - decision 6 (recording only where a tiering policy exists) is not
-    implemented: it needs a new metadata key and its own measurement.
+    implemented: it needs a new metadata key and its own measurement;
+  - the default batch is 128 generations, not 512: on the cluster, a
+    second's reads written as back-to-back batches of 512 (1,024 reads
+    issued at once and a 512-write commit each) raised GET p99 to about
+    twice the base gateway's; batches of 128 brought it back to the base's
+    level at 0.008 commit per GET (`docs/verification/phase-4.1-adr34.md`
+    §6).

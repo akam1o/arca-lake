@@ -55,7 +55,10 @@ impl Default for AccessConfig {
         Self {
             legacy: false,
             capacity: 65_536,
-            batch: 512,
+            // 128, not 512 (measured, Phase 4.1: a second's reads written
+            // as back-to-back 512-generation batches raised GET p99 to about
+            // twice the base; 128 brought it back, at 0.008 commit per GET).
+            batch: 128,
             flush_interval: Duration::from_secs(1),
             high_watermark: 0.5,
             max_age: Duration::from_secs(30),
