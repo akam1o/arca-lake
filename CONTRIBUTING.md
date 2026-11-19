@@ -23,7 +23,13 @@ and recovery behavior, documentation, and design review. Start with the
 
   The `Signed-off-by:` trailer certifies <https://developercertificate.org/>.
   Check your Git name and email before committing; use a GitHub no-reply
-  address if you do not want a personal email in public history.
+  address if you do not want a personal email in public history. CI checks
+  every non-merge commit of a pull request for the trailer.
+- Pull requests are merged with *rebase and merge* or *squash and merge*
+  (merge commits are disabled). Either keeps each commit's author and
+  `Signed-off-by:`; GitHub becomes the committer. A squash keeps the
+  trailers because the squashed message lists every commit's message: do
+  not delete them when editing it.
 - Report vulnerabilities through [SECURITY.md](SECURITY.md), rather than a
   public bug report.
 
