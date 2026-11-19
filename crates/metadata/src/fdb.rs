@@ -269,6 +269,19 @@ impl Txn for FdbTx {
         Ok(v.map(|s| s.to_vec()))
     }
 
+    fn atomic_max(
+        &mut self,
+        key: &[u8],
+        value: u64,
+    ) -> impl std::future::Future<Output = Result<(), KvError>> + Send {
+        self.trx.atomic_op(
+            key,
+            &value.to_le_bytes(),
+            foundationdb::options::MutationType::Max,
+        );
+        std::future::ready(Ok(()))
+    }
+
     fn atomic_add(
         &mut self,
         key: &[u8],

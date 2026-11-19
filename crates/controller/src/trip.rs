@@ -274,6 +274,11 @@ impl<T: Txn> Txn for TripTx<T> {
         self.seen(r)
     }
 
+    async fn atomic_max(&mut self, key: &[u8], value: u64) -> Result<(), KvError> {
+        let r = self.inner.atomic_max(key, value).await;
+        self.seen(r)
+    }
+
     async fn get_range(
         &mut self,
         range: &KeyRange,

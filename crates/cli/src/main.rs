@@ -542,7 +542,10 @@ struct GatewayArgs {
     /// table flushed in batches, ADR-0034), `off` (no record; tiering then
     /// sees no reads through this gateway) or `legacy` (one write per
     /// generation per second, as earlier releases; for one release).
-    #[arg(long, default_value = "on", value_parser = ["on", "off", "legacy"])]
+    /// `atomic` is an experiment (ADR-0035 option B: atomic mutations, a
+    /// new key layout that earlier releases do not clear): test clusters
+    /// only.
+    #[arg(long, default_value = "on", value_parser = ["on", "off", "legacy", "atomic"])]
     access_records: String,
     /// Generations pending at most in the access-record table (table and
     /// batch in flight); reads of new generations beyond it are dropped
@@ -1636,6 +1639,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 record_access: args.access_records != "off",
                 access: arca_lake_gateway::cluster::access::AccessConfig {
                     legacy: args.access_records == "legacy",
+                    atomic: args.access_records == "atomic",
                     capacity: args.access_capacity.max(1),
                     batch: args.access_batch.max(1),
                     flush_interval: Duration::from_millis(args.access_flush_interval_ms.max(1)),

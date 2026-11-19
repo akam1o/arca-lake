@@ -1758,7 +1758,89 @@ pub async fn record_accesses<S: KvStore>(
 /// Backend errors.
 pub async fn access_of<S: KvStore>(store: &S, generation: &GenId) -> Result<Option<AccessRecord>> {
     transact(store, *generation, |tx, generation| {
-        Box::pin(async move { read(tx, &keys::access(generation)).await })
+        Box::pin(async move {
+            let got = tx
+                .get_many(&[
+                    keys::access(generation),
+                    keys::access_count(generation),
+                    keys::access_last(generation),
+                ])
+                .await?;
+            let legacy: Option<AccessRecord> = match &got[0] {
+                Some(v) => Some(crate::records::decode(v)?),
+                None => None,
+            };
+            let le = |v: &Option<Vec<u8>>| {
+                v.as_ref()
+                    .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+                    .map(u64::from_le_bytes)
+            };
+            let (n, t) = (le(&got[1]), le(&got[2]));
+            if legacy.is_none() && n.is_none() && t.is_none() {
+                return Ok(None);
+            }
+            // Both layouts summed (ADR-0035 option B): each read is
+            // written to exactly one of them.
+            let l = legacy.unwrap_or_default();
+            Ok(Some(AccessRecord {
+                last_ms: l.last_ms.max(t.unwrap_or(0)),
+                count: l.count.saturating_add(n.unwrap_or(0)),
+            }))
+        })
+    })
+    .await
+}
+
+/// [`record_accesses`] with the experimental atomic layout (ADR-0035
+/// option B): the header is read (the GC check), the record is not; the
+/// reads are added (`ADD`) and the time raised (`MAX`) by atomic
+/// mutations, which do not conflict between gateways.
+///
+/// # Errors
+///
+/// Backend and codec errors (the whole batch).
+pub async fn record_accesses_atomic<S: KvStore>(
+    store: &S,
+    updates: &[AccessUpdate],
+    max_age_ms: u64,
+    now: impl Fn() -> u64 + Send + Sync,
+) -> Result<Vec<AccessWrite>> {
+    transact(store, (updates, max_age_ms, &now), |tx, env| {
+        Box::pin(async move {
+            let (updates, max_age_ms, now) = *env;
+            let at = now();
+            let stale =
+                |u: &AccessUpdate| max_age_ms != 0 && at.saturating_sub(u.oldest_ms) > max_age_ms;
+            let want: Vec<crate::kv::Key> = updates
+                .iter()
+                .filter(|u| !stale(u))
+                .map(|u| keys::gen_header(&u.generation))
+                .collect();
+            let got = tx.get_many(&want).await?;
+            let mut out = Vec::with_capacity(updates.len());
+            let mut fresh_at = 0usize;
+            for u in updates {
+                if stale(u) {
+                    out.push(AccessWrite::Stale);
+                    continue;
+                }
+                let header = &got[fresh_at];
+                fresh_at += 1;
+                if header.is_none() {
+                    out.push(AccessWrite::Finished);
+                    continue;
+                }
+                tx.atomic_add(
+                    &keys::access_count(&u.generation),
+                    i64::try_from(u.reads).unwrap_or(i64::MAX),
+                )
+                .await?;
+                tx.atomic_max(&keys::access_last(&u.generation), u.last_ms)
+                    .await?;
+                out.push(AccessWrite::Written);
+            }
+            Ok(out)
+        })
     })
     .await
 }
@@ -1777,6 +1859,10 @@ pub async fn reset_access<S: KvStore>(store: &S, generation: &GenId, now_ms: u64
             if tx.get(&keys::gen_header(&generation)).await?.is_none() {
                 return Ok(());
             }
+            // Both layouts reset (ADR-0035 option B): the atomic keys
+            // cleared, so that the legacy record alone holds `{now, 0}`.
+            tx.clear(&keys::access_count(&generation));
+            tx.clear(&keys::access_last(&generation));
             write(
                 tx,
                 &keys::access(&generation),

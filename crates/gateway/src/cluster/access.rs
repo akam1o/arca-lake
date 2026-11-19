@@ -29,6 +29,9 @@ pub struct AccessConfig {
     /// The per-GET write of earlier releases instead of the table (one
     /// release, for A/B and rollback).
     pub legacy: bool,
+    /// Experimental (ADR-0035 option B, test clusters only): write the
+    /// atomic access layout instead of the record's read-modify-write.
+    pub atomic: bool,
     /// Generations pending at most (table and batch in flight together).
     pub capacity: usize,
     /// Generations per flush transaction at most.
@@ -54,6 +57,7 @@ impl Default for AccessConfig {
     fn default() -> Self {
         Self {
             legacy: false,
+            atomic: false,
             capacity: 65_536,
             // 128, not 512 (measured, Phase 4.1: a second's reads written
             // as back-to-back 512-generation batches raised GET p99 to about
@@ -547,7 +551,11 @@ async fn flush_batch<S: KvStore>(
             })
             .collect();
         let started = std::time::Instant::now();
-        let r = object::record_accesses(meta, &updates, max_age, clock).await;
+        let r = if t.cfg.atomic {
+            object::record_accesses_atomic(meta, &updates, max_age, clock).await
+        } else {
+            object::record_accesses(meta, &updates, max_age, clock).await
+        };
         s.flush_time.observe(started.elapsed());
         match r {
             Ok(results) => {
@@ -1462,5 +1470,111 @@ mod tests {
         assert_eq!(order, vec![2, 3, 4, 5, 6, 1]);
         assert_eq!(t.snapshot(1_000).oldest_age_ms, 800);
         assert_conserved(&t);
+    }
+
+    fn atomic_cfg() -> AccessConfig {
+        AccessConfig {
+            atomic: true,
+            ..cfg(64, 512)
+        }
+    }
+
+    /// ADR-0035 option B (experimental): the atomic layout sums and keeps
+    /// the latest time, writes nothing for a finished generation, and is
+    /// read together with a legacy record.
+    #[tokio::test]
+    async fn the_atomic_layout_sums_and_skips_finished_generations() {
+        let kv = MemKv::default();
+        put_header(&kv, g(1), GenState::Committed).await;
+        object::record_access(&kv, &g(1), 5, 2).await.unwrap();
+        let t = AccessTable::new(atomic_cfg());
+        for (id, at) in [(1, 10), (1, 30), (3, 40)] {
+            t.note(g(id), at);
+        }
+        run_flush(&kv, &t, None, &|| 50).await;
+        assert_eq!(
+            record(&kv, g(1)).await,
+            Some(object::AccessRecord {
+                last_ms: 30,
+                count: 4
+            })
+        );
+        assert_eq!(record(&kv, g(3)).await, None, "an orphan was created");
+        let mut tx = kv.begin().await.unwrap();
+        assert_eq!(tx.get(&keys::access_count(&g(3))).await.unwrap(), None);
+        assert_eq!(t.snapshot(0).skipped_finished, 1);
+        assert_conserved(&t);
+    }
+
+    /// GC's finish clears the atomic keys with the generation; a reset
+    /// leaves `{now, 0}` and later flushes add to it.
+    #[tokio::test]
+    async fn gc_and_reset_cover_the_atomic_layout() {
+        let kv = MemKv::default();
+        put_header(&kv, g(1), GenState::Committed).await;
+        let t = AccessTable::new(atomic_cfg());
+        t.note(g(1), 10);
+        t.note(g(1), 20);
+        run_flush(&kv, &t, None, &|| 30).await;
+        object::reset_access(&kv, &g(1), 100).await.unwrap();
+        assert_eq!(
+            record(&kv, g(1)).await,
+            Some(object::AccessRecord {
+                last_ms: 100,
+                count: 0
+            })
+        );
+        t.note(g(1), 110);
+        run_flush(&kv, &t, None, &|| 120).await;
+        assert_eq!(
+            record(&kv, g(1)).await,
+            Some(object::AccessRecord {
+                last_ms: 110,
+                count: 1
+            })
+        );
+        put_header(&kv, g(1), GenState::Retiring { since_ms: 1 }).await;
+        arca_lake_metadata::ops::gc::finish(&kv, &g(1))
+            .await
+            .unwrap();
+        assert_eq!(record(&kv, g(1)).await, None);
+        let mut tx = kv.begin().await.unwrap();
+        assert_eq!(tx.get(&keys::access_count(&g(1))).await.unwrap(), None);
+        assert_eq!(tx.get(&keys::access_last(&g(1))).await.unwrap(), None);
+        // A read still pending does not bring it back.
+        t.note(g(1), 130);
+        run_flush(&kv, &t, None, &|| 140).await;
+        assert_eq!(record(&kv, g(1)).await, None);
+        assert_conserved(&t);
+    }
+
+    /// Unknown outcomes with the atomic layout: counted uncertain, never
+    /// resent, so never counted twice.
+    #[tokio::test]
+    async fn an_unknown_outcome_is_never_counted_twice_in_the_atomic_layout() {
+        for (fault, applied) in [
+            (CommitFault::UnknownAfterApply, true),
+            (CommitFault::UnknownWithoutApply, false),
+            (CommitFault::TimeoutAfterApply, true),
+            (CommitFault::TimeoutWithoutApply, false),
+        ] {
+            let kv = FaultKv::new(MemKv::default());
+            put_header(&kv, g(1), GenState::Committed).await;
+            let t = AccessTable::new(atomic_cfg());
+            for _ in 0..3 {
+                t.note(g(1), 10);
+            }
+            kv.inject_on_key(keys::access_count(&g(1)), fault, 1);
+            run_flush(&kv, &t, None, &|| 20).await;
+            assert_eq!(t.snapshot(0).uncertain, 3, "{fault:?}");
+            t.note(g(1), 30);
+            run_flush(&kv, &t, None, &|| 40).await;
+            assert_eq!(
+                record(&kv, g(1)).await.map(|r| r.count),
+                Some(if applied { 4 } else { 1 }),
+                "{fault:?}"
+            );
+            assert_conserved(&t);
+        }
     }
 }

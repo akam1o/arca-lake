@@ -299,6 +299,8 @@ pub async fn finish<S: KvStore>(store: &S, generation: &GenId) -> Result<()> {
             }
             tx.clear(&keys::retired(since_ms, generation));
             tx.clear(&keys::access(generation));
+            tx.clear(&keys::access_count(generation));
+            tx.clear(&keys::access_last(generation));
             tx.clear_range(&keys::gen_range(generation));
             Ok(())
         })

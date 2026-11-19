@@ -656,6 +656,20 @@ pub fn access(generation: &GenId) -> Key {
     pack(&(ROOT, "acc", Bytes::from(&generation[..])))
 }
 
+/// Experimental atomic access layout (ADR-0035 option B): reads counted,
+/// little-endian `u64`, kept with atomic additions.
+#[must_use]
+pub fn access_count(generation: &GenId) -> Key {
+    pack(&(ROOT, "acc_n", Bytes::from(&generation[..])))
+}
+
+/// Experimental atomic access layout (ADR-0035 option B): last read, Unix
+/// milliseconds, little-endian `u64`, kept with atomic maxima.
+#[must_use]
+pub fn access_last(generation: &GenId) -> Key {
+    pack(&(ROOT, "acc_t", Bytes::from(&generation[..])))
+}
+
 /// Every generation subspace (all `("al","g",...)` keys).
 #[must_use]
 pub fn all_generations_range() -> KeyRange {

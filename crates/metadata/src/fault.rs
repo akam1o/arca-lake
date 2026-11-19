@@ -242,6 +242,11 @@ impl<T: Txn + 'static> Txn for FaultTx<T> {
         self.inner.atomic_add(key, delta).await
     }
 
+    async fn atomic_max(&mut self, key: &[u8], value: u64) -> Result<(), KvError> {
+        self.written.push(key.to_vec());
+        self.inner.atomic_max(key, value).await
+    }
+
     async fn get_range(
         &mut self,
         range: &KeyRange,

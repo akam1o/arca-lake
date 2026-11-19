@@ -258,6 +258,25 @@ pub trait Txn: Send {
             Ok(())
         }
     }
+
+    /// Set the little-endian `u64` at `key` to the larger of it and
+    /// `value` (missing = `value`) as an atomic mutation (no read
+    /// conflict). Backends without atomic mutations read-modify-write.
+    fn atomic_max(
+        &mut self,
+        key: &[u8],
+        value: u64,
+    ) -> impl Future<Output = Result<(), KvError>> + Send {
+        async move {
+            let cur = self
+                .get(key)
+                .await?
+                .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+                .map(u64::from_le_bytes);
+            self.set(key, &cur.map_or(value, |c| c.max(value)).to_le_bytes());
+            Ok(())
+        }
+    }
 }
 
 /// Maximum attempts for [`transact`].
