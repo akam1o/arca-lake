@@ -66,7 +66,7 @@ retried within their transactions).
    transaction to the storage server and grew. ADR-0035's rule (close at
    least half the gap, or remove conflicts that cost throughput) is not
    met.
-2. **Conflicts between gateways are not the cost.** With two gateways on
+2. **Conflicts between gateways were not a measurable cost here.** With two gateways on
    the same keys, `on` saw 0.23–0.40 conflicted transactions per 1,000
    GETs, all retried successfully; option B's absence of conflicts gained
    nothing.
