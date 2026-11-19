@@ -5,6 +5,28 @@
 > publication clearance. Follow [public repository readiness](public-readiness.md)
 > for the remaining work and recheck the actual publication candidate.
 
+## Current arrangement (2026-11-19)
+
+The proposal below was carried out at publication: the self-hosted runners
+were removed (proposal 1) and every job moved to GitHub-hosted
+`ubuntu-24.04` runners (proposal 4, in the existing workflow rather than a
+second one; proposal 3 is moot without self-hosted runners).
+
+- Triggers: `push` to `main`, `pull_request` to `main`, and
+  `workflow_dispatch`. Token `contents: read`; no secrets; actions pinned
+  to commit SHAs; first-time contributors' runs need a maintainer's
+  approval.
+- Jobs on every trigger: format, lint and tests; the FoundationDB backend
+  tests and restore drill; the three-process FoundationDB failover suite;
+  licenses, history and tree secret scans, environment identifiers,
+  sign-off and Markdown links. The first hosted run of all four passed in
+  about 14 minutes, the longest job.
+- The upgrade and rollback job (`fdb-upgrade`: five earlier releases and
+  a version-bumped tree built) runs on pushes to `main` and on demand,
+  not on pull requests.
+- Pull requests are merged by rebase or squash (merge commits disabled);
+  the sign-off check skips merge commits.
+
 The repository is private today. This page reviews what changes when it
 becomes public and proposes the workflow and settings changes to make
 first. **None of the setting changes below has been applied**; they need
