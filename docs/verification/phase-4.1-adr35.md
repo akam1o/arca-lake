@@ -88,3 +88,33 @@ A multi-process FoundationDB; GET 64 KiB and HEAD with two gateways;
 option A itself (its cost where no policy acts is that of `off`, measured
 here; where one acts, that of `on`); flushes under a FoundationDB stall;
 a gateway restart during the runs.
+
+## 5. Option A: the tests of ADR-0035 §10.5
+
+Option A is implemented in three steps (the tiering record and
+`admin tiering`; the controller under the record with schema 4; the
+gateways). Each item of §10.5 and the test that covers it; a fix whose
+removal fails its test is marked †.
+
+| §10.5 item | Test |
+| --- | --- |
+| Gateway: each row of §10.3 (no record, enabled, unacknowledged, new term, earlier generation, no leader, expired or released lease, lease within the skew, stale) | `ops::tiering::tests::a_gateway_stops_recording_only_on_a_fresh_acknowledged_disable`; `cluster::backend::tiering_watch::recording_stops_only_while_the_confirmation_is_fresh_and_current` (also another incarnation) |
+| Gateway: a read failure and its ageing, a stalled refresh | the same watch test (an observation older than 10 s records); the observation is aged from the read's start |
+| Gateway: enabling and disabling reach it within one refresh; a restart | `tiering::a_gateway_records_reads_only_while_tiering_is_not_confirmed_disabled` † |
+| Flush: the promotion cutoff (an entry before, across and after it; an old record; the transaction's value, not a gateway's copy) | `cluster::access::tests::the_flush_applies_the_promotion_cutoff_of_the_tiering_record` † |
+| Controller: seeding from flags, no seeding without them, the record winning over different flags | `process::tests::the_tiering_record_is_seeded_once_and_acknowledged_per_term_and_incarnation` |
+| Controller: the acknowledgment once per generation and term, lost to a racing admin change, term 0 refused | `ops::tiering::tests::the_acknowledgment_names_the_generation_and_stamps_the_grace`, `term_zero_never_acknowledges` |
+| Controller: the acknowledgment waits for a running pass; acknowledgment by a leader without a policy (health pass) | the process test above (gate held and released) |
+| Controller: a pass whose policy changed (switch refused, nothing reset, cursor kept); its reset refused after a change | `tiering::a_changed_policy_refuses_the_pass_but_not_rebalancing` †; `ops::tiering::tests::a_reset_by_a_pass_of_an_earlier_policy_is_refused` |
+| Controller: rebalancing while tiering is disabled | `tiering::a_changed_policy_refuses_the_pass_but_not_rebalancing` |
+| Controller: disabling refused below schema 4 (any change leaving tiering disabled) | `ops::tiering::tests::seeding_happens_once_and_disabling_waits_for_the_schema` †; `previous_release::upgrade_and_finalize_to_the_tiering_schema` (CI) |
+| Controller: a restore (another incarnation) restarts the grace | the acknowledgment and process tests above |
+| Controller: the grace for no record, an old record and a reset record, with a skewed clock; after enabling and after a widening change | `tiering::generations_without_or_with_old_records_wait_for_the_grace`; `tiering::under_the_tiering_record_old_counts_do_not_promote_and_demotion_waits_for_the_grace` †; the stamps in the acknowledgment test |
+| Controller: old counts not promoting | the same test (controller side) †, the flush test (writer side) † |
+| Controller: disable then enable | the acknowledgment test |
+| Schema 4: the upgrade from the last release of schema 3, finalize, the previous release refused; the Phase 3.9 path through that release | `previous_release::upgrade_and_finalize_to_the_tiering_schema`, `upgrade_from_and_rollback_to_the_previous_release` (CI, the upgrade job) |
+
+Not covered by a test: two controllers seeding at the same instant (the
+seed is one insert-if-absent transaction, tested sequentially); a real
+controller failover between two processes with gateways (each side
+tested on its own); the cluster measurement of §10.6 (pending).

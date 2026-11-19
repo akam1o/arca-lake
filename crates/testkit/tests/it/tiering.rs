@@ -1183,3 +1183,90 @@ async fn a_gateway_records_reads_only_while_tiering_is_not_confirmed_disabled() 
     assert_eq!(c.backend.access_stats().reads - before.reads, 1);
     c.shutdown().await;
 }
+
+/// ADR-0035 §10.4 (§10.5 coverage): in an upper tier, a generation with
+/// no access record and one with an old record are not demoted before
+/// `demote_after` plus the margin from the grace start, the margin
+/// standing for the clock skew a leader may have against the reads'
+/// writers; past it both are.
+#[tokio::test]
+async fn generations_without_or_with_old_records_wait_for_the_grace() {
+    let (c, fast) = cluster().await;
+    let mut gens = Vec::new();
+    for (key, seed) in [("none", 61u64), ("old", 62)] {
+        let data = payload(usize::try_from(MIB / 2).unwrap(), seed);
+        s3::put(&c.backend, BUCKET, key, data, &PutOptions::default())
+            .await
+            .unwrap();
+        gens.push(c.manifest(BUCKET, key).await.pointer.generation);
+    }
+    // Both moved to the upper tier first (unfenced, as an earlier policy
+    // would have), then their records as tiering finds them on enabling.
+    let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(c.meta.as_ref())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.id, n))
+        .collect();
+    let groups = cluster::list_groups(c.meta.as_ref()).await.unwrap();
+    for key in ["none", "old"] {
+        let (index, record) = c.manifest(BUCKET, key).await.chunks[0].clone();
+        let source = groups
+            .iter()
+            .find(|g| g.id == record.placement.group_id)
+            .unwrap()
+            .clone();
+        let generation = c.manifest(BUCKET, key).await.pointer.generation;
+        let o = migrate_chunk(
+            c.meta.as_ref(),
+            &c.clients,
+            &Coders::default(),
+            &addr_of(&nodes),
+            &source,
+            &fast,
+            &generation,
+            index,
+            &record,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(o, MigrateOutcome::Switched { .. }), "{o:?}");
+    }
+    let t0 = now_ms();
+    object::record_access(c.meta.as_ref(), &gens[1], t0 - 86_400_000, 3)
+        .await
+        .unwrap();
+    // The leader's clock 60 s behind the writers: the margin covers it.
+    let skew = 60_000;
+    let margin = arca_lake_metadata::ops::tiering::grace_margin_ms(skew);
+    let fence = enabled_record(&c, t0, margin).await;
+    let run = async |at: u64| {
+        arca_lake_controller::tiering::run_once_bounded_fenced(
+            c.meta.as_ref(),
+            &c.clients,
+            &fenced_policy(),
+            at,
+            0,
+            Some(fence),
+        )
+        .await
+        .unwrap()
+    };
+    let demote = 1_800_000;
+    let report = run(t0 + demote + margin - 1_000).await;
+    assert_eq!(
+        report.demoted_chunks, 0,
+        "demoted within the grace: {report:?}"
+    );
+    for key in ["none", "old"] {
+        assert_eq!(
+            c.manifest(BUCKET, key).await.chunks[0].1.placement.group_id,
+            fast.id,
+            "{key}"
+        );
+    }
+    let report = run(t0 + demote + margin + 1_000).await;
+    assert_eq!(report.demoted_chunks, 2, "{report:?}");
+    c.shutdown().await;
+}
