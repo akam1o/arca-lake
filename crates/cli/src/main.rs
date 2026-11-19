@@ -998,6 +998,12 @@ enum AdminCommand {
         #[command(subcommand)]
         command: RebalanceCommand,
     },
+    /// Automatic tiering (ADR-0035): the cluster's tiering record, the
+    /// source of truth for whether tiering acts and its policy.
+    Tiering {
+        #[command(subcommand)]
+        command: TieringCommand,
+    },
     /// Print nodes, groups, and the leader record.
     Status {
         /// Also print every process heartbeat and node capability record
@@ -2357,6 +2363,7 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
         }
         AdminCommand::CheckConfig => check_config(meta.as_ref()).await,
         AdminCommand::Rebalance { command } => rebalance_command(meta.as_ref(), command).await,
+        AdminCommand::Tiering { command } => tiering_command(meta.as_ref(), command).await,
         AdminCommand::DeleteFence { command } => {
             delete_fence_command(meta.as_ref(), command, now).await
         }
@@ -3770,6 +3777,133 @@ enum RebalanceCommand {
         #[arg(value_parser = ["on", "off"])]
         mode: String,
     },
+}
+
+/// A tiering policy on the command line (every field, or none).
+#[derive(Debug, clap::Args)]
+struct TieringPolicyArgs {
+    /// Durable tiers from lowest (coldest) to highest (hottest); repeat.
+    #[arg(long = "tier")]
+    tiers: Vec<String>,
+    /// Promote a generation read at least this many times...
+    #[arg(long)]
+    promote_reads: Option<u64>,
+    /// ...within this window, seconds.
+    #[arg(long)]
+    promote_window_secs: Option<u64>,
+    /// Demote a generation not read for this long, seconds.
+    #[arg(long)]
+    demote_after_secs: Option<u64>,
+}
+
+impl TieringPolicyArgs {
+    /// `None` when no field is given; an error when only some are.
+    fn policy(
+        &self,
+    ) -> Result<Option<arca_lake_metadata::ops::tiering::TieringPolicyRecord>, String> {
+        match (
+            self.tiers.is_empty(),
+            self.promote_reads,
+            self.promote_window_secs,
+            self.demote_after_secs,
+        ) {
+            (true, None, None, None) => Ok(None),
+            (false, Some(r), Some(w), Some(d)) => Ok(Some(
+                arca_lake_metadata::ops::tiering::TieringPolicyRecord {
+                    tiers: self.tiers.clone(),
+                    promote_reads: r,
+                    promote_window_ms: w.saturating_mul(1000),
+                    demote_after_ms: d.saturating_mul(1000),
+                },
+            )),
+            _ => Err(
+                "give every policy field (--tier ... --promote-reads --promote-window-secs \
+                 --demote-after-secs) or none"
+                    .into(),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum TieringCommand {
+    /// Print the record: enabled, policy, generation, acknowledgment,
+    /// grace and promotion cutoff.
+    Status,
+    /// Enable tiering (with this policy, or the record's).
+    Enable {
+        #[command(flatten)]
+        policy: TieringPolicyArgs,
+    },
+    /// Disable tiering: gateways stop recording reads once the leader has
+    /// acknowledged it. Refused until `admin upgrade finalize` wrote the
+    /// schema every process of which reads the record.
+    Disable,
+    /// Replace the policy (enabled or not).
+    Set {
+        #[command(flatten)]
+        policy: TieringPolicyArgs,
+    },
+}
+
+async fn tiering_command<S: arca_lake_metadata::KvStore>(
+    meta: &S,
+    command: TieringCommand,
+) -> ExitCode {
+    use arca_lake_metadata::ops::tiering::{self, AdminChange};
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| u64::try_from(d.as_millis()).ok())
+            .unwrap_or(0)
+    };
+    let r = match command {
+        TieringCommand::Status => tiering::current(meta).await,
+        TieringCommand::Enable { policy } => match policy.policy() {
+            Ok(p) => tiering::admin_change(meta, &AdminChange::Enable(p), now_ms())
+                .await
+                .map(Some),
+            Err(e) => return fail(e),
+        },
+        TieringCommand::Disable => tiering::admin_change(meta, &AdminChange::Disable, now_ms())
+            .await
+            .map(Some),
+        TieringCommand::Set { policy } => match policy.policy() {
+            Ok(Some(p)) => tiering::admin_change(meta, &AdminChange::SetPolicy(p), now_ms())
+                .await
+                .map(Some),
+            Ok(None) => return fail("give the policy to set"),
+            Err(e) => return fail(e),
+        },
+    };
+    match r {
+        Ok(None) => {
+            println!(
+                "no tiering record (gateways record reads; a controller with --tiering-* flags seeds it)"
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(Some(t)) => {
+            println!(
+                "enabled {} generation {} acknowledged {} (term {} generation {}) tiers {:?} promote_reads {} promote_window_s {} demote_after_s {} grace_from_ms {} promotion_from_ms {} changed_ms {}",
+                t.enabled,
+                t.generation,
+                t.applied_generation == t.generation && t.applied_term != 0,
+                t.applied_term,
+                t.applied_generation,
+                t.policy.tiers,
+                t.policy.promote_reads,
+                t.policy.promote_window_ms / 1000,
+                t.policy.demote_after_ms / 1000,
+                t.grace_from_ms,
+                t.promotion_from_ms,
+                t.changed_ms
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
 }
 
 async fn rebalance_command<S: arca_lake_metadata::KvStore>(
@@ -5731,5 +5865,39 @@ mod gateway_auth_tests {
         assert!(gateway_auth(true, None, None).is_err());
         let (store, creds) = gateway_auth(false, None, None).unwrap();
         assert!(store.is_none() && creds.is_none());
+    }
+}
+
+#[cfg(test)]
+mod tiering_args {
+    //! `admin tiering` takes every policy field or none (ADR-0035).
+    use super::*;
+
+    fn args(tiers: &[&str], r: Option<u64>, w: Option<u64>, d: Option<u64>) -> TieringPolicyArgs {
+        TieringPolicyArgs {
+            tiers: tiers.iter().map(ToString::to_string).collect(),
+            promote_reads: r,
+            promote_window_secs: w,
+            demote_after_secs: d,
+        }
+    }
+
+    #[test]
+    fn every_policy_field_or_none() {
+        assert_eq!(args(&[], None, None, None).policy(), Ok(None));
+        let p = args(&["default", "fast"], Some(5), Some(600), Some(1800))
+            .policy()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (p.promote_window_ms, p.demote_after_ms),
+            (600_000, 1_800_000)
+        );
+        assert!(
+            args(&["default"], Some(5), None, Some(1800))
+                .policy()
+                .is_err()
+        );
+        assert!(args(&[], Some(5), Some(600), Some(1800)).policy().is_err());
     }
 }

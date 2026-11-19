@@ -26,6 +26,7 @@ pub mod rebalance;
 pub mod recovery;
 pub mod repair_status;
 pub mod reservation;
+pub mod tiering;
 
 use crate::error::Result;
 use crate::kv::Txn;
