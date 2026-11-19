@@ -169,11 +169,17 @@ counters around each run).
 
 ### 6.3 Findings
 
-- **Acceptance (§10.6, first criterion) met.** With tiering confirmed
-  disabled, GET throughput is within the spread of `off` in both layouts
-  (the four runs of `dis` and `off` overlap: +1.0 % and −1.0 % against
-  spreads of 1.4 % and 2.7 %), and so are latency, FoundationDB reads and
-  commits per GET and CPU per GET: `dis` does the work of `off`.
+- **Acceptance (§10.6, first criterion) met as observed here.** With
+  tiering confirmed disabled, GET throughput is within the spread of
+  `off` in both layouts (the four runs of `dis` and `off` overlap: +1.0 %
+  and −1.0 % against spreads of 1.4 % and 2.7 %), and so are latency,
+  FoundationDB reads and commits per GET and CPU per GET: `dis` does the
+  work of `off`. Four runs per arm with overlapping ranges show no
+  measurable difference; they are not a statistical proof of
+  equivalence. The result holds for this quiet setup (controller
+  background passes held off, §6.1); with those passes running, both
+  arms pay their cost alike, which the discarded campaign could not
+  resolve from noise.
 - Gateways counted every read as unrecorded in `dis` (about 2.8 × 10⁵ per
   run per gateway layout) and none as recorded; in `rec` every read was
   recorded and flushed (reads equal flushed reads in every run; no read
@@ -182,8 +188,12 @@ counters around each run).
   −18.6 % against `off`, as §2 measured on the retained cluster): option
   A removes it only where no policy acts, as decided (R-109 stays
   Medium).
-- Also observed on this cluster: `admin tiering disable` and `enable`
-  reached both gateways within one refresh (the gauge changed within
-  10 s), and after a controller restart (a new term) the new leader
-  acknowledged the record. The other criteria of §10.6 are covered by
-  the tests of §5, not by this measurement.
+- Also observed on this cluster: after `admin tiering disable` and
+  `enable` both gateways' gauges had changed when checked 10 s later
+  (the checks were not finer: this bounds the propagation at 10 s, not at
+  one 2 s refresh), and after a controller restart (a new term) the new
+  leader acknowledged the record. The other criteria of §10.6 are not
+  established by this measurement: they rest on the unit and
+  integration tests of §5, with the gaps listed there (simultaneous
+  seeding, a two-process failover with gateways), and this run made no
+  policy-driven moves.
