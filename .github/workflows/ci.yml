@@ -47,12 +47,18 @@ jobs:
           fi
           # S3 compatibility tests drive the gateway with the AWS CLI and
           # boto3 (they skip when the tools are absent; installed here).
-          # The distribution's awscli package is unusable with Python 3.14
-          # ("badly formed help string"), so the official AWS CLI v2 bundle
-          # is installed instead, pinned by version and SHA-256.
-          if ! python3 -c 'import boto3' 2>/dev/null || ! command -v unzip >/dev/null; then
+          # boto3 is pinned in a virtual environment put first on PATH: the
+          # distribution's python3-boto3 is too old to return the multipart
+          # checksum type the conformance script checks. The distribution's
+          # awscli package is unusable with Python 3.14 ("badly formed help
+          # string"), so the official AWS CLI v2 bundle is installed instead,
+          # pinned by version and SHA-256.
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install -q boto3==1.40.0
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+          if ! command -v unzip >/dev/null; then
             sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-boto3 unzip
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip
           fi
           if ! aws --version 2>/dev/null | grep -q 'aws-cli/2.37.9 .*exe/x86_64'; then
             dpkg -s awscli >/dev/null 2>&1 && sudo apt-get remove -y -qq awscli
@@ -145,12 +151,18 @@ jobs:
           fi
           # S3 compatibility tests drive the gateway with the AWS CLI and
           # boto3 (they skip when the tools are absent; installed here).
-          # The distribution's awscli package is unusable with Python 3.14
-          # ("badly formed help string"), so the official AWS CLI v2 bundle
-          # is installed instead, pinned by version and SHA-256.
-          if ! python3 -c 'import boto3' 2>/dev/null || ! command -v unzip >/dev/null; then
+          # boto3 is pinned in a virtual environment put first on PATH: the
+          # distribution's python3-boto3 is too old to return the multipart
+          # checksum type the conformance script checks. The distribution's
+          # awscli package is unusable with Python 3.14 ("badly formed help
+          # string"), so the official AWS CLI v2 bundle is installed instead,
+          # pinned by version and SHA-256.
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install -q boto3==1.40.0
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+          if ! command -v unzip >/dev/null; then
             sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-boto3 unzip
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip
           fi
           if ! aws --version 2>/dev/null | grep -q 'aws-cli/2.37.9 .*exe/x86_64'; then
             dpkg -s awscli >/dev/null 2>&1 && sudo apt-get remove -y -qq awscli
@@ -273,12 +285,18 @@ jobs:
           fi
           # S3 compatibility tests drive the gateway with the AWS CLI and
           # boto3 (they skip when the tools are absent; installed here).
-          # The distribution's awscli package is unusable with Python 3.14
-          # ("badly formed help string"), so the official AWS CLI v2 bundle
-          # is installed instead, pinned by version and SHA-256.
-          if ! python3 -c 'import boto3' 2>/dev/null || ! command -v unzip >/dev/null; then
+          # boto3 is pinned in a virtual environment put first on PATH: the
+          # distribution's python3-boto3 is too old to return the multipart
+          # checksum type the conformance script checks. The distribution's
+          # awscli package is unusable with Python 3.14 ("badly formed help
+          # string"), so the official AWS CLI v2 bundle is installed instead,
+          # pinned by version and SHA-256.
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install -q boto3==1.40.0
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+          if ! command -v unzip >/dev/null; then
             sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-boto3 unzip
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip
           fi
           if ! aws --version 2>/dev/null | grep -q 'aws-cli/2.37.9 .*exe/x86_64'; then
             dpkg -s awscli >/dev/null 2>&1 && sudo apt-get remove -y -qq awscli
@@ -418,12 +436,18 @@ jobs:
           fi
           # S3 compatibility tests drive the gateway with the AWS CLI and
           # boto3 (they skip when the tools are absent; installed here).
-          # The distribution's awscli package is unusable with Python 3.14
-          # ("badly formed help string"), so the official AWS CLI v2 bundle
-          # is installed instead, pinned by version and SHA-256.
-          if ! python3 -c 'import boto3' 2>/dev/null || ! command -v unzip >/dev/null; then
+          # boto3 is pinned in a virtual environment put first on PATH: the
+          # distribution's python3-boto3 is too old to return the multipart
+          # checksum type the conformance script checks. The distribution's
+          # awscli package is unusable with Python 3.14 ("badly formed help
+          # string"), so the official AWS CLI v2 bundle is installed instead,
+          # pinned by version and SHA-256.
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install -q boto3==1.40.0
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+          if ! command -v unzip >/dev/null; then
             sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-boto3 unzip
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip
           fi
           if ! aws --version 2>/dev/null | grep -q 'aws-cli/2.37.9 .*exe/x86_64'; then
             dpkg -s awscli >/dev/null 2>&1 && sudo apt-get remove -y -qq awscli
