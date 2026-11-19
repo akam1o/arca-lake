@@ -278,3 +278,14 @@ because every object is far from the thresholds; objects near a
 threshold can change decision under overflow, and that case is not
 measured here. The records never exceed the truth (drops only
 under-count).
+
+## 8. CI failures during this phase
+
+| Run (commit) | Job, test | Classification | Evidence |
+| --- | --- | --- | --- |
+| first attempt on the ADR-0034 commit | FoundationDB backend, `previous_release::upgrade_and_rollback_with_the_phase_3_12_release` ("timed out waiting for the current controller's repair and its status", a 60 s wait) | **Unclassified, not reproduced**; no evidence of a regression | the job's second attempt passed, and so did the test in the CI runs of the next two commits; on a test host with a FoundationDB of its own, the test run 10 times alternating the tree before ADR-0034 and the current one: 10 passes (5 each, about 33 s each); the change touches neither the repair path nor the controller outside tiering, which the test does not enable; the CI log has no controller output for that step |
+| first attempt on the batch-default commit | FoundationDB failover, the restore drill step | **Environment** | the compiler was killed (`SIGKILL`) while building the test binary; no test ran; the second attempt passed |
+
+A rerun's pass is not counted as a fix: the first row stays open until a
+failure is caught with the controller's log (a candidate for a timing
+margin on loaded runners).
