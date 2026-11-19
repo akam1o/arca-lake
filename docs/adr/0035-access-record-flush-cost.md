@@ -40,16 +40,18 @@ FoundationDB.
 
 ## 2. Option A: decision 6 of ADR-0034 (record only where tiering acts)
 
-No access record is written unless a tiering policy could use it.
+No access record is written where tiering is confirmed not to act
+(§10.3: whenever that is not confirmed, reads are recorded).
 
 - **What it needs.** The tiering policy is today a controller argument
   (`--tiering-tier`, `--tiering-promote-reads`, …), not metadata: a
   gateway cannot know whether one exists. The controller (leader) would
   publish a record, for example `tiering = {enabled, tiers}`, and the
   gateways watch it as they watch the cluster state and the admission
-  record; without a record (or with tiering off) the gateway does not
-  note reads.
-- **Cost when no policy applies:** that of `off` (6.00 reads, 2.00
+  record; with tiering confirmed off the gateway does not note reads
+  (without a record it does, §10.3).
+- **Cost when no policy applies:** expected to be that of `off` (option A
+  itself not measured; `off` (6.00 reads, 2.00
   transactions per GET in the measurement above): the whole gap closes.
 - **Cost when a policy applies:** unchanged from ADR-0034. A finer scope
   (only buckets or tiers a policy covers) narrows it, at the price of a
@@ -253,7 +255,12 @@ process, one or two gateways, uniform, Zipf (s = 1.1) and hot-set (1 % /
   switch) reads the tiering record: the switch is refused when the
   record's `generation` differs from the pass's or tiering is disabled.
   A move already copying finishes its copy and is abandoned at its
-  switch; no migration is decided by a policy that has been changed.
+  switch; no migration is decided by a policy that has been changed. A
+  switch refused for this reason is an outcome of its own
+  (`PolicyChanged`), distinct from a skipped move: it ends the pass and
+  does **not** reset the generation's access record (today a skipped
+  move is settled with `reset_access`, which would erase reads recorded
+  since).
   The acknowledgment of a new generation is written only after the pass
   that read the previous one has ended (or by a new leader, whose passes
   start from the record).
@@ -295,7 +302,9 @@ them early:
   margin)`; promotion keeps using the record's own count and time;
 - `margin` covers the gateways' propagation (the 10 s stale bound plus
   one refresh), the flush delay of ADR-0034 (a read is written at most
-  `max_age`, 30 s, after it happened) and the clock skew between
+  `max_age`, 30 s, after it happened, under ADR-0034's assumptions: the
+  age checked when a transaction attempt starts, a prompt read version,
+  FoundationDB's transaction age limit) and the clock skew between
   controllers and gateways (a controller setting, as the reclamation
   skew; `grace_from_ms` is stamped by a leader, §10.1); a
   generation is therefore not demoted before `demote_after + margin`
@@ -305,10 +314,12 @@ them early:
   enables tiering or can make more generations eligible for demotion (a
   shorter `demote_after`, a tier added, removed or reordered); other
   changes keep it;
-- promotion counts only reads after the grace start: a record whose
-  `last_ms` is before `grace_from_ms` counts as 0 reads (counts left from
-  before a disabled period, which ADR-0034 does not window, cannot
-  promote an object right after enabling);
+- promotion is not windowed (ADR-0034 defect 6): a record's count left
+  from before a disabled period still counts once the generation is read
+  again, so an object can be promoted sooner after re-enabling than its
+  recent reads alone justify. Accepted as a tiering-accuracy residual
+  (moves stay fenced; R-109); a per-record epoch would remove it and is
+  not part of this decision;
 - it lives in the record: a failover keeps it; disabling and enabling
   again starts a new grace period.
 
@@ -328,20 +339,26 @@ is disabled or changed (its moves refused at the switch, the
 acknowledgment after it); failover (the new leader acknowledges,
 gateways record in between); `admin tiering disable` refused below the
 schema step; seeding by two controllers at once, a controller without
-flags never seeding; acknowledgment by a leader without a policy (health
+flags never seeding; a switch refused for a changed policy not resetting the access record
+(and ending the pass); old counts followed by one new read after
+re-enabling (the accepted residual, recorded); acknowledgment by a
+leader without a policy (health
 pass) and right after a takeover; a restore that reverts or removes the
 record; the grace period for a generation with no record, an old record
 and a reset record, with a skewed clock (between controllers, and an
 admin host's clock not involved), after enabling and after a widening
-change, with reads still pending in a gateway's flush; old counts not
-promoting after re-enabling; disable then enable.
+change, with reads still pending in a gateway's flush; disable then
+enable.
 
 ### 10.6 Acceptance
 
 - GET throughput with tiering confirmed disabled within the measurement
   spread of `--access-records off`.
 - With tiering enabled: no access record lost or counted twice beyond
-  what ADR-0034 counts (drops and uncertain reads).
+  what ADR-0034 counts (drops and uncertain reads) and the reads a
+  gateway leaves unrecorded while its confirmation of a just-replaced
+  disabled state is still fresh (at most the stale bound after the
+  change).
 - Enabling, disabling and changing the policy reach every gateway within
   one refresh while connectivity is healthy; otherwise gateways record
   (fail safe) once their last confirmation is stale.
