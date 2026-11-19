@@ -628,8 +628,11 @@ jobs:
             head="$PUSH_AFTER"
             if git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then base="$PUSH_BEFORE"; else base="$head~1"; fi
           fi
+          # Merge commits are not contributions: GitHub writes them without a
+          # sign-off (merge commits are disabled for pull requests; a rebase
+          # or squash keeps each contributor's trailer).
           missing=0
-          for c in $(git rev-list "$base..$head"); do
+          for c in $(git rev-list --no-merges "$base..$head"); do
             if ! git show -s --format=%B "$c" | grep -q '^Signed-off-by: '; then
               echo "missing Signed-off-by: $c"
               missing=1
