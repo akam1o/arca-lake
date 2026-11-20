@@ -1,8 +1,10 @@
 # R-110: capacity-pressure retest plan
 
-Status: **plan, not run.** Nothing in this document has been executed; it
-needs an approval of its hosts, budgets, limits, test settings and stop
-rules before any step beyond the read-only preflight (§10). A passed run
+Status: **plan, not run.** Nothing in this document has been executed.
+Any connection to the test hosts, the read-only preflight included, is
+made only after a separate approval; the run itself then needs an
+approval of its hosts, budgets, limits, test settings and stop rules,
+given on the preflight's measurements (§10). A passed run
 of this plan would verify the small-allotment step only (§3); it would
 not by itself close R-110.
 
@@ -240,7 +242,7 @@ and the watchdog has not fired; anything else ends the run.
 
 | Stage | Start | Work | Exit | Max |
 | --- | --- | --- | --- | --- |
-| 1 Preflight (read-only) | approval | §10 | every check recorded and within its requirement | 30 min |
+| 1 Preflight (read-only) | the separate approval to connect to the hosts (§10) | §10 | every check recorded and within its requirement | 30 min |
 | 2 Smoke | 1 passed | fresh cluster (marker, own port); the watchdog, guard and generator limits exercised (a heartbeat withheld stops a running load; an operation limit ends it); 100 PUT, GET, DELETE; verify | all exercised and stopped as designed; 0 errors | 30 min |
 | 3 Fill and baseline | 2 passed | PUT L0 at the limits; then idle, sampling, until the smoke stage's deletes have matured | L0 acknowledged; admission normal; GC backlog 0 and `arca_node_reclaim_pending_records` 0 on every node (no deletion in progress before D1); samples complete | 60 min |
 | 4 Pressure | 3 passed | first DELETE an identified set D1 of 1,000 baseline keys (≤ 20/s), then PUT new keys at ≤ 10/s until the gateway's admission state is write rejected, at most 5,000 new objects; then hold the refusal with one PUT attempt per second (refused attempts count against the limits) until D1's deletes have passed the GC grace, a GC interval, the retention and a reclaim interval (≈ 25 min after D1), or until admission recovers on its own | write rejected reached and held while D1 matures: C1 judged on D1 over the refused interval (no refusal reached: Inconclusive) | 60 min |
@@ -320,7 +322,8 @@ of this plan.
   judgement values of §8.
 - The teardown scope: the run's own directories and processes only.
 
-Preflight (read-only, after approval): reachability; each host's free
+Preflight (read-only; a connection to the hosts, so only after its own
+approval, given before the execution approval above): reachability; each host's free
 space (data file system and `/`), memory, swap configuration, load; the
 system FoundationDB's `status minimal`; the chosen port free and the run
 directories absent; the retained cluster's directories unchanged since
