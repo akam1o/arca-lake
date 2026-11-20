@@ -49,6 +49,18 @@ has releases.
   3 (and finalized there) before this one. After `admin upgrade
   finalize` writes schema 4, earlier releases refuse to start and the
   cluster cannot be downgraded below it.
+- A tiering pass that finds another migration of a chunk in flight (for
+  example a deposed leader's move) no longer resets the generation's
+  access record: it moves nothing, keeps the reads and logs the skip.
+  Found by the ADR-0035 integration verification
+  ([report](docs/verification/phase-4.1-adr35.md) §7).
+- `admin tiering objects --bucket B`: each object's tier and access
+  record (read-only). Gateways log each change of their tiering
+  observation and of their recording decision (every refresh at debug);
+  controllers log who holds the lease when they stand by. The test-only
+  `fault-injection` feature also holds a gateway's tiering refresh or a
+  controller's tiering move (`ARCA_TEST_FAULT_FILE`; never in a release
+  build).
 - `admin tiering status | enable | disable | set`: the tiering record,
   the cluster's source of truth for whether tiering acts and its policy
   (ADR-0035). Controllers run tiering from it (their `--tiering-*` flags

@@ -8,8 +8,13 @@ rule, the flush-side promotion cutoff; metrics
 `arca_gateway_access_recording`, `arca_gateway_access_unrecorded_total`,
 `arca_gateway_access_dropped_total{reason="cutoff"}`) and measured: with
 tiering confirmed disabled, GET throughput is within the spread of `off`
-with one and two gateways ([report](../verification/phase-4.1-adr35.md)
-§6). It removes the cost of access recording where no
+with one and two gateways, with the controller's background passes held
+off ([report](../verification/phase-4.1-adr35.md) §6); and verified with
+two controller processes, two gateways and a real FoundationDB
+(concurrent initialisation, leader changes with gateways, reflection
+and stale confirmations, the grace and the cutoff through a leader
+change; report §7, which also fixed a pass resetting the access record
+of a move it found in flight). It removes the cost of access recording where no
 tiering policy acts; it does not remove it where one does (R-109 stays
 Medium). Concerns the gateway's recording of reads for automatic
 tiering (RFC-006 §5.8) and the records tiering reads; data safety,
@@ -57,9 +62,11 @@ No access record is written where tiering is confirmed not to act
   gateways watch it as they watch the cluster state and the admission
   record; with tiering confirmed off the gateway does not note reads
   (without a record it does, §10.3).
-- **Cost when no policy applies:** expected to be that of `off` (option A
-  itself not measured; `off` (6.00 reads, 2.00
-  transactions per GET in the measurement above): the whole gap closes.
+- **Cost when no policy applies:** expected to be that of `off` (at the
+  time of this comparison option A itself was not measured; `off` (6.00
+  reads, 2.00 transactions per GET in the measurement above): the whole
+  gap closes. Measured since, once implemented, under quiet controller
+  background passes: [report](../verification/phase-4.1-adr35.md) §6).
 - **Cost when a policy applies:** unchanged from ADR-0034. A finer scope
   (only buckets or tiers a policy covers) narrows it, at the price of a
   per-GET lookup of the object's tier or bucket in the gateway's copy of
@@ -168,8 +175,13 @@ run on resource limits and checks of the shared system FoundationDB:
 
 ## 7. Consequences
 
-Until a decision, ADR-0034 stays as implemented, R-109 stays Medium, and
-the GET-throughput target of ADR-0034 stays not met.
+As written before the decision (§9): until a decision, ADR-0034 stays as
+implemented, R-109 stays Medium, and the GET-throughput target of
+ADR-0034 stays not met. Now: option A is implemented and measured (status
+line); R-109 stays Medium (the cost remains where tiering acts); the
+throughput target of ADR-0034 was met only with tiering confirmed
+disabled, and only in the quiet measurement of the report's §6 (the
+controller's background passes held off).
 
 ## 8. Results (Phase 4.1 follow-up)
 

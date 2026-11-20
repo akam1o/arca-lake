@@ -1,0 +1,138 @@
+a_deposed_leaders_seed_is_fenced on FoundationDB:
+  old-leader attempt 1: begin
+  old-leader attempt 1: reads done, commit held
+  successor took term 2 (old term 1)
+  new-leader attempt 1: begin
+  new-leader attempt 1: committed
+  old-leader attempt 1: commit released
+  old-leader attempt 1: conflict (retried)
+  old-leader attempt 2: begin
+  old-leader result: Err(Kv(Fenced("leadership token 1 of ctl-old is no longer current")))
+  seed attempt 1: begin
+  admin attempt 1: begin
+  seed attempt 1: reads done, commit held
+  admin attempt 1: reads done, commit held
+  admin attempt 1: commit released
+  admin attempt 1: committed
+  seed attempt 1: commit released
+  seed attempt 1: conflict (retried)
+  seed attempt 2: begin
+  seed attempt 2: committed
+  seed attempt 1: begin
+  admin attempt 1: begin
+  seed attempt 1: reads done, commit held
+  admin attempt 1: reads done, commit held
+  seed attempt 1: commit released
+  seed attempt 1: committed
+  admin attempt 1: commit released
+  admin attempt 1: conflict (retried)
+  admin attempt 2: begin
+  admin attempt 2: committed
+a_seed_and_an_admin_enable on FoundationDB:
+  seed attempt 1: begin
+  admin attempt 1: begin
+  seed attempt 1: reads done, commit held
+  admin attempt 1: reads done, commit held
+  admin attempt 1: commit released
+  admin attempt 1: committed
+  seed attempt 1: commit released
+  seed attempt 1: conflict (retried)
+  seed attempt 2: begin
+  seed attempt 2: committed
+  seed attempt 1: begin
+  admin attempt 1: begin
+  seed attempt 1: reads done, commit held
+  admin attempt 1: reads done, commit held
+  seed attempt 1: commit released
+  seed attempt 1: committed
+  admin attempt 1: commit released
+  admin attempt 1: conflict (retried)
+  admin attempt 2: begin
+  admin attempt 2: committed
+  ack attempt 1: begin
+  admin attempt 1: begin
+  ack attempt 1: reads done, commit held
+  admin attempt 1: reads done, commit held
+  ack attempt 1: commit released
+  ack attempt 1: committed
+  admin attempt 1: commit released
+  admin attempt 1: conflict (retried)
+  admin attempt 2: begin
+  admin attempt 2: committed
+  ack attempt 1: begin
+  admin attempt 1: begin
+  ack attempt 1: reads done, commit held
+  admin attempt 1: reads done, commit held
+  admin attempt 1: commit released
+  admin attempt 1: committed
+  ack attempt 1: commit released
+  ack attempt 1: conflict (retried)
+  ack attempt 2: begin
+  ack attempt 2: committed
+an_acknowledgment_and_an_admin_change on FoundationDB:
+  ack attempt 1: begin
+  admin attempt 1: begin
+  ack attempt 1: reads done, commit held
+  admin attempt 1: reads done, commit held
+  ack attempt 1: commit released
+  ack attempt 1: committed
+  admin attempt 1: commit released
+  admin attempt 1: conflict (retried)
+  admin attempt 2: begin
+  admin attempt 2: committed
+  ack attempt 1: begin
+  admin attempt 1: begin
+  ack attempt 1: reads done, commit held
+  admin attempt 1: reads done, commit held
+  admin attempt 1: commit released
+  admin attempt 1: committed
+  ack attempt 1: commit released
+  ack attempt 1: conflict (retried)
+  ack attempt 2: begin
+  ack attempt 2: committed
+  seed-a attempt 1: begin
+  seed-b attempt 1: begin
+  seed-a attempt 1: reads done, commit held
+  seed-b attempt 1: reads done, commit held
+  both read no record; a released first
+  seed-a attempt 1: commit released
+  seed-a attempt 1: committed
+  seed-b attempt 1: commit released
+  seed-b attempt 1: conflict (retried)
+  seed-b attempt 2: begin
+  seed-b attempt 2: committed
+two_seeds_from_different_flags on FoundationDB:
+  seed-a attempt 1: begin
+  seed-b attempt 1: begin
+  seed-a attempt 1: reads done, commit held
+  seed-b attempt 1: reads done, commit held
+  both read no record; a released first
+  seed-a attempt 1: commit released
+  seed-a attempt 1: committed
+  seed-b attempt 1: commit released
+  seed-b attempt 1: conflict (retried)
+  seed-b attempt 2: begin
+  seed-b attempt 2: committed
+  seed-a attempt 1: begin
+  seed-b attempt 1: begin
+  seed-a attempt 1: reads done, commit held
+  seed-b attempt 1: reads done, commit held
+  seed-b attempt 1: commit released
+  seed-b attempt 1: committed
+  seed-a attempt 1: commit released
+  seed-a attempt 1: conflict (retried)
+  seed-a attempt 2: begin
+  seed-a attempt 2: committed
+two_seeds_from_equal_flags on FoundationDB:
+  seed-a attempt 1: begin
+  seed-b attempt 1: begin
+  seed-a attempt 1: reads done, commit held
+  seed-b attempt 1: reads done, commit held
+  seed-b attempt 1: commit released
+  seed-b attempt 1: committed
+  seed-a attempt 1: commit released
+  seed-a attempt 1: conflict (retried)
+  seed-a attempt 2: begin
+  seed-a attempt 2: committed
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 458 filtered out; finished in 1.04s
