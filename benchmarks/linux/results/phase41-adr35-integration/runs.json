@@ -1,0 +1,86 @@
+[
+ {
+  "run": "20261120T030857Z-run",
+  "scenarios": "A1",
+  "result": "pass",
+  "note": "debug run; earlier binary (build of c3db9d6, before the in-flight fix and the standing-by log); host times read with the faulty `date +%3N`"
+ },
+ {
+  "run": "20261120T031118Z-run",
+  "scenarios": "A1 A2",
+  "result": "pass",
+  "note": "debug run; earlier binary"
+ },
+ {
+  "run": "20261120T031237Z-run",
+  "scenarios": "populate C1",
+  "result": "pass",
+  "note": "debug run; earlier binary"
+ },
+ {
+  "run": "20261120T031427Z-run",
+  "scenarios": "C2",
+  "result": "pass",
+  "note": "debug run; earlier binary; the late-reply case not formed (no read spanned the enable): the check was vacuous, then rewritten"
+ },
+ {
+  "run": "20261120T031639Z-run",
+  "scenarios": "C2",
+  "result": "pass",
+  "note": "debug run; earlier binary; late-reply case formed (off 4.9 s, on 9.0 s after the enable)"
+ },
+ {
+  "run": "20261120T031820Z-run",
+  "scenarios": "B1 B3a",
+  "result": "pass",
+  "note": "debug run; earlier binary"
+ },
+ {
+  "run": "20261120T031933Z-run",
+  "scenarios": "B2",
+  "result": "pass",
+  "note": "debug run; earlier binary"
+ },
+ {
+  "run": "20261120T032152Z-run",
+  "scenarios": "B3b",
+  "result": "fail: harness waited for 'lost leadership' before releasing the held move (logged only once every task ended)",
+  "note": "earlier binary; this run showed the successor resetting the access record on a move found in flight (escaped only because a policy change refused the reset): the defect fixed in this change"
+ },
+ {
+  "run": "20261120T033817Z-run",
+  "scenarios": "all",
+  "result": "fail: C2 late (6 s hold left 1.3 s of lease: the rule correctly refused the old snapshot; case not formed)",
+  "note": "binary f81ed65; harness changed to a 4 s hold"
+ },
+ {
+  "run": "20261120T035651Z-run",
+  "scenarios": "all",
+  "result": "fail: C2 late (check required a logged change; the state was carried)",
+  "note": "binary f81ed65"
+ },
+ {
+  "run": "20261120T040021Z-run",
+  "scenarios": "C2 ...",
+  "result": "fail: C2 late (state at the enable inferred wrongly)",
+  "note": "binary f81ed65"
+ },
+ {
+  "run": "20261120T040202Z-run",
+  "scenarios": "C2 B1 B3a B2 B3b",
+  "result": "fail: B3b expected count (the object's earlier reads were replaced at the cutoff, as designed)",
+  "note": "binary f81ed65; B3b moved to a fresh object"
+ },
+ {
+  "run": "20261120T040925Z-run",
+  "scenarios": "B3b",
+  "result": "pass",
+  "note": "binary f81ed65"
+ },
+ {
+  "run": "20261120T041031Z-run",
+  "scenarios": "all (from a fresh setup)",
+  "result": "pass: 79 checks",
+  "note": "binary f81ed65, harness c6312ff: the run summary.json reports"
+ }
+]
