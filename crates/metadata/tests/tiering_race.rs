@@ -13,7 +13,9 @@
 //! operation's own guarantee, the fenced one the deployment's.
 //!
 //! Runs on the in-memory store always and, with `--features fdb`,
-//! `ARCA_FDB_TESTS=1` and `ARCA_FDB_CLUSTER_FILE`, on FoundationDB.
+//! `ARCA_FDB_TESTS=1`, `ARCA_FDB_CLUSTER_FILE` and `ARCA_FDB_CLEAR_OK` set
+//! to the same disposable cluster file (its keyspace is cleared), on
+//! FoundationDB.
 
 #![allow(clippy::too_many_lines, clippy::similar_names)]
 
@@ -213,17 +215,23 @@ fn policy(promote_reads: u64, demote_s: u64) -> TieringPolicyRecord {
 /// FoundationDB, from an empty keyspace, when configured.
 #[cfg(feature = "fdb")]
 fn fdb() -> Option<arca_lake_metadata::fdb::FdbKv> {
-    // The keyspace is cleared: only a cluster named explicitly (never the
-    // client's default cluster file).
-    let (Some(_), Ok(path)) = (
+    // The keyspace is cleared: only a cluster named explicitly, confirmed
+    // as disposable by naming it again in ARCA_FDB_CLEAR_OK, and never the
+    // system default.
+    let (Some(_), Ok(path), Ok(ok)) = (
         std::env::var_os("ARCA_FDB_TESTS"),
         std::env::var("ARCA_FDB_CLUSTER_FILE"),
+        std::env::var("ARCA_FDB_CLEAR_OK"),
     ) else {
         eprintln!(
-            "ARCA_FDB_TESTS or ARCA_FDB_CLUSTER_FILE not set; the race ran on the in-memory store only"
+            "ARCA_FDB_TESTS, ARCA_FDB_CLUSTER_FILE or ARCA_FDB_CLEAR_OK not set; the race ran on the in-memory store only"
         );
         return None;
     };
+    assert!(
+        ok == path && path != "/etc/foundationdb/fdb.cluster",
+        "ARCA_FDB_CLEAR_OK must name the disposable cluster file itself (not the system default)"
+    );
     let kv = arca_lake_metadata::fdb::FdbKv::open(Some(&path)).expect("open FoundationDB");
     run(kv.clear_range_blocking(&KeyRange::prefix(&foundationdb_tuple::pack(&("al",))))).unwrap();
     Some(kv)

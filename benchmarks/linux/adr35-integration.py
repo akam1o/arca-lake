@@ -964,7 +964,7 @@ def timeline(run, label, since, old, new):
         gws[gw]["checked"], gws[gw]["skipped"], gws[gw]["unparsed"] = checked, skipped, unparsed
         gws[gw]["wrong"] = wrong
         run.check(f"{label}: {gw} decision state follows the rule on every observation",
-                  not wrong and not unparsed and checked >= 1 and checked >= len(rows) - skipped - 0,
+                  not wrong and not unparsed and checked >= 5 and skipped <= checked // 10,
                   wrong=wrong[:5], checked=checked, skipped=skipped, unparsed=unparsed[:3])
     run.ev(f"{label}: timeline", old_leader=old, new_leader=new, controller=ev, acks=ak, gateways=gws)
     json.dump(dict(controller=ev, acks=ak, gateways=gws, old=old, new=new),
@@ -1290,8 +1290,13 @@ def cmd_teardown():
     best_effort(run, "collect", collect, run)
     left_any = False
     for h in HOSTS:
-        left = ssh(h, f"cd {Q(RUN)} 2>/dev/null || exit 0; for f in *.pid; do [ -f \"$f\" ] || continue; "
-                      f"p=$(cat $f); kill -0 $p 2>/dev/null && echo $f; done", check=False).split()
+        # A host that cannot be checked counts as having something left:
+        # every directory is then kept.
+        try:
+            left = ssh(h, f"cd {Q(RUN)} 2>/dev/null || exit 0; for f in *.pid; do [ -f \"$f\" ] || continue; "
+                          f"p=$(cat $f); kill -0 $p 2>/dev/null && echo $f; done; exit 0").split()
+        except (Failed, subprocess.TimeoutExpired) as e:
+            left = [f"unverified: {str(e)[:120]}"]
         run.ev("left running", host=h, pids=left)
         left_any |= bool(left)
     if left_any:

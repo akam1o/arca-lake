@@ -273,6 +273,9 @@ jobs:
         env:
           ARCA_FDB_TESTS: "1"
           ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
+          # The tiering races and tiering_fdb:: clear the keyspace only of a
+          # cluster confirmed disposable here.
+          ARCA_FDB_CLEAR_OK: ${{ runner.temp }}/fdb.cluster
         run: |
           set -euo pipefail
           cargo test -p arca-lake-metadata --features fdb --test fdb -- --nocapture --test-threads=1
