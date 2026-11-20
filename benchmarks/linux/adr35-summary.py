@@ -20,9 +20,16 @@ QUAD = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 HOLDER = re.compile(r"\b(ctl-[a-z])@[0-9a-f]+")
 
 
+# The harness's hosts (HOST_A..C, `user@host`) masked when set.
+HOSTS = [x for h in ("HOST_A", "HOST_B", "HOST_C") for x in (os.environ.get(h) or "").split("@") if x]
+
+
 def clean(v):
     if isinstance(v, str):
-        return HOLDER.sub(r"\1#<process>", QUAD.sub("<addr>", v))
+        v = HOLDER.sub(r"\1#<process>", QUAD.sub("<addr>", v))
+        for h in HOSTS:
+            v = v.replace(h, "<host>")
+        return v
     if isinstance(v, list):
         return [clean(x) for x in v]
     if isinstance(v, dict):

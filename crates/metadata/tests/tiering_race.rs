@@ -213,12 +213,18 @@ fn policy(promote_reads: u64, demote_s: u64) -> TieringPolicyRecord {
 /// FoundationDB, from an empty keyspace, when configured.
 #[cfg(feature = "fdb")]
 fn fdb() -> Option<arca_lake_metadata::fdb::FdbKv> {
-    if std::env::var_os("ARCA_FDB_TESTS").is_none() {
-        eprintln!("ARCA_FDB_TESTS not set; the race ran on the in-memory store only");
+    // The keyspace is cleared: only a cluster named explicitly (never the
+    // client's default cluster file).
+    let (Some(_), Ok(path)) = (
+        std::env::var_os("ARCA_FDB_TESTS"),
+        std::env::var("ARCA_FDB_CLUSTER_FILE"),
+    ) else {
+        eprintln!(
+            "ARCA_FDB_TESTS or ARCA_FDB_CLUSTER_FILE not set; the race ran on the in-memory store only"
+        );
         return None;
-    }
-    let path = std::env::var("ARCA_FDB_CLUSTER_FILE").ok();
-    let kv = arca_lake_metadata::fdb::FdbKv::open(path.as_deref()).expect("open FoundationDB");
+    };
+    let kv = arca_lake_metadata::fdb::FdbKv::open(Some(&path)).expect("open FoundationDB");
     run(kv.clear_range_blocking(&KeyRange::prefix(&foundationdb_tuple::pack(&("al",))))).unwrap();
     Some(kv)
 }

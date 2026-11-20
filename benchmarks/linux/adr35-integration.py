@@ -16,6 +16,7 @@ runs the scenarios of docs/verification/phase-4.1-adr35.md §7:
           the promotion cutoff, the grace, access accounting
   B3b     the leader paused while a tiering move it started is held before
           its switch; the policy changes; the old leader resumes
+  B3c     the leader's held move refused by a policy change alone
 
 Hosts and paths come from the environment, never from this file:
   HOST_A (FoundationDB, controller ctl-a, load generator, admin),
@@ -165,48 +166,67 @@ def clock_offsets():
 
 # ---------------------------------------------------------------- processes
 
+MARK = ".adr35-harness"
+Q = shlex.quote
+
+
 def start(h, name, cmd, env="", at_ms=None):
-    """Start `cmd` on host `h` under the run directory (pid file, log). With
-    `at_ms`, the process starts at that wall-clock instant of the host."""
+    """Start `cmd` on host `h` under the run directory: pid file, the
+    process's start time (to tell it from a later process with the same
+    pid), log. With `at_ms`, it starts at that wall-clock instant of the
+    host."""
     wait = (f"while :; do t=${{EPOCHREALTIME/./}}; [ ${{t:0:13}} -ge {at_ms} ] && break; sleep 0.002; done; "
             if at_ms else "")
     inner = f"{wait}exec env {ENVP} {env} {cmd}"
-    ssh(h, f"mkdir -p {RUN}/logs && cd {RUN} && "
+    ssh(h, f"mkdir -p {Q(RUN)}/logs && cd {Q(RUN)} || exit 1; "
            f"if [ -f {name}.pid ] && kill -0 $(cat {name}.pid) 2>/dev/null; then echo already; exit 0; fi; "
-           f"ulimit -n 65536 2>/dev/null; nohup bash -c {shlex.quote(inner)} >> logs/{name}.log 2>&1 < /dev/null & "
-           f"echo $! > {name}.pid")
+           f"ulimit -n 65536 2>/dev/null; nohup bash -c {Q(inner)} >> logs/{name}.log 2>&1 < /dev/null & "
+           f"p=$!; echo $p > {name}.pid; awk '{{print $22}}' /proc/$p/stat > {name}.start")
+
+
+def ident(name):
+    """A remote shell test that `$p` is still the process this harness
+    started as `name`: same start time, working directory RUN_DIR, owned
+    by the ssh user."""
+    return (f"p=$(cat {Q(RUN)}/{name}.pid 2>/dev/null) && st=$(cat {Q(RUN)}/{name}.start 2>/dev/null) && "
+            f"[ \"$(awk '{{print $22}}' /proc/$p/stat 2>/dev/null)\" = \"$st\" ] && "
+            f"[ \"$(readlink /proc/$p/cwd)\" = {Q(RUN)} ] && [ \"$(stat -c %U /proc/$p)\" = \"$(id -un)\" ]")
 
 
 def ours(h, name):
-    """The pid of `name` if it is this harness's process: its pid file in
-    RUN_DIR, alive, its working directory RUN_DIR, and its command naming
-    the run directory or the binary."""
-    out = ssh(h, f"p=$(cat {RUN}/{name}.pid 2>/dev/null) || exit 0; kill -0 $p 2>/dev/null || exit 0; "
-                 f"echo $p $(readlink /proc/$p/cwd) $(stat -c %U /proc/$p) \"$(tr '\\0' ' ' < /proc/$p/cmdline)\"",
-              check=False).strip()
-    if not out:
-        return None
-    pid, cwd, owner, cmdline = out.split(" ", 3)
-    if cwd != RUN or (RUN not in cmdline and BIN not in cmdline):
-        raise Failed(f"{name} on {h}: pid {pid} is not ours (cwd {cwd}, owner {owner})")
-    return int(pid)
+    """The pid of `name` if it is alive and still the process this harness
+    started (see `ident`)."""
+    out = ssh(h, f"{ident(name)} && echo $p", check=False).strip()
+    return int(out) if out else None
 
 
 def signal(h, name, sig):
-    pid = ours(h, name)
-    if pid is None:
-        raise Failed(f"{name} on {h} is not running")
-    ssh(h, f"kill -{sig} {pid}")
-    return pid
+    """Send `sig` to `name`, checking its identity in the same remote
+    command."""
+    out = ssh(h, f"{ident(name)} && kill -{sig} $p && echo $p", check=False).strip()
+    if not out:
+        raise Failed(f"{name} on {h} is not running (or not ours)")
+    return int(out)
 
 
 def stop(h, name, timeout=30):
-    pid = ours(h, name)
-    if pid is None:
-        return
-    ssh(h, f"kill -TERM {pid}; for i in $(seq 1 {timeout * 10}); do kill -0 {pid} 2>/dev/null || exit 0; sleep 0.1; done; "
-           f"kill -KILL {pid}")
-    ssh(h, f"rm -f {RUN}/{name}.pid")
+    """TERM, then KILL after `timeout`, each only while the identity holds."""
+    ssh(h, f"{ident(name)} || exit 0; kill -TERM $p; "
+           f"for i in $(seq 1 {timeout * 10}); do {ident(name)} || exit 0; sleep 0.1; done; "
+           f"{ident(name)} && kill -KILL $p; exit 0", check=False)
+    ssh(h, f"{ident(name)} || rm -f {Q(RUN)}/{name}.pid {Q(RUN)}/{name}.start", check=False)
+
+
+def best_effort(run, what, f, *a):
+    """One cleanup step: a failure is recorded and the next step runs."""
+    try:
+        return f(*a)
+    except Exception as e:  # noqa: BLE001 - cleanup goes on
+        try:
+            run.ev("cleanup step failed", step=what, error=str(e)[:300])
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
 
 def wait_until(run, what, timeout, cond, every=0.25):
@@ -339,13 +359,14 @@ def load_start(run, tag, keys, rate=20, workers=2):
     ssh("a", f"rm -f {stopf}; nohup python3 -I {LOADER} get {eps()} --bucket {BUCKET} "
              + " ".join(f"--key {k}" for k in keys)
              + f" --workers {workers} --rate {rate} --stop-file {stopf} --duration-secs 1800"
-             f" --out {RUN}/logs/load-{tag}.txt > {RUN}/logs/load-{tag}.err 2>&1 < /dev/null & echo $! > {RUN}/load-{tag}.pid")
+             f" --out {RUN}/logs/load-{tag}.txt > {RUN}/logs/load-{tag}.err 2>&1 < /dev/null & "
+             f"p=$!; echo $p > {RUN}/load-{tag}.pid; awk '{{print $22}}' /proc/$p/stat > {RUN}/load-{tag}.start")
     run.ev("load start", tag=tag, keys=len(keys), rate_per_gateway=rate, workers_per_gateway=workers)
 
 
 def load_stop(run, tag):
-    ssh("a", f"touch {RUN}/load-{tag}.stop; p=$(cat {RUN}/load-{tag}.pid 2>/dev/null); "
-             f"for i in $(seq 1 200); do kill -0 $p 2>/dev/null || break; sleep 0.1; done")
+    ssh("a", f"touch {RUN}/load-{tag}.stop")
+    stop("a", f"load-{tag}", timeout=20)
     run.ev("load stop", tag=tag)
 
 
@@ -372,7 +393,14 @@ def gets(run, gw, key, n, tag="once"):
 
 
 def stop_all_load():
-    ssh("a", f"for f in {RUN}/load-*.pid; do [ -f $f ] || continue; touch ${{f%.pid}}.stop; done", check=False)
+    """Every load generator of this run: its stop file, then TERM/KILL while
+    its identity holds."""
+    tags = ssh("a", f"cd {Q(RUN)} 2>/dev/null && for f in load-*.pid; do [ -f \"$f\" ] && echo ${{f%.pid}}; done",
+               check=False).split()
+    for t in tags:
+        ssh("a", f"touch {Q(RUN)}/{t}.stop", check=False)
+    for t in tags:
+        stop("a", t, timeout=20)
 
 
 # ---------------------------------------------------------------- logs
@@ -490,7 +518,8 @@ def controller_cmd(name, flags):
 def start_controller(name, flags, at_ms=None):
     h, _ = CTL[name]
     start(h, name, controller_cmd(name, flags),
-          env=f"RUST_LOG=info ARCA_TEST_FAULT_FILE={RUN}/{name}.fault", at_ms=at_ms)
+          env=f"RUST_LOG=info,arca_lake_controller::tiering=debug ARCA_TEST_FAULT_FILE={RUN}/{name}.fault",
+          at_ms=at_ms)
 
 
 def start_gateway(name):
@@ -508,7 +537,8 @@ def sampler(h, name, port):
               f"curl -s --max-time 1 127.0.0.1:{port}/metrics | awk -v t=$t "
               f"'/^arca_gateway_access_(reads_total|unrecorded_total|recording|flushed_reads_total|dropped_total|uncertain_total|queue_entries|queue_in_flight)/ {{print t, $1, $2}}'; "
               f"sleep 0.5; done")
-    ssh(h, f"cd {RUN} || exit 1; nohup bash -c {shlex.quote(script)} >> logs/{name}-metrics.txt 2>/dev/null < /dev/null & echo $! > {name}-sampler.pid")
+    ssh(h, f"cd {Q(RUN)} || exit 1; nohup bash -c {Q(script)} >> logs/{name}-metrics.txt 2>/dev/null < /dev/null & "
+           f"p=$!; echo $p > {name}-sampler.pid; awk '{{print $22}}' /proc/$p/stat > {name}-sampler.start")
 
 
 def cmd_setup():
@@ -518,9 +548,11 @@ def cmd_setup():
         if exists:
             raise SystemExit(f"host {h}: {exists} exists: refusing to set up over it")
     cf = f"arca44:p44@{addr('a')}:{FDB_PORT}"
+    # A marker in every directory this harness creates: teardown removes
+    # only directories carrying it.
     for h in HOSTS:
-        ssh(h, f"mkdir -p {RUN}/logs && echo {cf} > {CF}")
-    ssh("a", f"mkdir -p {FDB_DATA}/d0 {FDB_DATA}/l0")
+        ssh(h, f"mkdir -p {Q(RUN)}/logs && echo {os.path.basename(run.dir)} > {Q(RUN)}/{MARK} && echo {cf} > {Q(CF)}")
+    ssh("a", f"mkdir -p {Q(FDB_DATA)}/d0 {Q(FDB_DATA)}/l0 && echo {os.path.basename(run.dir)} > {Q(FDB_DATA)}/{MARK}")
     start("a", "fdb0", f"fdbserver -p {addr('a')}:{FDB_PORT} -C {CF} -d {FDB_DATA}/d0 -L {FDB_DATA}/l0")
     time.sleep(2)
     ssh("a", f"fdbcli -C {CF} --exec 'configure new single ssd' >/dev/null 2>&1; "
@@ -902,21 +934,35 @@ def timeline(run, label, since, old, new):
                         and o["applied_term"] == o["leader_term"] and o["same_incarnation"]
                         and o["lease_left_ms"] > LEASE_SKEW_MS)
             r["confirms"] = confirms
-        # The decision after each refresh matches the refresh's rule (the
-        # first decision logged after it and before the next refresh).
-        wrong = []
+        # The decision state 0.8 s after each observation (decisions are
+        # evaluated on every GET and on the sampler's scrape every 0.5 s, and
+        # logged when they change; the state is the last change logged)
+        # matches the rule applied to that observation, while it is the
+        # latest and not stale. Every observation must parse.
+        all_dec = decisions(gw, 0)
+
+        def state_at(t):
+            last = [d for d in all_dec if d["t_ms"] <= t]
+            return last[-1]["recording"] if last else True
+
+        wrong, checked, skipped = [], 0, 0
+        unparsed = [r["raw"][:80] for r in rows if r["obs"] is None]
         for i, r in enumerate(rows):
             if "confirms" not in r:
                 continue
-            nxt = rows[i + 1]["completed_ms"] if i + 1 < len(rows) else r["completed_ms"] + STALE_MS
-            stale_at = r["started_ms"] + STALE_MS
-            for d in dec:
-                # (5 ms: a decision evaluated just before the observation was
-                # stored may be logged just after it.)
-                if r["completed_ms"] + 5 < d["t_ms"] < min(nxt, stale_at) and d["recording"] == r["confirms"]:
-                    wrong.append((r["started_ms"], r["raw"][:120], d["t_ms"], d["recording"]))
+            probe = r["completed_ms"] + 800
+            nxt = rows[i + 1]["completed_ms"] if i + 1 < len(rows) else None
+            if (nxt is not None and probe >= nxt) or probe >= r["started_ms"] + STALE_MS:
+                skipped += 1
+                continue
+            checked += 1
+            if state_at(probe) == r["confirms"]:
+                wrong.append((r["started_ms"], r["raw"][:120], probe, state_at(probe)))
+        gws[gw]["checked"], gws[gw]["skipped"], gws[gw]["unparsed"] = checked, skipped, unparsed
         gws[gw]["wrong"] = wrong
-        run.check(f"{label}: {gw} decisions follow the rule on every observation", not wrong, wrong=wrong[:5])
+        run.check(f"{label}: {gw} decision state follows the rule on every observation",
+                  not wrong and not unparsed and checked >= 1 and checked >= len(rows) - skipped - 0,
+                  wrong=wrong[:5], checked=checked, skipped=skipped, unparsed=unparsed[:3])
     run.ev(f"{label}: timeline", old_leader=old, new_leader=new, controller=ev, acks=ak, gateways=gws)
     json.dump(dict(controller=ev, acks=ak, gateways=gws, old=old, new=new),
               open(os.path.join(run.dir, f"{label.lower()}-timeline.json"), "w"), indent=1)
@@ -929,9 +975,11 @@ def sc_b3a(run):
     time.sleep(3)
     l = leader()
     since = remote_ms("a")
-    pid = signal(CTL[l["id"]][0], l["id"], "STOP")
-    run.ev("B3a: leader paused (SIGSTOP)", leader=l, pid=pid)
+    paused = False
     try:
+        pid = signal(CTL[l["id"]][0], l["id"], "STOP")
+        paused = True
+        run.ev("B3a: leader paused (SIGSTOP)", leader=l, pid=pid)
         wait_until(run, "B3a: gateways record (lease within the skew)", 20, lambda: all_recording(1))
         rec_on = remote_ms("a")
         new = wait_until(run, "B3a: a new leader", 40,
@@ -941,7 +989,8 @@ def sc_b3a(run):
         wait_until(run, "B3a: gateways confirmed again", 30, lambda: all_recording(0))
         time.sleep(3)
     finally:
-        signal(CTL[l["id"]][0], l["id"], "CONT")
+        if paused:
+            signal(CTL[l["id"]][0], l["id"], "CONT")
     resumed = remote_ms("a")
     run.ev("B3a: old leader resumed (SIGCONT)", at_ms_a=resumed)
     wait_until(run, "B3a: the old leader gave up its term", 30,
@@ -1021,13 +1070,18 @@ def sc_b2(run):
     run.check("B2: a leader change changed only the acknowledging term",
               all(t2[k] == t[k] for k in keep), before={k: t[k] for k in keep}, after={k: t2[k] for k in keep})
     # Demotion: none before the bound, then it happens.
-    first_default = {}
+    # Polled: a switch lies after the last poll that still saw the upper
+    # tier (the poll's start), so "not demoted before the bound" is proved by
+    # that poll being at or after the bound.
+    first_default, last_fast = {}, {}
     deadline = max(bound.values()) + 60_000
     while remote_ms("a") < deadline and len(first_default) < 2:
         now = remote_ms("a")
         for k, v in tiers_of(["px", "py"]).items():
             if v == "default" and k not in first_default:
-                first_default[k] = now
+                first_default[k] = remote_ms("a")
+            elif v == "fast":
+                last_fast[k] = now
         time.sleep(1)
     load_stop(run, "b2-window")
     wait_until(run, "B2: flushed after the window", 60, flushed)
@@ -1036,8 +1090,9 @@ def sc_b2(run):
     timeline(run, "B2", since, l, new)
     for k in ("px", "py"):
         run.check(f"B2: {k} not demoted before demote_after plus the grace margin, then demoted",
-                  k in first_default and first_default[k] >= bound[k] and first_default[k] <= bound[k] + 30_000,
-                  demoted_ms=first_default.get(k), bound_ms=bound[k], without_grace_ms=no_grace[k])
+                  k in first_default and last_fast.get(k, 0) >= bound[k] and first_default[k] <= bound[k] + 30_000,
+                  last_seen_upper_ms=last_fast.get(k), first_seen_lower_ms=first_default.get(k),
+                  bound_ms=bound[k], without_grace_ms=no_grace[k])
     run.check("B2: hot objects stayed in the upper tier", all(v == "fast" for v in tiers_of(HOT).values()))
     run.check("B2: gateways recorded throughout", not [d for g in GW for d in decisions(g, since) if not d["recording"]])
     accounting(run, "B2 window", "b2-window", before, after, k0, k1, HOT)
@@ -1066,10 +1121,12 @@ def sc_b3b(run):
     held = wait_until(run, "B3b: the leader's move held before its switch", 60,
                       lambda: [e for e in ctl_events(since, ("test fault: tiering move held",)) if e["controller"] == l["id"]])
     run.check("B3b: the held move is mv's", mv["generation"] in held[0]["text"], held=held[0]["text"], mv=mv)
-    pid = signal(h, l["id"], "STOP")
-    paused = remote_ms("a")
-    run.ev("B3b: leader paused with its move held", leader=l, pid=pid)
+    stopped = False
     try:
+        pid = signal(h, l["id"], "STOP")
+        stopped = True
+        paused = remote_ms("a")
+        run.ev("B3b: leader paused with its move held", leader=l, pid=pid)
         gets(run, "gw1", key, 3, tag="b3b-once")
         want = 9
         new = wait_until(run, "B3b: a new leader", 40,
@@ -1089,7 +1146,8 @@ def sc_b3b(run):
         wait_until(run, "B3b: the new policy acknowledged by the new term", 30,
                    lambda: (lambda t: t["acknowledged"] and t["applied_term"] == new["token"] and t["generation"] == rec["generation"])(tiering()[0]))
     finally:
-        signal(h, l["id"], "CONT")
+        if stopped:
+            signal(h, l["id"], "CONT")
     resumed = remote_ms("a")
     run.ev("B3b: old leader resumed (SIGCONT), its move still held")
     # Its term is over: its next fenced commits fail (its "lost leadership"
@@ -1117,9 +1175,52 @@ def sc_b3b(run):
               refused=refused[:1])
 
 
+def sc_b3c(run):
+    """The current leader's tiering move held before its switch while the
+    policy changes (no leadership change): the switch is refused by the
+    policy fence alone, nothing is reset, and the change is acknowledged
+    only after that pass ends."""
+    ensure(run, True, MOVE)
+    key = f"mc{remote_ms('a') % 1_000_000}"
+    ssh("a", f"python3 -I {LOADER} put {eps(['gw0'])} --bucket {BUCKET} --key {key} --size {SIZE}")
+    run.ev("B3c: object", key=key)
+    l = leader()
+    h = CTL[l["id"]][0]
+    since = remote_ms("a")
+    fault(h, l["id"], "tiering-before-switch hold")
+    try:
+        o = objects([key])[key]
+        gets(run, "gw0", key, 6, tag="b3c-once")
+        wait_until(run, "B3c: the leader's move held before its switch", 60,
+                   lambda: [e for e in ctl_events(since, ("test fault: tiering move held",))
+                            if e["controller"] == l["id"] and o["generation"] in e["text"]])
+        gets(run, "gw1", key, 2, tag="b3c-once")
+        wait_until(run, "B3c: the reads flushed", 60, lambda: (objects([key])[key]["count"] or 0) >= 8)
+        rec, _, changed_end = admin_change(run, "set " + policy_args(HOLD))
+        time.sleep(12)  # two health passes: the acknowledgment waits for the pass
+        t = tiering()[0]
+        run.check("B3c: the change is not acknowledged while the pass that read the earlier policy runs",
+                  not (t["acknowledged"] and t["generation"] == rec["generation"]), record=t)
+    finally:
+        released = remote_ms("a")
+        fault(h, l["id"], "")
+    wait_until(run, "B3c: the switch refused for the changed policy", 30,
+               lambda: [e for e in ctl_events(released, ("the tiering record changed, pass stopped",))
+                        if e["controller"] == l["id"]])
+    acked = wait_until(run, "B3c: the change acknowledged after the pass", 30,
+                       lambda: [a for a in acks(released) if a["generation"] == rec["generation"]])
+    time.sleep(5)
+    o = objects([key])[key]
+    run.check("B3c: the move did not switch and the reads were kept", o["tiers"] == "default" and o["count"] == 8, obj=o)
+    run.check("B3c: no leader change; acknowledged by the same term after the release",
+              leader()["token"] == l["token"] and acked[0]["term"] == l["token"] and acked[0]["t_ms"] >= released,
+              ack=acked[0], released_ms=released)
+    run.ev("B3c: controller events", events=ctl_events(since - 1000))
+
+
 SCENARIOS = {"A1": sc_a1, "A2": sc_a2, "populate": populate, "C1": sc_c1, "C2": sc_c2, "B1": sc_b1,
-             "B3a": sc_b3a, "B2": sc_b2, "B3b": sc_b3b}
-ORDER = ["A1", "A2", "populate", "C1", "C2", "B1", "B3a", "B2", "B3b"]
+             "B3a": sc_b3a, "B2": sc_b2, "B3b": sc_b3b, "B3c": sc_b3c}
+ORDER = ["A1", "A2", "populate", "C1", "C2", "B1", "B3a", "B2", "B3b", "B3c"]
 
 
 def system_fdb_ok():
@@ -1157,48 +1258,68 @@ def cmd_run(names):
         run.ev("stopped", why=str(e))
         rc = 3
     finally:
-        stop_all_load()
+        best_effort(run, "stop the load", stop_all_load)
         for c, (h, _) in CTL.items():
             # A paused controller is resumed: never left stopped.
-            pid = ours(h, c)
-            if pid:
-                ssh(h, f"kill -CONT {pid}", check=False)
-            fault(h, c, "")
+            best_effort(run, f"resume {c}", lambda h=h, c=c: ssh(h, f"{ident(c)} && kill -CONT $p", check=False))
+            best_effort(run, f"clear {c}'s fault", fault, h, c, "")
         for g, (h, _, _) in GW.items():
-            fault(h, g, "")
-        run.ev("end", clocks=clock_offsets(), system_fdb=system_fdb_ok(), failed_checks=run.failed)
-        collect(run)
+            best_effort(run, f"clear {g}'s fault", fault, h, g, "")
+        best_effort(run, "end", lambda: run.ev("end", clocks=clock_offsets(), system_fdb=system_fdb_ok(),
+                                               failed_checks=run.failed))
+        best_effort(run, "collect", collect, run)
     sys.exit(rc)
 
 
 def cmd_teardown():
     run = Run("teardown")
-    names = {"a": ["ctl-a", "fdb0"], "b": ["gw0"] + [f"d{i}" for i in range(NODES)], "c": ["ctl-c", "gw1"]}
+    names = {"a": ["ctl-a"], "b": ["gw0"] + [f"d{i}" for i in range(NODES)], "c": ["ctl-c", "gw1"]}
     for h in HOSTS:
-        ssh(h, f"touch {RUN}/sampler.stop", check=False)
-    stop_all_load()
+        best_effort(run, f"sampler stop on {h}", ssh, h, f"touch {Q(RUN)}/sampler.stop", 60, False)
+    best_effort(run, "stop the load", stop_all_load)
     for h in ("c", "a", "b"):
         for n in names[h]:
-            if n != "fdb0":
-                stop(h, n)
-    stop("a", "fdb0")
-    collect(run)
+            best_effort(run, f"resume {n}", lambda h=h, n=n: ssh(h, f"{ident(n)} && kill -CONT $p", check=False))
+            best_effort(run, f"stop {n}", stop, h, n)
+    for g, (h, _, _) in GW.items():
+        best_effort(run, f"stop {g}-sampler", stop, h, f"{g}-sampler", 5)
+    best_effort(run, "stop fdb0", stop, "a", "fdb0")
+    best_effort(run, "collect", collect, run)
+    left_any = False
     for h in HOSTS:
-        left = ssh(h, f"for p in {RUN}/*.pid; do [ -f $p ] && kill -0 $(cat $p) 2>/dev/null && echo $p; done", check=False).strip()
+        left = ssh(h, f"cd {Q(RUN)} 2>/dev/null || exit 0; for f in *.pid; do [ -f \"$f\" ] || continue; "
+                      f"p=$(cat $f); kill -0 $p 2>/dev/null && echo $f; done", check=False).split()
         run.ev("left running", host=h, pids=left)
-        if left and not left.endswith("sampler.pid"):
-            run.check(f"teardown: nothing of ours left on {h}", False, left=left)
+        left_any |= bool(left)
+    if left_any:
+        run.check("teardown: nothing of ours left running; directories kept", False)
     for h in HOSTS:
-        ssh(h, f"rm -rf {RUN}" + (f" {FDB_DATA}" if h == "a" else ""))
-    run.ev("removed", run_dir=RUN, fdb_data=FDB_DATA, system_fdb=system_fdb_ok())
+        # Only directories this harness created (its marker inside).
+        ssh(h, f"[ -f {Q(RUN)}/{MARK} ] && rm -rf -- {Q(RUN)}; "
+               + (f"[ -f {Q(FDB_DATA)}/{MARK} ] && rm -rf -- {Q(FDB_DATA)}; " if h == "a" else "")
+               + "exit 0")
+        left = ssh(h, f"ls -d {Q(RUN)} {Q(FDB_DATA)} 2>/dev/null", check=False).strip()
+        run.ev("removed", host=h, still_present=left)
+    run.ev("system FoundationDB", available=system_fdb_ok())
+
+
+def check_paths():
+    """RUN_DIR and FDB_DATA: absolute, normalised, at least three levels
+    deep, distinct, neither inside the other, not the retained cluster's."""
+    for k, v in (("RUN_DIR", RUN), ("FDB_DATA", FDB_DATA)):
+        if not v.startswith("/") or os.path.normpath(v) != v or v.count("/") < 3 or not re.fullmatch(r"[A-Za-z0-9/._-]+", v):
+            raise SystemExit(f"{k}={v!r}: not an absolute, normalised path three levels deep")
+        if "p41" in v:
+            raise SystemExit(f"{k}: refusing a directory of the retained cluster")
+    if RUN == FDB_DATA or RUN.startswith(FDB_DATA + "/") or FDB_DATA.startswith(RUN + "/"):
+        raise SystemExit("RUN_DIR and FDB_DATA overlap")
 
 
 def main():
     for k in ("HOST_A", "HOST_B", "HOST_C", "REMOTE_BIN", "RUN_DIR", "FDB_DATA", "FDB_PORT", "OUT"):
         if not E.get(k):
             raise SystemExit(f"{k} is not set")
-    if "p41" in RUN or "p41" in FDB_DATA:
-        raise SystemExit("refusing a run directory of the retained cluster")
+    check_paths()
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "setup":
         cmd_setup()

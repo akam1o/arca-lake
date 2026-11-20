@@ -352,10 +352,16 @@ impl ClusterWatch {
         let now = std::time::Instant::now();
         let required = self.access_recording_required_at(now, skew_ms);
         let state = if required { 1 } else { 2 };
+        // A read of the shared state in the common case; written only on a
+        // change.
         if self
             .recording_state
-            .swap(state, std::sync::atomic::Ordering::Relaxed)
+            .load(std::sync::atomic::Ordering::Relaxed)
             != state
+            && self
+                .recording_state
+                .swap(state, std::sync::atomic::Ordering::Relaxed)
+                != state
         {
             let o = self.tiering.read().unwrap_or_else(PoisonError::into_inner);
             let age_ms = o.as_ref().map(|o| {
