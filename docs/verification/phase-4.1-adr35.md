@@ -242,11 +242,11 @@ a performance one: the limits of §6 (the quiet measurement) stand.
   generator (the independent count). Deadlines: every wait at most
   30–240 s, the run about 30 minutes; the watchdog (memory, disk, load,
   reachability, both system FoundationDBs) did not trigger.
-- One binary for every process: this change's `crates/` built with
-  `--features fdb,fault-injection` (the final run: commit b7396ab, whose
-  `crates/` tree is that of the merged change). The final run is
-  `20261120T045036Z-run` (82 checks, all passed); `runs.json` lists every
-  run before it, the failed ones included, with the binary each used. The feature adds, for the harness only, a control
+- One binary for every process, built with `--features
+  fdb,fault-injection`. The final run is `20261120T045036Z-run` (82
+  checks, all passed), with the binary built from commit b7396ab; `runs.json`
+  lists every run before it, the failed ones included, with the binary
+  each used. How b7396ab relates to the merged change is in §7.9. The feature adds, for the harness only, a control
   file (`ARCA_TEST_FAULT_FILE`) through which a gateway's combined tiering
   read fails or is held before it is observed, and a controller's
   tiering move is held before its switch; release builds do not contain
@@ -452,11 +452,9 @@ backend job); processes: §7 on three hosts.
 
 ### 7.7 Limits
 
-- Pre-existing and unchanged: a move whose own intent expired while its
-  copy ran (`Skipped`, "intent lost", grouped with "record changed") still
-  counts as settled and resets the record; the in-flight skip is told
-  apart by its reason constant, not by its own variant.
-
+- Pre-existing and unchanged: other outcomes that may not have acted on
+  a generation still reset its access record (§7.8, R-118); the in-flight
+  skip is told apart by its reason constant, not by its own variant.
 - One FoundationDB process; small data and load; no host, network or
   FoundationDB faults (only the targeted process faults above).
 - The leader changes were a graceful stop and a pause past the lease;
@@ -469,4 +467,91 @@ backend job); processes: §7 on three hosts.
   is what was checked, not a bound in seconds.
 - Throughput with the controller's normal background passes was not
   measured (§6 stands as a quiet-condition result).
+
+### 7.8 Access-record resets after outcomes that may not have acted (R-118)
+
+The fix of §7.5 covers one path: a chunk whose migration another attempt
+holds. Two further paths through the same decision are pre-existing,
+unchanged by this work, and tracked as R-118; whether either is a defect
+or the intended behaviour is not decided here.
+
+The decision (`crates/controller/src/tiering.rs`, the sweep): for a
+generation chosen for a move, every chunk is migrated in turn; the
+generation counts as *settled* when any chunk's outcome is `Switched` or
+any other `Ok` outcome except the in-flight skip and `PolicyChanged`
+(that is `AlreadyThere`, or `Skipped`); once settled, the generation's
+access record is reset (`reset_access_fenced`: `{now, 0}`). `Err`
+outcomes do not settle; a target at its reserve ends the pass before
+the reset. The rule dates from the Phase 3.12 liveness audit (finding 15,
+"tiering forgot a generation whose moves all failed", commit 0761473),
+which made the reset conditional on a settled chunk and counted "found
+there or changed" as settled; the audit records no decision on the two
+cases below.
+
+| | Path 1: a refused switch | Path 2: a partly moved generation |
+| --- | --- | --- |
+| Code | `crates/tiering/src/migrate.rs`: `switch_placement_fenced` returns `Refused` (the attempt no longer holds the chunk's intent; the generation is gone or not committed; the chunk's placement or id changed; the target group's epoch changed or it is no longer Active), mapped to `Skipped("record changed, generation not committed, or intent lost")`, which settles | the `settled` flag is one per generation: one chunk `Switched` (or `AlreadyThere`, or refused as in path 1) settles it even if another chunk failed (`Err`) or was skipped in flight |
+| When | an intent expired (TTL 1 h) before its switch; a membership change of the target group during the copy; another mover (rebalancing, repair, another tiering attempt) changed the chunk's placement; a delete of the generation during the copy | a multi-chunk generation whose chunks' moves end differently in one pass |
+| What is consumed | the generation's whole access record: the count (promotion progress) goes to 0, `last_ms` to now (demotion postponed by `demote_after`) | the same, for the whole generation, whatever its remaining chunks did |
+| Effect on decisions | a promotion that did not happen needs `promote_reads` new reads before it is tried again; a demotion that did not happen waits `demote_after` again | the chunks left behind are not retried until the record qualifies again; the generation's tier is read from its first chunk, so a generation whose first chunk moved and the others did not is judged in the upper tier (not confirmed by a test) |
+| Data integrity | none expected: the reset writes only the access record; the switch is conditional and the source stays referenced until it commits | the same; a generation spread over two tiers stays readable (each chunk record names its placement) |
+| Tiering accuracy | observation loss (as R-109's, but caused by the pass, not the recording path) | the same, and placement that may stay split |
+
+Confirmed by reading the code: the conditions, the reset and its scope.
+Not confirmed: how often either path occurs; the split-tier judgement of
+path 2 and how long a split generation stays split; whether a refused
+switch whose chunk another mover put in the target tier should count as
+done (the audit's "changed").
+
+Minimal reproductions to write next (in-memory tests through the pass,
+`run_once_bounded_fenced`, with the existing helpers), each recording
+the access count, `last_ms` and every chunk's placement after one and
+two passes:
+
+1. A one-chunk generation whose switch is refused because the target
+   group's epoch changes between the copy and the switch (the
+   `before_switch` hook of `migrate_chunk_with`): today the record is
+   reset; the test fixes whichever behaviour is decided.
+2. The same with the attempt's own intent expired before its switch
+   (`expire_migrations` in the hook).
+3. A two-chunk generation, chunk 0 switched, chunk 1 held in flight by
+   another attempt: today the record is reset; the test also records the
+   tier the next pass judges the generation by and whether chunk 1 moves.
+4. The same with chunk 1 failing (`Err`, a node error).
+5. The same with the target at its reserve after chunk 0 (the pass ends
+   before the reset: the record is kept, the generation split).
+
+A change of behaviour (for example a settled flag per chunk, a reset only
+when every chunk is in the target tier, or distinct outcomes in
+`MigrateOutcome`) is a separate design and review; it is not part of the
+ADR-0035 work, which stays complete as reported.
+
+### 7.9 The binary and the merged change
+
+The commits named in this section are commits of the pull request
+before it was merged by rebase; the merged commits on `main` have other
+identifiers. Compared tree to tree (not through a merge base):
+
+- b7396ab, the final run's binary source, and `main` at 42d44cb (the
+  merged head): identical product sources (every crate's `src/`,
+  `Cargo.toml` and build inputs), identical `fault_control.rs` of the
+  gateway, controller and storage node, identical root `Cargo.toml`,
+  `Cargo.lock` and `rust-toolchain.toml`. Under `crates/` two test files
+  differ: `crates/metadata/tests/tiering_race.rs` and
+  `crates/testkit/tests/it/tiering_fdb.rs` (the destructive FoundationDB
+  tests' cluster-file guards, added after the run); outside `crates/`,
+  the harness, CI, these results and this report differ. The final test
+  code was run by `main`'s CI at 42d44cb (every job, the FoundationDB
+  upgrade job included). The same source does not mean the same binary
+  bytes, and the run used a `fault-injection` build, not a release
+  build.
+- b7396ab and 5b2e7af (the harness of the final run) have the same trees
+  as `main`'s f941b59 and e7965a3, and both are reachable from the pull
+  request's head (`refs/pull/16/head`).
+- f81ed65, c6312ff and c3db9d6, named in `runs.json` for earlier runs,
+  were local commits never pushed (the branch was reorganised before its
+  first push). f81ed65's `crates/` equals that of the first pushed head
+  (1096b85, `main`'s 38b9c42); c3db9d6, the binary of the first debug
+  runs, predates the in-flight fix. They are named as recorded and not
+  re-derived.
 

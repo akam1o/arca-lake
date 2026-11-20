@@ -63,7 +63,9 @@ the environments described in their reports.
    at 10⁶ objects a reconcile pass 2,733 s → 146 s, reclaim 2.74 → 0.55 ms
    per record, retained bytes level for an hour; the reclaim-at-capacity
    run is incomplete (load host stopped; §4c): the reclaim criterion is
-   not met, R-110 stays Medium.* The implementation uses batched read-only
+   not met, R-110 stays Medium; a
+   [retest plan](../verification/phase-4.1-r110-retest-plan.md) awaits
+   approval (not run).* The implementation uses batched read-only
    judgments per listing page, bounded parallelism, settle time from the
    measured cycle, and a "pass running since" gauge. The subsequent
    [recovery and integrity check](../verification/phase-4.1-adr34.md)
@@ -72,15 +74,17 @@ the environments described in their reports.
 **P1 — metadata performance**
 
 4. **Access records (ADR-0034, R-109)** — *decisions 1–5, 7 and 8
-   implemented and tested; decision 6 not implemented
-   ([report](../verification/phase-4.1-adr34.md)).* The gateway uses a
+   implemented and tested ([report](../verification/phase-4.1-adr34.md));
+   decision 6 implemented since as ADR-0035 option A
+   ([report](../verification/phase-4.1-adr35.md)).* The gateway uses a
    bounded table and batched writes, checks the generation in the same
    transaction, and gives unread generations a last-access time from
    their creation. In the reported VM A/B, approximately 0.007–0.008
    FoundationDB commits per GET meets the ≤ 0.1 target; GET throughput
    remains 7–14 % below `off`, so its target is not met. The default
-   remains `on` (the batched path) with a batch size of 128. Recording only
-   where a tiering policy applies is still deferred. Two gateways contending
+   remains `on` (the batched path) with a batch size of 128. Where tiering
+   is confirmed disabled, gateways no longer record reads (ADR-0035; the
+   throughput result is a quiet-condition one). Two gateways contending
    on one hot generation and a FoundationDB stall under load remain
    unverified on the cluster (unit tests cover these cases).
 5. **Transactions and conflicts per request:** count and reduce the
