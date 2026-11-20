@@ -81,6 +81,12 @@
   "run": "20261120T041031Z-run",
   "scenarios": "all (from a fresh setup)",
   "result": "pass: 79 checks",
-  "note": "binary f81ed65, harness c6312ff: the run summary.json reports"
+  "note": "binary f81ed65, harness c6312ff; superseded after the review of PR #16 (rule check, strict demotion bound, B3c, cleanup)"
+ },
+ {
+  "run": "20261120T045036Z-run",
+  "scenarios": "all, with B3c (from a fresh setup)",
+  "result": "pass: 82 checks",
+  "note": "binary b7396ab (sha256 c7e3157924d8044f...), harness 5b2e7af: the run summary.json reports"
  }
 ]

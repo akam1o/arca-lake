@@ -234,7 +234,7 @@ a performance one: the limits of §6 (the quiet measurement) stand.
   different hosts; lease 10 s, health pass 5 s, tiering pass 5 s,
   `--tiering-clock-skew-secs 5` (grace margin 47 s), gateways' lease skew
   2 s. The hosts' clocks NTP-synchronised; their offsets, measured at the
-  start and end of each run, agreed within 1.5 ms.
+  start and end of the run, agreed within 1 ms.
 - 213 objects of 64 KiB (`o000`–`o199`, ten hot objects, three for the
   cutoff and the held move), read back through both gateways (0 bad).
 - Load: closed loop, at most two requests in flight and 20 GET/s per
@@ -242,8 +242,11 @@ a performance one: the limits of §6 (the quiet measurement) stand.
   generator (the independent count). Deadlines: every wait at most
   30–240 s, the run about 30 minutes; the watchdog (memory, disk, load,
   reachability, both system FoundationDBs) did not trigger.
-- One binary for every process: this change built with `--features
-  fdb,fault-injection`. The feature adds, for the harness only, a control
+- One binary for every process: this change's `crates/` built with
+  `--features fdb,fault-injection` (the final run: commit b7396ab, whose
+  `crates/` tree is that of the merged change). The final run is
+  `20261120T045036Z-run` (82 checks, all passed); `runs.json` lists every
+  run before it, the failed ones included, with the binary each used. The feature adds, for the harness only, a control
   file (`ARCA_TEST_FAULT_FILE`) through which a gateway's combined tiering
   read fails or is held before it is observed, and a controller's
   tiering move is held before its switch; release builds do not contain
@@ -273,13 +276,13 @@ commit outcome is logged (`fdb-races.txt`).
 | an acknowledgment against an admin change | each way | an acknowledgment that read generation 1 never names generation 2 |
 
 Removing the insert-if-absent check, the acknowledgment's generation
-condition or the fence makes these tests fail.
+condition or the fence makes these tests fail (`mutations.txt`).
 
 Real processes (scenarios A1, A2): both controllers started at the same
 wall-clock instant on a store without a record (A1 equal flags, A2
 different flags after clearing the record of the disposable store). They
-started 3 ms and 1.3 ms apart; one took the lease and seeded 7–11 ms
-later, the other logged that it stood by 2 ms and 4.5 ms after the lease
+started 2.2 ms and 1.4 ms apart; one took the lease and seeded 7 and 8 ms
+later, the other logged that it stood by 2.2 ms and 5.7 ms after the lease
 was taken. In deployment the seed is serialised by leader election: only
 the leader seeds, through its fenced store, so two controllers do not seed
 at once; the unfenced race above is the operation's own guarantee. In
@@ -298,25 +301,29 @@ state is the leader's acknowledgment (disable, a set), or the admin commit
 
 | Change | admin commit to acknowledgment | target to the start of the first refresh after it | that refresh reflects it | recording decision changed |
 | --- | --- | --- | --- | --- |
-| disable | 0.57–4.55 s | 0.07–1.93 s | every time | 0.11–1.94 s after the target |
-| set while disabled | 0.27–3.75 s | 1.03–1.86 s | every time | 1.82–1.92 s (back to not recording) |
-| enable | 0.63–3.73 s (not needed) | 0.72–1.49 s | every time | 0.75–1.50 s |
-| set while enabled | 0.53–3.03 s | 0.69–1.15 s | every time | (stays recording) |
+| disable | 0.57–4.55 s | 0.23–0.60 s | every time | 0.24–0.62 s after the target |
+| set while disabled | 0.06–0.48 s | 1.19–1.56 s | every time | (acknowledged before any refresh saw the new generation: stayed not recording) |
+| enable | 0.48–0.60 s (not needed) | 0.73–1.00 s | every time | 0.83–1.04 s |
+| set while enabled | 0.15–0.51 s | 1.11–1.48 s | every time | (stays recording) |
 
 Every change was reflected by the first refresh that started after its
-target state, on both gateways; refreshes started every 2.003–2.006 s.
-The acknowledgment follows the leader's health pass (every 5 s). A set
-while disabled makes gateways record from the first refresh that sees the
+target state, on both gateways; refreshes started every 2.003–2.007 s.
+The acknowledgment follows the leader's health pass (every 5 s; the
+ranges differ between runs with where the pass falls). A set while
+disabled makes gateways record from the first refresh that sees the
 unacknowledged generation until the one after the acknowledgment, as
-§10.3 requires.
+§10.3 requires: in an earlier run (`20261120T041031Z-run`) the
+acknowledgment came 0.27–3.75 s after the commit and the gateways recorded
+until 1.8–1.9 s after it; in the final run it always came before the
+gateways' next refresh.
 
 C2, on `gw0` only (`gw1` the control, which stayed confirmed throughout):
 
 | Fault | Result |
 | --- | --- |
-| every combined read fails | recording resumed 10.035 s after the start of the last good read (the stale bound is 10 s from the read's start); confirmed again 2.0 s after the fault was cleared |
-| every read held 15 s before it is observed (old snapshots, late) | recording resumed 10.065 s after the last good read's start; the late replies, 15 s old when observed, never stopped it; confirmed again 0.9 s after the hold ended |
-| one read held 4 s spanning an `enable` (a disabled snapshot from 1.1 s before the enable, observed 2.9 s after it, with 3.3 s of lease left) | the old confirmation kept the gateway from recording after the enable until its read's start plus 10.03 s, 8.9 s after the enable: within the stale bound after the change, the allowance of §10.6 |
+| every combined read fails | recording resumed 10.091 s after the start of the last good read (the stale bound is 10 s from the read's start); confirmed again 1.8 s after the fault was cleared |
+| every read held 15 s before it is observed (old snapshots, late) | recording resumed 10.071 s after the last good read's start; the late replies, 15 s old when observed, never stopped it; confirmed again 0.9 s after the hold ended |
+| one read held 4 s spanning an `enable` (a disabled snapshot from 1.06 s before the enable, observed 2.9 s after it, with 4.9 s of lease left) | the old confirmation kept the gateway from recording after the enable until its read's start plus 10.09 s, 9.0 s after the enable: within the stale bound after the change, the allowance of §10.6 |
 
 The age is measured from the read's start on the monotonic clock, as
 implemented and as §10.3 states. A hold longer than about 6 s can leave
@@ -330,27 +337,29 @@ stopped (it releases its lease). Times from the first event shown:
 
 | t (s) | Event |
 | --- | --- |
-| 3.502 | `ctl-a` (term 2) released leadership |
-| 4.010 / 4.142 | `gw0` / `gw1` observe the released lease: recording |
-| 4.435 | `ctl-c` took term 3; 4.444 acknowledged generation 16 for term 3 |
-| 6.013 / 6.147 | `gw0` / `gw1` observe the acknowledgment by term 3: not recording |
+| 3.752 | `ctl-a` (term 2) released leadership |
+| 4.008 / 4.145 | `gw0` / `gw1` observe the released lease: recording |
+| 6.143 | `ctl-c` took term 3; 6.149 acknowledged generation 16 for term 3 |
+| 6.151 / 8.017 | `gw1` / `gw0` observe the acknowledgment by term 3: not recording |
 
-Across B1, each gateway served 260 GETs: 220 counted unrecorded
-(confirmed disabled), 40 recorded (between the release and the new
-confirmation), all 40 flushed and persisted (80 in total, equal to the
-access counts written), none dropped or uncertain. The record changed
-only in its acknowledgment.
+Across B1, each gateway served 294 GETs: 214 and 254 counted unrecorded
+(confirmed disabled), 80 and 40 recorded (between the release and the new
+confirmation, two and one refresh periods), all flushed and persisted (120
+in total, equal to the access counts written), none dropped or
+uncertain. The record changed only in its acknowledgment.
 
 B3a, the leader paused (SIGSTOP) past its lease, then resumed: the
 gateways kept the confirmation while the paused leader's lease outlasted
-their reads by more than 2 s, recorded from 0.35 s and 0.25 s before the
-lease expired (their first read within the skew), `ctl-a` took term 4
-0.28 s after the expiry and acknowledged 5 ms later, and the gateways were
-confirmed again 1.65 s and 1.75 s after the expiry. The resumed leader
-gave up its term (fenced) and changed nothing: no acknowledgment by it,
-no gateway decision changed after its return. On every refresh of B1, B3a
-and B2 the logged decision matched the rule of §10.3 applied to what that
-refresh observed.
+their reads by more than 2 s and recorded from their first read within the
+skew (0.07 s and 1.97 s before the lease expired); `ctl-a` took term 4
+0.49 s after the expiry and acknowledged 7 ms later, and the gateways were
+confirmed again 1.94 s and 2.14 s after the expiry. The resumed leader
+gave up its term (fenced) 5.4 s after the expiry and changed nothing: no
+acknowledgment by it, no gateway decision changed after its return.
+
+For B1, B3a and B2, the decision state of each gateway 0.8 s after every
+observation (7, 14 and 29 observations per gateway, every one parsed and
+checked) matched the rule of §10.3 applied to that observation.
 
 B2, tiering enabled on two tiers (promote after 5 reads, demote after
 60 s), reads on both gateways through a leader change:
@@ -361,17 +370,18 @@ B2, tiering enabled on two tiers (promote after 5 reads, demote after
   was promoted after 6 reads; the ten hot objects were promoted under
   load.
 - The leader was stopped 4.5 s before the first promoted object would
-  have been demoted without the grace; `ctl-c` took term 5 0.3 s later.
+  have been demoted without the grace; `ctl-c` took term 5 0.4 s later.
   Generation, policy, `grace_from_ms` and `promotion_from_ms` were
   unchanged by the leader change (only the acknowledging term changed).
-- The two promoted objects were demoted 3.9 s after the bound
-  `max(reset, grace_from + 47 s) + 60 s` (by the new leader; without the
-  grace they would have been demoted 40 and 46 s earlier); the hot objects
-  stayed in the upper tier.
-- Accounting over the window spanning the change: each gateway served 994
-  GETs, recorded 994, flushed 994; the access counts persisted for the ten
-  objects rose by 1,988, equal per object to the GETs served; nothing
-  unrecorded, dropped or uncertain.
+- The two promoted objects were still in the upper tier at a poll 2.8 s
+  after the bound `max(reset, grace_from + 47 s) + 60 s` and in the lower
+  one at the next (4.3 s after it), demoted by the new leader; without the
+  grace they would have been demoted 36 and 42 s before the bound. The hot
+  objects stayed in the upper tier.
+- Accounting over the window spanning the change: each gateway served
+  1,002 GETs, recorded 1,002, flushed 1,002; the access counts persisted
+  for the ten objects rose by 2,004, equal per object to the GETs served;
+  nothing unrecorded, dropped or uncertain.
 
 B3b, the leader's own tiering move held before its switch: a fresh object
 read 6 times; the leader (`ctl-c`, term 5, policy generation 19) copied
@@ -383,7 +393,16 @@ reads). The policy was then changed (generation 20, acknowledged by term
 (`fenced: leadership token 5 … is no longer current`), its pass ended, and
 it gave up its term once the held task ended. The object stayed in the
 lower tier with its 9 reads; the successor kept its term and the new
-policy.
+policy. This shows a deposed term's move refused; the old leader is
+fenced by its term as well as by the policy.
+
+B3c, the policy fence alone: the current leader's move of a fresh object
+(6 reads) held before its switch, 2 more reads served, the policy changed
+(generation 22). The change was not acknowledged while the held pass ran
+(the leader's health passes skipped it, 12 s); once released, the switch
+was refused for the changed policy (`the tiering record changed, pass
+stopped`), the object stayed in the lower tier with its 8 reads, and the
+same term (6) acknowledged generation 22 0.16 s after the release.
 
 ### 7.5 Found and fixed
 
@@ -419,7 +438,8 @@ backend job); processes: §7 on three hosts.
 | Seeding by two controllers at once | `tiering_race` | `tiering_race` | A1, A2 (serialised by election) |
 | Acknowledgment once per generation and term, lost to a racing admin change | §5, `tiering_race` | `tiering_race` | C1 |
 | Acknowledgment after a takeover; failover with gateways | §5 | — | B1, B3a, B2, B3b |
-| A changed policy refusing a pass (switch, reset); nothing reset | §5 | `tiering_fdb::` | B3b (with the old term also fenced) |
+| A changed policy refusing a pass (switch, reset); nothing reset | §5 | `tiering_fdb::` | B3c (the policy alone), B3b (with the old term also fenced) |
+| The acknowledgment waiting for the pass that read the previous generation | §5 | — | B3c |
 | A move found in flight resetting nothing | `tiering::a_move_already_in_flight…` | `tiering_fdb::` | B3b |
 | Rebalancing unaffected by the tiering fence | §5 | `tiering_fdb::` | not exercised |
 | Disabling refused below schema 4; the upgrade | §5 | CI upgrade job | — |
@@ -431,6 +451,11 @@ backend job); processes: §7 on three hosts.
 | R-94(b), R-112, R-114 unchanged | existing tests | CI | — |
 
 ### 7.7 Limits
+
+- Pre-existing and unchanged: a move whose own intent expired while its
+  copy ran (`Skipped`, "intent lost", grouped with "record changed") still
+  counts as settled and resets the record; the in-flight skip is told
+  apart by its reason constant, not by its own variant.
 
 - One FoundationDB process; small data and load; no host, network or
   FoundationDB faults (only the targeted process faults above).
