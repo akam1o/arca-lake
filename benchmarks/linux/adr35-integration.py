@@ -214,7 +214,10 @@ def stop(h, name, timeout=30):
     ssh(h, f"{ident(name)} || exit 0; kill -TERM $p; "
            f"for i in $(seq 1 {timeout * 10}); do {ident(name)} || exit 0; sleep 0.1; done; "
            f"{ident(name)} && kill -KILL $p; exit 0", check=False)
-    ssh(h, f"{ident(name)} || rm -f {Q(RUN)}/{name}.pid {Q(RUN)}/{name}.start", check=False)
+    # The pid file goes only once its process is gone (a process that fails
+    # the identity check stays listed, and teardown then keeps its files).
+    ssh(h, f"p=$(cat {Q(RUN)}/{name}.pid 2>/dev/null) || exit 0; kill -0 $p 2>/dev/null || "
+           f"rm -f {Q(RUN)}/{name}.pid {Q(RUN)}/{name}.start", check=False)
 
 
 def best_effort(run, what, f, *a):
