@@ -12,6 +12,10 @@ use arca_lake_protocol::client::{NodeClients, RecordToken, ShardRef};
 use crate::TierError;
 use crate::durable::{Coders, encode_chunk, read_chunk};
 
+/// Why a migration was skipped when another migration of the chunk holds
+/// its intent ([`MigrateOutcome::Skipped`]): nothing was read or written.
+pub const IN_FLIGHT: &str = "another migration of the chunk is in flight";
+
 /// Result of one chunk migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrateOutcome {
@@ -32,6 +36,16 @@ pub enum MigrateOutcome {
     /// (ADR-0035 §10.1); nothing was switched and the target shards were
     /// deleted. Only [`migrate_chunk_for_tiering`] returns it.
     PolicyChanged,
+}
+
+impl MigrateOutcome {
+    /// Skipped because another migration of the chunk is in flight: this
+    /// attempt did nothing (a tiering pass must not reset the generation's
+    /// access record on it, ADR-0035 §10.1).
+    #[must_use]
+    pub fn in_flight(&self) -> bool {
+        matches!(self, Self::Skipped(why) if *why == IN_FLIGHT)
+    }
 }
 
 /// Fault-injection points for tests.
@@ -192,9 +206,7 @@ async fn migrate_inner<S: KvStore>(
     )
     .await?
     {
-        return Ok(MigrateOutcome::Skipped(
-            "another migration of the chunk is in flight",
-        ));
+        return Ok(MigrateOutcome::Skipped(IN_FLIGHT));
     }
     // 1. Read and verify the chunk from its current placement.
     let read = async {

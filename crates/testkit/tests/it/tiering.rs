@@ -22,11 +22,21 @@ const BUCKET: &str = "tiering";
 /// Three durable nodes of class `hdd` (tier `default`) plus three added
 /// nodes of class `ssd` forming a second durable tier `fast-durable`.
 async fn cluster() -> (TestCluster, GroupRecord) {
-    let mut c = TestCluster::start(ClusterOptions {
+    cluster_on(TestCluster::start(options()).await).await
+}
+
+/// The options of [`cluster`] (also on FoundationDB, `tiering_fdb`).
+pub(crate) fn options() -> ClusterOptions {
+    ClusterOptions {
         groups: 1,
         ..ClusterOptions::rs(3, 2, 1, MIB, 0)
-    })
-    .await;
+    }
+}
+
+/// [`cluster`] on any store.
+pub(crate) async fn cluster_on<S: arca_lake_metadata::KvStore + 'static>(
+    mut c: TestCluster<S>,
+) -> (TestCluster<S>, GroupRecord) {
     s3::create_bucket(&c.backend, BUCKET).await.unwrap();
     for _ in 0..3 {
         c.add_node().await;
@@ -900,8 +910,8 @@ fn fenced_policy() -> arca_lake_controller::tiering::TieringPolicy {
 
 /// A tiering record enabled and acknowledged (term 1) at `at`, as a leader
 /// leaves it: returns its fence with `margin_ms`.
-async fn enabled_record(
-    c: &TestCluster,
+async fn enabled_record<S: arca_lake_metadata::KvStore + 'static>(
+    c: &TestCluster<S>,
     at: u64,
     margin_ms: u64,
 ) -> arca_lake_controller::tiering::PolicyFence {
@@ -928,6 +938,17 @@ async fn enabled_record(
 #[tokio::test]
 async fn under_the_tiering_record_old_counts_do_not_promote_and_demotion_waits_for_the_grace() {
     let (c, fast) = cluster().await;
+    under_the_tiering_record_old_counts_do_not_promote_and_demotion_waits_for_the_grace_on(c, fast)
+        .await;
+}
+
+/// [`under_the_tiering_record_old_counts_do_not_promote_and_demotion_waits_for_the_grace`] on any store.
+pub(crate) async fn under_the_tiering_record_old_counts_do_not_promote_and_demotion_waits_for_the_grace_on<
+    S: arca_lake_metadata::KvStore + 'static,
+>(
+    c: TestCluster<S>,
+    fast: GroupRecord,
+) {
     let data = payload(usize::try_from(MIB / 2).unwrap(), 51);
     s3::put(
         &c.backend,
@@ -998,9 +1019,19 @@ async fn under_the_tiering_record_old_counts_do_not_promote_and_demotion_waits_f
 /// with tiering disabled.
 #[tokio::test]
 async fn a_changed_policy_refuses_the_pass_but_not_rebalancing() {
-    use arca_lake_metadata::kv::{KvStore as _, Txn as _};
-    use arca_lake_metadata::ops::tiering::{self, AdminChange};
     let (c, fast) = cluster().await;
+    a_changed_policy_refuses_the_pass_but_not_rebalancing_on(c, fast).await;
+}
+
+/// [`a_changed_policy_refuses_the_pass_but_not_rebalancing`] on any store.
+pub(crate) async fn a_changed_policy_refuses_the_pass_but_not_rebalancing_on<
+    S: arca_lake_metadata::KvStore + 'static,
+>(
+    c: TestCluster<S>,
+    fast: GroupRecord,
+) {
+    use arca_lake_metadata::kv::Txn as _;
+    use arca_lake_metadata::ops::tiering::{self, AdminChange};
     let data = payload(usize::try_from(MIB / 2).unwrap(), 52);
     s3::put(
         &c.backend,
@@ -1192,6 +1223,16 @@ async fn a_gateway_records_reads_only_while_tiering_is_not_confirmed_disabled() 
 #[tokio::test]
 async fn generations_without_or_with_old_records_wait_for_the_grace() {
     let (c, fast) = cluster().await;
+    generations_without_or_with_old_records_wait_for_the_grace_on(c, fast).await;
+}
+
+/// [`generations_without_or_with_old_records_wait_for_the_grace`] on any store.
+pub(crate) async fn generations_without_or_with_old_records_wait_for_the_grace_on<
+    S: arca_lake_metadata::KvStore + 'static,
+>(
+    c: TestCluster<S>,
+    fast: GroupRecord,
+) {
     let mut gens = Vec::new();
     for (key, seed) in [("none", 61u64), ("old", 62)] {
         let data = payload(usize::try_from(MIB / 2).unwrap(), seed);
@@ -1268,5 +1309,79 @@ async fn generations_without_or_with_old_records_wait_for_the_grace() {
     }
     let report = run(t0 + demote + margin + 1_000).await;
     assert_eq!(report.demoted_chunks, 2, "{report:?}");
+    c.shutdown().await;
+}
+
+/// A tiering pass that finds another migration of a chunk in flight (a
+/// deposed leader's move, held before its switch) moves nothing and keeps
+/// the generation's access record: the reads recorded meanwhile are not
+/// reset by a pass that did not act on them (ADR-0035 §10.1; found by the
+/// integration harness, scenario B3b).
+#[tokio::test]
+async fn a_move_already_in_flight_resets_no_access_record() {
+    let (c, fast) = cluster().await;
+    a_move_already_in_flight_resets_no_access_record_on(c, fast).await;
+}
+
+/// [`a_move_already_in_flight_resets_no_access_record`] on any store.
+pub(crate) async fn a_move_already_in_flight_resets_no_access_record_on<
+    S: arca_lake_metadata::KvStore + 'static,
+>(
+    c: TestCluster<S>,
+    fast: GroupRecord,
+) {
+    let data = payload(usize::try_from(MIB / 2).unwrap(), 71);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let manifest = c.manifest(BUCKET, "o").await;
+    let generation = manifest.pointer.generation;
+    let t0 = now_ms();
+    let fence = enabled_record(&c, t0 - 10_000, 0).await;
+    // Another attempt holds the chunk's migration intent.
+    let other = arca_lake_metadata::records::new_gen_id();
+    assert!(
+        object::begin_migration(
+            c.meta.as_ref(),
+            &manifest.chunks[0].1.chunk_id,
+            fast.id,
+            &other,
+            t0
+        )
+        .await
+        .unwrap()
+    );
+    object::record_access(c.meta.as_ref(), &generation, t0, 9)
+        .await
+        .unwrap();
+    let report = arca_lake_controller::tiering::run_once_bounded_fenced(
+        c.meta.as_ref(),
+        &c.clients,
+        &fenced_policy(),
+        t0 + 1_000,
+        0,
+        Some(fence),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.promoted_chunks, 0, "{report:?}");
+    assert_eq!(
+        c.manifest(BUCKET, "o").await.chunks[0].1.placement.group_id,
+        manifest.chunks[0].1.placement.group_id
+    );
+    assert_eq!(
+        object::access_of(c.meta.as_ref(), &generation)
+            .await
+            .unwrap()
+            .map(|r| r.count),
+        Some(9),
+        "the access record was reset by a pass that moved nothing"
+    );
     c.shutdown().await;
 }
