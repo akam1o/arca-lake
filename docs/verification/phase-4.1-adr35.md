@@ -483,7 +483,8 @@ any other `Ok` outcome except the in-flight skip and `PolicyChanged`
 access record is reset (`reset_access_fenced`: `{now, 0}`). `Err`
 outcomes do not settle; a target at its reserve ends the pass before
 the reset. The rule dates from the Phase 3.12 liveness audit (finding 15,
-"tiering forgot a generation whose moves all failed", commit 0761473),
+"tiering forgot a generation whose moves all failed",
+[Phase 3.12 report](phase-3.12-restore-architecture.md) §10; commit 0761473),
 which made the reset conditional on a settled chunk and counted "found
 there or changed" as settled; the audit records no decision on the two
 cases below.
@@ -491,7 +492,7 @@ cases below.
 | | Path 1: a refused switch | Path 2: a partly moved generation |
 | --- | --- | --- |
 | Code | `crates/tiering/src/migrate.rs`: `switch_placement_fenced` returns `Refused` (the attempt no longer holds the chunk's intent; the generation is gone or not committed; the chunk's placement or id changed; the target group's epoch changed or it is no longer Active), mapped to `Skipped("record changed, generation not committed, or intent lost")`, which settles | the `settled` flag is one per generation: one chunk `Switched` (or `AlreadyThere`, or refused as in path 1) settles it even if another chunk failed (`Err`) or was skipped in flight |
-| When | an intent expired (TTL 1 h) before its switch; a membership change of the target group during the copy; another mover (rebalancing, repair, another tiering attempt) changed the chunk's placement; a delete of the generation during the copy | a multi-chunk generation whose chunks' moves end differently in one pass |
+| When | an intent that expired (TTL 1 h) and was then removed (`expire_migrations`, at the start of each tiering and rebalancing sweep) or taken over by another attempt before its switch (expiry alone does not refuse: the switch compares the attempt); a membership change of the target group during the copy; another mover (rebalancing, repair, another tiering attempt) changed the chunk's placement; a delete of the generation during the copy | a multi-chunk generation whose chunks' moves end differently in one pass |
 | What is consumed | the generation's whole access record: the count (promotion progress) goes to 0, `last_ms` to now (demotion postponed by `demote_after`) | the same, for the whole generation, whatever its remaining chunks did |
 | Effect on decisions | a promotion that did not happen needs `promote_reads` new reads before it is tried again; a demotion that did not happen waits `demote_after` again | the chunks left behind are not retried until the record qualifies again; the generation's tier is read from its first chunk, so a generation whose first chunk moved and the others did not is judged in the upper tier (not confirmed by a test) |
 | Data integrity | none expected: the reset writes only the access record; the switch is conditional and the source stays referenced until it commits | the same; a generation spread over two tiers stays readable (each chunk record names its placement) |
@@ -504,22 +505,33 @@ switch whose chunk another mover put in the target tier should count as
 done (the audit's "changed").
 
 Minimal reproductions to write next (in-memory tests through the pass,
-`run_once_bounded_fenced`, with the existing helpers), each recording
-the access count, `last_ms` and every chunk's placement after one and
-two passes:
+`run_once_bounded_fenced`), each recording the access count, `last_ms`
+and every chunk's placement after one and two passes, and the hook it
+needs. The pass calls `migrate_chunk_for_tiering` with its own closure
+(only the file-driven hold of the `fault-injection` build), so the
+`before_switch` hook of `migrate_chunk_with` is not reachable from it:
 
 1. A one-chunk generation whose switch is refused because the target
-   group's epoch changes between the copy and the switch (the
-   `before_switch` hook of `migrate_chunk_with`): today the record is
-   reset; the test fixes whichever behaviour is decided.
-2. The same with the attempt's own intent expired before its switch
-   (`expire_migrations` in the hook).
+   group's epoch changes between the copy and the switch: today the
+   record is reset; the test fixes whichever behaviour is decided. Needs
+   a test seam for a hook in the pass, or a `fault-injection` test build
+   using the hold (`ARCA_TEST_FAULT_FILE`, process-global) to pause the
+   move while the test changes the epoch.
+2. The same with the attempt's intent expired and then removed before
+   its switch (`expire_migrations` at `now` past the TTL while the move is
+   held): the same seam or hold.
 3. A two-chunk generation, chunk 0 switched, chunk 1 held in flight by
-   another attempt: today the record is reset; the test also records the
-   tier the next pass judges the generation by and whether chunk 1 moves.
-4. The same with chunk 1 failing (`Err`, a node error).
+   another attempt (`begin_migration` beforehand, as in
+   `a_move_already_in_flight_resets_no_access_record`): feasible with the
+   existing helpers; today the record is reset; the test also records
+   the tier the next pass judges the generation by and whether chunk 1
+   moves.
+4. The same with chunk 1 failing (`Err`, a node error on chunk 1 only):
+   needs a per-chunk fault (the node clients' fault hook keyed on the
+   chunk's shards, or the seam of 1).
 5. The same with the target at its reserve after chunk 0 (the pass ends
-   before the reset: the record is kept, the generation split).
+   before the reset: the record is kept, the generation split): needs a
+   capacity set-up leaving room for chunk 0 only, or the seam of 1.
 
 A change of behaviour (for example a settled flag per chunk, a reset only
 when every chunk is in the target tier, or distinct outcomes in
@@ -541,8 +553,8 @@ identifiers. Compared tree to tree (not through a merge base):
   `crates/testkit/tests/it/tiering_fdb.rs` (the destructive FoundationDB
   tests' cluster-file guards, added after the run); outside `crates/`,
   the harness, CI, these results and this report differ. The final test
-  code was run by `main`'s CI at 42d44cb (every job, the FoundationDB
-  upgrade job included). The same source does not mean the same binary
+  code was run by `main`'s CI at 42d44cb (workflow run 44698389240, push
+  to `main`: every job passed, the FoundationDB upgrade job included). The same source does not mean the same binary
   bytes, and the run used a `fault-injection` build, not a release
   build.
 - b7396ab and 5b2e7af (the harness of the final run) have the same trees

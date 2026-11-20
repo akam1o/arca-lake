@@ -25,7 +25,7 @@ an immediate new request (about 1,100 refusals per second).
 | --- | --- | --- |
 | C1 | Under capacity pressure and write refusal, GC and reclaim keep making the progress the deletes need | a DELETE answered 204 |
 | C2 | Physical space returns: compaction lowers the segment bytes the admission counts, and the available bytes the nodes report rise accordingly (not only records reclaimed) | GC backlog falling; reclaim counters rising |
-| C3 | Admission recovers and writes resume, held over a window | one PUT succeeding |
+| C3 | Admission recovers and writes resume, held over a window (judged as C3a, recovery with probes only, and C3b, sustained writes) | one PUT succeeding |
 | C4 | With a constant live set and bounded churn, retained bytes and allocated capacity reach a steady state instead of growing | a level over a few minutes |
 | C5 | Data integrity after the run: every acknowledged write readable and correct, every acknowledged delete gone, every unknown outcome resolved to one of its candidate states | metric totals agreeing |
 
@@ -43,9 +43,9 @@ Every name below exists in the code at the time of writing
 | Layer | Observed by | Notes |
 | --- | --- | --- |
 | Client-visible live objects and bytes | the generator's ledger (acknowledged PUTs minus acknowledged DELETEs, per key); a listing count (`arcabench --workload list --expect-count`) | the ledger with unknown outcomes is additional (§9 P1) |
-| Metadata: deletes, GC, orphans | `arca_controller_gc_backlog`, `_bytes`, `_physical_bytes`, `_oldest_age_seconds`; `arca_controller_gc_collected_total`, `arca_controller_shards_deleted_total`, `arca_controller_gc_reclaimed_bytes_total`; `arca_controller_pass_last_seconds{task=gc\|reconcile}`; `arca_controller_gc_skipped_referenced_total` (must stay 0) | orphans found by reconciliation appear in the controller's `reconcile pass deleted=… unreachable=…` log line only: parsed from the log (additional, §9 P3) |
-| Nodes: retirement, retention, reclaim | `arca_node_reclaim_pending_records`, `arca_node_reclaim_retained_bytes`, `arca_node_reclaim_retention_seconds`, `arca_node_reclaim_damaged` (must stay 0); `arca_controller_reclaimed_total`, `_reclaimed_bytes_total`, `arca_controller_reclaim_refused_total`, `arca_controller_reclaim_errors_total`; `arca_controller_pass_last_seconds{task=reclaim}` | |
-| Storage engine: live and dead, compaction | `arca_node_capacity_bytes{kind=allocated\|live\|reclaimable}`, `arca_node_segment_bytes`, `arca_node_live_bytes`, `arca_node_dead_records`, `arca_node_index_entries{kind}`; `arca_node_compaction_backlog_bytes`, `_backlog_segments`, `_blocked_segments`, `arca_node_compactions_total`, `arca_node_compaction_reclaimed_bytes_total`, `arca_node_compaction_skipped_no_space_total`, `arca_node_compaction_errors_total` | `allocated` is the segment files' bytes |
+| Metadata: deletes, GC, orphans | `arca_controller_gc_backlog`, `arca_controller_gc_backlog_bytes`, `arca_controller_gc_backlog_physical_bytes`, `arca_controller_gc_backlog_oldest_age_seconds`; `arca_controller_gc_collected_total`, `arca_controller_shards_deleted_total`, `arca_controller_gc_reclaimed_bytes_total`; `arca_controller_pass_last_seconds{task=gc\|reconcile}`; `arca_controller_gc_skipped_referenced_total` (must stay 0) | orphans found by reconciliation appear in the controller's `reconcile pass deleted=… unreachable=…` log line only: parsed from the log (additional, §9 P3) |
+| Nodes: retirement, retention, reclaim | `arca_node_reclaim_pending_records`, `arca_node_reclaim_retained_bytes`, `arca_node_reclaim_retention_seconds`, `arca_node_reclaim_damaged` (must stay 0); `arca_controller_reclaimed_total`, `arca_controller_reclaimed_bytes_total`, `arca_controller_reclaim_refused_total`, `arca_controller_reclaim_errors_total`; `arca_controller_pass_last_seconds{task=reclaim}` | |
+| Storage engine: live and dead, compaction | `arca_node_capacity_bytes{kind=allocated\|live\|reclaimable}`, `arca_node_segment_bytes`, `arca_node_live_bytes`, `arca_node_dead_records`, `arca_node_index_entries{kind}`; `arca_node_compaction_backlog_bytes`, `arca_node_compaction_backlog_segments`, `arca_node_compaction_blocked_segments`, `arca_node_compactions_total`, `arca_node_compaction_reclaimed_bytes_total`, `arca_node_compaction_skipped_no_space_total`, `arca_node_compaction_errors_total` | `allocated` is the segment files' bytes |
 | Files on the file system | `arca_node_device_usage_bytes{kind=segments\|side_files\|fs_used\|fs_overhead\|delete_reserve}`; per node directory, apparent and allocated bytes (`du`, additional §9 P3); the file system's free bytes (`statvfs`, as the watchdog reads it) | `fs_used` and `fs_overhead` are of the whole file system, shared with other users: not attributable to the test |
 | Admission inputs and state | nodes: `arca_node_capacity_bytes{kind=total\|available\|reserved\|repair_floor\|inflight}`, `arca_node_device_free_bytes`, `arca_node_admission_refused_total{class}`; controller: `arca_controller_capacity_bytes{kind}`, `arca_controller_backpressure_state`, `arca_controller_admission_excluded_groups`; gateway: `arca_gateway_admission_state`, `arca_gateway_admission_rejected_total`, `arca_gateway_admission_throttled_total`, `arca_gateway_node_capacity_refusals_total`, `arca_gateway_placement_capacity_failures_total` | |
 
@@ -169,14 +169,14 @@ Closed loop, paced, and bounded by the generator itself (§9 P1):
 
 | Limit | Value (proposed) |
 | --- | --- |
-| Requests per second, all kinds, retries included (one token bucket) | 20 |
+| Requests per second (one token bucket, burst ≤ 5) | 20, counting every data-plane HTTP attempt of the test: the generator's operations, their retries, the GET and PUT probes, listings and the final verification all go through the one bucket; `arcabench` issues its requests with its own HTTP client (no SDK-internal retries), so each attempt is one it counts (`http_attempts`) |
 | Concurrency | 4 |
 | Retries of one request after a 503 | at most 2, backoff 200 ms doubling to 3.2 s with jitter, none started after 10 s from the first refusal |
 | New requests after a refusal | the worker waits the refusal backoff before its next operation (growing with consecutive refusals, `--reject-pause on`), and the shared bucket caps all requests |
-| Total operations per run | 40,000 (planned about 36,000: fill, pressure, deletes, churn, probes, verify) |
-| Total bytes written per run (logical) | 5 GiB (planned about 3.9 GiB) |
-| Live set | at most L0 plus what stage 4 adds before refusal (≤ 6,000 objects, 1.5 GiB logical); L1 = 2,000 objects in stage 6 |
-| Run time | 6 h; each stage its own maximum (§7) |
+| Total operations per run | 50,000 (planned about 44,000: fill 4,000; the early deletes 1,000; stage 4 at most 5,000 acknowledged PUTs and 3,600 refused attempts; stage 5 at most 7,000 deletes and 360 probe PUTs; churn 10,800; GET probes about 5,000; verification at most 8,000; smoke 300) |
+| Total bytes written per run (logical) | 5 GiB (planned at most 3.6 GiB: fill 1.0, stage 4 at most 1.22, churn 1.32, probes and smoke under 0.1) |
+| Live set | at most 8,000 objects (2.0 GiB logical): L0 4,000, less the 1,000 early deletes, plus at most 5,000 new objects in stage 4; L1 = 2,000 objects in stage 6 |
+| Run time | 7.5 h in total: the stage maxima of §7 (400 min), transitions (≤ 30 min) and evidence collection (≤ 20 min) |
 
 A refusing cluster therefore sees at most 20 requests per second, not
 the concurrency at refusal latency (ADR-0033 §4c: about 1,100 per
@@ -243,9 +243,9 @@ and the watchdog has not fired; anything else ends the run.
 | 1 Preflight (read-only) | approval | §10 | every check recorded and within its requirement | 30 min |
 | 2 Smoke | 1 passed | fresh cluster (marker, own port); the watchdog, guard and generator limits exercised (a heartbeat withheld stops a running load; an operation limit ends it); 100 PUT, GET, DELETE; verify | all exercised and stopped as designed; 0 errors | 30 min |
 | 3 Fill and baseline | 2 passed | PUT L0 at the limits; then 15 min idle, sampling | L0 acknowledged; admission normal; samples complete | 60 min |
-| 4 Pressure | 3 passed | PUT new keys at ≤ 10/s (the bucket's half) until the gateway's admission state is write rejected for 5 min, or 6,000 new objects | write rejected held 5 min (else Inconclusive) | 45 min |
-| 5 Drain and recovery | 4 exit | no new data except a probe PUT every 10 s; DELETE every key stage 4 added and 2,000 baseline keys (live set L1 = 2,000) at ≤ 20/s; observe GC, retention, reclaim, compaction, admission | C1, C2, C3 judged | 60 min (about 24 min of grace, retention and pass intervals, then the 10 min holds) |
-| 6 Steady churn | C3 passed | 1 PUT of a new key and 1 DELETE of the oldest per second for 90 min, the live set within ±5 % of L1 | C4 judged on the last 60 min | 100 min |
+| 4 Pressure | 3 passed | first DELETE an identified set D1 of 1,000 baseline keys (≤ 20/s), then PUT new keys at ≤ 10/s until the gateway's admission state is write rejected, at most 5,000 new objects; then hold the refusal with one PUT attempt per second (refused attempts count against the limits) until D1's deletes have passed the GC grace, a GC interval, the retention and a reclaim interval (≈ 25 min after D1), or until admission recovers on its own | write rejected reached and held while D1 matures: C1 judged on D1 over the refused interval (no refusal reached: Inconclusive) | 60 min |
+| 5 Drain and recovery | 4 exit | no new data except a probe PUT every 10 s; DELETE every key stage 4 added and 1,000 more baseline keys (live set L1 = 2,000) at ≤ 20/s; observe GC, retention, reclaim, compaction, admission | C2 and C3a judged | 60 min (about 24 min of grace, retention and pass intervals, then the 10 min holds) |
+| 6 Steady churn | C3a passed | 1 PUT of a new key and 1 DELETE of the oldest per second for 90 min, the live set within ±5 % of L1 | C3b judged over the whole stage, C4 on its last 60 min | 100 min |
 | 7 Integrity and evidence | 6 ended | verify (§8 C5), `admin integrity verify-manifests`, a scrub of every group; evidence saved; teardown only after review | C5 judged | 60 min |
 
 ## 8. Judgement (fixed before the run)
@@ -255,9 +255,10 @@ changed after it.
 
 | Criterion | Pass | Window |
 | --- | --- | --- |
-| C1 | while write rejected: `gc_collected_total` and `reclaimed_total` rise; the GC backlog of the stage-5 deletes falls below 10 % of its peak; `reclaim_refused_total` and `reclaim_errors_total` unchanged; retained bytes fall once records pass their retention | stage 5, by its maximum |
+| C1 | over the refused interval of stage 4: D1's generations collected by GC (every one of them out of the GC backlog) and its shards' retired records reclaimed once past their retention (`arca_controller_reclaimed_total` up by at least D1's record count, retained bytes back down); `arca_controller_reclaim_refused_total` and `arca_controller_reclaim_errors_total` unchanged | stage 4, from D1 to the end of the refusal |
 | C2 | per node, `allocated − live` (reclaimable) ≤ max(2 segments, 10 % of allocated), and `available` up by at least half the deleted shards' bytes, held for 10 min; `du` within 5 % of segment plus side-file bytes | stage 5, after retention + reclaim interval + 3 compaction intervals |
-| C3 | every gateway's admission state 0 and the controller's backpressure state 0, uninterrupted for 10 min; probe and stage-6 PUTs ≥ 99 % acknowledged in that window, none refused | stage 5 into 6 |
+| C3a | every gateway's admission state 0 and the controller's backpressure state 0, uninterrupted for 10 min; every probe PUT in that window (60) acknowledged | stage 5 |
+| C3b | over stage 6: PUTs ≥ 99 % acknowledged, none refused for capacity, admission never above warning | stage 6 |
 | C4 | over the last 60 min of stage 6, per node: the least-squares slope of retained bytes and of allocated bytes ≤ 1 % of the allotment per hour, their range ≤ 10 % of the allotment, admission never write rejected | stage 6 |
 | C5 | every key acknowledged and not deleted reads back with its exact body; every acknowledged delete answers 404; every unknown outcome reads as one of its candidates (recorded which); manifests and scrub 0 findings | stage 7 |
 
