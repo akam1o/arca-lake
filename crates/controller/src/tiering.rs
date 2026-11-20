@@ -386,7 +386,7 @@ async fn sweep<S: KvStore>(
                     // done, so the generation is not settled and its access
                     // record is not reset; tried again at a later pass.
                     Ok(o) if o.in_flight() => {
-                        tracing::info!(
+                        tracing::debug!(
                             generation = %arca_lake_metadata::ops::compat::hex(generation),
                             index,
                             "tiering: another move of the chunk is in flight; skipped, access record kept"
