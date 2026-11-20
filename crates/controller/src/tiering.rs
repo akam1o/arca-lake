@@ -381,6 +381,18 @@ async fn sweep<S: KvStore>(
                         report.last = before;
                         return Ok(());
                     }
+                    // Another migration of the chunk holds its intent (a
+                    // deposed leader's move, ADR-0035 §10.1): nothing was
+                    // done, so the generation is not settled and its access
+                    // record is not reset; tried again at a later pass.
+                    Ok(o) if o.in_flight() => {
+                        tracing::info!(
+                            generation = %arca_lake_metadata::ops::compat::hex(generation),
+                            index,
+                            "tiering: another move of the chunk is in flight; skipped, access record kept"
+                        );
+                        report.skipped_chunks += 1;
+                    }
                     Ok(MigrateOutcome::Switched { .. }) => {
                         settled = true;
                         if promote {

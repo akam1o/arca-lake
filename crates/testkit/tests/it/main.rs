@@ -80,6 +80,8 @@ mod retirement_crash;
 mod s3_compat;
 mod system_model;
 mod tiering;
+#[cfg(feature = "fdb")]
+mod tiering_fdb;
 mod tls_cluster;
 mod transport;
 mod upgrade;
