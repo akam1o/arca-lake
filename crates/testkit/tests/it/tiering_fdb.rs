@@ -14,7 +14,7 @@ async fn cluster() -> Option<(TestCluster<FdbKv>, GroupRecord)> {
     let path = std::env::var("ARCA_FDB_CLUSTER_FILE").ok()?;
     let ok = std::env::var("ARCA_FDB_CLEAR_OK").ok()?;
     assert!(
-        ok == path && path != "/etc/foundationdb/fdb.cluster",
+        ok == path && !is_system_cluster(&path),
         "ARCA_FDB_CLEAR_OK must name the disposable cluster file itself (not the system default)"
     );
     let start = arca_lake_testkit::fdb::starter()?;
@@ -59,4 +59,19 @@ async fn a_move_already_in_flight_resets_no_access_record() {
         return;
     };
     super::tiering::a_move_already_in_flight_resets_no_access_record_on(c, fast).await;
+}
+
+/// Whether `path` names the host's system cluster: the same file (after
+/// resolving links and relative paths) or the same coordinators as the
+/// default cluster file.
+fn is_system_cluster(path: &str) -> bool {
+    const SYSTEM: &str = "/etc/foundationdb/fdb.cluster";
+    let canon = |p: &str| std::fs::canonicalize(p).ok();
+    let coordinators = |p: &str| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| s.trim().split_once('@').map(|(_, c)| c.to_string()))
+    };
+    (canon(path).is_some() && canon(path) == canon(SYSTEM))
+        || (coordinators(path).is_some() && coordinators(path) == coordinators(SYSTEM))
 }

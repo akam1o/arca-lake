@@ -229,7 +229,7 @@ fn fdb() -> Option<arca_lake_metadata::fdb::FdbKv> {
         return None;
     };
     assert!(
-        ok == path && path != "/etc/foundationdb/fdb.cluster",
+        ok == path && !is_system_cluster(&path),
         "ARCA_FDB_CLEAR_OK must name the disposable cluster file itself (not the system default)"
     );
     let kv = arca_lake_metadata::fdb::FdbKv::open(Some(&path)).expect("open FoundationDB");
@@ -565,4 +565,19 @@ fn a_seed_and_an_admin_enable_race_both_ways() {
 #[test]
 fn an_acknowledgment_never_names_a_generation_it_did_not_read() {
     on_each_store!(an_acknowledgment_and_an_admin_change);
+}
+
+/// Whether `path` names the host's system cluster: the same file (after
+/// resolving links and relative paths) or the same coordinators as the
+/// default cluster file.
+fn is_system_cluster(path: &str) -> bool {
+    const SYSTEM: &str = "/etc/foundationdb/fdb.cluster";
+    let canon = |p: &str| std::fs::canonicalize(p).ok();
+    let coordinators = |p: &str| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| s.trim().split_once('@').map(|(_, c)| c.to_string()))
+    };
+    (canon(path).is_some() && canon(path) == canon(SYSTEM))
+        || (coordinators(path).is_some() && coordinators(path) == coordinators(SYSTEM))
 }
