@@ -124,6 +124,14 @@ Results are written by criterion to `target/criterion/`.
   `restart-gateways`; `linux/object-count.sh` the object-count campaign;
   `linux/summarize_bench.py` per-run summaries over the generator's
   measurement window.
+- `linux/adr35-integration.py` (ADR-0035 option A): a disposable
+  three-host cluster with two controllers and two gateways (`setup`,
+  `run [SCENARIO ...]`, `collect`, `teardown`; hosts and paths from the
+  environment) running the concurrent-initialisation, leader-change,
+  reflection and stale-confirmation scenarios with deadlines and checks;
+  needs a binary built with `--features fdb,fault-injection`.
+  `linux/adr35-loader.py` its bounded GET load, logged per request;
+  `linux/adr35-summary.py` a run's publishable summary.
 
 ## Reports
 
