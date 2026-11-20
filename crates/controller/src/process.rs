@@ -349,6 +349,8 @@ async fn run<S: KvStore + 'static>(
     mut shutdown: watch::Receiver<bool>,
     incarnation: [u8; 16],
 ) {
+    #[cfg(feature = "fault-injection")]
+    warn!("tiering fault injection is compiled in (test build)");
     let renew_every = cfg.lease / 3;
     // The leader record names this process, not only its configured id: a
     // second process started with the same id (a restart while the old
@@ -386,6 +388,8 @@ async fn run<S: KvStore + 'static>(
             }
         });
     }
+    // Logged once per stretch as a follower: who holds the lease.
+    let mut standing_by = false;
     loop {
         if *shutdown.borrow() {
             return;
@@ -402,6 +406,10 @@ async fn run<S: KvStore + 'static>(
                 }
             };
         let Some(leadership) = acquired else {
+            if !standing_by && let Ok(Some(l)) = leader::current(meta.as_ref()).await {
+                info!(controller = %cfg.id, holder = %l.holder, token = l.token, "standing by: the lease is held");
+                standing_by = true;
+            }
             tokio::select! {
                 () = tokio::time::sleep(renew_every) => {}
                 _ = shutdown.changed() => return,
@@ -409,6 +417,7 @@ async fn run<S: KvStore + 'static>(
             continue;
         };
         info!(controller = %cfg.id, token = leadership.token, "acquired leadership");
+        standing_by = false;
         metrics.leader.store(true, Ordering::Relaxed);
         metrics
             .leader_token
@@ -3467,6 +3476,8 @@ async fn acknowledge_tiering<S: KvStore>(
             generation = a.generation,
             enabled = a.enabled,
             term,
+            grace_from_ms = a.grace_from_ms,
+            promotion_from_ms = a.promotion_from_ms,
             "tiering record acknowledged"
         );
     }
@@ -3490,7 +3501,11 @@ async fn tiering_pass<S: KvStore>(
         if let Some(flags) = cfg.tiering.as_ref()
             && tiering::seed_if_absent(meta, &flags.to_record(), now_ms()).await?
         {
-            info!("tiering record seeded from the controller's flags");
+            info!(
+                policy = ?flags.to_record(),
+                term = metrics.leader_token.load(Ordering::Relaxed),
+                "tiering record seeded from the controller's flags"
+            );
         }
         // It runs once a leader has acknowledged it.
         return Ok(());
@@ -3498,7 +3513,12 @@ async fn tiering_pass<S: KvStore>(
     if let Some(flags) = cfg.tiering.as_ref()
         && flags.to_record() != record.policy
     {
-        warn!("tiering: --tiering-* flags differ from the tiering record, which is used");
+        warn!(
+            flags = ?flags.to_record(),
+            record = ?record.policy,
+            generation = record.generation,
+            "tiering: --tiering-* flags differ from the tiering record, which is used"
+        );
     }
     // Acknowledged first (this pass holds the gate).
     let Some(record) = acknowledge_tiering(meta, metrics, incarnation).await? else {

@@ -8,6 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Test-only hold of a tiering move before its switch
+# (ARCA_TEST_FAULT_FILE). Never ship a binary built with this.
+fault-injection = []
+
 [dependencies]
 arca-lake-common.workspace = true
 arca-lake-ec.workspace = true

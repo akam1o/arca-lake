@@ -342,7 +342,14 @@ async fn sweep<S: KvStore>(
                             *index,
                             record,
                             f.generation,
-                            async || {},
+                            {
+                                #[cfg(feature = "fault-injection")]
+                                let (g, i, pg) = (*generation, *index, f.generation);
+                                async move || {
+                                    #[cfg(feature = "fault-injection")]
+                                    crate::fault_control::before_tiering_switch(g, i, pg).await;
+                                }
+                            },
                         )
                         .await
                     }

@@ -3875,6 +3875,87 @@ enum TieringCommand {
         #[command(flatten)]
         policy: TieringPolicyArgs,
     },
+    /// Print, for the current objects of a bucket, the tier of each
+    /// object's chunks and its access record (read-only).
+    Objects {
+        /// Bucket.
+        #[arg(long)]
+        bucket: String,
+        /// Only keys starting with this prefix.
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// Objects at most.
+        #[arg(long, default_value_t = 1000)]
+        max: usize,
+    },
+}
+
+/// `admin tiering objects`: one line per object (its tiers, its access
+/// record) and a total.
+async fn tiering_objects<S: arca_lake_metadata::KvStore>(
+    meta: &S,
+    bucket: &str,
+    prefix: &str,
+    max: usize,
+) -> Result<(), arca_lake_metadata::MetaError> {
+    use arca_lake_metadata::ops::{cluster, list, object};
+    let tier_of: std::collections::HashMap<u64, String> = cluster::list_groups(meta)
+        .await?
+        .into_iter()
+        .map(|g| (g.id, g.tier))
+        .collect();
+    let mut req = list::ListRequest {
+        prefix: prefix.to_string(),
+        max_keys: max.clamp(1, 1000),
+        ..list::ListRequest::default()
+    };
+    let (mut objects, mut count_sum) = (0usize, 0u64);
+    let mut by_tier: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    'pages: loop {
+        let page = list::list_objects(meta, bucket, &req).await?;
+        for e in &page.objects {
+            if objects >= max {
+                break 'pages;
+            }
+            let Some(m) = object::read_manifest(meta, bucket, &e.key, None).await? else {
+                continue;
+            };
+            let mut tiers: Vec<String> = m
+                .chunks
+                .iter()
+                .map(|(_, c)| {
+                    tier_of
+                        .get(&c.placement.group_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("group-{}", c.placement.group_id))
+                })
+                .collect();
+            tiers.sort();
+            tiers.dedup();
+            let access = object::access_of(meta, &m.pointer.generation).await?;
+            count_sum += access.as_ref().map_or(0, |a| a.count);
+            *by_tier.entry(tiers.join("+")).or_default() += 1;
+            objects += 1;
+            println!(
+                "object {} generation {} tiers {} access_count {} access_last_ms {}",
+                e.key,
+                arca_lake_metadata::ops::compat::hex(&m.pointer.generation),
+                tiers.join("+"),
+                access
+                    .as_ref()
+                    .map_or_else(|| "-".into(), |a| a.count.to_string()),
+                access
+                    .as_ref()
+                    .map_or_else(|| "-".into(), |a| a.last_ms.to_string()),
+            );
+        }
+        match page.next_continuation {
+            Some(c) if page.is_truncated => req.continuation = Some(c),
+            _ => break,
+        }
+    }
+    println!("total objects {objects} access_count_sum {count_sum} by_tier {by_tier:?}");
+    Ok(())
 }
 
 async fn tiering_command<S: arca_lake_metadata::KvStore>(
@@ -3897,6 +3978,16 @@ async fn tiering_command<S: arca_lake_metadata::KvStore>(
     };
     let r = match command {
         TieringCommand::Status => tiering::current(meta).await,
+        TieringCommand::Objects {
+            bucket,
+            prefix,
+            max,
+        } => {
+            return match tiering_objects(meta, &bucket, &prefix, max).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(e),
+            };
+        }
         TieringCommand::Enable { policy } => match policy.policy() {
             Ok(p) => tiering::admin_change(meta, &AdminChange::Enable(p), now_ms())
                 .await
