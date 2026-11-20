@@ -1,14 +1,22 @@
 //! Tiering under the tiering record on a real FoundationDB cluster
 //! (ADR-0035 §10.1, §10.4; the same tests as `tiering.rs` on the in-memory
-//! store, environment as `e2e_fdb.rs`; run with `--test-threads=1`).
+//! store, environment as `e2e_fdb.rs`, plus `ARCA_FDB_CLEAR_OK` naming the
+//! same disposable cluster file; run with `--test-threads=1`).
 
 use arca_lake_metadata::fdb::FdbKv;
 use arca_lake_metadata::records::GroupRecord;
 use arca_lake_testkit::TestCluster;
 
 async fn cluster() -> Option<(TestCluster<FdbKv>, GroupRecord)> {
-    // The keyspace is cleared: only a cluster named explicitly.
-    std::env::var_os("ARCA_FDB_CLUSTER_FILE")?;
+    // The keyspace is cleared: only a cluster named explicitly, confirmed
+    // as disposable by naming it again in ARCA_FDB_CLEAR_OK, and never the
+    // system default.
+    let path = std::env::var("ARCA_FDB_CLUSTER_FILE").ok()?;
+    let ok = std::env::var("ARCA_FDB_CLEAR_OK").ok()?;
+    assert!(
+        ok == path && path != "/etc/foundationdb/fdb.cluster",
+        "ARCA_FDB_CLEAR_OK must name the disposable cluster file itself (not the system default)"
+    );
     let start = arca_lake_testkit::fdb::starter()?;
     Some(super::tiering::cluster_on(start(super::tiering::options()).await).await)
 }
@@ -17,7 +25,7 @@ async fn cluster() -> Option<(TestCluster<FdbKv>, GroupRecord)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn under_the_tiering_record_old_counts_do_not_promote_and_demotion_waits_for_the_grace() {
     let Some((c, fast)) = cluster().await else {
-        eprintln!("ARCA_FDB_TESTS or ARCA_FDB_CLUSTER_FILE not set; skipping");
+        eprintln!("ARCA_FDB_TESTS, ARCA_FDB_CLUSTER_FILE or ARCA_FDB_CLEAR_OK not set; skipping");
         return;
     };
     super::tiering::under_the_tiering_record_old_counts_do_not_promote_and_demotion_waits_for_the_grace_on(c, fast).await;
@@ -27,7 +35,7 @@ async fn under_the_tiering_record_old_counts_do_not_promote_and_demotion_waits_f
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_changed_policy_refuses_the_pass_but_not_rebalancing() {
     let Some((c, fast)) = cluster().await else {
-        eprintln!("ARCA_FDB_TESTS or ARCA_FDB_CLUSTER_FILE not set; skipping");
+        eprintln!("ARCA_FDB_TESTS, ARCA_FDB_CLUSTER_FILE or ARCA_FDB_CLEAR_OK not set; skipping");
         return;
     };
     super::tiering::a_changed_policy_refuses_the_pass_but_not_rebalancing_on(c, fast).await;
@@ -37,7 +45,7 @@ async fn a_changed_policy_refuses_the_pass_but_not_rebalancing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn generations_without_or_with_old_records_wait_for_the_grace() {
     let Some((c, fast)) = cluster().await else {
-        eprintln!("ARCA_FDB_TESTS or ARCA_FDB_CLUSTER_FILE not set; skipping");
+        eprintln!("ARCA_FDB_TESTS, ARCA_FDB_CLUSTER_FILE or ARCA_FDB_CLEAR_OK not set; skipping");
         return;
     };
     super::tiering::generations_without_or_with_old_records_wait_for_the_grace_on(c, fast).await;
@@ -47,7 +55,7 @@ async fn generations_without_or_with_old_records_wait_for_the_grace() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_move_already_in_flight_resets_no_access_record() {
     let Some((c, fast)) = cluster().await else {
-        eprintln!("ARCA_FDB_TESTS or ARCA_FDB_CLUSTER_FILE not set; skipping");
+        eprintln!("ARCA_FDB_TESTS, ARCA_FDB_CLUSTER_FILE or ARCA_FDB_CLEAR_OK not set; skipping");
         return;
     };
     super::tiering::a_move_already_in_flight_resets_no_access_record_on(c, fast).await;
