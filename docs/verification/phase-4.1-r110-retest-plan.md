@@ -169,18 +169,18 @@ Closed loop, paced, and bounded by the generator itself (§9 P1):
 
 | Limit | Value (proposed) |
 | --- | --- |
-| Requests per second (one token bucket, burst ≤ 5) | 20, counting every data-plane HTTP attempt of the test: the generator's operations, their retries, the GET and PUT probes, listings and the final verification all go through the one bucket; `arcabench` issues its requests with its own HTTP client (no SDK-internal retries), so each attempt is one it counts (`http_attempts`) |
+| Requests (one token bucket: 20 per second, burst 5; at most 25 in any second and 205 in any 10 s) | counting every data-plane HTTP attempt of the test: the generator's operations, their retries, the GET and PUT probes, listings and the final verification all go through the one bucket; `arcabench` issues its requests with its own HTTP client (no SDK-internal retries), so each attempt is one it counts (`http_attempts`) |
 | Concurrency | 4 |
 | Retries of one request after a 503 | at most 2, backoff 200 ms doubling to 3.2 s with jitter, none started after 10 s from the first refusal |
 | New requests after a refusal | the worker waits the refusal backoff before its next operation (growing with consecutive refusals, `--reject-pause on`), and the shared bucket caps all requests |
-| Total operations per run | 50,000 (planned about 44,000: fill 4,000; the early deletes 1,000; stage 4 at most 5,000 acknowledged PUTs and 3,600 refused attempts; stage 5 at most 7,000 deletes and 360 probe PUTs; churn 10,800; GET probes about 5,000; verification at most 8,000; smoke 300) |
+| Total HTTP attempts per run | 70,000 (planned at most about 51,000 before retries: fill 4,000; the early deletes 1,000; stage 4 at most 5,000 acknowledged PUTs and 3,600 refused attempts (the hold's attempts are not retried); stage 5 at most 6,000 deletes and 360 probe PUTs; churn 10,800; GET probes about 5,000; verification at most 14,400 (the live keys at the end, about 2,000, and every acknowledged delete, at most 12,400); smoke 300; retries at most 2 per refused request elsewhere, bounded by the shared bucket and this cap) |
 | Total bytes written per run (logical) | 5 GiB (planned at most 3.6 GiB: fill 1.0, stage 4 at most 1.22, churn 1.32, probes and smoke under 0.1) |
 | Live set | at most 8,000 objects (2.0 GiB logical): L0 4,000, less the 1,000 early deletes, plus at most 5,000 new objects in stage 4; L1 = 2,000 objects in stage 6 |
 | Run time | 7.5 h in total: the stage maxima of §7 (400 min), transitions (≤ 30 min) and evidence collection (≤ 20 min) |
 
-A refusing cluster therefore sees at most 20 requests per second, not
-the concurrency at refusal latency (ADR-0033 §4c: about 1,100 per
-second).
+A refusing cluster therefore sees at most 25 requests in any second and
+20 per second on average over longer intervals, not the concurrency at
+refusal latency (ADR-0033 §4c: about 1,100 per second).
 
 Churn rate (stage 6) follows from retention: a deleted shard stays on its
 node for the GC grace, a GC interval, the retention, a reclaim interval
@@ -242,7 +242,7 @@ and the watchdog has not fired; anything else ends the run.
 | --- | --- | --- | --- | --- |
 | 1 Preflight (read-only) | approval | §10 | every check recorded and within its requirement | 30 min |
 | 2 Smoke | 1 passed | fresh cluster (marker, own port); the watchdog, guard and generator limits exercised (a heartbeat withheld stops a running load; an operation limit ends it); 100 PUT, GET, DELETE; verify | all exercised and stopped as designed; 0 errors | 30 min |
-| 3 Fill and baseline | 2 passed | PUT L0 at the limits; then 15 min idle, sampling | L0 acknowledged; admission normal; samples complete | 60 min |
+| 3 Fill and baseline | 2 passed | PUT L0 at the limits; then idle, sampling, until the smoke stage's deletes have matured | L0 acknowledged; admission normal; GC backlog 0 and `arca_node_reclaim_pending_records` 0 on every node (no deletion in progress before D1); samples complete | 60 min |
 | 4 Pressure | 3 passed | first DELETE an identified set D1 of 1,000 baseline keys (≤ 20/s), then PUT new keys at ≤ 10/s until the gateway's admission state is write rejected, at most 5,000 new objects; then hold the refusal with one PUT attempt per second (refused attempts count against the limits) until D1's deletes have passed the GC grace, a GC interval, the retention and a reclaim interval (≈ 25 min after D1), or until admission recovers on its own | write rejected reached and held while D1 matures: C1 judged on D1 over the refused interval (no refusal reached: Inconclusive) | 60 min |
 | 5 Drain and recovery | 4 exit | no new data except a probe PUT every 10 s; DELETE every key stage 4 added and 1,000 more baseline keys (live set L1 = 2,000) at ≤ 20/s; observe GC, retention, reclaim, compaction, admission | C2 and C3a judged | 60 min (about 24 min of grace, retention and pass intervals, then the 10 min holds) |
 | 6 Steady churn | C3a passed | 1 PUT of a new key and 1 DELETE of the oldest per second for 90 min, the live set within ±5 % of L1 | C3b judged over the whole stage, C4 on its last 60 min | 100 min |
@@ -255,12 +255,12 @@ changed after it.
 
 | Criterion | Pass | Window |
 | --- | --- | --- |
-| C1 | over the refused interval of stage 4: D1's generations collected by GC (every one of them out of the GC backlog) and its shards' retired records reclaimed once past their retention (`arca_controller_reclaimed_total` up by at least D1's record count, retained bytes back down); `arca_controller_reclaim_refused_total` and `arca_controller_reclaim_errors_total` unchanged | stage 4, from D1 to the end of the refusal |
+| C1 | over the refused interval of stage 4: D1's generations collected by GC (the GC backlog back to 0) and their shards' retired records reclaimed once past their retention (`arca_controller_reclaimed_total` up by D1's record count, 3 shards × 1,000 objects, and pending records back to 0); `arca_controller_reclaim_refused_total` and `arca_controller_reclaim_errors_total` unchanged. The counts are attributed to D1 because stage 3 ends with no deletion in progress and D1 is stage 4's only delete; a PUT that failed after writing some shards (`arca_gateway_node_capacity_refusals_total` > 0) adds leftovers that GC or reconciliation also removes, and then the attribution is stated as approximate. Admission recovering before D1 matured under refusal: Inconclusive | stage 4, from D1 to the end of the refusal |
 | C2 | per node, `allocated − live` (reclaimable) ≤ max(2 segments, 10 % of allocated), and `available` up by at least half the deleted shards' bytes, held for 10 min; `du` within 5 % of segment plus side-file bytes | stage 5, after retention + reclaim interval + 3 compaction intervals |
 | C3a | every gateway's admission state 0 and the controller's backpressure state 0, uninterrupted for 10 min; every probe PUT in that window (60) acknowledged | stage 5 |
 | C3b | over stage 6: PUTs ≥ 99 % acknowledged, none refused for capacity, admission never above warning | stage 6 |
 | C4 | over the last 60 min of stage 6, per node: the least-squares slope of retained bytes and of allocated bytes ≤ 1 % of the allotment per hour, their range ≤ 10 % of the allotment, admission never write rejected | stage 6 |
-| C5 | every key acknowledged and not deleted reads back with its exact body; every acknowledged delete answers 404; every unknown outcome reads as one of its candidates (recorded which); manifests and scrub 0 findings | stage 7 |
+| C5 | every key acknowledged and not deleted reads back with its exact body; every acknowledged delete (D1, stage 5 and churn, at most 12,400) answers 404; every unknown outcome reads as one of its candidates (recorded which); manifests and scrub 0 findings | stage 7 |
 
 Time relations taken into account: a deleted shard waits the GC grace
 (600 s) and a GC interval before its retirement, then the retention
