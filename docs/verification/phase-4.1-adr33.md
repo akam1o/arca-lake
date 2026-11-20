@@ -271,7 +271,8 @@ interval after the previous one ended, so passes do not accumulate.
   a stable return from capacity pressure; retained bytes and allocated
   capacity converging; the final integrity of every key after it; the
   separate effects of reconciliation, reclaim and compaction on client
-  latency.
+  latency. A [retest plan](phase-4.1-r110-retest-plan.md) for the first
+  three awaits approval (not run).
 - The slice-cancellation path of the parallel pairs (a fatal error while
   other pairs of its slice run) is covered by code analysis and the
   reviews, not by a test.
