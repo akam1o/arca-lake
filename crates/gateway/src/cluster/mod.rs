@@ -4,6 +4,8 @@
 pub mod access;
 pub mod admission;
 mod backend;
+#[cfg(feature = "fault-injection")]
+mod fault_control;
 mod map;
 mod popqueue;
 mod read;

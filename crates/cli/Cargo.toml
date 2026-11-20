@@ -19,9 +19,15 @@ fdb = ["arca-lake-metadata/fdb"]
 # Test-only build reporting (P + 1, M + 1, F + 1) for the mixed-version
 # tests (RFC-014 §5.7, ADR-0016). Never ship a binary built with this.
 version-bump = ["arca-lake-common/version-bump"]
-# Test-only storage I/O fault control file on storage nodes (soak tests).
-# Never ship a binary built with this.
-fault-injection = ["arca-lake-storage-node/fault-injection"]
+# Test-only fault controls: storage I/O faults on storage nodes (soak
+# tests); tiering-refresh faults on gateways and a hold of tiering moves on
+# controllers (ADR-0035 integration harness). Never ship a binary built
+# with this.
+fault-injection = [
+    "arca-lake-storage-node/fault-injection",
+    "arca-lake-gateway/fault-injection",
+    "arca-lake-controller/fault-injection",
+]
 
 [dependencies]
 libc.workspace = true

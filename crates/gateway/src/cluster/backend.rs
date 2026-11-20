@@ -173,6 +173,12 @@ pub struct ClusterWatch {
     /// The last successful combined read of the tiering and leader
     /// records (ADR-0035 §10.2).
     tiering: RwLock<Option<TieringObservation>>,
+    /// Combined tiering reads that failed (the last observation kept, to
+    /// age).
+    pub tiering_refresh_failures: std::sync::atomic::AtomicU64,
+    /// The recording decision last evaluated: 0 none yet, 1 recording, 2
+    /// not recording (its changes are logged).
+    recording_state: std::sync::atomic::AtomicU8,
 }
 
 /// One combined read of the tiering and leader records.
@@ -184,6 +190,59 @@ struct TieringObservation {
     read_at_ms: u64,
     /// Monotonic clock of the read (its age).
     read_at: std::time::Instant,
+}
+
+/// The tiering record's (enabled, generation, acknowledged generation,
+/// acknowledging term, same incarnation) and the leader's (term,
+/// released).
+type ObservationKey = (Option<(bool, u64, u64, u64, bool)>, Option<(u64, bool)>);
+
+impl TieringObservation {
+    /// What the recording decision rests on, without the lease expiry
+    /// (renewed every few seconds): logged when it changes.
+    fn key(&self, incarnation: [u8; 16]) -> ObservationKey {
+        (
+            self.tiering.as_ref().map(|t| {
+                (
+                    t.enabled,
+                    t.generation,
+                    t.applied_generation,
+                    t.applied_term,
+                    t.applied_incarnation == incarnation,
+                )
+            }),
+            self.leader
+                .as_ref()
+                .map(|l| (l.token, l.lease_until_ms == 0)),
+        )
+    }
+
+    fn describe(&self, incarnation: [u8; 16]) -> String {
+        let t = self.tiering.as_ref().map_or_else(
+            || "no record".to_string(),
+            |t| {
+                format!(
+                    "enabled {} generation {} acknowledged generation {} term {} same incarnation {}",
+                    t.enabled,
+                    t.generation,
+                    t.applied_generation,
+                    t.applied_term,
+                    t.applied_incarnation == incarnation
+                )
+            },
+        );
+        let l = self.leader.as_ref().map_or_else(
+            || "no leader".to_string(),
+            |l| {
+                format!(
+                    "leader term {} lease {} ms after the read",
+                    l.token,
+                    i128::from(l.lease_until_ms) - i128::from(self.read_at_ms)
+                )
+            },
+        );
+        format!("{t}; {l}")
+    }
 }
 
 /// Interval of the cluster-state refresh.
@@ -232,6 +291,39 @@ impl ClusterWatch {
         });
     }
 
+    /// [`Self::observe_tiering`] from the refresh: every read logged at
+    /// debug with its wall-clock start and end, a change of what the
+    /// decision rests on at info (ADR-0035 §10.6 timing evidence).
+    fn observe_tiering_logged(
+        &self,
+        tiering: Option<arca_lake_metadata::ops::tiering::TieringRecord>,
+        leader: Option<arca_lake_metadata::ops::leader::LeaderRecord>,
+        started_ms: u64,
+        completed_ms: u64,
+        started: std::time::Instant,
+    ) {
+        let next = TieringObservation {
+            tiering,
+            leader,
+            read_at_ms: completed_ms,
+            read_at: started,
+        };
+        let before = self
+            .tiering
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|o| o.key(self.incarnation));
+        let changed = before != Some(next.key(self.incarnation));
+        let what = next.describe(self.incarnation);
+        if changed {
+            tracing::info!(started_ms, completed_ms, observation = %what, "tiering observation changed");
+        } else {
+            tracing::debug!(started_ms, completed_ms, observation = %what, "tiering refresh");
+        }
+        *self.tiering.write().unwrap_or_else(PoisonError::into_inner) = Some(next);
+    }
+
     /// Whether reads must be recorded for tiering (ADR-0035 §10.3): unless
     /// the last combined read, fresh at `now`, confirmed tiering disabled
     /// by the current leader. No read yet: recorded.
@@ -253,10 +345,31 @@ impl ClusterWatch {
         )
     }
 
-    /// [`Self::access_recording_required_at`] now.
+    /// [`Self::access_recording_required_at`] now; a change of the decision
+    /// is logged with the observation it rests on.
     #[must_use]
     pub fn access_recording_required(&self, skew_ms: u64) -> bool {
-        self.access_recording_required_at(std::time::Instant::now(), skew_ms)
+        let now = std::time::Instant::now();
+        let required = self.access_recording_required_at(now, skew_ms);
+        let state = if required { 1 } else { 2 };
+        if self
+            .recording_state
+            .swap(state, std::sync::atomic::Ordering::Relaxed)
+            != state
+        {
+            let o = self.tiering.read().unwrap_or_else(PoisonError::into_inner);
+            let age_ms = o.as_ref().map(|o| {
+                u64::try_from(now.saturating_duration_since(o.read_at).as_millis())
+                    .unwrap_or(u64::MAX)
+            });
+            tracing::info!(
+                recording = required,
+                observation_age_ms = ?age_ms,
+                observation = %o.as_ref().map_or_else(|| "none".to_string(), |o| o.describe(self.incarnation)),
+                "access recording for tiering changed"
+            );
+        }
+        required
     }
 
     /// Admission: client writes need `Active`; reads need anything but
@@ -778,6 +891,8 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             incarnation: state.incarnation,
             state: RwLock::new(Some(state.clone())),
             tiering: RwLock::new(None),
+            tiering_refresh_failures: std::sync::atomic::AtomicU64::new(0),
+            recording_state: std::sync::atomic::AtomicU8::new(0),
             refused: std::sync::atomic::AtomicU64::new(0),
             refresh_failures: std::sync::atomic::AtomicU64::new(0),
             admission: watch_admission,
@@ -912,6 +1027,8 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         watch: std::sync::Weak<ClusterWatch>,
         clients: NodeClients,
     ) {
+        #[cfg(feature = "fault-injection")]
+        tracing::warn!("tiering-refresh fault injection is compiled in (test build)");
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(CLUSTER_REFRESH).await;
@@ -938,10 +1055,20 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         // fresher than its snapshot); the lease compared with
                         // its end (later is stricter).
                         let started = std::time::Instant::now();
-                        if let Ok((t, l)) =
-                            arca_lake_metadata::ops::tiering::read_with_leader(meta.as_ref()).await
-                        {
-                            w.observe_tiering(t, l, now_ms(), started);
+                        let started_ms = now_ms();
+                        let read =
+                            arca_lake_metadata::ops::tiering::read_with_leader(meta.as_ref()).await;
+                        #[cfg(feature = "fault-injection")]
+                        let read = super::fault_control::tiering_read(read).await;
+                        match read {
+                            Ok((t, l)) => {
+                                w.observe_tiering_logged(t, l, started_ms, now_ms(), started);
+                            }
+                            Err(e) => {
+                                w.tiering_refresh_failures
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                tracing::warn!(error = %e, "tiering refresh failed; the last observation ages");
+                            }
                         }
                         // A failed read closes it here (fail closed).
                         let fence =
@@ -2619,6 +2746,8 @@ mod tiering_watch {
             refresh_failures: std::sync::atomic::AtomicU64::new(0),
             admission: super::super::admission::WriteAdmission::new("default"),
             tiering: RwLock::new(None),
+            tiering_refresh_failures: std::sync::atomic::AtomicU64::new(0),
+            recording_state: std::sync::atomic::AtomicU8::new(0),
         }
     }
 

@@ -11,6 +11,8 @@ pub mod backpressure;
 pub mod backup;
 pub mod capacity;
 pub mod delete_fence;
+#[cfg(feature = "fault-injection")]
+mod fault_control;
 pub mod gc;
 pub mod groups;
 pub mod integrity;
