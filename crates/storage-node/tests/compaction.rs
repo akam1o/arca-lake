@@ -31,6 +31,49 @@ fn data(i: u32) -> Bytes {
     Bytes::from(vec![u8::try_from(i % 251).unwrap(); 64 << 10])
 }
 
+/// Listings of the store a size is retried over at most (see [`seg_bytes`]).
+const SCAN_ATTEMPTS: usize = 8;
+
+/// Bytes of the store's segment files (`seg-*`), from one listing in which
+/// every listed segment could still be read. Compaction deletes segments
+/// while the node serves, so a segment listed and then gone before its size
+/// is read (`NotFound`) starts the listing again, at most
+/// [`SCAN_ATTEMPTS`] times; any other error, and a segment vanishing in
+/// every listing, fails the test.
+fn seg_bytes(dir: &std::path::Path) -> u64 {
+    seg_bytes_with(dir, std::fs::DirEntry::metadata)
+}
+
+/// [`seg_bytes`] with the size read by `stat` (a test interleaves a
+/// deletion there).
+fn seg_bytes_with(
+    dir: &std::path::Path,
+    mut stat: impl FnMut(&std::fs::DirEntry) -> std::io::Result<std::fs::Metadata>,
+) -> u64 {
+    for _ in 0..SCAN_ATTEMPTS {
+        let mut total = 0;
+        let mut vanished = false;
+        for entry in std::fs::read_dir(dir).expect("list the store directory") {
+            let entry = entry.expect("read a store directory entry");
+            if !entry.file_name().to_string_lossy().starts_with("seg-") {
+                continue;
+            }
+            match stat(&entry) {
+                Ok(m) => total += m.len(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    vanished = true;
+                    break;
+                }
+                Err(e) => panic!("size of {}: {e}", entry.path().display()),
+            }
+        }
+        if !vanished {
+            return total;
+        }
+    }
+    panic!("segment files vanished during each of {SCAN_ATTEMPTS} listings");
+}
+
 fn config(dir: &std::path::Path, listen: std::net::SocketAddr) -> NodeConfig {
     let mut cfg = NodeConfig::new(listen, dir);
     cfg.store.sync = arca_lake_storage::SyncPolicy::Never;
@@ -58,14 +101,6 @@ async fn deleted_space_is_reclaimed_while_serving_and_survivors_read_back() {
             .await
             .unwrap();
     }
-    let seg_bytes = |dir: &std::path::Path| -> u64 {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().starts_with("seg-"))
-            .map(|e| e.metadata().unwrap().len())
-            .sum()
-    };
     let before = seg_bytes(dir.path());
     // Delete four of every five shards.
     for i in (0..120).filter(|i| i % 5 != 0) {
@@ -124,4 +159,73 @@ async fn deleted_space_is_reclaimed_while_serving_and_survivors_read_back() {
         }
     }
     node.shutdown().await;
+}
+
+/// Two segment files of 10 and 20 bytes in a fresh directory.
+fn two_segments() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("seg-1"), [0u8; 10]).unwrap();
+    std::fs::write(dir.path().join("seg-2"), [0u8; 20]).unwrap();
+    std::fs::write(dir.path().join("index"), [0u8; 5]).unwrap();
+    dir
+}
+
+/// The race the size had (CI, a flaky failure): a segment listed, then
+/// deleted by compaction before its size is read, answers `NotFound`.
+#[test]
+fn a_listed_segment_can_vanish_before_its_size_is_read() {
+    let dir = two_segments();
+    let entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    std::fs::remove_file(dir.path().join("seg-1")).unwrap();
+    let e = entries
+        .iter()
+        .find(|e| e.file_name() == "seg-1")
+        .unwrap()
+        .metadata()
+        .unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+}
+
+/// A segment deleted between the listing and its size: listed again, the
+/// size is that of the segments left.
+#[test]
+fn a_segment_vanishing_during_the_listing_is_listed_again() {
+    let dir = two_segments();
+    let mut deleted = false;
+    let bytes = seg_bytes_with(dir.path(), |e| {
+        if e.file_name() == "seg-1" && !deleted {
+            deleted = true;
+            std::fs::remove_file(e.path()).unwrap();
+        }
+        e.metadata()
+    });
+    assert!(deleted, "the interleaving did not happen");
+    assert_eq!(bytes, 20);
+    assert_eq!(seg_bytes(dir.path()), 20);
+}
+
+/// Any other error is a failure, not a reason to list again.
+#[test]
+#[should_panic(expected = "permission denied")]
+fn other_errors_reading_a_size_fail() {
+    let dir = two_segments();
+    seg_bytes_with(dir.path(), |_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ))
+    });
+}
+
+/// Segments vanishing in every listing end the test, bounded.
+#[test]
+#[should_panic(expected = "vanished during each of 8 listings")]
+fn listings_are_bounded() {
+    let dir = two_segments();
+    seg_bytes_with(dir.path(), |_| {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    });
 }
