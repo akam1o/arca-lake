@@ -1,0 +1,7 @@
+Mutation checks at 5b2e7af (in-memory store; cargo test -p arca-lake-metadata --test tiering_race, -p arca-lake-testkit --test it tiering::a_move_already_in_flight_resets_no_access_record): each protection removed, then restored.
+
+seed without insert-if-absent: test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+acknowledgment without its generation condition: test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+fenced store without its leadership check: test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+in-flight skip settling (the fix removed): test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 369 filtered out; finished in 0.46s
+restored: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 369 filtered out; finished in 0.49s

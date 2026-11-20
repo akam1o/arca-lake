@@ -1,7 +1,7 @@
 {
- "run": "20261120T041031Z-run",
- "binary": "arca-lake built from f81ed65 with --features fdb,fault-injection (sha256 913ac6a8512e3860...)",
- "harness": "c6312ff",
+ "run": "20261120T045036Z-run",
+ "binary": "arca-lake built from b7396ab with --features fdb,fault-injection (sha256 c7e3157924d8044f...)",
+ "harness": "5b2e7af",
  "scenarios": [
   "A1",
   "A2",
@@ -11,34 +11,35 @@
   "B1",
   "B3a",
   "B2",
-  "B3b"
+  "B3b",
+  "B3c"
  ],
  "clock_offsets_start": {
   "a": {
-   "offset_ms": 51.3,
-   "rtt_ms": 12.2
+   "offset_ms": 1.3,
+   "rtt_ms": 11.9
   },
   "b": {
-   "offset_ms": 50.5,
-   "rtt_ms": 13.7
+   "offset_ms": 0.7,
+   "rtt_ms": 12.4
   },
   "c": {
-   "offset_ms": 51.9,
-   "rtt_ms": 14.6
+   "offset_ms": 1.5,
+   "rtt_ms": 12.0
   }
  },
  "clock_offsets_end": {
   "a": {
-   "offset_ms": 11.6,
-   "rtt_ms": 15.9
+   "offset_ms": -3.5,
+   "rtt_ms": 12.0
   },
   "b": {
-   "offset_ms": 10.4,
-   "rtt_ms": 13.5
+   "offset_ms": -4.5,
+   "rtt_ms": 12.6
   },
   "c": {
-   "offset_ms": 11.1,
-   "rtt_ms": 14.5
+   "offset_ms": -3.9,
+   "rtt_ms": 12.3
   }
  },
  "system_foundationdb_available": {
@@ -51,13 +52,13 @@
    "c": true
   }
  },
- "checks_passed": 79,
+ "checks_passed": 82,
  "checks_failed": 0,
  "checks": [
   {
    "check": "A1: no tiering record before",
    "ok": true,
-   "output": "-20T04:10:31.723652Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)\nno tiering record (gateways record reads; a controller with --tiering-* flags seeds it)"
+   "output": "-20T04:50:37.107204Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)\nno tiering record (gateways record reads; a controller with --tiering-* flags seeds it)"
   },
   {
    "check": "A1: one leader acquired",
@@ -110,7 +111,7 @@
   {
    "check": "A2: no tiering record before",
    "ok": true,
-   "output": "-20T04:10:40.665643Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)\nno tiering record (gateways record reads; a controller with --tiering-* flags seeds it)"
+   "output": "-20T04:50:45.750231Z  WARN arca_lake: metadata (FoundationDB) connection is PLAINTEXT (--fdb-insecure-plaintext)\nno tiering record (gateways record reads; a controller with --tiering-* flags seeds it)"
   },
   {
    "check": "A2: one leader acquired",
@@ -173,175 +174,175 @@
   {
    "check": "C1.0 disable: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 2 acknowledged generation 2 term 2 same incarnation true; leader term 2 lease 7914 ms after the read",
-   "target_ms": 1795147858918,
-   "started": 1795147859159
+   "first": "enabled false generation 2 acknowledged generation 2 term 2 same incarnation true; leader term 2 lease 7594 ms after the read",
+   "target_ms": 1795150264012,
+   "started": 1795150264575
   },
   {
    "check": "C1.0 disable: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 2 acknowledged generation 2 term 2 same incarnation true; leader term 2 lease 7872 ms after the read",
-   "target_ms": 1795147858918,
-   "started": 1795147859202
+   "first": "enabled false generation 2 acknowledged generation 2 term 2 same incarnation true; leader term 2 lease 7558 ms after the read",
+   "target_ms": 1795150264012,
+   "started": 1795150264612
   },
   {
    "check": "C1.0 set while disabled: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 3 acknowledged generation 3 term 2 same incarnation true; leader term 2 lease 8579 ms after the read",
-   "target_ms": 1795147863977,
-   "started": 1795147865172
+   "first": "enabled false generation 3 acknowledged generation 3 term 2 same incarnation true; leader term 2 lease 8261 ms after the read",
+   "target_ms": 1795150269061,
+   "started": 1795150270588
   },
   {
    "check": "C1.0 set while disabled: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 3 acknowledged generation 3 term 2 same incarnation true; leader term 2 lease 8537 ms after the read",
-   "target_ms": 1795147863977,
-   "started": 1795147865214
+   "first": "enabled false generation 3 acknowledged generation 3 term 2 same incarnation true; leader term 2 lease 8224 ms after the read",
+   "target_ms": 1795150269061,
+   "started": 1795150270625
   },
   {
    "check": "C1.0 enable: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 4 acknowledged generation 4 term 2 same incarnation true; leader term 2 lease 7907 ms after the read",
-   "target_ms": 1795147868390,
-   "started": 1795147869180
+   "first": "enabled true generation 4 acknowledged generation 4 term 2 same incarnation true; leader term 2 lease 7590 ms after the read",
+   "target_ms": 1795150273630,
+   "started": 1795150274598
   },
   {
    "check": "C1.0 enable: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 4 acknowledged generation 4 term 2 same incarnation true; leader term 2 lease 7864 ms after the read",
-   "target_ms": 1795147868390,
-   "started": 1795147869223
+   "first": "enabled true generation 4 acknowledged generation 4 term 2 same incarnation true; leader term 2 lease 7554 ms after the read",
+   "target_ms": 1795150273630,
+   "started": 1795150274634
   },
   {
    "check": "C1.0 set while enabled: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 5 acknowledged generation 5 term 2 same incarnation true; leader term 2 lease 8570 ms after the read",
-   "target_ms": 1795147874082,
-   "started": 1795147875192
+   "first": "enabled true generation 5 acknowledged generation 5 term 2 same incarnation true; leader term 2 lease 8255 ms after the read",
+   "target_ms": 1795150279166,
+   "started": 1795150280610
   },
   {
    "check": "C1.0 set while enabled: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 5 acknowledged generation 5 term 2 same incarnation true; leader term 2 lease 8526 ms after the read",
-   "target_ms": 1795147874082,
-   "started": 1795147875235
+   "first": "enabled true generation 5 acknowledged generation 5 term 2 same incarnation true; leader term 2 lease 8214 ms after the read",
+   "target_ms": 1795150279166,
+   "started": 1795150280650
   },
   {
    "check": "C1.1 disable: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 6 acknowledged generation 6 term 2 same incarnation true; leader term 2 lease 7898 ms after the read",
-   "target_ms": 1795147879132,
-   "started": 1795147879200
+   "first": "enabled false generation 6 acknowledged generation 6 term 2 same incarnation true; leader term 2 lease 7583 ms after the read",
+   "target_ms": 1795150284219,
+   "started": 1795150284618
   },
   {
    "check": "C1.1 disable: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 6 acknowledged generation 6 term 2 same incarnation true; leader term 2 lease 7853 ms after the read",
-   "target_ms": 1795147879132,
-   "started": 1795147879245
+   "first": "enabled false generation 6 acknowledged generation 6 term 2 same incarnation true; leader term 2 lease 7542 ms after the read",
+   "target_ms": 1795150284219,
+   "started": 1795150284660
   },
   {
    "check": "C1.1 set while disabled: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 7 acknowledged generation 7 term 2 same incarnation true; leader term 2 lease 8567 ms after the read",
-   "target_ms": 1795147884188,
-   "started": 1795147885213
+   "first": "enabled false generation 7 acknowledged generation 7 term 2 same incarnation true; leader term 2 lease 8250 ms after the read",
+   "target_ms": 1795150289272,
+   "started": 1795150290631
   },
   {
    "check": "C1.1 set while disabled: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 7 acknowledged generation 7 term 2 same incarnation true; leader term 2 lease 8522 ms after the read",
-   "target_ms": 1795147884188,
-   "started": 1795147885258
+   "first": "enabled false generation 7 acknowledged generation 7 term 2 same incarnation true; leader term 2 lease 8209 ms after the read",
+   "target_ms": 1795150289272,
+   "started": 1795150290672
   },
   {
    "check": "C1.1 enable: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 8 acknowledged generation 7 term 2 same incarnation true; leader term 2 lease 7898 ms after the read",
-   "target_ms": 1795147888502,
-   "started": 1795147889222
+   "first": "enabled true generation 8 acknowledged generation 8 term 2 same incarnation true; leader term 2 lease 7579 ms after the read",
+   "target_ms": 1795150293720,
+   "started": 1795150294640
   },
   {
    "check": "C1.1 enable: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 8 acknowledged generation 8 term 2 same incarnation true; leader term 2 lease 7853 ms after the read",
-   "target_ms": 1795147888502,
-   "started": 1795147889267
+   "first": "enabled true generation 8 acknowledged generation 8 term 2 same incarnation true; leader term 2 lease 7538 ms after the read",
+   "target_ms": 1795150293720,
+   "started": 1795150294680
   },
   {
    "check": "C1.1 set while enabled: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 9 acknowledged generation 9 term 2 same incarnation true; leader term 2 lease 8567 ms after the read",
-   "target_ms": 1795147894304,
-   "started": 1795147895234
+   "first": "enabled true generation 9 acknowledged generation 9 term 2 same incarnation true; leader term 2 lease 8244 ms after the read",
+   "target_ms": 1795150299378,
+   "started": 1795150300653
   },
   {
    "check": "C1.1 set while enabled: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 9 acknowledged generation 9 term 2 same incarnation true; leader term 2 lease 8523 ms after the read",
-   "target_ms": 1795147894304,
-   "started": 1795147895278
+   "first": "enabled true generation 9 acknowledged generation 9 term 2 same incarnation true; leader term 2 lease 8202 ms after the read",
+   "target_ms": 1795150299378,
+   "started": 1795150300694
   },
   {
    "check": "C1.2 disable: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 10 acknowledged generation 10 term 2 same incarnation true; leader term 2 lease 9233 ms after the read",
-   "target_ms": 1795147899358,
-   "started": 1795147901247
+   "first": "enabled false generation 10 acknowledged generation 10 term 2 same incarnation true; leader term 2 lease 7572 ms after the read",
+   "target_ms": 1795150304428,
+   "started": 1795150304661
   },
   {
    "check": "C1.2 disable: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 10 acknowledged generation 10 term 2 same incarnation true; leader term 2 lease 9188 ms after the read",
-   "target_ms": 1795147899358,
-   "started": 1795147901291
+   "first": "enabled false generation 10 acknowledged generation 10 term 2 same incarnation true; leader term 2 lease 7532 ms after the read",
+   "target_ms": 1795150304428,
+   "started": 1795150304701
   },
   {
    "check": "C1.2 set while disabled: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 11 acknowledged generation 11 term 2 same incarnation true; leader term 2 lease 9222 ms after the read",
-   "target_ms": 1795147909455,
-   "started": 1795147911268
+   "first": "enabled false generation 11 acknowledged generation 11 term 2 same incarnation true; leader term 2 lease 8236 ms after the read",
+   "target_ms": 1795150309482,
+   "started": 1795150310674
   },
   {
    "check": "C1.2 set while disabled: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled false generation 11 acknowledged generation 11 term 2 same incarnation true; leader term 2 lease 9177 ms after the read",
-   "target_ms": 1795147909455,
-   "started": 1795147911313
+   "first": "enabled false generation 11 acknowledged generation 11 term 2 same incarnation true; leader term 2 lease 8196 ms after the read",
+   "target_ms": 1795150309482,
+   "started": 1795150310715
   },
   {
    "check": "C1.2 enable: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 12 acknowledged generation 11 term 2 same incarnation true; leader term 2 lease 9887 ms after the read",
-   "target_ms": 1795147915835,
-   "started": 1795147917284
+   "first": "enabled true generation 12 acknowledged generation 12 term 2 same incarnation true; leader term 2 lease 7565 ms after the read",
+   "target_ms": 1795150313955,
+   "started": 1795150314683
   },
   {
    "check": "C1.2 enable: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 12 acknowledged generation 11 term 2 same incarnation true; leader term 2 lease 9847 ms after the read",
-   "target_ms": 1795147915835,
-   "started": 1795147917325
+   "first": "enabled true generation 12 acknowledged generation 12 term 2 same incarnation true; leader term 2 lease 7523 ms after the read",
+   "target_ms": 1795150313955,
+   "started": 1795150314724
   },
   {
    "check": "C1.2 set while enabled: gw0 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 13 acknowledged generation 13 term 2 same incarnation true; leader term 2 lease 8547 ms after the read",
-   "target_ms": 1795147924614,
-   "started": 1795147925302
+   "first": "enabled true generation 13 acknowledged generation 13 term 2 same incarnation true; leader term 2 lease 8228 ms after the read",
+   "target_ms": 1795150319590,
+   "started": 1795150320696
   },
   {
    "check": "C1.2 set while enabled: gw1 reflects it at the first refresh started after the target state",
    "ok": true,
-   "first": "enabled true generation 13 acknowledged generation 13 term 2 same incarnation true; leader term 2 lease 8512 ms after the read",
-   "target_ms": 1795147924614,
-   "started": 1795147925338
+   "first": "enabled true generation 13 acknowledged generation 13 term 2 same incarnation true; leader term 2 lease 8185 ms after the read",
+   "target_ms": 1795150319590,
+   "started": 1795150320738
   },
   {
    "check": "C2 fail: recording resumes at the stale bound after the last good read's start",
    "ok": true,
-   "resumed_after_ms": 10035
+   "resumed_after_ms": 10091
   },
   {
    "check": "C2 fail: gw1 (no fault) stayed confirmed",
@@ -350,7 +351,7 @@
   {
    "check": "C2 delay: recording resumes at the stale bound after the last good read's start",
    "ok": true,
-   "resumed_after_ms": 10065
+   "resumed_after_ms": 10071
   },
   {
    "check": "C2 delay: late replies (old snapshots) did not stop recording",
@@ -365,15 +366,15 @@
   {
    "check": "C2 late: a read started before the enable was observed after it, a confirmation of disabled",
    "ok": true,
-   "spanning": "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 3256 ms after the read",
+   "spanning": "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 4930 ms after the read",
    "attempts": 1
   },
   {
    "check": "C2 late: the old confirmation kept recording off after the enable, for at most the stale bound",
    "ok": true,
    "off_at_enable": true,
-   "resumed_after_enable_ms": 8895,
-   "resumed_minus_spanning_start_ms": 10034
+   "resumed_after_enable_ms": 8973,
+   "resumed_minus_spanning_start_ms": 10089
   },
   {
    "check": "B1: the new leader, whose flags differ, runs from the record (and says so)",
@@ -398,56 +399,62 @@
    }
   },
   {
-   "check": "B1: gw0 decisions follow the rule on every observation",
+   "check": "B1: gw0 decision state follows the rule on every observation",
    "ok": true,
-   "wrong": []
+   "wrong": [],
+   "checked": 7,
+   "skipped": 0,
+   "unparsed": []
   },
   {
-   "check": "B1: gw1 decisions follow the rule on every observation",
+   "check": "B1: gw1 decision state follows the rule on every observation",
    "ok": true,
-   "wrong": []
+   "wrong": [],
+   "checked": 7,
+   "skipped": 0,
+   "unparsed": []
   },
   {
    "check": "B1: gw0 every served GET recorded or counted unrecorded",
    "ok": true,
-   "served": 260,
-   "recorded": 40.0,
-   "unrecorded": 220.0,
-   "flushed": 40.0,
+   "served": 294,
+   "recorded": 80.0,
+   "unrecorded": 214.0,
+   "flushed": 80.0,
    "lost": 0.0
   },
   {
    "check": "B1: gw0 every recorded read flushed (none dropped or uncertain)",
    "ok": true,
-   "served": 260,
-   "recorded": 40.0,
-   "unrecorded": 220.0,
-   "flushed": 40.0,
+   "served": 294,
+   "recorded": 80.0,
+   "unrecorded": 214.0,
+   "flushed": 80.0,
    "lost": 0.0
   },
   {
    "check": "B1: gw1 every served GET recorded or counted unrecorded",
    "ok": true,
-   "served": 260,
+   "served": 294,
    "recorded": 40.0,
-   "unrecorded": 220.0,
+   "unrecorded": 254.0,
    "flushed": 40.0,
    "lost": 0.0
   },
   {
    "check": "B1: gw1 every recorded read flushed (none dropped or uncertain)",
    "ok": true,
-   "served": 260,
+   "served": 294,
    "recorded": 40.0,
-   "unrecorded": 220.0,
+   "unrecorded": 254.0,
    "flushed": 40.0,
    "lost": 0.0
   },
   {
    "check": "B1: persisted access counts equal the reads recorded during the change",
    "ok": true,
-   "persisted": 80,
-   "recorded": 80.0
+   "persisted": 120,
+   "recorded": 120.0
   },
   {
    "check": "B1: the record unchanged but for its acknowledgment",
@@ -466,9 +473,9 @@
     "promote_reads": 1000000,
     "window": 600,
     "demote": 3600,
-    "grace_from_ms": 1795147995296,
-    "promotion_from_ms": 1795147995296,
-    "changed_ms": 1795148014911
+    "grace_from_ms": 1795150390300,
+    "promotion_from_ms": 1795150390300,
+    "changed_ms": 1795150408159
    }
   },
   {
@@ -478,7 +485,7 @@
     "id": "ctl-a",
     "holder": "ctl-a#<process>",
     "token": 4,
-    "lease_until_ms": 1795148067486
+    "lease_until_ms": 1795150462802
    },
    "record": {
     "enabled": false,
@@ -494,9 +501,9 @@
     "promote_reads": 1000000,
     "window": 600,
     "demote": 3600,
-    "grace_from_ms": 1795147995296,
-    "promotion_from_ms": 1795147995296,
-    "changed_ms": 1795148014911
+    "grace_from_ms": 1795150390300,
+    "promotion_from_ms": 1795150390300,
+    "changed_ms": 1795150408159
    }
   },
   {
@@ -510,29 +517,35 @@
    "acks": []
   },
   {
-   "check": "B3a: gw0 decisions follow the rule on every observation",
+   "check": "B3a: gw0 decision state follows the rule on every observation",
    "ok": true,
-   "wrong": []
+   "wrong": [],
+   "checked": 14,
+   "skipped": 0,
+   "unparsed": []
   },
   {
-   "check": "B3a: gw1 decisions follow the rule on every observation",
+   "check": "B3a: gw1 decision state follows the rule on every observation",
    "ok": true,
-   "wrong": []
+   "wrong": [],
+   "checked": 14,
+   "skipped": 0,
+   "unparsed": []
   },
   {
    "check": "B2: enabling stamped the grace and the cutoff",
    "ok": true,
-   "grace_from_ms": 1795148074491,
-   "promotion_from_ms": 1795148074491
+   "grace_from_ms": 1795150469784,
+   "promotion_from_ms": 1795150469784
   },
   {
    "check": "B2: px's old count did not promote it (count replaced at the cutoff)",
    "ok": true,
    "px": {
-    "generation": "01a1f726692d7045adba1a51cf6d0cb2",
+    "generation": "01a1f74b1bef74bdbf5a6b1ce44c48fd",
     "tiers": "default",
     "count": 1,
-    "last_ms": 1795148074785
+    "last_ms": 1795150470158
    }
   },
   {
@@ -540,8 +553,8 @@
    "ok": true,
    "before": {
     "generation": 19,
-    "grace_from_ms": 1795148074491,
-    "promotion_from_ms": 1795148074491,
+    "grace_from_ms": 1795150469784,
+    "promotion_from_ms": 1795150469784,
     "tiers": [
      "default",
      "fast"
@@ -553,8 +566,8 @@
    },
    "after": {
     "generation": 19,
-    "grace_from_ms": 1795148074491,
-    "promotion_from_ms": 1795148074491,
+    "grace_from_ms": 1795150469784,
+    "promotion_from_ms": 1795150469784,
     "tiers": [
      "default",
      "fast"
@@ -566,28 +579,36 @@
    }
   },
   {
-   "check": "B2: gw0 decisions follow the rule on every observation",
+   "check": "B2: gw0 decision state follows the rule on every observation",
    "ok": true,
-   "wrong": []
+   "wrong": [],
+   "checked": 29,
+   "skipped": 0,
+   "unparsed": []
   },
   {
-   "check": "B2: gw1 decisions follow the rule on every observation",
+   "check": "B2: gw1 decision state follows the rule on every observation",
    "ok": true,
-   "wrong": []
+   "wrong": [],
+   "checked": 29,
+   "skipped": 0,
+   "unparsed": []
   },
   {
    "check": "B2: px not demoted before demote_after plus the grace margin, then demoted",
    "ok": true,
-   "demoted_ms": 1795148185426,
-   "bound_ms": 1795148181491,
-   "without_grace_ms": 1795148145340
+   "last_seen_upper_ms": 1795150579608,
+   "first_seen_lower_ms": 1795150581121,
+   "bound_ms": 1795150576784,
+   "without_grace_ms": 1795150540629
   },
   {
    "check": "B2: py not demoted before demote_after plus the grace margin, then demoted",
    "ok": true,
-   "demoted_ms": 1795148185426,
-   "bound_ms": 1795148181491,
-   "without_grace_ms": 1795148139807
+   "last_seen_upper_ms": 1795150579608,
+   "first_seen_lower_ms": 1795150581133,
+   "bound_ms": 1795150576784,
+   "without_grace_ms": 1795150535130
   },
   {
    "check": "B2: hot objects stayed in the upper tier",
@@ -600,52 +621,52 @@
   {
    "check": "B2 window: gw0 every served GET recorded or counted unrecorded",
    "ok": true,
-   "served": 994,
-   "recorded": 994.0,
+   "served": 1002,
+   "recorded": 1002.0,
    "unrecorded": 0.0,
-   "flushed": 994.0,
+   "flushed": 1002.0,
    "lost": 0.0
   },
   {
    "check": "B2 window: gw0 every recorded read flushed (none dropped or uncertain)",
    "ok": true,
-   "served": 994,
-   "recorded": 994.0,
+   "served": 1002,
+   "recorded": 1002.0,
    "unrecorded": 0.0,
-   "flushed": 994.0,
+   "flushed": 1002.0,
    "lost": 0.0
   },
   {
    "check": "B2 window: gw1 every served GET recorded or counted unrecorded",
    "ok": true,
-   "served": 994,
-   "recorded": 994.0,
+   "served": 1002,
+   "recorded": 1002.0,
    "unrecorded": 0.0,
-   "flushed": 994.0,
+   "flushed": 1002.0,
    "lost": 0.0
   },
   {
    "check": "B2 window: gw1 every recorded read flushed (none dropped or uncertain)",
    "ok": true,
-   "served": 994,
-   "recorded": 994.0,
+   "served": 1002,
+   "recorded": 1002.0,
    "unrecorded": 0.0,
-   "flushed": 994.0,
+   "flushed": 1002.0,
    "lost": 0.0
   },
   {
    "check": "B2 window: persisted access counts equal the GETs served, per object",
    "ok": true,
    "differing": {},
-   "persisted": 1988,
-   "served": 1988
+   "persisted": 2004,
+   "served": 2004
   },
   {
    "check": "B3b: the held move is mv's",
    "ok": true,
-   "held": "test fault: tiering move held before its switch generation=01a1f72c84fe7258801fffe6ac8a30bb index=0 policy_generation=19",
+   "held": "test fault: tiering move held before its switch generation=01a1f75112f177938bedb8fc140f19f4 index=0 policy_generation=19",
    "mv": {
-    "generation": "01a1f72c84fe7258801fffe6ac8a30bb",
+    "generation": "01a1f75112f177938bedb8fc140f19f4",
     "tiers": "default",
     "count": null,
     "last_ms": null
@@ -655,10 +676,10 @@
    "check": "B3b: the successor moved nothing and kept the reads",
    "ok": true,
    "mv": {
-    "generation": "01a1f72c84fe7258801fffe6ac8a30bb",
+    "generation": "01a1f75112f177938bedb8fc140f19f4",
     "tiers": "default",
     "count": 9,
-    "last_ms": 1795148256842
+    "last_ms": 1795150651785
    },
    "expected_count": 9,
    "skips": 2
@@ -667,20 +688,20 @@
    "check": "B3b: the old term's move did not switch (mv stays in default)",
    "ok": true,
    "mv": {
-    "generation": "01a1f72c84fe7258801fffe6ac8a30bb",
+    "generation": "01a1f75112f177938bedb8fc140f19f4",
     "tiers": "default",
     "count": 9,
-    "last_ms": 1795148256842
+    "last_ms": 1795150651785
    }
   },
   {
    "check": "B3b: the reads recorded meanwhile were not reset",
    "ok": true,
    "mv": {
-    "generation": "01a1f72c84fe7258801fffe6ac8a30bb",
+    "generation": "01a1f75112f177938bedb8fc140f19f4",
     "tiers": "default",
     "count": 9,
-    "last_ms": 1795148256842
+    "last_ms": 1795150651785
    },
    "expected_count": 9
   },
@@ -701,9 +722,9 @@
     "promote_reads": 1000000,
     "window": 600,
     "demote": 60,
-    "grace_from_ms": 1795148074491,
-    "promotion_from_ms": 1795148074491,
-    "changed_ms": 1795148272526
+    "grace_from_ms": 1795150469784,
+    "promotion_from_ms": 1795150469784,
+    "changed_ms": 1795150668054
    }
   },
   {
@@ -712,11 +733,57 @@
    "refused": [
     {
      "controller": "ctl-c",
-     "t_ms": 1795148276654,
+     "t_ms": 1795150672048,
      "level": "WARN",
      "text": "chunk migration failed error=fenced: leadership token 5 of ctl-c#<process> is no longer current index=0"
     }
    ]
+  },
+  {
+   "check": "B3c: the change is not acknowledged while the pass that read the earlier policy runs",
+   "ok": true,
+   "record": {
+    "enabled": true,
+    "generation": 22,
+    "acknowledged": false,
+    "applied_term": 6,
+    "applied_generation": 21,
+    "leader_term": 6,
+    "tiers": [
+     "default",
+     "fast"
+    ],
+    "promote_reads": 1000000,
+    "window": 600,
+    "demote": 60,
+    "grace_from_ms": 1795150469784,
+    "promotion_from_ms": 1795150469784,
+    "changed_ms": 1795150689757
+   }
+  },
+  {
+   "check": "B3c: the move did not switch and the reads were kept",
+   "ok": true,
+   "obj": {
+    "generation": "01a1f7519bf0730abadbaa5cc8e7d03e",
+    "tiers": "default",
+    "count": 8,
+    "last_ms": 1795150688952
+   }
+  },
+  {
+   "check": "B3c: no leader change; acknowledged by the same term after the release",
+   "ok": true,
+   "ack": {
+    "controller": "ctl-a",
+    "t_ms": 1795150702048,
+    "generation": 22,
+    "term": 6,
+    "enabled": true,
+    "grace_from_ms": 1795150469784,
+    "promotion_from_ms": 1795150469784
+   },
+   "released_ms": 1795150701892
   }
  ],
  "c1_reflection": [
@@ -724,17 +791,31 @@
    "label": "C1.0 disable",
    "cmd": "disable",
    "generation": 2,
-   "admin_start_ms": 1795147854301,
-   "admin_end_ms": 1795147854365,
-   "ack_ms": 1795147858918,
+   "admin_start_ms": 1795150259405,
+   "admin_end_ms": 1795150259466,
+   "ack_ms": 1795150264012,
    "ack_by": "ctl-a",
-   "target_ms": 1795147858918,
+   "target_ms": 1795150264012,
    "gateways": {
     "gw0": {
-     "last_before": 1795147857155,
-     "first_after_started": 1795147859159,
-     "first_after_completed": 1795147859160,
-     "delay_ms": 242,
+     "last_before": 1795150262571,
+     "first_after_started": 1795150264575,
+     "first_after_completed": 1795150264576,
+     "delay_ms": 564,
+     "period_ms": [
+      2005,
+      2005,
+      2004,
+      2004,
+      2005
+     ],
+     "decision_ms": 1795150264628
+    },
+    "gw1": {
+     "last_before": 1795150262608,
+     "first_after_started": 1795150264612,
+     "first_after_completed": 1795150264612,
+     "delay_ms": 600,
      "period_ms": [
       2005,
       2004,
@@ -742,21 +823,7 @@
       2004,
       2005
      ],
-     "decision_ms": 1795147859218
-    },
-    "gw1": {
-     "last_before": 1795147857198,
-     "first_after_started": 1795147859202,
-     "first_after_completed": 1795147859202,
-     "delay_ms": 284,
-     "period_ms": [
-      2005,
-      2005,
-      2005,
-      2004,
-      2003
-     ],
-     "decision_ms": 1795147859219
+     "decision_ms": 1795150264629
     }
    }
   },
@@ -764,33 +831,33 @@
    "label": "C1.0 set while disabled",
    "cmd": "set --tier default --tier fast --promote-reads 999999 --promote-window-secs 600 --demote-after-secs 7200",
    "generation": 3,
-   "admin_start_ms": 1795147863642,
-   "admin_end_ms": 1795147863705,
-   "ack_ms": 1795147863977,
+   "admin_start_ms": 1795150268940,
+   "admin_end_ms": 1795150269001,
+   "ack_ms": 1795150269061,
    "ack_by": "ctl-a",
-   "target_ms": 1795147863977,
+   "target_ms": 1795150269061,
    "gateways": {
     "gw0": {
-     "last_before": 1795147863169,
-     "first_after_started": 1795147865172,
-     "first_after_completed": 1795147865172,
-     "delay_ms": 1195,
+     "last_before": 1795150268585,
+     "first_after_started": 1795150270588,
+     "first_after_completed": 1795150270589,
+     "delay_ms": 1528,
      "period_ms": [
       2005,
       2004,
-      2004
+      2005
      ],
      "decision_ms": null
     },
     "gw1": {
-     "last_before": 1795147863210,
-     "first_after_started": 1795147865214,
-     "first_after_completed": 1795147865214,
-     "delay_ms": 1237,
+     "last_before": 1795150268621,
+     "first_after_started": 1795150270625,
+     "first_after_completed": 1795150270626,
+     "delay_ms": 1565,
      "period_ms": [
-      2003,
       2005,
-      2004
+      2004,
+      2005
      ],
      "decision_ms": null
     }
@@ -800,35 +867,37 @@
    "label": "C1.0 enable",
    "cmd": "enable",
    "generation": 4,
-   "admin_start_ms": 1795147868322,
-   "admin_end_ms": 1795147868390,
-   "ack_ms": 1795147869024,
+   "admin_start_ms": 1795150273574,
+   "admin_end_ms": 1795150273630,
+   "ack_ms": 1795150274114,
    "ack_by": "ctl-a",
-   "target_ms": 1795147868390,
+   "target_ms": 1795150273630,
    "gateways": {
     "gw0": {
-     "last_before": 1795147867177,
-     "first_after_started": 1795147869180,
-     "first_after_completed": 1795147869180,
-     "delay_ms": 790,
-     "period_ms": [
-      2004,
-      2004,
-      2005
-     ],
-     "decision_ms": 1795147869229
-    },
-    "gw1": {
-     "last_before": 1795147867219,
-     "first_after_started": 1795147869223,
-     "first_after_completed": 1795147869223,
-     "delay_ms": 833,
+     "last_before": 1795150272594,
+     "first_after_started": 1795150274598,
+     "first_after_completed": 1795150274598,
+     "delay_ms": 968,
      "period_ms": [
       2005,
-      2003,
-      2005
+      2005,
+      2004,
+      2004
      ],
-     "decision_ms": 1795147869230
+     "decision_ms": 1795150274639
+    },
+    "gw1": {
+     "last_before": 1795150272631,
+     "first_after_started": 1795150274634,
+     "first_after_completed": 1795150274634,
+     "delay_ms": 1004,
+     "period_ms": [
+      2005,
+      2004,
+      2004,
+      2007
+     ],
+     "decision_ms": 1795150274639
     }
    }
   },
@@ -836,33 +905,33 @@
    "label": "C1.0 set while enabled",
    "cmd": "set --tier default --tier fast --promote-reads 1000000 --promote-window-secs 600 --demote-after-secs 3600",
    "generation": 5,
-   "admin_start_ms": 1795147873492,
-   "admin_end_ms": 1795147873555,
-   "ack_ms": 1795147874082,
+   "admin_start_ms": 1795150278961,
+   "admin_end_ms": 1795150279017,
+   "ack_ms": 1795150279166,
    "ack_by": "ctl-a",
-   "target_ms": 1795147874082,
+   "target_ms": 1795150279166,
    "gateways": {
     "gw0": {
-     "last_before": 1795147873189,
-     "first_after_started": 1795147875192,
-     "first_after_completed": 1795147875192,
-     "delay_ms": 1110,
+     "last_before": 1795150278606,
+     "first_after_started": 1795150280610,
+     "first_after_completed": 1795150280610,
+     "delay_ms": 1444,
      "period_ms": [
-      2005,
-      2003,
-      2004
+      2004,
+      2004,
+      2003
      ],
      "decision_ms": null
     },
     "gw1": {
-     "last_before": 1795147873231,
-     "first_after_started": 1795147875235,
-     "first_after_completed": 1795147875236,
-     "delay_ms": 1154,
+     "last_before": 1795150278646,
+     "first_after_started": 1795150280650,
+     "first_after_completed": 1795150280651,
+     "delay_ms": 1485,
      "period_ms": [
+      2007,
       2005,
-      2004,
-      2006
+      2005
      ],
      "decision_ms": null
     }
@@ -872,35 +941,37 @@
    "label": "C1.1 disable",
    "cmd": "disable",
    "generation": 6,
-   "admin_start_ms": 1795147878483,
-   "admin_end_ms": 1795147878562,
-   "ack_ms": 1795147879132,
+   "admin_start_ms": 1795150283590,
+   "admin_end_ms": 1795150283645,
+   "ack_ms": 1795150284219,
    "ack_by": "ctl-a",
-   "target_ms": 1795147879132,
+   "target_ms": 1795150284219,
    "gateways": {
     "gw0": {
-     "last_before": 1795147877196,
-     "first_after_started": 1795147879200,
-     "first_after_completed": 1795147879201,
-     "delay_ms": 69,
+     "last_before": 1795150282614,
+     "first_after_started": 1795150284618,
+     "first_after_completed": 1795150284619,
+     "delay_ms": 400,
      "period_ms": [
-      2004,
+      2003,
       2005,
-      2003
+      2004,
+      2005
      ],
-     "decision_ms": 1795147879239
+     "decision_ms": 1795150284652
     },
     "gw1": {
-     "last_before": 1795147877241,
-     "first_after_started": 1795147879245,
-     "first_after_completed": 1795147879246,
-     "delay_ms": 114,
+     "last_before": 1795150282655,
+     "first_after_started": 1795150284660,
+     "first_after_completed": 1795150284660,
+     "delay_ms": 441,
      "period_ms": [
-      2004,
       2005,
-      2003
+      2005,
+      2004,
+      2004
      ],
-     "decision_ms": 1795147879300
+     "decision_ms": 1795150284750
     }
    }
   },
@@ -908,32 +979,32 @@
    "label": "C1.1 set while disabled",
    "cmd": "set --tier default --tier fast --promote-reads 1000000 --promote-window-secs 600 --demote-after-secs 3600",
    "generation": 7,
-   "admin_start_ms": 1795147883472,
-   "admin_end_ms": 1795147883542,
-   "ack_ms": 1795147884188,
+   "admin_start_ms": 1795150289082,
+   "admin_end_ms": 1795150289138,
+   "ack_ms": 1795150289272,
    "ack_by": "ctl-a",
-   "target_ms": 1795147884188,
+   "target_ms": 1795150289272,
    "gateways": {
     "gw0": {
-     "last_before": 1795147883209,
-     "first_after_started": 1795147885213,
-     "first_after_completed": 1795147885213,
-     "delay_ms": 1025,
+     "last_before": 1795150288627,
+     "first_after_started": 1795150290631,
+     "first_after_completed": 1795150290632,
+     "delay_ms": 1360,
      "period_ms": [
-      2003,
       2005,
-      2005
+      2004,
+      2004
      ],
      "decision_ms": null
     },
     "gw1": {
-     "last_before": 1795147883254,
-     "first_after_started": 1795147885258,
-     "first_after_completed": 1795147885258,
-     "delay_ms": 1070,
+     "last_before": 1795150288669,
+     "first_after_started": 1795150290672,
+     "first_after_completed": 1795150290673,
+     "delay_ms": 1401,
      "period_ms": [
-      2003,
-      2005,
+      2004,
+      2004,
       2004
      ],
      "decision_ms": null
@@ -944,35 +1015,36 @@
    "label": "C1.1 enable",
    "cmd": "enable",
    "generation": 8,
-   "admin_start_ms": 1795147888441,
-   "admin_end_ms": 1795147888502,
-   "ack_ms": 1795147889243,
+   "admin_start_ms": 1795150293654,
+   "admin_end_ms": 1795150293720,
+   "ack_ms": 1795150294322,
    "ack_by": "ctl-a",
-   "target_ms": 1795147888502,
+   "target_ms": 1795150293720,
    "gateways": {
     "gw0": {
-     "last_before": 1795147887219,
-     "first_after_started": 1795147889222,
-     "first_after_completed": 1795147889223,
-     "delay_ms": 721,
-     "period_ms": [
-      2004,
-      2004,
-      2004
-     ],
-     "decision_ms": 1795147889249
-    },
-    "gw1": {
-     "last_before": 1795147887263,
-     "first_after_started": 1795147889267,
-     "first_after_completed": 1795147889268,
-     "delay_ms": 766,
+     "last_before": 1795150292636,
+     "first_after_started": 1795150294640,
+     "first_after_completed": 1795150294640,
+     "delay_ms": 920,
      "period_ms": [
       2005,
       2004,
       2004
      ],
-     "decision_ms": 1795147889351
+     "decision_ms": 1795150294659
+    },
+    "gw1": {
+     "last_before": 1795150292677,
+     "first_after_started": 1795150294680,
+     "first_after_completed": 1795150294681,
+     "delay_ms": 961,
+     "period_ms": [
+      2004,
+      2004,
+      2005,
+      2004
+     ],
+     "decision_ms": 1795150294760
     }
    }
   },
@@ -980,33 +1052,33 @@
    "label": "C1.1 set while enabled",
    "cmd": "set --tier default --tier fast --promote-reads 999999 --promote-window-secs 600 --demote-after-secs 7200",
    "generation": 9,
-   "admin_start_ms": 1795147893606,
-   "admin_end_ms": 1795147893677,
-   "ack_ms": 1795147894304,
+   "admin_start_ms": 1795150299075,
+   "admin_end_ms": 1795150299146,
+   "ack_ms": 1795150299378,
    "ack_by": "ctl-a",
-   "target_ms": 1795147894304,
+   "target_ms": 1795150299378,
    "gateways": {
     "gw0": {
-     "last_before": 1795147893230,
-     "first_after_started": 1795147895234,
-     "first_after_completed": 1795147895235,
-     "delay_ms": 931,
+     "last_before": 1795150298649,
+     "first_after_started": 1795150300653,
+     "first_after_completed": 1795150300653,
+     "delay_ms": 1275,
      "period_ms": [
       2004,
-      2004,
+      2005,
       2004
      ],
      "decision_ms": null
     },
     "gw1": {
-     "last_before": 1795147893275,
-     "first_after_started": 1795147895278,
-     "first_after_completed": 1795147895279,
-     "delay_ms": 975,
+     "last_before": 1795150298690,
+     "first_after_started": 1795150300694,
+     "first_after_completed": 1795150300695,
+     "delay_ms": 1317,
      "period_ms": [
       2004,
-      2003,
-      2005
+      2005,
+      2004
      ],
      "decision_ms": null
     }
@@ -1016,37 +1088,35 @@
    "label": "C1.2 disable",
    "cmd": "disable",
    "generation": 10,
-   "admin_start_ms": 1795147898598,
-   "admin_end_ms": 1795147898658,
-   "ack_ms": 1795147899358,
+   "admin_start_ms": 1795150303716,
+   "admin_end_ms": 1795150303783,
+   "ack_ms": 1795150304428,
    "ack_by": "ctl-a",
-   "target_ms": 1795147899358,
+   "target_ms": 1795150304428,
    "gateways": {
     "gw0": {
-     "last_before": 1795147899243,
-     "first_after_started": 1795147901247,
-     "first_after_completed": 1795147901247,
-     "delay_ms": 1889,
+     "last_before": 1795150302657,
+     "first_after_started": 1795150304661,
+     "first_after_completed": 1795150304662,
+     "delay_ms": 234,
      "period_ms": [
       2004,
       2005,
-      2005,
       2004
      ],
-     "decision_ms": 1795147901262
+     "decision_ms": 1795150304670
     },
     "gw1": {
-     "last_before": 1795147899287,
-     "first_after_started": 1795147901291,
-     "first_after_completed": 1795147901292,
-     "delay_ms": 1934,
+     "last_before": 1795150302699,
+     "first_after_started": 1795150304701,
+     "first_after_completed": 1795150304702,
+     "delay_ms": 274,
      "period_ms": [
       2003,
       2005,
-      2005,
-      2003
+      2004
      ],
-     "decision_ms": 1795147901295
+     "decision_ms": 1795150304771
     }
    }
   },
@@ -1054,39 +1124,35 @@
    "label": "C1.2 set while disabled",
    "cmd": "set --tier default --tier fast --promote-reads 999999 --promote-window-secs 600 --demote-after-secs 7200",
    "generation": 11,
-   "admin_start_ms": 1795147905622,
-   "admin_end_ms": 1795147905706,
-   "ack_ms": 1795147909455,
+   "admin_start_ms": 1795150308943,
+   "admin_end_ms": 1795150309004,
+   "ack_ms": 1795150309482,
    "ack_by": "ctl-a",
-   "target_ms": 1795147909455,
+   "target_ms": 1795150309482,
    "gateways": {
     "gw0": {
-     "last_before": 1795147909264,
-     "first_after_started": 1795147911268,
-     "first_after_completed": 1795147911268,
-     "delay_ms": 1813,
+     "last_before": 1795150308670,
+     "first_after_started": 1795150310674,
+     "first_after_completed": 1795150310675,
+     "delay_ms": 1193,
      "period_ms": [
       2004,
       2004,
-      2004,
-      2005,
       2005
      ],
-     "decision_ms": 1795147911272
+     "decision_ms": null
     },
     "gw1": {
-     "last_before": 1795147909309,
-     "first_after_started": 1795147911313,
-     "first_after_completed": 1795147911313,
-     "delay_ms": 1858,
+     "last_before": 1795150308711,
+     "first_after_started": 1795150310715,
+     "first_after_completed": 1795150310715,
+     "delay_ms": 1233,
      "period_ms": [
-      2005,
       2004,
       2005,
-      2004,
       2004
      ],
-     "decision_ms": 1795147911373
+     "decision_ms": null
     }
    }
   },
@@ -1094,37 +1160,35 @@
    "label": "C1.2 enable",
    "cmd": "enable",
    "generation": 12,
-   "admin_start_ms": 1795147915773,
-   "admin_end_ms": 1795147915835,
-   "ack_ms": 1795147919560,
+   "admin_start_ms": 1795150313897,
+   "admin_end_ms": 1795150313955,
+   "ack_ms": 1795150314535,
    "ack_by": "ctl-a",
-   "target_ms": 1795147915835,
+   "target_ms": 1795150313955,
    "gateways": {
     "gw0": {
-     "last_before": 1795147915279,
-     "first_after_started": 1795147917284,
-     "first_after_completed": 1795147917285,
-     "delay_ms": 1450,
+     "last_before": 1795150312679,
+     "first_after_started": 1795150314683,
+     "first_after_completed": 1795150314683,
+     "delay_ms": 728,
      "period_ms": [
-      2005,
-      2006,
-      2005,
-      2004
+      2004,
+      2004,
+      2005
      ],
-     "decision_ms": 1795147917308
+     "decision_ms": 1795150314780
     },
     "gw1": {
-     "last_before": 1795147915322,
-     "first_after_started": 1795147917325,
-     "first_after_completed": 1795147917325,
-     "delay_ms": 1490,
+     "last_before": 1795150312720,
+     "first_after_started": 1795150314724,
+     "first_after_completed": 1795150314725,
+     "delay_ms": 770,
      "period_ms": [
+      2005,
       2004,
-      2004,
-      2003,
-      2003
+      2006
      ],
-     "decision_ms": 1795147917334
+     "decision_ms": 1795150314781
     }
    }
   },
@@ -1132,35 +1196,33 @@
    "label": "C1.2 set while enabled",
    "cmd": "set --tier default --tier fast --promote-reads 1000000 --promote-window-secs 600 --demote-after-secs 3600",
    "generation": 13,
-   "admin_start_ms": 1795147921525,
-   "admin_end_ms": 1795147921586,
-   "ack_ms": 1795147924614,
+   "admin_start_ms": 1795150319018,
+   "admin_end_ms": 1795150319082,
+   "ack_ms": 1795150319590,
    "ack_by": "ctl-a",
-   "target_ms": 1795147924614,
+   "target_ms": 1795150319590,
    "gateways": {
     "gw0": {
-     "last_before": 1795147923298,
-     "first_after_started": 1795147925302,
-     "first_after_completed": 1795147925303,
-     "delay_ms": 689,
+     "last_before": 1795150318693,
+     "first_after_started": 1795150320696,
+     "first_after_completed": 1795150320696,
+     "delay_ms": 1106,
      "period_ms": [
-      2004,
       2005,
       2004,
-      2004
+      2005
      ],
      "decision_ms": null
     },
     "gw1": {
-     "last_before": 1795147923335,
-     "first_after_started": 1795147925338,
-     "first_after_completed": 1795147925338,
-     "delay_ms": 724,
+     "last_before": 1795150318735,
+     "first_after_started": 1795150320738,
+     "first_after_completed": 1795150320739,
+     "delay_ms": 1149,
      "period_ms": [
-      2003,
-      2003,
+      2006,
       2004,
-      2004
+      2006
      ],
      "decision_ms": null
     }
@@ -1169,107 +1231,107 @@
  ],
  "c2_stale": {
   "fail": {
-   "fault_ms": 1795147931463,
-   "cleared_ms": 1795147947400,
-   "last_ok_started": 1795147931314,
-   "recording_on_ms": 1795147941349,
-   "resumed_after_ms": 10035,
-   "recording_off_ms": 1795147949410,
+   "fault_ms": 1795150324849,
+   "cleared_ms": 1795150340952,
+   "last_ok_started": 1795150324705,
+   "recording_on_ms": 1795150334796,
+   "resumed_after_ms": 10091,
+   "recording_off_ms": 1795150342782,
    "decisions": [
     {
-     "t_ms": 1795147941349,
+     "t_ms": 1795150334796,
      "recording": true,
-     "age": "Some(10034)",
-     "obs": "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 9214 ms after the read"
+     "age": "Some(10091)",
+     "obs": "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 7556 ms after the read"
     },
     {
-     "t_ms": 1795147949410,
+     "t_ms": 1795150342782,
      "recording": false,
-     "age": "Some(54)",
-     "obs": "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 7869 ms after the read"
+     "age": "Some(37)",
+     "obs": "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 9547 ms after the read"
     }
    ],
    "refreshes": [
     [
-     1795147929310,
-     1795147929311,
-     "enabled false generation 14 acknowledged generation 13 term 2 same incarnation t"
+     1795150322701,
+     1795150322701,
+     "enabled true generation 13 acknowledged generation 13 term 2 same incarnation tr"
     ],
     [
-     1795147931314,
-     1795147931315,
+     1795150324705,
+     1795150324705,
      "enabled false generation 14 acknowledged generation 14 term 2 same incarnation t"
     ],
     [
-     1795147949356,
-     1795147949356,
+     1795150342744,
+     1795150342745,
      "enabled false generation 14 acknowledged generation 14 term 2 same incarnation t"
     ]
    ]
   },
   "delay": {
-   "fault_ms": 1795147949548,
-   "cleared_ms": 1795147984488,
-   "last_ok_started": 1795147949356,
-   "recording_on_ms": 1795147959421,
-   "resumed_after_ms": 10065,
-   "recording_off_ms": 1795147985397,
+   "fault_ms": 1795150343056,
+   "cleared_ms": 1795150377895,
+   "last_ok_started": 1795150342744,
+   "recording_on_ms": 1795150352815,
+   "resumed_after_ms": 10071,
+   "recording_off_ms": 1795150378786,
    "decisions": [
     {
-     "t_ms": 1795147959421,
+     "t_ms": 1795150352815,
      "recording": true,
-     "age": "Some(10065)",
-     "obs": "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 7869 ms after the read"
+     "age": "Some(10070)",
+     "obs": "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 9547 ms after the read"
     },
     {
-     "t_ms": 1795147985397,
+     "t_ms": 1795150378786,
      "recording": false,
      "age": "Some(25)",
-     "obs": "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 8589 ms after the read"
+     "obs": "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 6931 ms after the read"
     }
    ],
    "refreshes": [
     [
-     1795147949356,
-     1795147949356,
+     1795150342744,
+     1795150342745,
      "enabled false generation 14 acknowledged generation 14 term 2 same incarnation t"
     ],
     [
-     1795147951360,
-     1795147966363,
+     1795150344749,
+     1795150359750,
      "enabled false generation 14 acknowledged generation 14 term 2 same incarnation t"
     ],
     [
-     1795147968366,
-     1795147983368,
+     1795150361755,
+     1795150376757,
      "enabled false generation 14 acknowledged generation 14 term 2 same incarnation t"
     ],
     [
-     1795147985372,
-     1795147985372,
+     1795150378761,
+     1795150378761,
      "enabled false generation 14 acknowledged generation 14 term 2 same incarnation t"
     ]
    ]
   },
   "late_after_enable": {
-   "enable_start_ms_a": 1795147994455,
-   "enable_end_ms_a": 1795147994521,
+   "enable_start_ms_a": 1795150387827,
+   "enable_end_ms_a": 1795150387887,
    "attempts": 1,
    "spanning_read": [
-    1795147993382,
-    1795147997384,
-    "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 3256 ms after the read"
+    1795150386771,
+    1795150390772,
+    "enabled false generation 14 acknowledged generation 14 term 2 same incarnation true; leader term 2 lease 4930 ms after the read"
    ],
    "off_after_enable_ms": [],
    "on_after_enable_ms": [
-    8895
+    8973
    ],
    "decisions": [
     {
-     "t_ms": 1795148003416,
+     "t_ms": 1795150396860,
      "recording": true,
-     "age": "Some(4026)",
-     "obs": "enabled true generation 15 acknowledged generation 15 term 2 same incarnation true; leader term 2 lease 3928 ms after the read"
+     "age": "Some(4083)",
+     "obs": "enabled true generation 15 acknowledged generation 15 term 2 same incarnation true; leader term 2 lease 5605 ms after the read"
     }
    ]
   }
@@ -1279,75 +1341,75 @@
    {
     "t_s": 0.0,
     "who": "gw0",
-    "what": "observed enabled false generation 16 acknowledged generation 16 term 2 same incarnation true; leader term 2 lease 7938 ms after the read"
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 2 same incarnation true; leader term 2 lease 9614 ms after the read"
    },
    {
-    "t_s": 0.133,
+    "t_s": 0.137,
     "who": "gw1",
-    "what": "observed enabled false generation 16 acknowledged generation 16 term 2 same incarnation true; leader term 2 lease 7805 ms after the read"
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 2 same incarnation true; leader term 2 lease 9477 ms after the read"
    },
    {
-    "t_s": 3.502,
+    "t_s": 3.752,
     "who": "ctl-a",
     "what": "released leadership controller=ctl-a"
    },
    {
-    "t_s": 4.01,
+    "t_s": 4.008,
     "who": "gw0",
-    "what": "observed enabled false generation 16 acknowledged generation 16 term 2 same incarnation true; leader term 2 lease -1795148023420 ms after the read"
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 2 same incarnation true; leader term 2 lease -1795150416806 ms after the read"
    },
    {
-    "t_s": 4.02,
+    "t_s": 4.097,
     "who": "gw0",
-    "what": "recording true (observation Some(10) ms old)"
+    "what": "recording true (observation Some(89) ms old)"
    },
    {
-    "t_s": 4.142,
+    "t_s": 4.145,
     "who": "gw1",
-    "what": "observed enabled false generation 16 acknowledged generation 16 term 2 same incarnation true; leader term 2 lease -1795148023552 ms after the read"
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 2 same incarnation true; leader term 2 lease -1795150416943 ms after the read"
    },
    {
-    "t_s": 4.221,
+    "t_s": 4.198,
     "who": "gw1",
-    "what": "recording true (observation Some(79) ms old)"
+    "what": "recording true (observation Some(53) ms old)"
    },
    {
-    "t_s": 4.435,
+    "t_s": 6.143,
     "who": "ctl-c",
     "what": "acquired leadership controller=ctl-c token=3"
    },
    {
-    "t_s": 4.438,
-    "who": "ctl-c",
-    "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
-   },
-   {
-    "t_s": 4.444,
+    "t_s": 6.149,
     "who": "ctl-c",
     "what": "acknowledged generation 16 term 3"
    },
    {
-    "t_s": 6.013,
-    "who": "gw0",
-    "what": "observed enabled false generation 16 acknowledged generation 16 term 3 same incarnation true; leader term 3 lease 8419 ms after the read"
+    "t_s": 6.151,
+    "who": "ctl-c",
+    "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 6.022,
-    "who": "gw0",
-    "what": "recording false (observation Some(9) ms old)"
-   },
-   {
-    "t_s": 6.147,
+    "t_s": 6.151,
     "who": "gw1",
-    "what": "observed enabled false generation 16 acknowledged generation 16 term 3 same incarnation true; leader term 3 lease 8285 ms after the read"
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 3 same incarnation true; leader term 3 lease 9988 ms after the read"
    },
    {
-    "t_s": 6.188,
+    "t_s": 6.201,
     "who": "gw1",
-    "what": "recording false (observation Some(42) ms old)"
+    "what": "recording false (observation Some(50) ms old)"
    },
    {
-    "t_s": 9.446,
+    "t_s": 8.017,
+    "who": "gw0",
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 3 same incarnation true; leader term 3 lease 8122 ms after the read"
+   },
+   {
+    "t_s": 8.101,
+    "who": "gw0",
+    "what": "recording false (observation Some(85) ms old)"
+   },
+   {
+    "t_s": 11.155,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    }
@@ -1356,60 +1418,65 @@
    {
     "t_s": 0.0,
     "who": "gw0",
-    "what": "observed enabled false generation 16 acknowledged generation 16 term 3 same incarnation true; leader term 3 lease 9085 ms after the read"
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 3 same incarnation true; leader term 3 lease 8790 ms after the read"
    },
    {
-    "t_s": 0.134,
+    "t_s": 0.14,
     "who": "gw1",
-    "what": "observed enabled false generation 16 acknowledged generation 16 term 3 same incarnation true; leader term 3 lease 8951 ms after the read"
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 3 same incarnation true; leader term 3 lease 8650 ms after the read"
    },
    {
-    "t_s": 2.424,
+    "t_s": 2.131,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 12.068,
-    "who": "gw0",
-    "what": "recording true (observation Some(42) ms old)"
-   },
-   {
-    "t_s": 12.17,
+    "t_s": 10.162,
     "who": "gw1",
-    "what": "recording true (observation Some(12) ms old)"
+    "what": "recording true (observation Some(0) ms old)"
    },
    {
-    "t_s": 12.702,
+    "t_s": 12.064,
+    "who": "gw0",
+    "what": "recording true (observation Some(39) ms old)"
+   },
+   {
+    "t_s": 12.167,
+    "who": "gw1",
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 3 same incarnation true; leader term 3 lease -36 ms after the read"
+   },
+   {
+    "t_s": 12.624,
     "who": "ctl-a",
     "what": "acquired leadership controller=ctl-a token=4"
    },
    {
-    "t_s": 12.707,
+    "t_s": 12.631,
     "who": "ctl-a",
     "what": "acknowledged generation 16 term 4"
    },
    {
-    "t_s": 14.03,
+    "t_s": 14.029,
     "who": "gw0",
-    "what": "observed enabled false generation 16 acknowledged generation 16 term 4 same incarnation true; leader term 4 lease 8669 ms after the read"
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 4 same incarnation true; leader term 4 lease 8588 ms after the read"
    },
    {
-    "t_s": 14.07,
+    "t_s": 14.066,
     "who": "gw0",
-    "what": "recording false (observation Some(40) ms old)"
-   },
-   {
-    "t_s": 14.162,
-    "who": "gw1",
-    "what": "observed enabled false generation 16 acknowledged generation 16 term 4 same incarnation true; leader term 4 lease 8537 ms after the read"
+    "what": "recording false (observation Some(37) ms old)"
    },
    {
     "t_s": 14.172,
     "who": "gw1",
-    "what": "recording false (observation Some(10) ms old)"
+    "what": "observed enabled false generation 16 acknowledged generation 16 term 4 same incarnation true; leader term 4 lease 8445 ms after the read"
    },
    {
-    "t_s": 17.518,
+    "t_s": 14.267,
+    "who": "gw1",
+    "what": "recording false (observation Some(95) ms old)"
+   },
+   {
+    "t_s": 17.508,
     "who": "ctl-c",
     "what": "lost leadership controller=ctl-c token=3"
    }
@@ -1418,90 +1485,90 @@
    {
     "t_s": 0.0,
     "who": "gw0",
-    "what": "observed enabled true generation 19 acknowledged generation 19 term 4 same incarnation true; leader term 4 lease 9260 ms after the read"
+    "what": "observed enabled true generation 19 acknowledged generation 19 term 4 same incarnation true; leader term 4 lease 9199 ms after the read"
    },
    {
-    "t_s": 0.131,
+    "t_s": 0.135,
     "who": "gw1",
-    "what": "observed enabled true generation 19 acknowledged generation 19 term 4 same incarnation true; leader term 4 lease 9129 ms after the read"
+    "what": "observed enabled true generation 19 acknowledged generation 19 term 4 same incarnation true; leader term 4 lease 9064 ms after the read"
    },
    {
-    "t_s": 3.727,
+    "t_s": 3.634,
     "who": "ctl-a",
     "what": "released leadership controller=ctl-a"
    },
    {
     "t_s": 4.008,
-    "who": "gw0",
-    "what": "observed enabled true generation 19 acknowledged generation 19 term 4 same incarnation true; leader term 4 lease -1795148135664 ms after the read"
-   },
-   {
-    "t_s": 4.037,
     "who": "ctl-c",
     "what": "acquired leadership controller=ctl-c token=5"
    },
    {
-    "t_s": 4.045,
+    "t_s": 4.009,
+    "who": "gw0",
+    "what": "observed enabled true generation 19 acknowledged generation 19 term 4 same incarnation true; leader term 5 lease 9995 ms after the read"
+   },
+   {
+    "t_s": 4.014,
     "who": "ctl-c",
     "what": "acknowledged generation 19 term 5"
    },
    {
-    "t_s": 4.046,
+    "t_s": 4.015,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 4.141,
+    "t_s": 4.144,
     "who": "gw1",
-    "what": "observed enabled true generation 19 acknowledged generation 19 term 5 same incarnation true; leader term 5 lease 9881 ms after the read"
+    "what": "observed enabled true generation 19 acknowledged generation 19 term 5 same incarnation true; leader term 5 lease 9860 ms after the read"
    },
    {
-    "t_s": 6.012,
+    "t_s": 6.014,
     "who": "gw0",
-    "what": "observed enabled true generation 19 acknowledged generation 19 term 5 same incarnation true; leader term 5 lease 8010 ms after the read"
+    "what": "observed enabled true generation 19 acknowledged generation 19 term 5 same incarnation true; leader term 5 lease 7990 ms after the read"
    },
    {
-    "t_s": 9.516,
+    "t_s": 9.508,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 15.008,
+    "t_s": 14.967,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 20.449,
+    "t_s": 20.37,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 25.896,
+    "t_s": 25.826,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 31.416,
+    "t_s": 31.279,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 36.887,
+    "t_s": 36.797,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 42.337,
+    "t_s": 42.234,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 47.775,
+    "t_s": 47.71,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    },
    {
-    "t_s": 53.173,
+    "t_s": 53.082,
     "who": "ctl-c",
     "what": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_"
    }
@@ -1509,38 +1576,38 @@
  },
  "events": [
   {
-   "t_ms": 1795147831774,
+   "t_ms": 1795150237192,
    "event": "A1: controllers start at",
-   "at_ms_a": 1795147834772
+   "at_ms_a": 1795150240141
   },
   {
-   "t_ms": 1795147840105,
+   "t_ms": 1795150245481,
    "event": "A1: controller events",
    "events": [
     {
      "controller": "ctl-c",
-     "t_ms": 1795147834790,
+     "t_ms": 1795150240160,
      "level": "INFO",
      "text": "acquired leadership controller=ctl-c token=1"
     },
     {
      "controller": "ctl-c",
-     "t_ms": 1795147834797,
+     "t_ms": 1795150240167,
      "level": "INFO",
      "text": "tiering record seeded from the controller's flags policy=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 1000000, promote_window_ms: 600000, demote_after_ms: 3600000 } term=1"
     }
    ]
   },
   {
-   "t_ms": 1795147840105,
+   "t_ms": 1795150245481,
    "event": "A1: status sequence",
    "seen": [
     [
-     1795147831786,
+     1795150237190,
      null
     ],
     [
-     1795147835012,
+     1795150240420,
      [
       1,
       false,
@@ -1550,48 +1617,48 @@
    ]
   },
   {
-   "t_ms": 1795147840593,
+   "t_ms": 1795150245731,
    "event": "A2: tiering key cleared on the disposable store"
   },
   {
-   "t_ms": 1795147840699,
+   "t_ms": 1795150245857,
    "event": "A2: controllers start at",
-   "at_ms_a": 1795147843704
+   "at_ms_a": 1795150248805
   },
   {
-   "t_ms": 1795147849111,
+   "t_ms": 1795150254140,
    "event": "A2: controller events",
    "events": [
     {
      "controller": "ctl-c",
-     "t_ms": 1795147840475,
+     "t_ms": 1795150245658,
      "level": "INFO",
      "text": "released leadership controller=ctl-c"
     },
     {
      "controller": "ctl-a",
-     "t_ms": 1795147843722,
+     "t_ms": 1795150248820,
      "level": "INFO",
      "text": "acquired leadership controller=ctl-a token=2"
     },
     {
      "controller": "ctl-a",
-     "t_ms": 1795147843733,
+     "t_ms": 1795150248828,
      "level": "INFO",
      "text": "tiering record seeded from the controller's flags policy=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 1000000, promote_window_ms: 600000, demote_after_ms: 3600000 } term=2"
     }
    ]
   },
   {
-   "t_ms": 1795147849112,
+   "t_ms": 1795150254140,
    "event": "A2: status sequence",
    "seen": [
     [
-     1795147840707,
+     1795150245859,
      null
     ],
     [
-     1795147843964,
+     1795150249088,
      [
       1,
       false,
@@ -1601,7 +1668,7 @@
    ]
   },
   {
-   "t_ms": 1795147854220,
+   "t_ms": 1795150259379,
    "event": "load start",
    "tag": "c1",
    "keys": 200,
@@ -1609,142 +1676,142 @@
    "workers_per_gateway": 2
   },
   {
-   "t_ms": 1795147854319,
+   "t_ms": 1795150259471,
    "event": "admin",
    "cmd": "disable",
-   "start_ms_a": 1795147854301,
-   "end_ms_a": 1795147854365,
+   "start_ms_a": 1795150259405,
+   "end_ms_a": 1795150259466,
    "generation": 2,
    "enabled": false,
-   "changed_ms": 1795147854327
+   "changed_ms": 1795150259434
   },
   {
-   "t_ms": 1795147863660,
+   "t_ms": 1795150269008,
    "event": "admin",
    "cmd": "set --tier default --tier fast --promote-reads 999999 --promote-window-secs 600 --demote-after-secs 7200",
-   "start_ms_a": 1795147863642,
-   "end_ms_a": 1795147863705,
+   "start_ms_a": 1795150268940,
+   "end_ms_a": 1795150269001,
    "generation": 3,
    "enabled": false,
-   "changed_ms": 1795147863669
+   "changed_ms": 1795150268965
   },
   {
-   "t_ms": 1795147868346,
+   "t_ms": 1795150273635,
    "event": "admin",
    "cmd": "enable",
-   "start_ms_a": 1795147868322,
-   "end_ms_a": 1795147868390,
+   "start_ms_a": 1795150273574,
+   "end_ms_a": 1795150273630,
    "generation": 4,
    "enabled": true,
-   "changed_ms": 1795147868351
+   "changed_ms": 1795150273597
   },
   {
-   "t_ms": 1795147873511,
+   "t_ms": 1795150279022,
    "event": "admin",
    "cmd": "set --tier default --tier fast --promote-reads 1000000 --promote-window-secs 600 --demote-after-secs 3600",
-   "start_ms_a": 1795147873492,
-   "end_ms_a": 1795147873555,
+   "start_ms_a": 1795150278961,
+   "end_ms_a": 1795150279017,
    "generation": 5,
    "enabled": true,
-   "changed_ms": 1795147873520
+   "changed_ms": 1795150278984
   },
   {
-   "t_ms": 1795147878519,
+   "t_ms": 1795150283650,
    "event": "admin",
    "cmd": "disable",
-   "start_ms_a": 1795147878483,
-   "end_ms_a": 1795147878562,
+   "start_ms_a": 1795150283590,
+   "end_ms_a": 1795150283645,
    "generation": 6,
    "enabled": false,
-   "changed_ms": 1795147878507
+   "changed_ms": 1795150283614
   },
   {
-   "t_ms": 1795147883497,
+   "t_ms": 1795150289143,
    "event": "admin",
    "cmd": "set --tier default --tier fast --promote-reads 1000000 --promote-window-secs 600 --demote-after-secs 3600",
-   "start_ms_a": 1795147883472,
-   "end_ms_a": 1795147883542,
+   "start_ms_a": 1795150289082,
+   "end_ms_a": 1795150289138,
    "generation": 7,
    "enabled": false,
-   "changed_ms": 1795147883499
+   "changed_ms": 1795150289105
   },
   {
-   "t_ms": 1795147888457,
+   "t_ms": 1795150293726,
    "event": "admin",
    "cmd": "enable",
-   "start_ms_a": 1795147888441,
-   "end_ms_a": 1795147888502,
+   "start_ms_a": 1795150293654,
+   "end_ms_a": 1795150293720,
    "generation": 8,
    "enabled": true,
-   "changed_ms": 1795147888467
+   "changed_ms": 1795150293677
   },
   {
-   "t_ms": 1795147893632,
+   "t_ms": 1795150299151,
    "event": "admin",
    "cmd": "set --tier default --tier fast --promote-reads 999999 --promote-window-secs 600 --demote-after-secs 7200",
-   "start_ms_a": 1795147893606,
-   "end_ms_a": 1795147893677,
+   "start_ms_a": 1795150299075,
+   "end_ms_a": 1795150299146,
    "generation": 9,
    "enabled": true,
-   "changed_ms": 1795147893633
+   "changed_ms": 1795150299099
   },
   {
-   "t_ms": 1795147898613,
+   "t_ms": 1795150303788,
    "event": "admin",
    "cmd": "disable",
-   "start_ms_a": 1795147898598,
-   "end_ms_a": 1795147898658,
+   "start_ms_a": 1795150303716,
+   "end_ms_a": 1795150303783,
    "generation": 10,
    "enabled": false,
-   "changed_ms": 1795147898626
+   "changed_ms": 1795150303739
   },
   {
-   "t_ms": 1795147905663,
+   "t_ms": 1795150309009,
    "event": "admin",
    "cmd": "set --tier default --tier fast --promote-reads 999999 --promote-window-secs 600 --demote-after-secs 7200",
-   "start_ms_a": 1795147905622,
-   "end_ms_a": 1795147905706,
+   "start_ms_a": 1795150308943,
+   "end_ms_a": 1795150309004,
    "generation": 11,
    "enabled": false,
-   "changed_ms": 1795147905648
+   "changed_ms": 1795150308969
   },
   {
-   "t_ms": 1795147915790,
+   "t_ms": 1795150313962,
    "event": "admin",
    "cmd": "enable",
-   "start_ms_a": 1795147915773,
-   "end_ms_a": 1795147915835,
+   "start_ms_a": 1795150313897,
+   "end_ms_a": 1795150313955,
    "generation": 12,
    "enabled": true,
-   "changed_ms": 1795147915799
+   "changed_ms": 1795150313921
   },
   {
-   "t_ms": 1795147921541,
+   "t_ms": 1795150319087,
    "event": "admin",
    "cmd": "set --tier default --tier fast --promote-reads 1000000 --promote-window-secs 600 --demote-after-secs 3600",
-   "start_ms_a": 1795147921525,
-   "end_ms_a": 1795147921586,
+   "start_ms_a": 1795150319018,
+   "end_ms_a": 1795150319082,
    "generation": 13,
    "enabled": true,
-   "changed_ms": 1795147921552
+   "changed_ms": 1795150319041
   },
   {
-   "t_ms": 1795147929061,
+   "t_ms": 1795150324002,
    "event": "load stop",
    "tag": "c1"
   },
   {
-   "t_ms": 1795147929192,
+   "t_ms": 1795150324113,
    "event": "admin",
    "cmd": "disable",
-   "start_ms_a": 1795147929165,
-   "end_ms_a": 1795147929226,
+   "start_ms_a": 1795150324054,
+   "end_ms_a": 1795150324108,
    "generation": 14,
    "enabled": false,
-   "changed_ms": 1795147929190
+   "changed_ms": 1795150324077
   },
   {
-   "t_ms": 1795147931413,
+   "t_ms": 1795150324842,
    "event": "load start",
    "tag": "c2",
    "keys": 200,
@@ -1752,32 +1819,32 @@
    "workers_per_gateway": 2
   },
   {
-   "t_ms": 1795147994513,
+   "t_ms": 1795150387894,
    "event": "admin",
    "cmd": "enable",
-   "start_ms_a": 1795147994455,
-   "end_ms_a": 1795147994521,
+   "start_ms_a": 1795150387827,
+   "end_ms_a": 1795150387887,
    "generation": 15,
    "enabled": true,
-   "changed_ms": 1795147994483
+   "changed_ms": 1795150387854
   },
   {
-   "t_ms": 1795148014799,
+   "t_ms": 1795150408086,
    "event": "load stop",
    "tag": "c2"
   },
   {
-   "t_ms": 1795148014961,
+   "t_ms": 1795150408204,
    "event": "admin",
    "cmd": "disable",
-   "start_ms_a": 1795148014882,
-   "end_ms_a": 1795148014969,
+   "start_ms_a": 1795150408136,
+   "end_ms_a": 1795150408197,
    "generation": 16,
    "enabled": false,
-   "changed_ms": 1795148014911
+   "changed_ms": 1795150408159
   },
   {
-   "t_ms": 1795148017766,
+   "t_ms": 1795150411447,
    "event": "load start",
    "tag": "b1",
    "keys": 200,
@@ -1785,12 +1852,12 @@
    "workers_per_gateway": 2
   },
   {
-   "t_ms": 1795148030749,
+   "t_ms": 1795150426077,
    "event": "load stop",
    "tag": "b1"
   },
   {
-   "t_ms": 1795148031629,
+   "t_ms": 1795150426935,
    "event": "load start",
    "tag": "b3a",
    "keys": 200,
@@ -1798,63 +1865,63 @@
    "workers_per_gateway": 2
   },
   {
-   "t_ms": 1795148059165,
+   "t_ms": 1795150454466,
    "event": "load stop",
    "tag": "b3a"
   },
   {
-   "t_ms": 1795148059698,
+   "t_ms": 1795150454933,
    "event": "admin",
    "cmd": "enable --tier default --tier fast --promote-reads 1000000 --promote-window-secs 600 --demote-after-secs 3600",
-   "start_ms_a": 1795148059642,
-   "end_ms_a": 1795148059706,
+   "start_ms_a": 1795150454860,
+   "end_ms_a": 1795150454926,
    "generation": 17,
    "enabled": true,
-   "changed_ms": 1795148059670
+   "changed_ms": 1795150454883
   },
   {
-   "t_ms": 1795148064380,
+   "t_ms": 1795150459862,
    "event": "gets",
    "gateway": "gw0",
    "key": "px",
    "count": 20
   },
   {
-   "t_ms": 1795148065283,
+   "t_ms": 1795150460730,
    "event": "admin",
    "cmd": "disable",
-   "start_ms_a": 1795148065213,
-   "end_ms_a": 1795148065290,
+   "start_ms_a": 1795150460653,
+   "end_ms_a": 1795150460723,
    "generation": 18,
    "enabled": false,
-   "changed_ms": 1795148065243
+   "changed_ms": 1795150460680
   },
   {
-   "t_ms": 1795148069916,
+   "t_ms": 1795150465272,
    "event": "admin",
    "cmd": "enable --tier default --tier fast --promote-reads 5 --promote-window-secs 600 --demote-after-secs 60",
-   "start_ms_a": 1795148069846,
-   "end_ms_a": 1795148069924,
+   "start_ms_a": 1795150465192,
+   "end_ms_a": 1795150465264,
    "generation": 19,
    "enabled": true,
-   "changed_ms": 1795148069875
+   "changed_ms": 1795150465220
   },
   {
-   "t_ms": 1795148074793,
+   "t_ms": 1795150470177,
    "event": "gets",
    "gateway": "gw0",
    "key": "px",
    "count": 1
   },
   {
-   "t_ms": 1795148074889,
+   "t_ms": 1795150470273,
    "event": "gets",
    "gateway": "gw1",
    "key": "py",
    "count": 6
   },
   {
-   "t_ms": 1795148074912,
+   "t_ms": 1795150470295,
    "event": "load start",
    "tag": "b2-hot",
    "keys": 10,
@@ -1862,19 +1929,19 @@
    "workers_per_gateway": 2
   },
   {
-   "t_ms": 1795148081275,
+   "t_ms": 1795150476575,
    "event": "gets",
    "gateway": "gw1",
    "key": "px",
    "count": 5
   },
   {
-   "t_ms": 1795148086391,
+   "t_ms": 1795150481082,
    "event": "load stop",
    "tag": "b2-hot"
   },
   {
-   "t_ms": 1795148087416,
+   "t_ms": 1795150482100,
    "event": "load start",
    "tag": "b2-window",
    "keys": 10,
@@ -1882,191 +1949,225 @@
    "workers_per_gateway": 2
   },
   {
-   "t_ms": 1795148090990,
+   "t_ms": 1795150485590,
    "event": "B2: demotion bounds",
-   "t_ack": 1795148074491,
+   "t_ack": 1795150469784,
    "margin_ms": 47000,
    "promoted_last_ms": {
-    "px": 1795148085340,
-    "py": 1795148079807
+    "px": 1795150480629,
+    "py": 1795150475130
    },
    "bound": {
-    "px": 1795148181491,
-    "py": 1795148181491
+    "px": 1795150576784,
+    "py": 1795150576784
    },
    "without_grace": {
-    "px": 1795148145340,
-    "py": 1795148139807
+    "px": 1795150540629,
+    "py": 1795150535130
    }
   },
   {
-   "t_ms": 1795148135951,
+   "t_ms": 1795150531478,
    "event": "B2: leader change",
-   "stopped_ms_a": 1795148135331,
+   "stopped_ms_a": 1795150530654,
    "new_leader": {
     "id": "ctl-c",
     "holder": "ctl-c#<process>",
     "token": 5,
-    "lease_until_ms": 1795148145678
+    "lease_until_ms": 1795150541057
    },
    "inside_the_grace_window": true
   },
   {
-   "t_ms": 1795148186818,
+   "t_ms": 1795150582214,
    "event": "load stop",
    "tag": "b2-window"
   },
   {
-   "t_ms": 1795148252431,
+   "t_ms": 1795150648083,
    "event": "B3b: object",
-   "key": "mv252348"
+   "key": "mv647987"
   },
   {
-   "t_ms": 1795148252874,
+   "t_ms": 1795150648532,
    "event": "gets",
    "gateway": "gw0",
-   "key": "mv252348",
+   "key": "mv647987",
    "count": 6
   },
   {
-   "t_ms": 1795148256766,
+   "t_ms": 1795150651725,
    "event": "B3b: leader paused with its move held",
    "leader": {
     "id": "ctl-c",
     "holder": "ctl-c#<process>",
     "token": 5,
-    "lease_until_ms": 1795148259214
+    "lease_until_ms": 1795150657910
    },
-   "pid": 244027
+   "pid": 259956
   },
   {
-   "t_ms": 1795148256849,
+   "t_ms": 1795150651805,
    "event": "gets",
    "gateway": "gw1",
-   "key": "mv252348",
+   "key": "mv647987",
    "count": 3
   },
   {
-   "t_ms": 1795148272567,
+   "t_ms": 1795150668114,
    "event": "admin",
    "cmd": "set --tier default --tier fast --promote-reads 1000000 --promote-window-secs 600 --demote-after-secs 60",
-   "start_ms_a": 1795148272493,
-   "end_ms_a": 1795148272571,
+   "start_ms_a": 1795150668027,
+   "end_ms_a": 1795150668104,
    "generation": 20,
    "enabled": true,
-   "changed_ms": 1795148272526
+   "changed_ms": 1795150668054
   },
   {
-   "t_ms": 1795148276471,
+   "t_ms": 1795150671969,
    "event": "B3b: old leader resumed (SIGCONT), its move still held"
   },
   {
-   "t_ms": 1795148287396,
+   "t_ms": 1795150682461,
    "event": "B3b: controller events",
    "events": [
     {
      "controller": "ctl-c",
-     "t_ms": 1795148256020,
+     "t_ms": 1795150651214,
      "level": "WARN",
      "text": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 999999, promote_window_ms: 600000, demote_after_ms: 7200000 } record=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 5, promote_window_ms: 600000, demote_after_ms: 60000 } generation=19"
     },
     {
      "controller": "ctl-c",
-     "t_ms": 1795148256474,
+     "t_ms": 1795150651602,
      "level": "WARN",
-     "text": "test fault: tiering move held before its switch generation=01a1f72c84fe7258801fffe6ac8a30bb index=0 policy_generation=19"
+     "text": "test fault: tiering move held before its switch generation=01a1f75112f177938bedb8fc140f19f4 index=0 policy_generation=19"
     },
     {
      "controller": "ctl-a",
-     "t_ms": 1795148266042,
+     "t_ms": 1795150661559,
      "level": "INFO",
      "text": "acquired leadership controller=ctl-a token=6"
     },
     {
      "controller": "ctl-a",
-     "t_ms": 1795148266044,
+     "t_ms": 1795150661561,
      "level": "WARN",
      "text": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 1000000, promote_window_ms: 600000, demote_after_ms: 3600000 } record=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 5, promote_window_ms: 600000, demote_after_ms: 60000 } generation=19"
     },
     {
      "controller": "ctl-a",
-     "t_ms": 1795148271453,
+     "t_ms": 1795150666937,
      "level": "WARN",
      "text": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 1000000, promote_window_ms: 600000, demote_after_ms: 3600000 } record=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 5, promote_window_ms: 600000, demote_after_ms: 60000 } generation=19"
     },
     {
      "controller": "ctl-c",
-     "t_ms": 1795148276453,
+     "t_ms": 1795150671947,
      "level": "WARN",
      "text": "cluster state unreadable; pass skipped task=\"upgrade\" error=fenced: leadership token 5 of ctl-c#<process> is no longer current"
     },
     {
      "controller": "ctl-c",
-     "t_ms": 1795148276453,
-     "level": "WARN",
-     "text": "cluster state unreadable; pass skipped task=\"stripe-repair\" error=fenced: leadership token 5 of ctl-c#<process> is no longer current"
-    },
-    {
-     "controller": "ctl-c",
-     "t_ms": 1795148276453,
+     "t_ms": 1795150671947,
      "level": "WARN",
      "text": "cluster state unreadable; pass skipped task=\"repair\" error=fenced: leadership token 5 of ctl-c#<process> is no longer current"
     },
     {
      "controller": "ctl-c",
-     "t_ms": 1795148276453,
-     "level": "WARN",
-     "text": "cluster state unreadable; pass skipped task=\"health\" error=fenced: leadership token 5 of ctl-c#<process> is no longer current"
-    },
-    {
-     "controller": "ctl-c",
-     "t_ms": 1795148276453,
-     "level": "WARN",
-     "text": "cluster state unreadable; pass skipped task=\"recovery\" error=fenced: leadership token 5 of ctl-c#<process> is no longer current"
-    },
-    {
-     "controller": "ctl-c",
-     "t_ms": 1795148276453,
+     "t_ms": 1795150671947,
      "level": "WARN",
      "text": "cluster state unreadable; pass skipped task=\"evict\" error=fenced: leadership token 5 of ctl-c#<process> is no longer current"
     },
     {
      "controller": "ctl-c",
-     "t_ms": 1795148276653,
+     "t_ms": 1795150671947,
      "level": "WARN",
-     "text": "test fault: tiering move released generation=01a1f72c84fe7258801fffe6ac8a30bb index=0 policy_generation=19"
+     "text": "cluster state unreadable; pass skipped task=\"health\" error=fenced: leadership token 5 of ctl-c#<process> is no longer current"
     },
     {
      "controller": "ctl-c",
-     "t_ms": 1795148276654,
+     "t_ms": 1795150671947,
+     "level": "WARN",
+     "text": "cluster state unreadable; pass skipped task=\"recovery\" error=fenced: leadership token 5 of ctl-c#<process> is no longer current"
+    },
+    {
+     "controller": "ctl-c",
+     "t_ms": 1795150671947,
+     "level": "WARN",
+     "text": "cluster state unreadable; pass skipped task=\"stripe-repair\" error=fenced: leadership token 5 of ctl-c#<process> is no longer current"
+    },
+    {
+     "controller": "ctl-c",
+     "t_ms": 1795150672047,
+     "level": "WARN",
+     "text": "test fault: tiering move released generation=01a1f75112f177938bedb8fc140f19f4 index=0 policy_generation=19"
+    },
+    {
+     "controller": "ctl-c",
+     "t_ms": 1795150672048,
      "level": "WARN",
      "text": "chunk migration failed error=fenced: leadership token 5 of ctl-c#<process> is no longer current index=0"
     },
     {
      "controller": "ctl-c",
-     "t_ms": 1795148276655,
+     "t_ms": 1795150672048,
      "level": "WARN",
      "text": "fenced; stopping task task=\"tiering\" error=fenced: leadership token 5 of ctl-c#<process> is no longer current"
     },
     {
      "controller": "ctl-c",
-     "t_ms": 1795148276655,
+     "t_ms": 1795150672049,
      "level": "WARN",
      "text": "lost leadership controller=ctl-c token=5"
     },
     {
      "controller": "ctl-a",
-     "t_ms": 1795148276780,
+     "t_ms": 1795150672287,
      "level": "WARN",
      "text": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 1000000, promote_window_ms: 600000, demote_after_ms: 3600000 } record=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 1000000, promote_window_ms: 600000, demote_after_ms: 60000 } generation=20"
     },
     {
      "controller": "ctl-a",
-     "t_ms": 1795148282097,
+     "t_ms": 1795150677601,
      "level": "WARN",
      "text": "tiering: --tiering-* flags differ from the tiering record, which is used flags=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 1000000, promote_window_ms: 600000, demote_after_ms: 3600000 } record=TieringPolicyRecord { tiers: [\"default\", \"fast\"], promote_reads: 1000000, promote_window_ms: 600000, demote_after_ms: 60000 } generation=20"
     }
    ]
+  },
+  {
+   "t_ms": 1795150682626,
+   "event": "admin",
+   "cmd": "enable --tier default --tier fast --promote-reads 5 --promote-window-secs 600 --demote-after-secs 60",
+   "start_ms_a": 1795150682565,
+   "end_ms_a": 1795150682617,
+   "generation": 21,
+   "enabled": true,
+   "changed_ms": 1795150682588
+  },
+  {
+   "t_ms": 1795150683581,
+   "event": "gets",
+   "gateway": "gw0",
+   "key": "mc683043",
+   "count": 6
+  },
+  {
+   "t_ms": 1795150688972,
+   "event": "gets",
+   "gateway": "gw1",
+   "key": "mc683043",
+   "count": 2
+  },
+  {
+   "t_ms": 1795150689816,
+   "event": "admin",
+   "cmd": "set --tier default --tier fast --promote-reads 1000000 --promote-window-secs 600 --demote-after-secs 60",
+   "start_ms_a": 1795150689726,
+   "end_ms_a": 1795150689804,
+   "generation": 22,
+   "enabled": true,
+   "changed_ms": 1795150689757
   }
  ]
 }

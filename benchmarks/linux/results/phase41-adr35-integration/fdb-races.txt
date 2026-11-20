@@ -1,3 +1,5 @@
+tiering_race on a temporary single-process FoundationDB (memory engine), tests at f81ed65 (the race code is unchanged since but for the explicit cluster-file guard); tiering_fdb:: in the same session: 4 passed.
+
 a_deposed_leaders_seed_is_fenced on FoundationDB:
   old-leader attempt 1: begin
   old-leader attempt 1: reads done, commit held
