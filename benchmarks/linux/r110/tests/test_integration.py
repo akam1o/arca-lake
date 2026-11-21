@@ -309,7 +309,7 @@ class Watching(unittest.TestCase):
             json.dump({"run_id": "run-w-smoke-hb"}, f)
         ns = argparse.Namespace(run_dir=sub, heartbeat=os.path.join(sub, "no-heartbeat.json"), heartbeat_id="run-w",
                                 heartbeat_timeout=0.5, data_dir=self.dir, min_free_gib=3.0, min_mem_mib=1024.0,
-                                max_seconds=60.0, interval=0.1, services=None)
+                                max_seconds=60.0, interval=0.1, services=None, grace=0.3)
         g = guard.Guard(ns, checks={"free": lambda _p: 100 << 30, "mem": lambda: 8 << 30})
         rc = g.run(SLEEPER)
         res = common.read_json(os.path.join(sub, "guard.json"))

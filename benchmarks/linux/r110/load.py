@@ -36,6 +36,7 @@ import math
 import os
 import random
 import re
+import signal
 import sys
 import threading
 import urllib.parse
@@ -71,6 +72,7 @@ class Load:
         self.counts = {}
         self.rng = rng or random.Random(1)
         self._closed = False
+        self.terminated = False
         # The watchdog's heartbeat, read by the load itself too: if the
         # guard is gone as well, the load still stops within the timeout.
         self._hb = common.Heartbeat(heartbeat, heartbeat_id or run_id, 120.0, self.clock) if heartbeat else None
@@ -108,6 +110,8 @@ class Load:
         self.budget.stop(reason)
 
     def stopped(self):
+        if self.terminated and not self.budget.stopped():
+            self.budget.stop("operator", "sigterm")
         if self._hb is not None:
             with self._hb_lock:
                 stale = self._hb.check()
@@ -578,6 +582,15 @@ def run(args, clock=None, client=None):
             steps.append({"n": num, "kind": s["kind"], "stage": s.get("stage"), "result": out})
         status(None)
 
+    # A SIGTERM (the guard's, after its grace) ends the load like a stop:
+    # its status is still written. The handler only sets a flag.
+    def on_term(*_):
+        load.terminated = True
+
+    try:
+        signal.signal(signal.SIGTERM, on_term)
+    except ValueError:
+        pass  # not the main thread (tests)
     try:
         while True:
             if load.stopped():

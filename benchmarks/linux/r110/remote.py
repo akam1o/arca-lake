@@ -110,6 +110,14 @@ import json, sys
 sys.path.insert(0, sys.argv[1])
 from r110 import common, proc
 path, wait = sys.argv[2], float(sys.argv[3])
+import os
+name = os.path.basename(path)[:-5]
+try:
+    started = open(os.path.join(os.path.dirname(path), "started.list")).read().split()
+except OSError:
+    started = None
+if not os.path.exists(path) and started is not None and name not in started:
+    print(json.dumps({"verdict": "not-started"})); sys.exit(0)
 try:
     rec = json.load(open(path))
 except (OSError, ValueError) as e:
@@ -684,7 +692,8 @@ class SshCluster:
                                       n.startswith("sampler")))
         for n in order:
             out["stopped"][n] = self._stop(n, 30)
-        unconfirmed = {n: v for n, v in out["stopped"].items() if v.get("verdict") not in ("stopped", "gone")}
+        unconfirmed = {n: v for n, v in out["stopped"].items()
+                       if v.get("verdict") not in ("stopped", "gone", "not-started")}
         if unconfirmed:
             out["kept"] = f"stop not confirmed: {sorted(unconfirmed)}"
             return out
@@ -701,4 +710,8 @@ class SshCluster:
             r = self.ssh(f"[ \"$(cat {Q(d)}/{MARK} 2>/dev/null)\" = {Q(rid)} ] && rm -rf -- {Q(d)} && echo removed || "
                          f"echo kept", check=False).strip()
             out["removed" if r == "removed" else "kept_dirs"] = out.get("removed" if r == "removed" else "kept_dirs", []) + [d]
+        parent = os.path.dirname(self.run_dir)
+        if not out.get("kept_dirs") and parent == os.path.dirname(self.fdb_data) and parent.endswith(rid):
+            # Their common parent, named by the run, only if now empty.
+            self.ssh(f"rmdir -- {Q(parent)} 2>/dev/null || true", check=False)
         return out
