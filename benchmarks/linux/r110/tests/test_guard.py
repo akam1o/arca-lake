@@ -79,7 +79,7 @@ class GuardBase(unittest.TestCase):
         checks = {"free": lambda _p: self.free if not callable(self.free) else self.free(),
                   "mem": (lambda: self.mem) if not callable(self.mem) else self.mem}
         argv = ["run", "--run-dir", self.dir, "--heartbeat", self.hb, "--data-dir", self.dir,
-                "--heartbeat-timeout", str(timeout), "--interval", "0.1",
+                "--heartbeat-timeout", str(timeout), "--interval", "0.1", "--grace", "0.3",
                 "--max-seconds", str(max_seconds)]
         if services:
             argv += ["--services", services]
@@ -142,7 +142,9 @@ class Heartbeats(GuardBase):
             self.child_pid()
             common.StopFile(os.path.join(self.dir, "stop.json")).stop("memory", "watchdog", 1)
 
-        rc, res = self.run_guard(LOAD, timeout=60, during=during)
+        d = os.path.join(self.dir, "services")
+        os.makedirs(d)
+        rc, res = self.run_guard(LOAD, timeout=60, during=during, services=d)
         self.assertEqual((res["reason"], res["source"], res["group_empty"]), ("memory", "stop-file", True))
         self.assertIn("services", res["stopped"])
 
@@ -215,6 +217,20 @@ class Resources(GuardBase):
 
 
 class Groups(GuardBase):
+    def test_a_load_that_ends_by_itself_after_the_stop_is_not_signalled(self):
+        """The grace: a load that reads the stop file ends on its own (and
+        writes its status); its group is then confirmed empty."""
+        rc, res = self.run_guard(WATCHING, timeout=0.3)
+        self.assertEqual(res["reason"], "heartbeat-lost")
+        self.assertEqual(res["load_stop"]["signals"], [])
+        self.assertEqual(res["load_exit"], 0)
+        self.assertTrue(res["group_empty"])
+
+    def test_a_sub_runs_guard_has_no_services_to_stop(self):
+        rc, res = self.run_guard(LOAD, timeout=0.3)
+        self.assertNotIn("services", res["stopped"])
+        self.assertNotIn("services_confirmed", res)
+
     def test_a_load_ignoring_term_is_killed(self):
         rc, res = self.run_guard(STUBBORN, timeout=0.5)
         self.assertTrue(res["group_empty"])
@@ -299,7 +315,7 @@ class ReviewFindings(GuardBase):
         import argparse
         ns = argparse.Namespace(run_dir=self.dir, heartbeat=self.hb, heartbeat_id=None, heartbeat_timeout=60.0,
                                 data_dir=self.dir, min_free_gib=3.0, min_mem_mib=1024.0, max_seconds=60.0,
-                                interval=0.1, services=None)
+                                interval=0.1, services=None, grace=0.3)
         self.beat(1)
         g = guard.Guard(ns, checks={"free": lambda _p: self.free, "mem": lambda: self.mem})
         out = {}

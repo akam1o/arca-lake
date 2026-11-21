@@ -46,6 +46,7 @@ from . import common, proc
 
 GIB, MIB = 1 << 30, 1 << 20
 KEEP_PREFIXES = ("guard", "sampler", "sentinel")
+GRACE_S = 15.0
 
 
 def free_bytes(path):
@@ -169,6 +170,13 @@ class Guard:
             if source == "guard":
                 self.stop_file.stop(reason, "guard", self.clock.wall_ms())
             self.result["stopped"].append("load")
+            # The load reads the stop file before each attempt: a short grace
+            # lets it end by itself and write its own status, then its
+            # group is stopped whatever happened.
+            end = self.clock.monotonic() + getattr(self.args, "grace", GRACE_S)
+            while self.clock.monotonic() < end and \
+                    os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+                self.clock.sleep(0.2)
         # The whole group (the load and anything it started), also after the
         # load itself ended: nothing of it may outlive the guard.
         # The load (the group's leader) is reaped only after: until then its
@@ -184,7 +192,8 @@ class Guard:
             # never waited on for ever. The load still sees the stop file
             # and its own heartbeat check.
             self.result["load_reaped"] = False
-        if reason and common.reason_class(reason) in ("resource", "monitor"):
+        if reason and common.reason_class(reason) in ("resource", "monitor") and self.args.services:
+            # A sub-run's guard (no services given) has none to stop.
             self.stop_services()
             self.result["stopped"].append("services")
         self.result.update(reason=reason, source=source, load_exit=child.returncode if self.result["load_reaped"] else None,
@@ -324,6 +333,8 @@ def main(argv=None, clock=None, checks=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("command", choices=["run"])
     _common_args(p)
+    p.add_argument("--grace", type=float, default=GRACE_S,
+                   help="seconds the load has to end by itself after a stop (at most 60)")
     if "--" not in argv:
         p.error("the load command follows --")
     i = argv.index("--")
@@ -332,6 +343,8 @@ def main(argv=None, clock=None, checks=None):
     if not cmd:
         p.error("the load command follows --")
     _check_limits(p, args, 7.5 * 3600 + 600)
+    if not (math.isfinite(args.grace) and 0 <= args.grace <= 60):
+        p.error("--grace: 0 to 60 s")
     return Guard(args, clock, checks).run(cmd)
 
 

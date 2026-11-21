@@ -142,7 +142,11 @@ class Limits(Base):
         ld.step({"kind": "put", "keys": ["a", "b", "c", "d", "e"]})
         self.assertEqual(ld.budget.live_count(), 3)
         self.assertGreater(ld.counts.get("live-limit", 0), 0)
-        ld.step({"kind": "delete", "keys": ["a"]})
+        # Which three were stored depends on the workers' order: delete one
+        # the ledger shows acknowledged.
+        stored = ledger.acknowledged(ledger.read(ld.ledger.path)[0], "PUT")
+        self.assertEqual(len(stored), 3)
+        ld.step({"kind": "delete", "keys": [stored[0]]})
         self.assertEqual(ld.budget.live_count(), 2)
         self.assertIsNone(ld.stop_reason)
 
