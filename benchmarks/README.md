@@ -141,7 +141,17 @@ Results are written by criterion to `target/criterion/`.
   sending, live set, run deadline; one process per run, never resumed);
   `ledger.py`: the outcome ledger (an intent before each request, an
   outcome after, CRC per line, fsync, unknown outcomes as candidate
-  states); `load.py`: the load process, executing the driver's steps.
+  states); `load.py`: the load process, executing the driver's steps,
+  which also stops by itself when the watchdog's heartbeat goes stale.
+  `guard.py`: the on-host guard, parent of the load (its own session),
+  stopping the load's whole process group without any network on a
+  stale heartbeat, low free space or memory, a check it cannot make, its
+  deadline or the run's stop file, and the test services by recorded
+  identity on a resource or monitor reason; `watchdog.py`: the external
+  watchdog (ssh readings of every host, the heartbeat only after a round
+  whose every required check passed, a breach written as the run's stop
+  file; it never kills a process); `proc.py`: process identity (pid,
+  start time, working directory), never names.
 
 ## Reports
 
