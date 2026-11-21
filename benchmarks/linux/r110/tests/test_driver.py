@@ -624,8 +624,31 @@ class ReviewFindingsJudge(unittest.TestCase):
         self.assertEqual(self.c3a(probes=1), judge.INCONCLUSIVE)
         self.assertEqual(self.c3a(probes=59), judge.INCONCLUSIVE)
 
-    def test_a_probe_without_an_outcome_is_not_acknowledged(self):
-        self.assertEqual(self.c3a(unknown=1), judge.FAILED)
+    def test_a_probe_without_an_outcome_is_never_a_pass(self):
+        self.assertEqual(self.c3a(unknown=1), judge.INCONCLUSIVE)
+
+    def c3b(self, acks, no_outcome=0, refused=0, unknown=0):
+        S = []
+        for t in range(0, 600_001, 15_000):
+            S.append(smp("gateway0", t, arca_gateway_admission_state=0))
+            S.append(smp("controller", t, arca_controller_backpressure_state=0))
+        R, k = [], 0
+        for result in ["ack"] * acks + [None] * no_outcome + ["refused"] * refused + ["unknown"] * unknown:
+            R.append({"type": "intent", "op_id": k, "attempt": 1, "key": f"c{k}", "op": "PUT", "stage": "6",
+                      "kind": "op", "wall_ms": 1000 + k})
+            if result:
+                R.append({"type": "outcome", "op_id": k, "attempt": 1, "result": result})
+            k += 1
+        tl = {"6": {"start_ms": 0, "end_ms": 600_000, "completed": True}}
+        return judge.c3b(S, R, tl, judge.VALUES)["outcome"]
+
+    def test_c3b_attempts_without_an_outcome(self):
+        self.assertEqual(self.c3b(1000), judge.PASSED)
+        self.assertEqual(self.c3b(980, no_outcome=20), judge.INCONCLUSIVE)
+        self.assertEqual(self.c3b(950, no_outcome=5, unknown=45), judge.FAILED)
+        self.assertEqual(self.c3b(990, refused=1), judge.FAILED)
+        # A refusal fails C3b whatever the open attempts would have been.
+        self.assertEqual(self.c3b(980, no_outcome=15, refused=5), judge.FAILED)
 
 
 class ReviewFindingsEngine(EngineBase):

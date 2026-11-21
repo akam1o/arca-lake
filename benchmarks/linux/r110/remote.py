@@ -576,7 +576,9 @@ class SshCluster:
         return self.ssh(f"tail -c 2000000 {Q(self.run_dir)}/logs/*.log 2>/dev/null || true", check=False, timeout=600)
 
     def stop_load(self):
-        self.py(STOP, self.tools, f"{self.run_dir}/services/guard.json", 60, check=False)
+        # The guard may be stopping services and the load's group (up to
+        # 30 s each) when this arrives: time for it to write its result.
+        self.py(STOP, self.tools, f"{self.run_dir}/services/guard.json", 120, check=False)
         self.stop_watchdog()
 
     def escalation(self):
