@@ -158,11 +158,12 @@ class Heartbeat:
 # and the driver). Classes decide what is stopped (plan §6.2) and how a
 # stop is judged (plan §8): ``integrity`` -> Failed; ``resource`` and
 # ``monitor`` -> Inconclusive and the test's services stopped too;
-# ``limit`` and ``operator`` -> Inconclusive, load only.
+# ``limit``, ``anomaly`` (an unexpected answer) and ``operator`` ->
+# Inconclusive, load only; ``exercise`` -> a stop exercised on purpose
+# in a smoke sub-run, never the main run's.
 REASONS = {
     "integrity-violation": "integrity",
     "protection-violation": "integrity",
-    "ledger-failure": "integrity",
     "disk-free": "resource",
     "memory": "resource",
     "swap": "resource",
@@ -170,17 +171,27 @@ REASONS = {
     "load": "resource",
     "iowait": "resource",
     "system-fdb": "resource",
-    "test-fdb": "resource",
+    # Not among the plan's resource rules (§6.2: space, memory, swap, OOM,
+    # load, iowait, system FoundationDB): the load stops, the services stay
+    # for the drain's observation.
+    "test-fdb": "anomaly",
     "test-dirs": "resource",
-    "probe": "resource",
+    "probe": "anomaly",
+    "unexpected-5xx": "anomaly",
     "heartbeat-lost": "monitor",
     "host-unreachable": "monitor",
     "monitor-failed": "monitor",
     "stop-file-unreadable": "monitor",
+    "guard-lost": "monitor",
+    "driver-error": "monitor",
+    # The evidence of C5 is lost, not shown violated.
+    "ledger-failure": "monitor",
     "attempts-limit": "limit",
     "bytes-limit": "limit",
     "run-deadline": "limit",
     "stage-deadline": "limit",
+    "stage-exit": "limit",
+    "unexpected-response": "anomaly",
     "operator": "operator",
     "smoke-exercise": "exercise",
 }

@@ -34,7 +34,7 @@ an immediate new request (about 1,100 refusals per second).
 The client effects of reconciliation, reclaim and compaction taken one by
 one (the fourth item above) are **not** a criterion of this plan: the
 churn is itself client load, and this plan only records client latency
-alongside (§8.1); separating them needs its own design.
+alongside (§8.2); separating them needs its own design.
 
 ## 2. The layers and what observes them
 
@@ -204,10 +204,16 @@ Three layers, any one of which ends the load:
    120 s (monitor or SSH lost), when the data file system has less than
    3 GiB free, or when available memory is below 1 GiB. It needs no
    network to act.
-3. **The watchdog** (operator's machine, `benchmarks/linux/watchdog.sh`
-   extended, §9 P2) every 10 s: the rules below; it writes the stop file
-   and stops the generator by identity (pid file, start time, working
-   directory; not by process name, as the current script's `pkill` does).
+3. **The watchdog** (operator's machine, `benchmarks/linux/r110/watchdog.py`,
+   §9 P2) every 10 s: the rules below; it writes the run's stop file on
+   host 2, which the generator and the guard act on (the guard stops the
+   generator's process group, and the services on a resource rule, by
+   identity: pid, start time, working directory; never by process name, as
+   `benchmarks/linux/watchdog.sh`'s `pkill` does). It signals no process
+   itself, and rewrites the heartbeat only after a round in which every
+   required check succeeded, so a watchdog that cannot see, or a lost
+   connection, stops the generator through the guard within 120 s. It also
+   watches the guard's own identity (`guard-lost`).
 
 | Rule | Threshold | Status |
 | --- | --- | --- |
@@ -281,7 +287,46 @@ a precondition not formed, such as no refusal in stage 4); **Not run**
 earlier Failed or Inconclusive into a pass, and the earlier evidence is
 kept.
 
-### 8.1 Client effects (recorded, not judged)
+### 8.1 C2 in detail
+
+As `benchmarks/linux/r110/judge.py` computes it:
+
+- **Baseline:** per node, the last `ok` sample of
+  `arca_node_capacity_bytes{kind="live"}` and `{kind="available"}` at or
+  before stage 5's start (its first delete), at most one sampling
+  interval (15 s) earlier. A node without one: Inconclusive.
+- **D1 told apart:** D1's chain must be over at the baseline: the
+  controller's `arca_controller_gc_backlog` 0 and every node's
+  `arca_node_reclaim_pending_records` 0 in their baseline samples.
+  Otherwise D1's reclaim would count as stage 5's, and C2 is
+  Inconclusive; a missing baseline sample of either is Inconclusive too.
+- **Deleted shard bytes:** in total, stage 5's acknowledged deletes
+  (from the ledger) × the shard bytes of one object (3 × 128 KiB); the
+  sum over the nodes of the live-byte decrease from the baseline to the
+  judgement must reach 90 % of it. Per node the placement is not known in
+  advance, so a node's deleted shard bytes are bounded from above by its
+  own live-byte decrease plus one shard (128 KiB) per probe PUT of stage 5
+  acknowledged or unknown before the judgement (a node holds at most one
+  shard of an object; probes add live bytes, and adding the bound back
+  makes the threshold stricter, never looser).
+- **Pass, per node, over the 10 min hold after the judgement time:**
+  `available` up from its baseline by at least half the node's bound in
+  every sample; reclaimable (`allocated − live`, reported as
+  `{kind="reclaimable"}`) ≤ max(2 segments, 10 % of allocated); `du`
+  (allocated bytes of the node directory) within 5 % of the segment plus
+  side-file bytes the node reports.
+- **Partial-PUT leftovers and orphans:** shards of a PUT that a node
+  refused after others had stored theirs
+  (`arca_gateway_node_capacity_refusals_total` rising during stage 5),
+  and orphans that reconciliation removes (its log's `deleted=` count
+  rising), also free space. They are not subtracted (their sizes are not
+  observed); the result lists them as an approximate attribution, and an
+  unsampled reconcile count is listed the same way.
+- **Missing data:** any sample the rule above needs (baseline, judgement
+  time, any point of the hold, with no gap above two intervals) missing or
+  not `ok`: Inconclusive, never a pass and never a value of 0.
+
+### 8.2 Client effects (recorded, not judged)
 
 GET and PUT latency and outcome counts of the probe and the generator,
 per stage, next to the background passes' running gauges
@@ -310,6 +355,17 @@ of this plan.
 - **P4, the harness:** setup and teardown with a marker and identity
   checks, the stages and their exit conditions, evidence collection on
   any stop (as `adr35-integration.py`).
+
+Implemented in `benchmarks/linux/r110/` (P1 `budget.py`, `ledger.py`,
+`load.py`; P2 `guard.py`, `watchdog.py`, `proc.py`; P3 `sampler.py`; P4
+`driver.py`, `judge.py`, `remote.py`), tested locally without any host.
+`driver.py check` is the default and contacts nothing; every other command
+needs `--execute` and an approval file naming the sha256 of the run's
+configuration, the scope and the time window (§10). The example
+configuration there is not approved. What the local tests cannot show
+(the tools' own cost on the hosts, the real stop latencies, the real
+metric names and values on the binary under test) is confirmed only at
+the preflight and the smoke stage of an approved run.
 
 ## 10. Before an execution approval: what the approver chooses
 

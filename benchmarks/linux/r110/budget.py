@@ -19,6 +19,7 @@ could not prove what the stopped process had sent).
 
 import fcntl
 import json
+import math
 import os
 import threading
 
@@ -54,6 +55,12 @@ DEFAULTS = {
 }
 
 
+def valid_limit(v):
+    """A limit is a finite positive number (``NaN`` or ``inf`` would pass
+    every comparison against the plan's values and switch the limit off)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0
+
+
 class Permit:
     def __init__(self, budget, kind, body_bytes, live):
         self.budget = budget
@@ -79,6 +86,9 @@ class Budget:
     def __init__(self, run_dir, run_id, limits=None, clock=None, stop=None):
         self.clock = clock or common.Clock()
         self.limits = dict(DEFAULTS, **(limits or {}))
+        bad = {k: v for k, v in self.limits.items() if k not in DEFAULTS or not valid_limit(v)}
+        if bad:
+            raise ValueError(f"limits not finite positive numbers: {bad}")
         self.run_id = run_id
         self.stop_file = stop or common.StopFile(os.path.join(run_dir, "stop.json"))
         self._lock = threading.Condition()

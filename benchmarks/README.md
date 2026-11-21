@@ -142,7 +142,9 @@ Results are written by criterion to `target/criterion/`.
   `ledger.py`: the outcome ledger (an intent before each request, an
   outcome after, CRC per line, fsync, unknown outcomes as candidate
   states); `load.py`: the load process, executing the driver's steps,
-  which also stops by itself when the watchdog's heartbeat goes stale.
+  which also stops by itself when the watchdog's heartbeat goes stale, on
+  a 5xx other than 503, and when the baseline-key probe (a GET every 5 s)
+  fails 3 times in a row or answers in more than 5 s.
   `guard.py`: the on-host guard, parent of the load (its own session),
   stopping the load's whole process group without any network on a
   stale heartbeat, low free space or memory, a check it cannot make, its
@@ -159,6 +161,19 @@ Results are written by criterion to `target/criterion/`.
   `partial`, `error`, `timeout`); a value not read is absent, never 0;
   bounded workers, timeouts and output size. Its own load on the hosts at
   scale is not measured.
+  `driver.py`: `check CONFIG` (the default) validates a run
+  configuration against the plan and prints the stages, contacting
+  nothing; `preflight`, `run` and `teardown` need `--execute` and an
+  approval file naming the configuration's sha256, the scope and a time
+  window. `run` executes the seven stages (each with its exit condition
+  and maximum; the smoke stage's stops in sub-runs of their own), keeps
+  the evidence in a directory created once per run id, and judges with
+  `judge.py` (plan §8: C1 to C5 and the run's outcome; missing data is
+  Inconclusive, never a pass). `remote.py`: the hosts' commands (marker
+  checked setup and teardown, processes started and stopped by identity).
+  `example-run.json` is an unapproved example with placeholders.
+  `tests/mutate.py` removes each protection in turn; every removal must
+  fail a test.
 
 ## Reports
 

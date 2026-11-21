@@ -36,6 +36,7 @@ the load's when it ended by itself without a breach, else 3.
 
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -44,6 +45,7 @@ import sys
 from . import common, proc
 
 GIB, MIB = 1 << 30, 1 << 20
+KEEP_PREFIXES = ("guard", "sampler")
 
 
 def free_bytes(path):
@@ -68,7 +70,8 @@ class Guard:
         with open(os.path.join(args.run_dir, "run.json")) as f:
             self.run_id = json.load(f)["run_id"]
         self.stop_file = common.StopFile(os.path.join(args.run_dir, "stop.json"))
-        self.hb = common.Heartbeat(args.heartbeat, self.run_id, args.heartbeat_timeout, self.clock)
+        self.hb = common.Heartbeat(args.heartbeat, args.heartbeat_id or self.run_id, args.heartbeat_timeout,
+                                   self.clock)
         self.free = (checks or {}).get("free", free_bytes)
         self.mem = (checks or {}).get("mem", mem_available_bytes)
         self.deadline = self.clock.monotonic() + args.max_seconds
@@ -78,6 +81,8 @@ class Guard:
         rec = self.stop_file.reason()
         if rec is not None:
             return rec.get("reason", "stop-file-unreadable"), "stop-file"
+        if getattr(self, "terminated", False):
+            return "operator", "guard"
         r = self.hb.check()
         if r:
             return r, "guard"
@@ -96,26 +101,58 @@ class Guard:
         return None
 
     def stop_services(self):
+        """The test's services (plan §6.2: gateway, controller, nodes,
+        FoundationDB) by identity. Never the guards (this one among them)
+        or the sampler, which keeps observing."""
         d = self.args.services
         if not d or not os.path.isdir(d):
             return
         recs = []
+        mine = {os.getpid(), os.getppid()}
         for name in sorted(os.listdir(d)):
-            if name.endswith(".json"):
-                try:
-                    recs.append((name[:-5], common.read_json(os.path.join(d, name))))
-                except (OSError, ValueError) as e:
-                    self.result["services"][name] = f"unreadable: {e}"
+            if not name.endswith(".json") or name.startswith(KEEP_PREFIXES):
+                continue
+            try:
+                rec = common.read_json(os.path.join(d, name))
+                if not isinstance(rec, dict) or not isinstance(rec.get("pid"), int):
+                    raise ValueError(f"not an identity: {rec!r}")
+            except (OSError, ValueError) as e:
+                self.result["services"][name] = f"unreadable: {e}"
+                continue
+            if rec["pid"] in mine:
+                self.result["services"][name] = "skipped: the guard itself"
+                continue
+            recs.append((name[:-5], rec))
+
+        def alive(rec):
+            try:
+                return proc.matches(rec)
+            except ValueError:
+                return False
+
         for name, rec in recs:
-            self.result["services"][name] = proc.signal_if_same(rec, signal.SIGTERM)
+            try:
+                self.result["services"][name] = proc.signal_if_same(rec, signal.SIGTERM)
+            except ValueError as e:
+                self.result["services"][name] = f"unreadable: {e}"
         end = self.clock.monotonic() + 30
-        while self.clock.monotonic() < end and any(proc.matches(r) for _, r in recs):
+        while self.clock.monotonic() < end and any(alive(r) for _, r in recs):
             self.clock.sleep(0.2)
         for name, rec in recs:
-            if proc.matches(rec):
+            if alive(rec):
                 self.result["services"][name] = "killed: " + proc.signal_if_same(rec, signal.SIGKILL)
 
+    def terminate(self, *_):
+        """SIGTERM to the guard: it stops the load's group and writes its
+        result like any other stop (never just dies, leaving the load)."""
+        self.terminated = True
+
     def run(self, command):
+        self.terminated = False
+        try:
+            signal.signal(signal.SIGTERM, self.terminate)
+        except ValueError:
+            pass  # not the main thread (tests call terminate() directly)
         child = subprocess.Popen(command, start_new_session=True, cwd=self.args.run_dir)
         pgid = child.pid
         self.result["load"] = {"pid": child.pid, "command": command}
@@ -125,6 +162,11 @@ class Guard:
             # load's until the guard reaps it below.
             exited = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
             if exited is not None:
+                # The load may have ended because of a stop (its own or the
+                # watchdog's): the stop file still decides what is stopped.
+                rec = self.stop_file.reason()
+                if rec is not None:
+                    reason, source = rec.get("reason", "stop-file-unreadable"), "stop-file"
                 break
             b = self.breach()
             if b:
@@ -162,6 +204,7 @@ def main(argv=None, clock=None, checks=None):
     p.add_argument("--max-seconds", type=float, default=7.5 * 3600 + 600)
     p.add_argument("--interval", type=float, default=1.0)
     p.add_argument("--services")
+    p.add_argument("--heartbeat-id", help="the run id the heartbeat names (default: this run's)")
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--" not in argv:
         p.error("the load command follows --")
@@ -170,8 +213,13 @@ def main(argv=None, clock=None, checks=None):
     cmd = argv[i + 1:]
     if not cmd:
         p.error("the load command follows --")
+    nums = (args.heartbeat_timeout, args.min_free_gib, args.min_mem_mib, args.max_seconds, args.interval)
+    if not all(math.isfinite(x) and x > 0 for x in nums):
+        p.error("every limit a finite positive number")
     if args.heartbeat_timeout > 120 or args.min_free_gib < 3 or args.min_mem_mib < 1024:
         p.error("limits looser than the plan's (heartbeat 120 s, 3 GiB, 1 GiB)")
+    if args.interval > 10 or args.max_seconds > 7.5 * 3600 + 600:
+        p.error("check interval above 10 s or deadline above the plan's run time")
     return Guard(args, clock, checks).run(cmd)
 
 

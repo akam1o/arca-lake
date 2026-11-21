@@ -13,9 +13,15 @@ Records:
   the body's identity (``version`` and ``sha256`` for a PUT), stage, kind
   (``op``, ``retry``, ``probe``, ``list``, ``verify``), the wall time.
 - ``outcome``: the same ids, ``status`` (HTTP status or 0), ``result``
-  (``ack``, ``refused``, ``unknown``, ``mismatch``, ``missing``,
-  ``found``), the wall time, the rate and concurrency waits, the response
-  time.
+  (``ack``, ``refused``, ``unknown``, ``not-sent``, ``missing``,
+  ``found``, ``unexpected``), the wall time, the rate and concurrency
+  waits, the response time. ``not-sent``: no connection could be made, so
+  nothing reached the server.
+- ``check``: the verification's verdict on a key (``match``,
+  ``mismatch``, ``unread``).
+
+The bucket's own requests are recorded too (op ``BUCKET-PUT``, ``LIST``);
+they change no key.
 
 Reading (``read``): a line whose CRC does not match, or that does not
 parse, is corruption and an error, except the file's last line when it has
@@ -30,7 +36,8 @@ Expected state (``expected``): per key, the set of states it may be in,
 each ``("absent",)`` or ``("body", version, sha256)``. Operations on one
 key are serialised by the load (one at a time per key, in operation-id
 order). An acknowledged PUT or DELETE sets the state; a refused one
-(``503 SlowDown``, rejected before the write) leaves it; an unknown one
+(``503 SlowDown``, rejected before the write) or a ``not-sent`` one
+leaves it; an unknown one
 adds its state to the candidates. ``verify`` then reads each key and
 checks the body against them.
 """
@@ -146,7 +153,7 @@ def expected(records, initial=None):
             cur.add(new)
         elif o["result"] == "ack":
             state[key] = {new}
-        elif o["result"] == "refused":
+        elif o["result"] in ("refused", "not-sent"):
             pass
         else:
             cur.add(new)
