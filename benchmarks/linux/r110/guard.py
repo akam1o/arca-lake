@@ -160,8 +160,8 @@ class Guard:
         if not ident:
             return False
         ident["argv"] = list(child.args)
-        common.atomic_write_json(os.path.join(d, name + ".json"), ident)
-        return True
+        # Never over an existing record (one of a load that may still run).
+        return common.link_new(os.path.join(d, name + ".json"), json.dumps(ident))
 
     def run(self, command):
         self.terminated = False

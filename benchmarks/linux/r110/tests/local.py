@@ -114,7 +114,7 @@ class LocalCluster:
     def step_done(self, n):
         self.load.done(n)
 
-    def run_step(self, step, deadline):
+    def run_step(self, step, deadline, check=None):
         n = self.load.send(dict(step, max_seconds=max(1, int(deadline - time.monotonic()))))
         return self.load.result(n, timeout=max(1, deadline - time.monotonic()))
 

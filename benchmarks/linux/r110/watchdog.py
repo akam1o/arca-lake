@@ -148,7 +148,9 @@ if a.get("detail"):
         rec = json.load(open(record))
         if result and os.path.exists(result):
             res = json.load(open(result))
-            return "gone" if res.get("group_empty") is False else "ended"
+            # The guard: its load's group confirmed; the sentinel: the services.
+            unconfirmed = res.get("group_empty") is False or res.get("services_confirmed") is False
+            return "gone" if unconfirmed else "ended"
         try:
             stat = open("/proc/%d/stat" % rec["pid"]).read()
         except FileNotFoundError:
