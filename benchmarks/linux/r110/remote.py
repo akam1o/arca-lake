@@ -25,17 +25,31 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 import time
 
-from . import judge, ledger as ledger_mod
+from . import budget, common, judge, ledger as ledger_mod
 
 Q = shlex.quote
 TOOLS_FILES = ("__init__.py", "common.py", "budget.py", "ledger.py", "s3.py", "load.py", "proc.py",
                "guard.py", "sampler.py")
 MARK = ".r110-run"
+# The smoke stage's sub-runs have budgets of their own, taken out of the
+# run's (plan §6.1: the limits are the whole run's): the main load gets
+# what is left.
+SMOKE_LIMITS = {"smoke-hb": {"max_attempts": 400, "max_body_bytes": 128 << 20},
+                "smoke-limit": {"max_attempts": 20, "max_body_bytes": 16 << 20},
+                "smoke-ops": {"max_attempts": 600, "max_body_bytes": 128 << 20}}
+
+
+def main_limits(limits):
+    out = dict(budget.DEFAULTS, **limits)
+    for k in ("max_attempts", "max_body_bytes"):
+        out[k] = min(out[k], budget.DEFAULTS[k] - sum(v[k] for v in SMOKE_LIMITS.values()))
+    return out
 
 START = r'''
-import json, os, subprocess, sys
+import json, os, subprocess, sys, time
 sys.path.insert(0, sys.argv[1])
 from r110 import proc
 name, cwd, cmd = sys.argv[2], sys.argv[3], sys.argv[4:]
@@ -53,8 +67,32 @@ for _ in range(100):
     ident = proc.identity(p.pid)
     if ident and ident["cwd"]:
         break
+    time.sleep(0.05)
+if not (ident and ident["cwd"]):
+    # A process whose identity cannot be recorded could never be stopped
+    # by it: it is not left running.
+    p.kill(); p.wait()
+    print("identity unavailable", file=sys.stderr); sys.exit(1)
 json.dump(ident, open(rec_path + ".tmp", "w")); os.replace(rec_path + ".tmp", rec_path)
 print(json.dumps(ident))
+'''
+
+ALIVE = r'''
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+from r110 import proc
+d = sys.argv[2]
+names = sorted(n for n in os.listdir(d) if n.endswith(".json")) if os.path.isdir(d) else []
+bad = 0
+for n in names:
+    try:
+        if proc.matches(json.load(open(os.path.join(d, n)))):
+            print("alive " + n); bad = 1
+    except (OSError, ValueError) as e:
+        print("unreadable %s: %s" % (n, e)); bad = 1
+if bad:
+    sys.exit(1)
+print("checked %d" % len(names))
 '''
 
 STOP = r'''
@@ -77,6 +115,20 @@ def ssh_runner(target, command, stdin=None, timeout=120):
     r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
                         target, command], input=stdin, capture_output=True, text=True, timeout=timeout)
     return r.returncode, r.stdout, r.stderr
+
+
+HOST_CHECK = r'''
+import json, os
+out = {"cpus": os.cpu_count()}
+for l in open("/proc/meminfo"):
+    if l.startswith("MemAvailable:"):
+        out["mem_available"] = int(l.split()[1]) * 1024
+out["load1"] = float(open("/proc/loadavg").read().split()[0])
+s = os.statvfs("/")
+out["free_root"] = s.f_bavail * s.f_frsize
+out["swaps"] = open("/proc/swaps").read().splitlines()[1:]
+print(json.dumps(out))
+'''
 
 
 class RemoteError(Exception):
@@ -116,6 +168,25 @@ class SshCluster:
     def nodes(self):
         return [f"node{i}" for i in range(self.cfg["settings"]["nodes"])]
 
+    def gateways(self):
+        return ["gateway0"]
+
+    def targets(self):
+        return [t["name"] for t in self.sampler_config()["targets"]]
+
+    def required_checks(self):
+        hosts = list(self.cfg["hosts"])
+        return (["space", "dirs_absent", "ports_free", "binary", "tools", "proc_stat", "kernel_log",
+                 "fdb_memory", "retained"] + [f"host {h}" for h in hosts] + [f"clock {h}" for h in hosts]
+                + [f"system_fdb {h}" for h in self.cfg.get("system_fdb_hosts", [])])
+
+    def clock_offset_ms(self, host=None):
+        """The host's wall clock minus this machine's, in ms (the midpoint
+        of the round trip; time_ns on both sides, no formatted dates)."""
+        t0 = time.time_ns()
+        out = self.ssh("python3 -I -c 'import time; print(time.time_ns())'", host=host, timeout=30)
+        t1 = time.time_ns()
+        return (int(out.strip()) - (t0 + t1) // 2) // 1_000_000
     # -- preflight (read-only) ----------------------------------------------------
 
     def preflight(self):
@@ -142,7 +213,42 @@ class SshCluster:
             c[f"system_fdb {h}"] = {"ok": "is available" in o}
         tools = self.ssh("command -v du iostat journalctl fdbserver fdbcli python3 || true", check=False)
         c["tools"] = {"ok": all(t in tools for t in ("du", "fdbserver", "fdbcli", "python3")), "found": tools.split()}
+        c["binary"]["commit_and_features"] = "not readable from the binary: the approved build record's"
+        c["proc_stat"] = {"ok": self.ssh("test -r /proc/stat && test -r /proc/vmstat && echo yes || true",
+                                         check=False).strip() == "yes"}
+        klog = self.ssh("journalctl -k -n 1 --no-pager >/dev/null 2>&1 && echo yes || true", check=False).strip()
+        c["kernel_log"] = {"ok": klog == "yes" or "kernel_log" in self.cfg.get("optional_checks", []),
+                           "readable": klog == "yes"}
+        mem = self.ssh("fdbserver --help 2>&1 | grep -c -- '--memory' || true", check=False).strip()
+        c["fdb_memory"] = {"ok": mem not in ("", "0")}
+        for h in self.cfg["hosts"]:
+            raw = self.ssh("python3 -I -", stdin=HOST_CHECK, check=False, host=h, timeout=60)
+            try:
+                r = json.loads(raw.strip().splitlines()[-1])
+                ok = r["mem_available"] >= (1 << 30) and r["load1"] <= 4 * r["cpus"] and r["free_root"] >= 3 << 30
+            except (ValueError, IndexError, KeyError, TypeError):
+                r, ok = {"raw": raw[-200:]}, False
+            c[f"host {h}"] = dict(r, ok=ok)
+            try:
+                c[f"clock {h}"] = {"ok": True, "offset_ms": self.clock_offset_ms(h)}
+            except (RemoteError, ValueError) as e:
+                c[f"clock {h}"] = {"ok": False, "error": str(e)[:200]}
+        c["retained"] = self._retained()
         return c
+
+    def _retained(self):
+        """The retained cluster's directories unchanged since the last
+        record (plan §10): size and modification time read with ``stat``
+        only, compared to ``retained_record`` of the configuration."""
+        rec = self.cfg.get("retained_record")
+        if not rec:
+            return {"ok": False, "detail": "no retained_record in the configuration to compare against"}
+        host = self.cfg.get("retained_host", self.host)
+        now = {}
+        for path in sorted(rec):
+            out = self.ssh(f"stat -c '%s %Y' -- {Q(path)} 2>/dev/null || echo missing", check=False, host=host)
+            now[path] = out.strip()
+        return {"ok": now == rec, "now": now}
 
     # -- setup, smoke ----------------------------------------------------------
 
@@ -202,13 +308,21 @@ class SshCluster:
         node_fams = ["arca_node_capacity_bytes", "arca_node_device_usage_bytes", "arca_node_reclaim_pending_records",
                      "arca_node_reclaim_retained_bytes", "arca_node_reclaim_damaged", "arca_node_compaction_backlog_bytes",
                      "arca_node_compactions_total", "arca_node_compaction_reclaimed_bytes_total",
-                     "arca_node_admission_refused_total", "arca_node_live_bytes", "arca_node_segment_bytes"]
+                     "arca_node_compaction_backlog_segments", "arca_node_compaction_blocked_segments",
+                     "arca_node_compaction_errors_total", "arca_node_compaction_skipped_no_space_total",
+                     "arca_node_dead_records", "arca_node_index_entries", "arca_node_device_free_bytes",
+                     "arca_node_reclaim_retention_seconds", "arca_node_admission_refused_total",
+                     "arca_node_live_bytes", "arca_node_segment_bytes"]
         ctl_fams = ["arca_controller_gc_backlog", "arca_controller_gc_backlog_bytes", "arca_controller_gc_collected_total",
                     "arca_controller_reclaimed_total", "arca_controller_reclaimed_bytes_total",
                     "arca_controller_reclaim_refused_total", "arca_controller_reclaim_errors_total",
                     "arca_controller_backpressure_state", "arca_controller_capacity_bytes",
-                    "arca_controller_gc_skipped_referenced_total", "arca_controller_pass_running_since_seconds"]
+                    "arca_controller_gc_skipped_referenced_total", "arca_controller_pass_running_since_seconds",
+                    "arca_controller_pass_last_seconds", "arca_controller_gc_backlog_physical_bytes",
+                    "arca_controller_gc_backlog_oldest_age_seconds", "arca_controller_shards_deleted_total",
+                    "arca_controller_gc_reclaimed_bytes_total", "arca_controller_admission_excluded_groups"]
         gw_fams = ["arca_gateway_admission_state", "arca_gateway_admission_rejected_total",
+                   "arca_gateway_admission_throttled_total",
                    "arca_gateway_node_capacity_refusals_total", "arca_gateway_placement_capacity_failures_total"]
         t = [{"name": f"node{i}", "kind": "metrics", "url": f"http://127.0.0.1:{p['node_metrics'] + i}/metrics",
               "families": node_fams} for i in range(n)]
@@ -223,7 +337,7 @@ class SshCluster:
     def start_sampler(self):
         self.ssh(f"cat > {Q(self.run_dir)}/sampler.json", stdin=json.dumps(self.sampler_config()))
         cmd = self.tool("sampler", "--config", f"{self.run_dir}/sampler.json", "--out", f"{self.run_dir}/samples.jsonl")
-        self.start("sampler", ["sh", "-c", cmd])
+        self.start("sampler", ["sh", "-c", "exec " + cmd])
 
     def start_load(self, sub=None, limits=None, heartbeat=True):
         """The load (under the guard) in ``load_dir`` or a sub-run (both read
@@ -233,18 +347,18 @@ class SshCluster:
         g = self.cfg["stop_rules"]["guard"]
         self.ssh(f"mkdir -p {Q(d)}/control && echo {Q(json.dumps({'run_id': rid}))} > {Q(d)}/run.json")
         hb = f"{self.run_dir}/heartbeat.json" if heartbeat else f"{d}/no-heartbeat.json"
+        lim = dict(self.cfg["limits"], **SMOKE_LIMITS[sub], **(limits or {})) if sub else main_limits(self.cfg["limits"])
         load = self.tool("load", "run", "--run-dir", d, "--endpoint", f"http://127.0.0.1:{self.ports['gateway']}",
                          "--object-size", self.cfg["settings"]["object_size"], "--heartbeat", hb,
-                         "--heartbeat-id", self.cfg["run_id"],
-                         *(["--limits", json.dumps(limits or self.cfg["limits"])]))
+                         "--heartbeat-id", self.cfg["run_id"], "--limits", json.dumps(lim))
         guard = self.tool("guard", "run", "--run-dir", d, "--heartbeat", hb, "--data-dir", self.mount,
                           "--min-free-gib", g["min_free_gib"], "--min-mem-mib", g["min_mem_mib"],
                           "--heartbeat-timeout", g["heartbeat_timeout_s"], "--heartbeat-id", self.cfg["run_id"],
                           # A smoke sub-run's exercised stop must not reach the
                           # main run's services: only the main guard gets them.
                           *([] if sub else ["--services", f"{self.run_dir}/services"]),
-                          "--", "sh", "-c", load)
-        self.start("guard" + (f"-{sub}" if sub else ""), ["sh", "-c", guard])
+                          "--", "sh", "-c", "exec " + load)
+        self.start("guard" + (f"-{sub}" if sub else ""), ["sh", "-c", "exec " + guard])
         self.step_n = 0
         return d
 
@@ -257,7 +371,7 @@ class SshCluster:
         self._send(d, 1, {"kind": "put", "keys": [f"s{i}" for i in range(10_000)], "rate": 2})
         st = self._wait_exit(d, 180)
         res["stop_layers_exercised"] = bool(st and st.get("stopped") == "heartbeat-lost")
-        d = self.start_load("smoke-limit", limits=dict(self.cfg["limits"], max_attempts=20))
+        d = self.start_load("smoke-limit")
         self._send(d, 1, {"kind": "create-bucket"})
         self._send(d, 2, {"kind": "put", "keys": [f"l{i}" for i in range(100)]})
         st = self._wait_exit(d, 120)
@@ -268,10 +382,12 @@ class SshCluster:
                                   {"kind": "delete", "keys": keys}, {"kind": "verify"}, {"kind": "finish"}], 1):
             self._send(d, n, step)
         st = self._wait_exit(d, 600)
-        verify = st and st["steps"][3]["result"] if st and len(st.get("steps", [])) > 3 else None
-        if not verify or verify.get("violations") or not verify.get("complete"):
+        steps = st.get("steps", []) if st else []
+        verify = steps[3]["result"] if len(steps) > 3 else None
+        gets = steps[1]["result"].get("counts", {}).get("op-GET-found", 0) if len(steps) > 1 else 0
+        if not verify or verify.get("violations") or not verify.get("complete") or gets != len(keys):
             res["errors"] += 1
-        res["ops"] = verify
+        res["ops"] = {"verify": verify, "gets_found": gets}
         return res
 
     def _send(self, d, n, step):
@@ -327,6 +443,8 @@ class SshCluster:
                "remote_heartbeat": f"{self.run_dir}/heartbeat.json",
                "remote_test_dirs": [self.run_dir, self.fdb_data],
                "remote_test_fdb_cluster": f"{self.run_dir}/fdb.cluster",
+               "remote_guard_record": f"{self.run_dir}/services/guard.json",
+               "remote_guard_result": f"{self.load_dir}/guard.json",
                "local_dir": self.cfg["local_dir"], "optional_checks": self.cfg.get("optional_checks", []),
                "limits": {"max_test_dir_bytes": self.cfg["stop_rules"]["max_test_dir_bytes"]}}
         os.makedirs(self.cfg["local_dir"], exist_ok=False)
@@ -368,17 +486,28 @@ class SshCluster:
                  stdin=rec, check=False)
 
     def samples(self):
-        out = self.ssh(f"cat {Q(self.run_dir)}/samples.jsonl 2>/dev/null || true", check=False, timeout=600)
-        return [json.loads(x) for x in out.splitlines() if x.startswith("{") and '"target"' in x]
+        """The sampler's records so far, read incrementally (only the bytes
+        written since the last read, whole lines only)."""
+        if not hasattr(self, "_samples"):
+            self._samples, self._sample_off = [], 0
+        out = self.ssh(f"tail -c +{self._sample_off + 1} {Q(self.run_dir)}/samples.jsonl 2>/dev/null || true",
+                       check=False, timeout=600)
+        end = out.rfind("\n") + 1
+        self._sample_off += len(out[:end].encode())
+        self._samples += [json.loads(x) for x in out[:end].splitlines() if x.startswith("{") and '"target"' in x]
+        return list(self._samples)
 
     def ledger_records(self):
-        out = self.ssh(f"cat {Q(self.load_dir)}/ledger.jsonl", check=False, timeout=600)
-        recs = []
-        for line in out.splitlines():
-            if not line.endswith("}"):
-                continue
-            crc, body = line.split(" ", 1)
-            recs.append(json.loads(body))
+        """The ledger, checked line by line as ``ledger.read`` does (CRC;
+        corruption raises; a torn last line left out). A ledger that cannot
+        be read raises: never an empty one."""
+        out = self.ssh(f"cat {Q(self.load_dir)}/ledger.jsonl", timeout=600)
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write(out)
+        try:
+            recs, _torn = ledger_mod.read(f.name)
+        finally:
+            os.unlink(f.name)
         return recs
 
     def stage4_keys(self):
@@ -411,6 +540,22 @@ class SshCluster:
         self.py(STOP, self.tools, f"{self.run_dir}/services/guard.json", 60, check=False)
         self.stop_watchdog()
 
+    def escalation(self):
+        """The watchdog's own stop record (a rule that fired), if any."""
+        p = os.path.join(self.cfg["local_dir"], "stop.json")
+        rec = common.StopFile(p).reason() if os.path.exists(p) else None
+        return rec
+
+    def stop_services(self):
+        """The test's gateway, controller, nodes and FoundationDB by
+        identity (never the guards or the sampler)."""
+        names = self.ssh(f"ls {Q(self.run_dir)}/services", check=False).split()
+        out = {}
+        for n in sorted(names, key=lambda n: n.startswith("fdb")):
+            if n.endswith(".json") and not n.startswith(("guard", "sampler")):
+                out[n] = self.py(STOP, self.tools, f"{self.run_dir}/services/{n}", 30, check=False).strip()
+        return out
+
     # -- teardown --------------------------------------------------------------
 
     def teardown(self):
@@ -424,17 +569,14 @@ class SshCluster:
         for n in order:
             if n.endswith(".json"):
                 out["stopped"][n] = self.py(STOP, self.tools, f"{self.run_dir}/services/{n}", 30, check=False).strip()
-        alive = self.py(r'''
-import json, os, sys
-sys.path.insert(0, sys.argv[1])
-from r110 import proc
-d = sys.argv[2]
-for n in os.listdir(d) if os.path.isdir(d) else []:
-    if n.endswith(".json") and proc.matches(json.load(open(os.path.join(d, n)))):
-        print(n)
-''', self.tools, f"{self.run_dir}/services", check=False)
-        if alive is None or alive.strip():
-            out["kept"] = f"still running: {alive.strip() if alive else 'unknown'}"
+        # Nothing is removed unless this check ran to its end and found no
+        # process of the run: an unreadable record or a failed check keeps
+        # everything.
+        rc, alive, err = self.runner(self.cfg["hosts"][self.host], "python3 -I - " + " ".join(
+            Q(a) for a in (self.tools, f"{self.run_dir}/services")), ALIVE, 120)
+        lines = alive.strip().splitlines()
+        if rc != 0 or not lines or not lines[-1].startswith("checked ") or len(lines) > 1:
+            out["kept"] = f"still running or not checked (rc {rc}): {alive.strip()[-300:]} {err.strip()[-200:]}"
             return out
         for d in (self.run_dir, self.fdb_data):
             r = self.ssh(f"[ \"$(cat {Q(d)}/{MARK} 2>/dev/null)\" = {Q(rid)} ] && rm -rf -- {Q(d)} && echo removed || "

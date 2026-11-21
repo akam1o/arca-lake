@@ -204,10 +204,16 @@ Three layers, any one of which ends the load:
    120 s (monitor or SSH lost), when the data file system has less than
    3 GiB free, or when available memory is below 1 GiB. It needs no
    network to act.
-3. **The watchdog** (operator's machine, `benchmarks/linux/watchdog.sh`
-   extended, §9 P2) every 10 s: the rules below; it writes the stop file
-   and stops the generator by identity (pid file, start time, working
-   directory; not by process name, as the current script's `pkill` does).
+3. **The watchdog** (operator's machine, `benchmarks/linux/r110/watchdog.py`,
+   §9 P2) every 10 s: the rules below; it writes the run's stop file on
+   host 2, which the generator and the guard act on (the guard stops the
+   generator's process group, and the services on a resource rule, by
+   identity: pid, start time, working directory; never by process name, as
+   `benchmarks/linux/watchdog.sh`'s `pkill` does). It signals no process
+   itself, and rewrites the heartbeat only after a round in which every
+   required check succeeded, so a watchdog that cannot see, or a lost
+   connection, stops the generator through the guard within 120 s. It also
+   watches the guard's own identity (`guard-lost`).
 
 | Rule | Threshold | Status |
 | --- | --- | --- |
