@@ -18,21 +18,27 @@ Step kinds: ``create-bucket``; ``put`` / ``delete`` / ``get`` (a list of
 keys; ``rate`` per second at most, below the run's bucket);
 ``put-until-refused`` (new keys until ``refused_for`` consecutive
 seconds of refusals, ``max_new`` at most); ``hold`` (one PUT attempt per
-``interval`` seconds, never retried, until done); ``probe`` (a GET of
-``get_key`` and, if ``put``, a PUT of a new key, every ``interval``
-seconds, until done); ``churn`` (``rate`` PUT of a new key and DELETE of
+``interval`` seconds, never retried, until done); ``probe`` (if ``put``,
+a PUT of a new key, and if ``get_key``, a GET of it, every ``interval``
+seconds on a fixed schedule, until done); ``start-probe`` /
+``stop-probe`` (the baseline-key probe of plan §6.2, in a thread of its
+own: a GET of ``key`` every 5 s; 3 failures in a row, or an answer over
+5 s, stop the run); ``churn`` (``rate`` PUT of a new key and DELETE of
 the oldest live key per second, for ``seconds``); ``list`` (pages);
 ``verify`` (every key the ledger has, checked against its candidates);
-``finish``.
+``finish``. Every request of every step goes through ``Load.attempt``.
 """
 
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
+import re
 import sys
 import threading
+import urllib.parse
 
 from . import budget as budget_mod
 from . import common, ledger as ledger_mod, s3
@@ -69,6 +75,8 @@ class Load:
         # guard is gone as well, the load still stops within the timeout.
         self._hb = common.Heartbeat(heartbeat, heartbeat_id or run_id, 120.0, self.clock) if heartbeat else None
         self._hb_lock = threading.Lock()
+        self._probe = None
+        self._probe_end = threading.Event()
 
     @property
     def stop_reason(self):
@@ -107,15 +115,23 @@ class Load:
 
     # -- one operation ------------------------------------------------------------
 
-    def attempt(self, stage, kind, method, key, op_id, attempt_no, version=None, deadline=None):
-        """One HTTP attempt: permit, intent, request, outcome. Returns the
-        result (``ack``, ``refused``, ``unknown``, ``rejected``) or raises
-        ``Stopped`` / ``LiveLimit``."""
+    def attempt(self, stage, kind, method, key, op_id, attempt_no, version=None, deadline=None,
+                op=None, path=None):
+        """One HTTP attempt: permit, intent, request, outcome. ``op`` is the
+        ledger's name of the operation (default ``method``; ``BUCKET-PUT``
+        and ``LIST`` for the bucket's own requests, with their ``path``).
+        Returns the result (``ack``, ``refused``, ``unknown``,
+        ``not-sent``, ``found``, ``missing``, ``unexpected``) and leaves
+        the response in ``last_response()``; or raises ``Stopped`` /
+        ``LiveLimit``. Every data-plane request of the load is sent here."""
         if self.stopped():
             raise budget_mod.Stopped(self.stopped())
-        size = self.object_size if method == "PUT" else 0
-        new_live = method == "PUT" and key not in self.may_exist
+        op = op or method
+        obj_put = op == "PUT"
+        size = self.object_size if obj_put else 0
+        new_live = obj_put and key not in self.may_exist
         permit = self.budget.acquire(kind, size, new_live, deadline)
+        result = None
         try:
             # Checked again after the waits for a slot and a token, just
             # before anything is written or sent.
@@ -123,12 +139,12 @@ class Load:
             if reason:
                 raise budget_mod.Stopped(reason)
             data = sha = None
-            if method == "PUT":
+            if obj_put:
                 data, sha = s3.body(key, version, size)
-            rec = {"type": "intent", "op_id": op_id, "attempt": attempt_no, "key": key, "op": method,
+            rec = {"type": "intent", "op_id": op_id, "attempt": attempt_no, "key": key, "op": op,
                    "stage": stage, "kind": kind, "budget_attempt": permit.attempt,
                    "wall_ms": self.clock.wall_ms()}
-            if method == "PUT":
+            if obj_put:
                 rec.update(version=version, sha256=sha)
                 with self._lock:
                     self.may_exist.add(key)
@@ -137,9 +153,9 @@ class Load:
             except ledger_mod.LedgerFailure:
                 self.stop("ledger-failure")
                 raise budget_mod.Stopped("ledger-failure") from None
-            path = f"/{self.bucket}/{key}" if key else f"/{self.bucket}"
-            r = self._client().request(method, path, data)
-            result, detail = self._classify(method, r, key, version)
+            r = self._client().request(method, path or f"/{self.bucket}/{key}", data)
+            self._local.response = r
+            result, detail = self._classify(op, r)
             out = {"type": "outcome", "op_id": op_id, "attempt": attempt_no, "status": r.status,
                    "result": result, "wall_ms": self.clock.wall_ms(), "seconds": round(r.seconds, 6),
                    "rate_wait_s": round(permit.rate_wait_s, 6),
@@ -155,7 +171,16 @@ class Load:
                 raise budget_mod.Stopped("ledger-failure") from None
         finally:
             permit.release()
-        self._count(f"{kind}-{method}-{result}")
+            # A new key's live slot back when it cannot have been stored: the
+            # attempt never sent, refused (503 SlowDown, before any write) or
+            # never connected.
+            if new_live and result in (None, "refused", "not-sent"):
+                with self._lock:
+                    self.may_exist.discard(key)
+                self.budget.live_release()
+        self._count(f"{kind}-{op}-{result}")
+        if r.status >= 500 and r.status != 503:
+            self.stop("unexpected-5xx")
         if method == "DELETE" and result == "ack":
             with self._lock:
                 was = key in self.may_exist
@@ -168,28 +193,31 @@ class Load:
             self.stop("integrity-violation")
         return result
 
-    def _classify(self, method, r, key, version):
+    def last_response(self):
+        return getattr(self._local, "response", None)
+
+    @staticmethod
+    def _classify(op, r):
         if r.status == 0:
             # Nothing came back: a request that may have been sent is
             # unknown; one never sent (no connection) is not.
             return ("unknown" if r.sent else "not-sent"), None
-        if method in ("PUT", "DELETE"):
-            if r.status in (200, 204):
-                return "ack", None
-            if r.slow_down():
-                return "refused", None
-            if r.status >= 500:
-                return "unknown", None
-            return "unexpected", f"status {r.status}"
-        if method == "GET":
+        if r.slow_down():
+            return "refused", None
+        if r.status >= 500:
+            # Its effect unknown (and any 5xx but 503 stops the run).
+            return "unknown", f"status {r.status}"
+        if op == "GET":
             if r.status == 200:
                 return "found", None
             if r.status == 404:
                 return "missing", None
-            if r.slow_down():
-                return "refused", None
-            return ("unknown" if r.status >= 500 else "unexpected"), f"status {r.status}"
-        return ("ack" if r.status < 300 else "unknown" if r.status >= 500 else "unexpected"), None
+        elif op in ("PUT", "DELETE"):
+            if r.status in (200, 204):
+                return "ack", None
+        elif r.status == 200:
+            return "ack", None
+        return "unexpected", f"status {r.status}"
 
     def operation(self, stage, kind, method, key, deadline=None, retries=RETRIES):
         """A logical operation with its retries after a refusal (each a new
@@ -253,6 +281,9 @@ class Load:
                 except budget_mod.LiveLimit:
                     self._count("live-limit")
                     return
+                except ledger_mod.LedgerFailure:
+                    self.stop("ledger-failure")
+                    return
                 if result == "refused":
                     refusals += 1
                     delay = self.rng.uniform(0, min(RETRY_MAX_S, RETRY_BASE_S * 2 ** min(refusals, 5)))
@@ -276,12 +307,12 @@ class Load:
         before = dict(self.counts)
         out = {}
         if kind == "create-bucket":
-            permit = self.budget.acquire("op", 0, False, deadline)
             try:
-                r = self._client().request("PUT", f"/{self.bucket}")
-            finally:
-                permit.release()
-            out["status"] = r.status
+                out["result"] = self.attempt(stage, "op", "PUT", None, self.ledger.next_operation(), 1,
+                                             deadline=deadline, op="BUCKET-PUT", path=f"/{self.bucket}")
+                out["status"] = self.last_response().status
+            except budget_mod.Stopped:
+                out["result"] = "stopped"
         elif kind in ("put", "delete", "get"):
             method = kind.upper()
             if method == "PUT":
@@ -314,6 +345,9 @@ class Load:
             out["refusal_reached"] = state["reached"]
         elif kind in ("hold", "probe"):
             i = 0
+            # A fixed schedule (start + i * interval): any window of n
+            # intervals holds n attempts.
+            interval = s.get("interval", 1.0)
             while not done() and not self.stopped():
                 if deadline is not None and self.clock.monotonic() >= deadline:
                     break
@@ -326,7 +360,8 @@ class Load:
                 except (budget_mod.Stopped, budget_mod.LiveLimit):
                     break
                 i += 1
-                if self.clock.sleep(s.get("interval", 1.0), self.budget._cancel):
+                wait = t0 + i * interval - self.clock.monotonic()
+                if wait > 0 and self.clock.sleep(wait, self.budget._cancel):
                     break
             out["attempts"] = i
         elif kind == "churn":
@@ -353,21 +388,27 @@ class Load:
             pages = 0
             token = None
             while pages < s.get("max_pages", 100) and not self.stopped():
+                q = "?list-type=2" + (f"&continuation-token={urllib.parse.quote(token, safe='')}" if token else "")
                 try:
-                    permit = self.budget.acquire("list", 0, False, deadline)
+                    res = self.attempt(stage, "list", "GET", None, self.ledger.next_operation(), 1,
+                                       deadline=deadline, op="LIST", path=f"/{self.bucket}{q}")
                 except budget_mod.Stopped:
                     break
-                try:
-                    q = "?list-type=2" + (f"&continuation-token={token}" if token else "")
-                    r = self._client().request("GET", f"/{self.bucket}{q}")
-                finally:
-                    permit.release()
                 pages += 1
-                text = r.payload.decode(errors="replace")
-                if r.status != 200 or "<IsTruncated>true</IsTruncated>" not in text:
+                text = self.last_response().payload.decode(errors="replace")
+                if res != "ack" or "<IsTruncated>true</IsTruncated>" not in text:
+                    out["last"] = res
                     break
-                token = text.split("<NextContinuationToken>")[1].split("<")[0]
+                m = re.search(r"<NextContinuationToken>([^<]+)</NextContinuationToken>", text)
+                if not m:
+                    out["error"] = "a truncated page without a continuation token"
+                    break
+                token = m.group(1)
             out["pages"] = pages
+        elif kind == "start-probe":
+            self.start_probe(s["key"], s.get("interval", 5.0))
+        elif kind == "stop-probe":
+            self.stop_probe()
         elif kind == "verify":
             out.update(self.verify(stage, deadline))
         elif kind == "finish":
@@ -392,26 +433,24 @@ class Load:
             cands = state[key]
             with self._key_lock(key):
                 op_id = self.ledger.next_operation()
-                permit = self.budget.acquire("verify", 0, False, deadline)
+                res = self.attempt(stage, "verify", "GET", key, op_id, 1, deadline=deadline)
+                r = self.last_response()
+                if res == "found":
+                    got = ("body-sha", hashlib.sha256(r.payload).hexdigest())
+                elif res == "missing":
+                    got = ("absent",)
+                else:
+                    got = None
+                ok = got is not None and any(
+                    (c == ledger_mod.ABSENT and got == ("absent",)) or
+                    (c[0] == "body" and got[0] == "body-sha" and c[2] == got[1]) for c in cands)
                 try:
-                    self.ledger.write({"type": "intent", "op_id": op_id, "attempt": 1, "key": key,
-                                       "op": "GET", "stage": stage, "kind": "verify",
-                                       "wall_ms": self.clock.wall_ms()})
-                    r = self._client().request("GET", f"/{self.bucket}/{key}")
-                    if r.status == 200:
-                        got = ("body-sha", hashlib.sha256(r.payload).hexdigest())
-                    elif r.status == 404:
-                        got = ("absent",)
-                    else:
-                        got = None
-                    ok = got is not None and any(
-                        (c == ledger_mod.ABSENT and got == ("absent",)) or
-                        (c[0] == "body" and got[0] == "body-sha" and c[2] == got[1]) for c in cands)
-                    self.ledger.write({"type": "outcome", "op_id": op_id, "attempt": 1, "status": r.status,
+                    self.ledger.write({"type": "check", "op_id": op_id, "key": key,
                                        "result": "match" if ok else ("unread" if got is None else "mismatch"),
                                        "wall_ms": self.clock.wall_ms()})
-                finally:
-                    permit.release()
+                except ledger_mod.LedgerFailure:
+                    self.stop("ledger-failure")
+                    raise budget_mod.Stopped("ledger-failure") from None
             with lock:
                 if got is None:
                     results["not_checked"] += 1
@@ -424,20 +463,62 @@ class Load:
                                                   "candidates": sorted(list(c) for c in cands)})
             return "ack"
 
-        try:
-            self._pool(sorted(state), check, None, deadline)
-        except ledger_mod.LedgerFailure:
-            self.stop("ledger-failure")
+        self._pool(sorted(state), check, None, deadline)
         checked = results["ok"] + len(results["violations"]) + results["not_checked"]
         results["complete"] = checked == len(state) and results["not_checked"] == 0
         if results["violations"]:
             self.stop("integrity-violation")
         return results
 
+    # -- the baseline-key probe (plan §6.2) ------------------------------------
+
+    def start_probe(self, key, interval=5.0, max_seconds=5.0, failures=3, timeout=5.0):
+        """A GET of ``key`` every ``interval`` seconds (a fixed schedule), in
+        a thread of its own, until the run stops or ``stop_probe``; each
+        under the budget and in the ledger. ``failures`` consecutive
+        failures (not found, an error, or a response over ``max_seconds``)
+        stop the run (``probe``). Requests time out after ``timeout``."""
+        if self._probe is not None:
+            return
+        self._probe_end.clear()
+
+        def run():
+            c = self._client_factory(self.endpoints[0])
+            if hasattr(c, "timeout"):
+                c.timeout = timeout
+            self._local.c = c
+            bad, t0, i = 0, self.clock.monotonic(), 0
+            while not self._probe_end.is_set() and not self.stopped():
+                try:
+                    res = self.operation("probe", "probe", "GET", key, retries=0)
+                except (budget_mod.Stopped, budget_mod.LiveLimit, ledger_mod.LedgerFailure):
+                    return
+                r = self.last_response()
+                ok = res == "found" and r is not None and r.seconds <= max_seconds
+                bad = 0 if ok else bad + 1
+                self._count("baseline-probe-" + ("ok" if ok else "failed"))
+                if bad >= failures:
+                    self.stop("probe")
+                    return
+                i += 1
+                wait = t0 + i * interval - self.clock.monotonic()
+                if wait > 0 and self.clock.sleep(wait, self._probe_end):
+                    return
+
+        self._probe = threading.Thread(target=run, daemon=True)
+        self._probe.start()
+
+    def stop_probe(self):
+        self._probe_end.set()
+        if self._probe is not None:
+            self._probe.join(60)
+            self._probe = None
+
     def close(self):
         if self._closed:
             return
         self._closed = True
+        self.stop_probe()
         self.ledger.close()
         self.budget.close()
 
@@ -474,7 +555,10 @@ def run(args, clock=None, client=None):
             n += 1
             if s["kind"] == "finish":
                 break
+        if load.stopped():
+            rc = 3
     finally:
+        load.stop_probe()
         write_status(args.run_dir, {"run_id": run_id, "step": n, "running": None, "steps": steps,
                                     "budget": load.budget.snapshot(), "stopped": load.stop_reason,
                                     "exit": "stopped" if rc else "finished"})
@@ -495,9 +579,11 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.limits:
         over = {k: v for k, v in json.loads(args.limits).items()
-                if k not in budget_mod.DEFAULTS or v > budget_mod.DEFAULTS[k]}
+                if k not in budget_mod.DEFAULTS or not budget_mod.valid_limit(v) or v > budget_mod.DEFAULTS[k]}
         if over:
-            p.error(f"limits above the plan's: {over}")
+            p.error(f"limits above the plan's or not finite positive numbers: {over}")
+    if not 0 < args.object_size <= 256 << 10:
+        p.error("object size above the plan's 256 KiB")
     return run(args)
 
 
