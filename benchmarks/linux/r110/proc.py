@@ -1,13 +1,27 @@
-"""Process identity for the R-110 stop layers (plan §6.2).
+"""Process identity and stopping for the R-110 stop layers (plan §6.2).
 
-A process is identified by its pid *and* its start token (Linux: the
-start time in clock ticks since boot, ``/proc/<pid>/stat`` field 22;
-elsewhere: ``ps -o lstart=``) and working directory, recorded when it was
-started. A signal is sent only after the identity is read again and
-matches, so a pid reused by another process is never signalled; the
-remaining window between that check and the signal is closed for the
-load, which the guard starts as its own child (its pid cannot be reused
-before the guard reaps it). Nothing here matches processes by name.
+A process is identified by its pid *and* its start token (Linux: the start
+time in clock ticks since boot, ``/proc/<pid>/stat`` field 22; elsewhere:
+``ps -o lstart=``) and working directory, recorded when it was started.
+Nothing here matches processes by name, and nothing is signalled on a
+guess: every answer distinguishes a process that is gone, the same
+process, another one (the pid reused), and one that cannot be checked
+(a permission error, an unreadable record). Only the same process is
+signalled.
+
+Process groups: every test process is started in a session of its own,
+so its process group (id = its pid) holds it and its children. A group
+is stopped by signalling its id while it has members, and is stopped
+when none of its members is alive (zombies are not alive). A group id is
+not reused while any member exists, the leader's zombie included: the
+guard does not reap the load (its child) until the group is confirmed
+stopped, so its signals can only reach that group. For a service (not the
+caller's child) the group is signalled only after its leader's identity
+was confirmed in the same call; once the leader is gone, its remaining
+members still hold the id, and the group is signalled only while a member
+is seen (the remaining window, a member exiting and the id being handed
+out again between the look and the signal, needs the kernel to cycle
+through its pid space in that interval).
 """
 
 import os
@@ -15,96 +29,261 @@ import signal
 import subprocess
 import sys
 
+LINUX = sys.platform.startswith("linux")
+
+
+class Unknown(Exception):
+    """A process or group that exists, or may exist, and cannot be checked."""
+
 
 def start_token(pid):
-    """The start token of ``pid``, or None if it does not exist."""
-    if sys.platform.startswith("linux"):
+    """The start token of ``pid``; None if no such process. Raises
+    ``Unknown`` when it cannot be read."""
+    if LINUX:
         try:
             with open(f"/proc/{pid}/stat") as f:
                 stat = f.read()
         except (FileNotFoundError, ProcessLookupError):
             return None
+        except OSError as e:
+            raise Unknown(f"/proc/{pid}/stat: {e}") from None
         # The command may contain spaces and parentheses: fields follow the
         # last ')'. Field 22 overall is the 20th after it.
         return stat.rsplit(")", 1)[1].split()[19]
-    r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Unknown(f"ps: {e}") from None
     out = r.stdout.strip()
+    if r.returncode != 0 and not out:
+        return None  # ps answers 1 for no such process
     return out or None
 
 
 def cwd_of(pid):
-    if sys.platform.startswith("linux"):
+    """The working directory of ``pid``; None if the process is gone.
+    Raises ``Unknown`` when it cannot be read (another user's process, a
+    failing ``lsof``)."""
+    if LINUX:
         try:
             return os.readlink(f"/proc/{pid}/cwd")
-        except OSError:
+        except (FileNotFoundError, ProcessLookupError):
             return None
-    r = subprocess.run(["lsof", "-a", "-d", "cwd", "-p", str(pid), "-Fn"], capture_output=True, text=True)
+        except OSError as e:
+            raise Unknown(f"/proc/{pid}/cwd: {e}") from None
+    try:
+        r = subprocess.run(["lsof", "-a", "-d", "cwd", "-p", str(pid), "-Fn"], capture_output=True, text=True,
+                           timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Unknown(f"lsof: {e}") from None
     lines = [ln[1:] for ln in r.stdout.splitlines() if ln.startswith("n")]
-    return lines[-1] if lines else None
+    if lines:
+        return lines[-1]
+    if start_token(pid) is None:
+        return None
+    raise Unknown(f"lsof gave no working directory for {pid}")
 
 
 def identity(pid):
+    """``{"pid", "start", "cwd", "pgid"}`` of a live ``pid``; None if it
+    does not exist; raises ``Unknown`` if it cannot be read."""
     tok = start_token(pid)
     if tok is None:
         return None
-    return {"pid": pid, "start": tok, "cwd": cwd_of(pid)}
+    cwd = cwd_of(pid)
+    if cwd is None:
+        return None
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return None
+    return {"pid": pid, "start": tok, "cwd": cwd, "pgid": pgid}
+
+
+def valid(rec):
+    return isinstance(rec, dict) and isinstance(rec.get("pid"), int) and not isinstance(rec["pid"], bool) \
+        and rec["pid"] > 1 and bool(rec.get("start")) and bool(rec.get("cwd"))
+
+
+def check(rec):
+    """``same``, ``gone``, ``other`` (the pid now another process's),
+    ``unknown`` (it cannot be checked) or ``invalid`` (not an identity)."""
+    if not valid(rec):
+        return "invalid"
+    try:
+        tok = start_token(rec["pid"])
+        if tok is None:
+            return "gone"
+        if tok != rec["start"]:
+            return "other"
+        cwd = cwd_of(rec["pid"])
+    except Unknown:
+        return "unknown"
+    if cwd is None:
+        return "gone"
+    return "same" if cwd == rec["cwd"] else "other"
 
 
 def matches(rec):
-    """Whether the process ``rec`` (pid, start, cwd) still exists as itself."""
-    if not isinstance(rec, dict) or not isinstance(rec.get("pid"), int) or not rec.get("start") \
-            or not rec.get("cwd"):
+    """Whether ``rec`` is still the same process. Raises ``ValueError``
+    for a record that is not an identity and ``Unknown`` when it cannot be
+    checked (never a silent no)."""
+    c = check(rec)
+    if c == "invalid":
         raise ValueError(f"not a process identity: {rec!r}")
-    now = identity(rec["pid"])
-    return bool(now and now["start"] == rec["start"] and now["cwd"] == rec["cwd"])
+    if c == "unknown":
+        raise Unknown(f"process {rec['pid']} cannot be checked")
+    return c == "same"
 
 
 def signal_if_same(rec, sig):
     """Send ``sig`` to ``rec`` only if it is still the same process.
-    Returns ``signalled``, ``gone`` or ``other`` (pid reused: nothing sent)."""
-    if not isinstance(rec, dict) or not isinstance(rec.get("pid"), int):
+    Returns ``signalled``, ``gone``, ``other`` (pid reused: nothing sent),
+    ``unknown`` (not checkable: nothing sent) or ``denied`` (EPERM)."""
+    if not valid(rec):
         raise ValueError(f"not a process identity: {rec!r}")
-    if start_token(rec["pid"]) is None:
-        return "gone"
-    if not matches(rec):
-        return "other"
+    c = check(rec)
+    if c != "same":
+        return c
     try:
         os.kill(rec["pid"], sig)
     except ProcessLookupError:
         return "gone"
+    except PermissionError:
+        return "denied"
     return "signalled"
 
 
-def group_alive(pgid):
-    """Whether the group has a member. ``EPERM`` (macOS answers it for a
-    group whose members are all zombies; the group is the guard's own
-    session, so no member of another user can be in it) counts as none."""
-    try:
-        os.killpg(pgid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
-        return False
+# -- groups ---------------------------------------------------------------------
 
 
-def stop_group(pgid, clock, reap, term_wait=20.0, kill_wait=10.0):
-    """TERM the process group ``pgid``, then KILL it; return whether it is
-    empty afterwards. ``reap()`` collects the group leader (the caller's
-    child) once it has exited: a zombie leader would otherwise keep the
-    group alive, and until it is reaped its id cannot be reused, so the
-    signals reach only this group."""
-    for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
-        reap()
-        if not group_alive(pgid):
-            return True
+def members(pgid):
+    """``[(pid, state)]`` of the processes in group ``pgid`` (state: a
+    one-letter process state, ``Z`` a zombie). Raises ``Unknown`` when the
+    process table cannot be read."""
+    out = []
+    if LINUX:
         try:
-            os.killpg(pgid, sig)
-        except (ProcessLookupError, PermissionError):
-            return True
+            names = os.listdir("/proc")
+        except OSError as e:
+            raise Unknown(f"/proc: {e}") from None
+        for n in names:
+            if not n.isdigit():
+                continue
+            try:
+                with open(f"/proc/{n}/stat") as f:
+                    rest = f.read().rsplit(")", 1)[1].split()
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # exited while listed
+            except OSError as e:
+                raise Unknown(f"/proc/{n}/stat: {e}") from None
+            # After ')': state, ppid, pgrp, ...
+            if int(rest[2]) == pgid:
+                out.append((int(n), rest[0]))
+        return out
+    try:
+        r = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Unknown(f"ps: {e}") from None
+    if r.returncode != 0:
+        raise Unknown(f"ps: rc {r.returncode}")
+    for line in r.stdout.splitlines():
+        f = line.split()
+        if len(f) >= 3 and int(f[1]) == pgid:
+            out.append((int(f[0]), f[2][0]))
+    return out
+
+
+def group_state(pgid):
+    """``empty`` (no member alive: none, or zombies only), ``alive`` or
+    ``unknown`` (the table cannot be read)."""
+    try:
+        ms = members(pgid)
+    except Unknown:
+        return "unknown"
+    return "alive" if any(st != "Z" for _, st in ms) else "empty"
+
+
+def group_alive(pgid):
+    """True when a member of ``pgid`` is alive; raises ``Unknown`` when it
+    cannot be told (never taken as empty)."""
+    st = group_state(pgid)
+    if st == "unknown":
+        raise Unknown(f"group {pgid} cannot be checked")
+    return st == "alive"
+
+
+def _killpg(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+        return "signalled"
+    except ProcessLookupError:
+        return "gone"
+    except PermissionError:
+        # A member another user owns (Linux), or a group of zombies only
+        # (macOS): never taken as stopped; the member scan decides.
+        return "denied"
+
+
+def stop_group(pgid, clock, term_wait=20.0, kill_wait=10.0):
+    """TERM the group, then KILL it, until no member is alive. Returns
+    ``{"confirmed": bool, "state": final group state, "signals": [...]}``.
+    The caller must keep the group id reserved meanwhile (the guard: its
+    load, the leader, is not reaped before this returns)."""
+    sent = []
+    for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
+        st = group_state(pgid)
+        if st == "empty":
+            return {"confirmed": True, "state": st, "signals": sent}
+        sent.append((signal.Signals(sig).name, _killpg(pgid, sig)))
         end = clock.monotonic() + wait
         while clock.monotonic() < end:
-            reap()
-            if not group_alive(pgid):
-                return True
+            st = group_state(pgid)
+            if st == "empty":
+                return {"confirmed": True, "state": st, "signals": sent}
             clock.sleep(0.05)
-    reap()
-    return not group_alive(pgid)
+    st = group_state(pgid)
+    return {"confirmed": st == "empty", "state": st, "signals": sent}
+
+
+def stop_identified(rec, clock, term_wait=20.0, kill_wait=10.0):
+    """Stop a recorded service (a session leader started by the run) and
+    its whole group. Returns ``{"verdict", ...}``:
+
+    - ``stopped``: it was the same process, signalled, and no member of
+      its group is alive any more;
+    - ``gone``: neither it nor any member of its group is alive;
+    - ``not-stopped``: signalled, but a member is still alive;
+    - ``unverified``: it could not be identified or checked (an invalid
+      record, a reused pid, a permission error, members left of a leader
+      gone before this call): nothing was signalled on a guess.
+    """
+    if not valid(rec):
+        return {"verdict": "unverified", "reason": "not a process identity"}
+    pgid = rec.get("pgid", rec["pid"])
+    c = check(rec)
+    if c == "unknown":
+        return {"verdict": "unverified", "reason": "the process cannot be checked"}
+    if c in ("gone", "other"):
+        st = group_state(pgid)
+        if st == "empty" and c == "gone":
+            return {"verdict": "gone"}
+        # A reused pid (``other``) or members left of a group whose leader
+        # is gone: not identifiable here.
+        return {"verdict": "unverified", "reason": f"leader {c}, group {st}"}
+    if pgid != rec["pid"]:
+        # Not a session leader of its own: only the process itself.
+        r = signal_if_same(rec, signal.SIGTERM)
+        end = clock.monotonic() + term_wait
+        while r == "signalled" and clock.monotonic() < end and check(rec) == "same":
+            clock.sleep(0.05)
+        if check(rec) == "same":
+            r = signal_if_same(rec, signal.SIGKILL)
+            end = clock.monotonic() + kill_wait
+            while clock.monotonic() < end and check(rec) == "same":
+                clock.sleep(0.05)
+        left = check(rec)
+        return {"verdict": "stopped" if left == "gone" else "not-stopped", "signal": r, "left": left}
+    res = stop_group(pgid, clock, term_wait, kill_wait)
+    verdict = "stopped" if res["confirmed"] else ("unverified" if res["state"] == "unknown" else "not-stopped")
+    return dict(res, verdict=verdict)

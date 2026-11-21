@@ -31,6 +31,10 @@ VALUES = {
     "c2_freed_fraction_of_expected": 0.9,
     "c2_hold_s": 600,
     "c2_du_tolerance": 0.05,
+    # D1's chain (plan §7 stage 4: the GC grace, a GC interval, the
+    # retention and a reclaim interval after D1, about 25 min): C1 is
+    # judged on progress only once the refusal was observed that far.
+    "d1_chain_s": 1500,
     "c3a_hold_s": 600,
     "c3a_probe_interval_s": 10,
     "c3b_ack_fraction": 0.99,
@@ -137,35 +141,49 @@ def c1(samples, records, tl, v, nodes):
         if not covered(pts, t_r, t_e, iv, v["max_gap_factor"]):
             return verdict("C1", INCONCLUSIVE, [f"{k} not sampled through the refusal"])
     reasons, ev = [], {"d1": d1, "refusal_s": (t_e - t_r) / 1000}
+    # Observed violations fail C1 whenever they happened, matured or not.
+    for k in ("arca_controller_reclaim_refused_total", "arca_controller_reclaim_errors_total"):
+        pts = ctl[k]
+        if pts[-1][1] != pts[0][1]:
+            reasons.append(f"{k} rose during the refusal")
+    if reasons:
+        return verdict("C1", FAILED, reasons, **ev)
+    # Progress is judged only on an observation that reached D1's maturity
+    # (its chain after D1's last delete); one cut short (a stop, a lost
+    # monitor, the stage's end) is Inconclusive, never Failed for progress
+    # it had no time to show.
+    d1_done = s4.get("d1_done_ms")
+    if d1_done is None:
+        return verdict("C1", INCONCLUSIVE, ["the end of D1's deletes not recorded"], **ev)
+    matured_at = d1_done + v["d1_chain_s"] * 1000
+    ev["matured_at_ms"] = matured_at
+    if t_e < matured_at:
+        return verdict("C1", INCONCLUSIVE, [f"the refusal observed until {t_e}, D1 matures at {matured_at}"], **ev)
+    if any(s != 3 for t, s in gw if t <= matured_at):
+        return verdict("C1", INCONCLUSIVE, ["admission left write rejected before D1 matured"], **ev)
     backlog0 = ctl["arca_controller_gc_backlog"][0][1]
     if backlog0 == 0:
         return verdict("C1", INCONCLUSIVE, ["no D1 generation left to collect at the refusal's start"], **ev)
     collected = ctl["arca_controller_gc_collected_total"][-1][1] - ctl["arca_controller_gc_collected_total"][0][1]
     reclaimed = ctl["arca_controller_reclaimed_total"][-1][1] - ctl["arca_controller_reclaimed_total"][0][1]
     ev.update(backlog_at_refusal=backlog0, gc_collected=collected, reclaimed=reclaimed)
-    if collected <= 0:
-        reasons.append("no GC collection after the refusal's start")
-    if min(b for _, b in ctl["arca_controller_gc_backlog"]) != 0:
-        reasons.append("the GC backlog did not reach 0 during the refusal")
-    if any(s != 3 for _, s in gw):
-        return verdict("C1", INCONCLUSIVE, ["admission left write rejected before D1 matured"], **ev)
     before = s4.get("reclaimed_before_refusal")
     if before is None:
         return verdict("C1", INCONCLUSIVE, ["the reclaims before the refusal not known"], **ev)
-    need = v["c1_records_per_object"] * d1 - before
-    ev["reclaimed_needed"] = need
-    if reclaimed < need:
-        reasons.append(f"reclaimed {reclaimed} records after the refusal's start, {need} needed")
-    for k in ("arca_controller_reclaim_refused_total", "arca_controller_reclaim_errors_total"):
-        pts = ctl[k]
-        if pts[-1][1] != pts[0][1]:
-            reasons.append(f"{k} rose during the refusal")
     for n in nodes:
         pend = series(samples, n, "arca_node_reclaim_pending_records", t_r, t_e)
         if not covered(pend, t_r, t_e, iv, v["max_gap_factor"]):
             return verdict("C1", INCONCLUSIVE, [f"{n}: pending records not sampled through the refusal"], **ev)
-        if min(p for _, p in pend) != 0:
-            reasons.append(f"{n}: pending records never back to 0")
+        if pend[-1][1] != 0:
+            reasons.append(f"{n}: pending records not back to 0 at the end of the refusal")
+    if collected <= 0:
+        reasons.append("no GC collection after the refusal's start")
+    if min(b for _, b in ctl["arca_controller_gc_backlog"]) != 0:
+        reasons.append("the GC backlog did not reach 0 during the refusal")
+    need = v["c1_records_per_object"] * d1 - before
+    ev["reclaimed_needed"] = need
+    if reclaimed < need:
+        reasons.append(f"reclaimed {reclaimed} records after the refusal's start, {need} needed")
     approx = [k for k in ("arca_gateway_node_capacity_refusals_total",)
               if (lambda p: p and p[-1][1] > p[0][1])(series(samples, "gateway0", k, t_r, t_e))]
     if tl.get("reconcile_deleted_during_refusal"):

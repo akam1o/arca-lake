@@ -156,7 +156,9 @@ class Heartbeats(GuardBase):
 class Resources(GuardBase):
     def service(self):
         """A test service and its identity record."""
-        p = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(300)"], cwd=self.dir)
+        # As remote.START starts one: a session (and process group) of its own.
+        p = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(300)"], cwd=self.dir,
+                             start_new_session=True)
         self.extra.append(p)
         for _ in range(50):
             ident = proc.identity(p.pid)
@@ -175,7 +177,7 @@ class Resources(GuardBase):
         self.free = lambda: 2 * GIB
         rc, res = self.run_guard(LOAD, timeout=60, services=d)
         self.assertEqual(res["reason"], "disk-free")
-        self.assertEqual(res["services"]["node0"], "signalled")
+        self.assertEqual(res["services"]["node0"]["verdict"], "stopped")
         p.wait(10)
         self.assertIsNotNone(p.returncode)
 
@@ -186,7 +188,7 @@ class Resources(GuardBase):
             json.dump(stale, f)
         self.free = lambda: 1 * GIB
         rc, res = self.run_guard(LOAD, timeout=60, services=d)
-        self.assertEqual(res["services"]["node0"], "other")
+        self.assertEqual(res["services"]["node0"]["verdict"], "unverified")
         self.assertIsNone(p.poll(), "a process not ours was signalled")
 
     def test_a_check_that_cannot_be_made_is_a_breach(self):
@@ -275,7 +277,7 @@ class ReviewFindings(GuardBase):
         self.assertNotIn("guard", res["services"])
         self.assertNotIn("guard-smoke-hb", res["services"])
         self.assertIsNone(other.poll(), "a guard was signalled")
-        self.assertEqual(res["services"]["node0"], "signalled")
+        self.assertEqual(res["services"]["node0"]["verdict"], "stopped")
         p.wait(10)
 
     def test_a_load_that_ended_on_a_stop_still_gets_the_services_stopped(self):
@@ -290,7 +292,7 @@ class ReviewFindings(GuardBase):
 
         rc, res = self.run_guard(WATCHING, timeout=60, services=d, during=during)
         self.assertEqual((res["reason"], res["source"]), ("disk-free", "stop-file"))
-        self.assertEqual(res["services"]["node0"], "signalled")
+        self.assertEqual(res["services"]["node0"]["verdict"], "stopped")
         p.wait(10)
 
     def test_a_terminated_guard_stops_the_load_and_reports(self):
@@ -353,6 +355,124 @@ def healthy(load_host=False, system=False):
     if system:
         r["system_fdb_available"] = True
     return r
+
+
+# A service (a session of its own) whose child ignores SIGTERM: stopping the
+# leader alone would leave the child.
+STUBBORN_CHILD = [sys.executable, "-I", "-c",
+                  "import subprocess,sys,time\n"
+                  "c=subprocess.Popen([sys.executable,'-I','-c','import signal,time\\n"
+                  "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\ntime.sleep(300)'])\n"
+                  "open('child.pid','w').write(str(c.pid))\n"
+                  "time.sleep(300)\n"]
+
+
+class F3Stopping(GuardBase):
+    """Stopping is confirmed, never assumed (F3): real processes, and the
+    errors forced where they cannot be made safely."""
+
+    def spawn(self, argv=None):
+        p = subprocess.Popen(argv or [sys.executable, "-I", "-c", "import time; time.sleep(300)"], cwd=self.dir,
+                             start_new_session=True)
+        self.extra.append(p)
+        for _ in range(100):
+            ident = proc.identity(p.pid)
+            if ident:
+                return p, ident
+            time.sleep(0.05)
+        self.fail("no identity")
+
+    def test_a_childs_stubborn_child_is_stopped_and_confirmed(self):
+        p, ident = self.spawn(STUBBORN_CHILD)
+        child = self.child_pid()
+        res = proc.stop_identified(ident, common.Clock(), term_wait=1.0, kill_wait=5.0)
+        self.assertEqual(res["verdict"], "stopped", res)
+        self.assertEqual([s for s, _ in res["signals"]], ["SIGTERM", "SIGKILL"])
+        p.wait(10)
+        for _ in range(50):
+            if not alive(child):
+                break
+            time.sleep(0.1)
+        self.assertFalse(alive(child))
+
+    def test_eperm_from_killpg_is_not_a_stop(self):
+        p, ident = self.spawn()
+        with mock.patch.object(proc.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")):
+            res = proc.stop_group(ident["pgid"], common.Clock(), term_wait=0.3, kill_wait=0.3)
+        self.assertFalse(res["confirmed"])
+        self.assertEqual(res["state"], "alive")
+        self.assertEqual(res["signals"], [("SIGTERM", "denied"), ("SIGKILL", "denied")])
+        self.assertIsNone(p.poll(), "the process was stopped although EPERM was answered")
+        self.assertTrue(proc.group_alive(ident["pgid"]))
+
+    def test_a_process_table_that_cannot_be_read_is_unknown_not_empty(self):
+        p, ident = self.spawn()
+        with mock.patch.object(proc, "members", side_effect=proc.Unknown("forced")):
+            self.assertEqual(proc.group_state(ident["pgid"]), "unknown")
+            with self.assertRaises(proc.Unknown):
+                proc.group_alive(ident["pgid"])
+            res = proc.stop_group(ident["pgid"], common.Clock(), term_wait=0.2, kill_wait=0.2)
+            self.assertEqual((res["confirmed"], res["state"]), (False, "unknown"))
+            v = proc.stop_identified(ident, common.Clock(), term_wait=0.2, kill_wait=0.2)
+            self.assertNotIn(v["verdict"], ("stopped", "gone"))
+
+    def test_an_unreadable_working_directory_sends_nothing(self):
+        p, ident = self.spawn()
+        with mock.patch.object(proc, "cwd_of", side_effect=proc.Unknown("forced: permission denied")):
+            self.assertEqual(proc.check(ident), "unknown")
+            self.assertEqual(proc.signal_if_same(ident, signal.SIGTERM), "unknown")
+            self.assertEqual(proc.stop_identified(ident, common.Clock())["verdict"], "unverified")
+            with self.assertRaises(proc.Unknown):
+                proc.matches(ident)
+        self.assertIsNone(p.poll())
+
+    def test_a_reused_pid_is_never_signalled_and_never_counted_stopped(self):
+        p, ident = self.spawn()
+        other = dict(ident, start="not-its-start")
+        self.assertEqual(proc.check(other), "other")
+        v = proc.stop_identified(other, common.Clock(), term_wait=0.2, kill_wait=0.2)
+        self.assertEqual(v["verdict"], "unverified")
+        self.assertIsNone(p.poll())
+
+    def test_a_gone_process_with_no_group_left_is_gone(self):
+        p, ident = self.spawn()
+        p.kill()
+        p.wait()
+        self.assertEqual(proc.stop_identified(ident, common.Clock())["verdict"], "gone")
+
+    def test_invalid_records(self):
+        for rec in (None, {}, {"pid": True, "start": "1", "cwd": "/"}, {"pid": 1, "start": "1", "cwd": "/"}):
+            self.assertEqual(proc.check(rec), "invalid")
+            self.assertEqual(proc.stop_identified(rec, common.Clock())["verdict"], "unverified")
+
+    def test_the_guard_reaps_its_load_only_after_the_group_is_stopped(self):
+        order = []
+        real = proc.stop_group
+
+        def stop_group(pgid, clock, *a, **k):
+            # The load (the leader) must still be unreaped here: its zombie
+            # or itself is still a member, so the id is reserved.
+            order.append(("stop", any(pid == pgid for pid, _ in proc.members(pgid))))
+            return real(pgid, clock, *a, **k)
+
+        with mock.patch.object(proc, "stop_group", stop_group):
+            rc, res = self.run_guard(LOAD, timeout=0.5)
+        self.assertEqual(order, [("stop", True)])
+        self.assertTrue(res["group_empty"])
+        self.assertFalse(alive(self.child_pid()))
+
+    def test_the_guard_reports_a_group_it_could_not_confirm(self):
+        with mock.patch.object(proc.os, "killpg", side_effect=PermissionError(1, "denied")):
+            rc, res = self.run_guard(LOAD, timeout=0.3)
+        self.assertEqual(rc, 3)
+        self.assertFalse(res["group_empty"])
+        self.assertFalse(res["load_stop"]["confirmed"])
+        # The test's own cleanup: the load and its child, by their pids.
+        for pid in (res["load"]["pid"], self.child_pid()):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 FAKE_SSH = """#!/bin/sh
@@ -475,8 +595,12 @@ class Watchdogs(unittest.TestCase):
     def test_the_test_foundationdb_down_for_a_minute(self):
         self.hosts.readings["t2"]["test_fdb_available"] = False
         w = self.wd()
-        self.assertEqual(w.run(max_rounds=20), 2)
+        # An anomaly: the load stops, the watching goes on (and beats: the
+        # resources are fine), no alarm for the services.
+        self.assertEqual(w.run(max_rounds=20), 0)
         self.assertEqual(self.stops(), ["test-fdb"])
+        self.assertEqual(len(self.beats()), 20)
+        self.assertFalse(os.path.isdir(w.local_alarms) and os.listdir(w.local_alarms))
 
     def test_the_watchdog_never_kills_and_refuses_looser_limits(self):
         self.wd().run(max_rounds=2)

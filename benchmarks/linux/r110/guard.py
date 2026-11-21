@@ -45,7 +45,7 @@ import sys
 from . import common, proc
 
 GIB, MIB = 1 << 30, 1 << 20
-KEEP_PREFIXES = ("guard", "sampler")
+KEEP_PREFIXES = ("guard", "sampler", "sentinel")
 
 
 def free_bytes(path):
@@ -61,6 +61,35 @@ def mem_available_bytes():
             if line.startswith("MemAvailable:"):
                 return int(line.split()[1]) * 1024
     raise OSError("MemAvailable not in /proc/meminfo")
+
+
+def stop_services(services_dir, clock):
+    """The test's services (plan §6.2: gateway, controller, nodes,
+    FoundationDB) by identity, each with its whole process group, until
+    stopped or confirmed not stoppable (``proc.stop_identified``). Never the
+    guards, the sentinel or the sampler, nor this process or its parent.
+    Returns ``(name -> verdict, all confirmed)``; a missing directory is not
+    confirmed."""
+    out = {}
+    if not services_dir or not os.path.isdir(services_dir):
+        return out, False
+    mine = {os.getpid(), os.getppid()}
+    for name in sorted(os.listdir(services_dir), key=lambda n: (n.startswith("fdb"), n)):
+        if not name.endswith(".json") or name.startswith(KEEP_PREFIXES):
+            continue
+        try:
+            rec = common.read_json(os.path.join(services_dir, name))
+            if not proc.valid(rec):
+                raise ValueError(f"not an identity: {rec!r}")
+        except (OSError, ValueError) as e:
+            out[name] = {"verdict": "unverified", "reason": f"unreadable: {e}"}
+            continue
+        if rec["pid"] in mine:
+            out[name] = "skipped: the guard itself"
+            continue
+        out[name[:-5]] = proc.stop_identified(rec, clock)
+    verdicts = [v["verdict"] for v in out.values() if isinstance(v, dict)]
+    return out, all(v in ("stopped", "gone") for v in verdicts)
 
 
 class Guard:
@@ -101,46 +130,9 @@ class Guard:
         return None
 
     def stop_services(self):
-        """The test's services (plan §6.2: gateway, controller, nodes,
-        FoundationDB) by identity. Never the guards (this one among them)
-        or the sampler, which keeps observing."""
-        d = self.args.services
-        if not d or not os.path.isdir(d):
-            return
-        recs = []
-        mine = {os.getpid(), os.getppid()}
-        for name in sorted(os.listdir(d)):
-            if not name.endswith(".json") or name.startswith(KEEP_PREFIXES):
-                continue
-            try:
-                rec = common.read_json(os.path.join(d, name))
-                if not isinstance(rec, dict) or not isinstance(rec.get("pid"), int):
-                    raise ValueError(f"not an identity: {rec!r}")
-            except (OSError, ValueError) as e:
-                self.result["services"][name] = f"unreadable: {e}"
-                continue
-            if rec["pid"] in mine:
-                self.result["services"][name] = "skipped: the guard itself"
-                continue
-            recs.append((name[:-5], rec))
-
-        def alive(rec):
-            try:
-                return proc.matches(rec)
-            except ValueError:
-                return False
-
-        for name, rec in recs:
-            try:
-                self.result["services"][name] = proc.signal_if_same(rec, signal.SIGTERM)
-            except ValueError as e:
-                self.result["services"][name] = f"unreadable: {e}"
-        end = self.clock.monotonic() + 30
-        while self.clock.monotonic() < end and any(alive(r) for _, r in recs):
-            self.clock.sleep(0.2)
-        for name, rec in recs:
-            if alive(rec):
-                self.result["services"][name] = "killed: " + proc.signal_if_same(rec, signal.SIGKILL)
+        res, confirmed = stop_services(self.args.services, self.clock)
+        self.result["services"].update(res)
+        self.result["services_confirmed"] = confirmed
 
     def terminate(self, *_):
         """SIGTERM to the guard: it stops the load's group and writes its
@@ -179,12 +171,23 @@ class Guard:
             self.result["stopped"].append("load")
         # The whole group (the load and anything it started), also after the
         # load itself ended: nothing of it may outlive the guard.
-        empty = proc.stop_group(pgid, self.clock, child.poll)
-        child.wait()
+        # The load (the group's leader) is reaped only after: until then its
+        # id is reserved and the signals can only reach this group.
+        stop = proc.stop_group(pgid, self.clock)
+        empty = stop["confirmed"]
+        self.result["load_stop"] = stop
+        try:
+            child.wait(timeout=5 if not empty else None)
+            self.result["load_reaped"] = True
+        except subprocess.TimeoutExpired:
+            # Not stoppable from here (the stop is not confirmed): reported,
+            # never waited on for ever. The load still sees the stop file
+            # and its own heartbeat check.
+            self.result["load_reaped"] = False
         if reason and common.reason_class(reason) in ("resource", "monitor"):
             self.stop_services()
             self.result["stopped"].append("services")
-        self.result.update(reason=reason, source=source, load_exit=child.returncode,
+        self.result.update(reason=reason, source=source, load_exit=child.returncode if self.result["load_reaped"] else None,
                            group_empty=empty, wall_ms=self.clock.wall_ms())
         common.atomic_write_json(os.path.join(self.args.run_dir, "guard.json"), self.result)
         if reason or not empty:
@@ -192,9 +195,90 @@ class Guard:
         return child.returncode
 
 
-def main(argv=None, clock=None, checks=None):
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("command", choices=["run"])
+class Sentinel:
+    """The run's host-side keeper (plan §6.2), from setup to teardown, apart
+    from any load: it watches the data file system's free space, the
+    available memory, the watchdog's heartbeat and the watchdog's alarms
+    (``ALARMS``: one file per resource or monitor rule that fired, written
+    whatever stop came first), and on any of them, on a check it cannot
+    make, on its deadline or on SIGTERM, writes the run's stop file (the
+    loads stop) and stops the test's services by identity, then writes its
+    result (``sentinel.json``) with every verdict. It needs no network, no
+    driver and no load: a lost driver, ssh or watchdog leaves the heartbeat
+    stale, and it stops the services within the heartbeat timeout."""
+
+    def __init__(self, args, clock=None, checks=None):
+        self.args = args
+        self.clock = clock or common.Clock()
+        self.hb = common.Heartbeat(args.heartbeat, args.heartbeat_id, args.heartbeat_timeout, self.clock)
+        self.free = (checks or {}).get("free", free_bytes)
+        self.mem = (checks or {}).get("mem", mem_available_bytes)
+        self.deadline = self.clock.monotonic() + args.max_seconds
+        self.terminated = False
+        self.result = {"run_id": args.heartbeat_id, "services": {}}
+
+    def terminate(self, *_):
+        self.terminated = True
+
+    def alarm(self):
+        d = self.args.alarms
+        try:
+            names = sorted(os.listdir(d))
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            return {"reason": "monitor-failed", "detail": f"alarms: {e}"}
+        for n in names:
+            if not n.endswith(".json"):
+                continue
+            try:
+                rec = common.read_json(os.path.join(d, n))
+            except (OSError, ValueError):
+                return {"reason": "stop-file-unreadable", "file": n}
+            if common.reason_class(rec.get("reason")) in ("resource", "monitor"):
+                return dict(rec, file=n)
+        return None
+
+    def breach(self):
+        a = self.alarm()
+        if a:
+            return a.get("reason", "monitor-failed"), {"source": "alarm", "alarm": a}
+        if self.terminated:
+            return "operator", {"source": "sigterm"}
+        r = self.hb.check()
+        if r:
+            return r, {"source": "sentinel"}
+        try:
+            if self.free(self.args.data_dir) < self.args.min_free_gib * GIB:
+                return "disk-free", {"source": "sentinel"}
+            if self.mem() < self.args.min_mem_mib * MIB:
+                return "memory", {"source": "sentinel"}
+        except (OSError, ValueError) as e:
+            return "monitor-failed", {"source": "sentinel", "error": str(e)[:200]}
+        if self.clock.monotonic() >= self.deadline:
+            return "run-deadline", {"source": "sentinel"}
+        return None
+
+    def run(self):
+        try:
+            signal.signal(signal.SIGTERM, self.terminate)
+        except ValueError:
+            pass  # not the main thread (tests call terminate() directly)
+        while True:
+            b = self.breach()
+            if b:
+                break
+            self.clock.sleep(self.args.interval)
+        reason, detail = b
+        common.StopFile(self.args.stop_file).stop(reason, "sentinel", self.clock.wall_ms())
+        res, confirmed = stop_services(self.args.services, self.clock)
+        self.result.update(reason=reason, detail=detail, services=res, services_confirmed=confirmed,
+                           wall_ms=self.clock.wall_ms())
+        common.atomic_write_json(os.path.join(self.args.run_dir, "sentinel.json"), self.result)
+        return 3
+
+
+def _common_args(p):
     p.add_argument("--run-dir", required=True)
     p.add_argument("--heartbeat", required=True)
     p.add_argument("--data-dir", required=True)
@@ -205,7 +289,41 @@ def main(argv=None, clock=None, checks=None):
     p.add_argument("--interval", type=float, default=1.0)
     p.add_argument("--services")
     p.add_argument("--heartbeat-id", help="the run id the heartbeat names (default: this run's)")
+
+
+def _check_limits(p, args, max_seconds):
+    nums = (args.heartbeat_timeout, args.min_free_gib, args.min_mem_mib, args.max_seconds, args.interval)
+    if not all(math.isfinite(x) and x > 0 for x in nums):
+        p.error("every limit a finite positive number")
+    if args.heartbeat_timeout > 120 or args.min_free_gib < 3 or args.min_mem_mib < 1024:
+        p.error("limits looser than the plan's (heartbeat 120 s, 3 GiB, 1 GiB)")
+    if args.interval > 10 or args.max_seconds > max_seconds:
+        p.error("check interval above 10 s or deadline above the plan's run time")
+
+
+# The sentinel outlives the run by the drain's observation and a margin.
+SENTINEL_MAX_S = 7.5 * 3600 + 1800 + 1800
+
+
+def sentinel_main(argv, clock=None, checks=None):
+    p = argparse.ArgumentParser(description="the run's host-side keeper")
+    _common_args(p)
+    p.add_argument("--alarms", required=True)
+    p.add_argument("--stop-file", required=True, help="the main load's stop file")
+    args = p.parse_args(argv)
+    if not args.services or not args.heartbeat_id:
+        p.error("--services and --heartbeat-id are required")
+    _check_limits(p, args, SENTINEL_MAX_S)
+    return Sentinel(args, clock, checks).run()
+
+
+def main(argv=None, clock=None, checks=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["sentinel"]:
+        return sentinel_main(argv[1:], clock, checks)
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument("command", choices=["run"])
+    _common_args(p)
     if "--" not in argv:
         p.error("the load command follows --")
     i = argv.index("--")
@@ -213,13 +331,7 @@ def main(argv=None, clock=None, checks=None):
     cmd = argv[i + 1:]
     if not cmd:
         p.error("the load command follows --")
-    nums = (args.heartbeat_timeout, args.min_free_gib, args.min_mem_mib, args.max_seconds, args.interval)
-    if not all(math.isfinite(x) and x > 0 for x in nums):
-        p.error("every limit a finite positive number")
-    if args.heartbeat_timeout > 120 or args.min_free_gib < 3 or args.min_mem_mib < 1024:
-        p.error("limits looser than the plan's (heartbeat 120 s, 3 GiB, 1 GiB)")
-    if args.interval > 10 or args.max_seconds > 7.5 * 3600 + 600:
-        p.error("check interval above 10 s or deadline above the plan's run time")
+    _check_limits(p, args, 7.5 * 3600 + 600)
     return Guard(args, clock, checks).run(cmd)
 
 

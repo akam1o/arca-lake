@@ -16,17 +16,22 @@ be missing, decided at preflight: ``kernel_log``, ``swap``).
 Every ``interval`` (10 s) one round: each host's memory, free space of
 ``/`` and the data mount, load per CPU; on the load host also swap
 activity, CPU iowait, kernel OOM or hung-task messages, the test
-directories' allocated bytes and the test FoundationDB; every system
-FoundationDB. A breach writes the run's stop file on the load host
-(exclusively created: the first reason wins; the guard and the load act
-on it) and locally, and the watchdog exits 2. It never kills a process
-itself. Only a round in which every required check succeeded and passed
-rewrites the load host's heartbeat (a higher ``seq``): a watchdog that
-cannot see, or that has stopped, lets the heartbeat go stale and the
-guard stops the load within its timeout. A host unreachable
-``max_unreachable`` rounds in a row (6, 60 s) is a breach; the load host
-unreachable stops the load through the heartbeat even if the stop file
-cannot be written.
+directories' allocated bytes, the test FoundationDB and the guard's own
+identity; every system FoundationDB. A reading that cannot be made is a
+monitor failure unless the approved configuration declares it optional
+(``optional_checks``). It never kills a process itself.
+
+What fires is acted on by class (``common.REASONS``): a limit or an anomaly
+writes the run's stop file on the load host (the first reason wins; the
+guard and the load act on it) and the watching goes on, through the
+drain; a resource or monitor rule also writes an alarm file of its own
+(``remote_alarms``, read by the sentinel, which stops the services), and
+the watchdog exits 2. Only a round in which every required reading was
+made and no resource or monitor rule fired rewrites the load host's
+heartbeat (a higher ``seq``): a watchdog that cannot see, or that has
+stopped, lets the heartbeat go stale, and the guard and the sentinel stop
+the load and the services within its timeout. A host unreachable
+``max_unreachable`` rounds in a row (6, 60 s) is a monitor breach.
 """
 
 import argparse
@@ -99,23 +104,37 @@ if a.get("detail"):
         return [v[4], sum(v)]
     tryit("cpu_iowait_total", cpu)
     def klog():
+        # No alert is [], a log that cannot be read is an error (journalctl
+        # answers 0 without the permission too, saying so).
         r = subprocess.run(["journalctl", "-k", "--since", "-60s", "-o", "cat", "--no-pager"],
                            capture_output=True, text=True, timeout=20)
-        if r.returncode != 0:
-            raise OSError(r.stderr.strip()[:200] or "journalctl failed")
+        said = r.stdout + r.stderr
+        if r.returncode != 0 or "No journal files" in said or "not seeing messages" in said \
+                or "insufficient permissions" in said:
+            raise OSError((r.stderr or r.stdout).strip()[:200] or "journalctl failed")
         return [l for l in r.stdout.splitlines()
                 if "Out of memory" in l or "oom-kill" in l or "blocked for more than" in l][:20]
     tryit("kernel_alerts", klog)
     def du():
-        total = 0
-        for root in a.get("test_dirs", []):
-            for d, _, files in os.walk(root):
-                for n in files:
-                    try:
-                        total += os.lstat(os.path.join(d, n)).st_blocks * 512
-                    except FileNotFoundError:
-                        pass
-        return total
+        # Every error surfaces (os.walk ignores them by default); a file or
+        # directory vanishing during the walk (compaction) restarts it, at
+        # most 8 walks; a missing test directory is an error.
+        def fail(e):
+            raise e
+        for _ in range(8):
+            total, vanished = 0, False
+            try:
+                for root in a.get("test_dirs", []):
+                    if not os.path.isdir(root):
+                        raise OSError("test directory missing: " + root)
+                    for d, _, files in os.walk(root, onerror=fail):
+                        for n in files:
+                            total += os.lstat(os.path.join(d, n)).st_blocks * 512
+            except FileNotFoundError:
+                vanished = True
+            if not vanished:
+                return total
+        raise OSError("files vanished during each of 8 walks")
     tryit("test_dir_bytes", du)
     if a.get("guard_record"):
         def guard():
@@ -208,6 +227,7 @@ class Watchdog:
         self.seq = 0
         os.makedirs(cfg["local_dir"], exist_ok=True)
         self.local_stop = common.StopFile(os.path.join(cfg["local_dir"], "stop.json"))
+        self.local_alarms = os.path.join(cfg["local_dir"], "alarms")
         self.log_path = os.path.join(cfg["local_dir"], "watchdog.jsonl")
 
     def log(self, **rec):
@@ -235,11 +255,15 @@ class Watchdog:
             return None
 
     def round(self):
-        """One round: ``(breach_reason, detail)`` or ``(None, None)``; a
-        round that passed every required check rewrites the heartbeat."""
+        """One round over every host and rule: the list of ``(reason,
+        detail)`` that fired. The heartbeat is rewritten only when every
+        required reading was made and no resource or monitor rule fired (an
+        anomaly already reported, such as the test's FoundationDB down, does
+        not hold the heartbeat back: the resources are still watched)."""
         lim, c = self.limits, self.cfg
         now = self.clock.monotonic()
         required_ok = True
+        out = []
         for host in c["hosts"]:
             detail = host == c["load_host"]
             r = self._read(host, detail)
@@ -247,7 +271,7 @@ class Watchdog:
                 self.unreachable[host] += 1
                 required_ok = False
                 if self.unreachable[host] >= lim["max_unreachable"]:
-                    return "host-unreachable", {"host": host, "rounds": self.unreachable[host]}
+                    out.append(("host-unreachable", {"host": host, "rounds": self.unreachable[host]}))
                 continue
             self.unreachable[host] = 0
 
@@ -259,27 +283,26 @@ class Watchdog:
 
             try:
                 if need("mem_available") < lim["min_mem_mib"] * (1 << 20):
-                    return "memory", {"host": host, "bytes": r["mem_available"]}
+                    out.append(("memory", {"host": host, "bytes": r["mem_available"]}))
                 if need("free_root") < lim["min_free_gib"] * (1 << 30):
-                    return "disk-free", {"host": host, "path": "/", "bytes": r["free_root"]}
+                    out.append(("disk-free", {"host": host, "path": "/", "bytes": r["free_root"]}))
                 if need("free_data") < lim["min_free_gib"] * (1 << 30):
-                    return "disk-free", {"host": host, "path": "data", "bytes": r["free_data"]}
+                    out.append(("disk-free", {"host": host, "path": "data", "bytes": r["free_data"]}))
                 if need("load1") > lim["max_load_per_cpu"] * need("cpus"):
-                    return "load", {"host": host, "load1": r["load1"], "cpus": r["cpus"]}
+                    out.append(("load", {"host": host, "load1": r["load1"], "cpus": r["cpus"]}))
                 if host in c.get("system_fdb_hosts", []) and not need("system_fdb_available"):
-                    return "system-fdb", {"host": host}
+                    out.append(("system-fdb", {"host": host}))
                 if detail:
-                    b = self._detail(r, now)
-                    if b:
-                        return b
+                    out += self._detail(r, now)
             except KeyError as e:
-                return "monitor-failed", {"host": host, "missing": str(e), "errors": r.get("errors")}
-        if required_ok:
+                out.append(("monitor-failed", {"host": host, "missing": str(e), "errors": r.get("errors")}))
+        if required_ok and not any(common.reason_class(b[0]) in ("resource", "monitor") for b in out):
             self.beat()
-        return None, None
+        return out
 
     def _detail(self, r, now):
         lim = self.limits
+        out = []
 
         def opt(name, key):
             v = r.get(key)
@@ -292,7 +315,7 @@ class Watchdog:
             self.swap_hist = [(t, v) for t, v in self.swap_hist if t >= now - lim["swap_window_s"]]
             self.swap_hist.append((now, swap))
             if swap > self.swap_hist[0][1]:
-                return "swap", {"pages": swap - self.swap_hist[0][1]}
+                out.append(("swap", {"pages": swap - self.swap_hist[0][1]}))
         iow = r.get("cpu_iowait_total")
         if iow is None:
             raise KeyError("cpu_iowait_total")
@@ -302,22 +325,22 @@ class Watchdog:
         if now - t0 >= lim["iowait_window_s"] - lim["interval"] and iow[1] > a0:
             pct = 100.0 * (iow[0] - w0) / (iow[1] - a0)
             if pct > lim["iowait_pct"]:
-                return "iowait", {"pct": round(pct, 1)}
+                out.append(("iowait", {"pct": round(pct, 1)}))
         if self.cfg.get("remote_guard_record"):
             g = r.get("guard")
             if g is None:
                 raise KeyError("guard")
             if g == "gone":
-                return "guard-lost", {}
+                out.append(("guard-lost", {}))
         alerts = opt("kernel_log", "kernel_alerts")
         if alerts:
-            return "oom", {"lines": alerts[:5]}
+            out.append(("oom", {"lines": alerts[:5]}))
         if lim["max_test_dir_bytes"] is not None:
             used = r.get("test_dir_bytes")
             if used is None:
                 raise KeyError("test_dir_bytes")
             if used > lim["max_test_dir_bytes"]:
-                return "test-dirs", {"bytes": used}
+                out.append(("test-dirs", {"bytes": used}))
         if self.cfg.get("remote_test_fdb_cluster"):
             up = r.get("test_fdb_available")
             if up is None:
@@ -327,8 +350,8 @@ class Watchdog:
             else:
                 self.test_fdb_down_since = self.test_fdb_down_since or now
                 if now - self.test_fdb_down_since >= lim["test_fdb_down_s"]:
-                    return "test-fdb", {"down_s": now - self.test_fdb_down_since}
-        return None
+                    out.append(("test-fdb", {"down_s": now - self.test_fdb_down_since}))
+        return out
 
     def beat(self):
         self.seq = max(self.seq + 1, time.time_ns() // 1_000_000)
@@ -356,16 +379,52 @@ class Watchdog:
         self.log(event="stop", reason=reason, detail=detail, remote=written)
         return written
 
+    def alarm(self, reason, detail):
+        """A resource or monitor rule fired: an alarm file of its own, on the
+        load host (the sentinel stops the services on it) and here (the
+        driver's drain reads it). Exclusively created, one per rule that
+        fired: an earlier stop never hides a later danger."""
+        rec = {"reason": reason, "source": "watchdog", "wall_ms": self.clock.wall_ms(), "detail": detail}
+        name = f"{self.clock.wall_ms():013d}-{reason}.json"
+        os.makedirs(self.local_alarms, exist_ok=True)
+        try:
+            fd = os.open(os.path.join(self.local_alarms, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            with os.fdopen(fd, "w") as f:
+                json.dump(rec, f)
+        except FileExistsError:
+            pass
+        written = None
+        if self.cfg.get("remote_alarms"):
+            for _ in range(3):
+                try:
+                    rc, out = self.runner(self.cfg["hosts"][self.cfg["load_host"]], WRITE_STOP,
+                                          [os.path.join(self.cfg["remote_alarms"], name), json.dumps(rec)])
+                    if rc == 0:
+                        written = out.strip()
+                        break
+                except subprocess.TimeoutExpired:
+                    pass
+        self.log(event="alarm", reason=reason, detail=detail, remote=written)
+
     def run(self, max_rounds=None):
+        """Round after round until a resource or monitor rule fires (an
+        alarm and the stop: exit 2) or ``max_rounds``. A limit or anomaly
+        stop (the load stops, the services stay for the drain) does not end
+        the watching: it is reported once, and the rounds go on."""
         n = 0
+        reported = set()
         while max_rounds is None or n < max_rounds:
-            if self.local_stop.reason():
-                self.log(event="stop file present")
-                return 0
-            reason, detail = self.round()
-            if reason:
+            breaches = self.round()
+            danger = [b for b in breaches if common.reason_class(b[0]) in ("resource", "monitor")]
+            if danger:
+                reason, detail = danger[0]
+                self.alarm(reason, detail)
                 self.stop(reason, detail)
                 return 2
+            for reason, detail in breaches:
+                if reason not in reported:
+                    reported.add(reason)
+                    self.stop(reason, detail)
             n += 1
             self.clock.sleep(self.limits["interval"])
         return 0

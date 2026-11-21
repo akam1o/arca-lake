@@ -58,6 +58,8 @@ class FakeS3(http.server.ThreadingHTTPServer):
         self.objects = {}
         self.corrupt = set()
         self.refuse_puts = False
+        self.delete_delay = 0.0  # seconds each DELETE takes
+        self.requests = []  # (method, path) in arrival order
         self.lock = threading.Lock()
         super().__init__(("127.0.0.1", 0), _Handler)
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
@@ -83,6 +85,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def parse_request(self):
+        ok = super().parse_request()
+        if ok:
+            with self.server.lock:
+                self.server.requests.append((self.command, self.path))
+        return ok
 
     def do_PUT(self):
         n = int(self.headers.get("Content-Length", "0"))
@@ -110,6 +119,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._send(200, data)
 
     def do_DELETE(self):
+        if self.server.delete_delay:
+            time.sleep(self.server.delete_delay)
         parts = self.path.strip("/").split("/", 1)
         with self.server.lock:
             self.server.objects.pop(parts[1], None)
