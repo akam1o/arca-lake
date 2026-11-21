@@ -152,6 +152,13 @@ Results are written by criterion to `target/criterion/`.
   whose every required check passed, a breach written as the run's stop
   file; it never kills a process); `proc.py`: process identity (pid,
   start time, working directory), never names.
+  `sampler.py`: every 15 s, the metrics families of plan §2 from each
+  process's endpoint, each node directory's apparent and allocated bytes
+  and the controller log's reconcile counts, each sample stamped (run,
+  target, wall start and end, monotonic duration) with a status (`ok`,
+  `partial`, `error`, `timeout`); a value not read is absent, never 0;
+  bounded workers, timeouts and output size. Its own load on the hosts at
+  scale is not measured.
 
 ## Reports
 
