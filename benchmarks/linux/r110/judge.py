@@ -299,16 +299,21 @@ def c3a(samples, records, tl, v, gateways=("gateway0",)):
     need = int(v["c3a_hold_s"] // v["c3a_probe_interval_s"])
     if len(probes) < need:
         return verdict("C3a", INCONCLUSIVE, [f"{len(probes)} probe PUTs in the window, {need} needed"])
-    bad = [p for p in probes if p != "ack"]
+    bad = [p for p in probes if p not in ("ack", "no-outcome")]
     if bad:
         reasons.append(f"{len(bad)} of {len(probes)} probe PUTs not acknowledged")
+    elif not reasons and "no-outcome" in probes:
+        # A probe cut by a stop proves neither: never a pass, not a failure.
+        return verdict("C3a", INCONCLUSIVE, [f"{probes.count('no-outcome')} probe PUTs without an outcome"],
+                       probes=len(probes))
     return verdict("C3a", FAILED if reasons else PASSED, reasons, probes=len(probes), window=[t0, t1])
 
 
 def _attempts(records, stage, kind, op, t0=None, t1=None):
     """The results of the attempts of ``op`` (and ``kind``) in ``stage``
     whose intent falls in [t0, t1]; an intent without an outcome is
-    ``unknown`` (never left out)."""
+    ``no-outcome`` (never left out: it is neither acknowledged nor shown
+    to have failed)."""
     outcomes = {(r["op_id"], r["attempt"]): r["result"] for r in records if r.get("type") == "outcome"}
     out = []
     for i in records:
@@ -318,7 +323,7 @@ def _attempts(records, stage, kind, op, t0=None, t1=None):
             continue
         if (t0 is not None and i["wall_ms"] < t0) or (t1 is not None and i["wall_ms"] > t1):
             continue
-        out.append(outcomes.get((i["op_id"], i["attempt"]), "unknown"))
+        out.append(outcomes.get((i["op_id"], i["attempt"]), "no-outcome"))
     return out
 
 
@@ -336,9 +341,14 @@ def c3b(samples, records, tl, v, gateways=("gateway0",)):
         return verdict("C3b", INCONCLUSIVE, ["no PUT in stage 6"])
     ops = _attempts(records, "6", "op", "PUT")
     acked = sum(1 for r in ops if r == "ack")
+    open_ = sum(1 for r in ops if r == "no-outcome")
     refused = sum(1 for r in puts if r == "refused")
     reasons = []
     if acked < v["c3b_ack_fraction"] * len(ops):
+        if acked + open_ >= v["c3b_ack_fraction"] * len(ops) and not refused:
+            # Met or not depending on attempts without an outcome.
+            return verdict("C3b", INCONCLUSIVE, [f"{open_} PUTs without an outcome decide the fraction"],
+                           puts=len(ops), acked=acked)
         reasons.append(f"{acked} of {len(ops)} PUTs acknowledged")
     if refused:
         reasons.append(f"{refused} PUT attempts refused")

@@ -491,7 +491,7 @@ class Run:
             self.c.step_done(n)
         # Every probe of the window has its outcome once the probe step has
         # ended (it stops at done), before C3a is judged.
-        if self.c.wait_step(n, deadline + 120) is None or self._stopped("5"):
+        if self.c.wait_step(n, deadline) is None or self._stopped("5"):
             return False
         tl["end_ms"] = self.host_ms()
         # Stage 6 starts only when C3a passed (plan §7).
