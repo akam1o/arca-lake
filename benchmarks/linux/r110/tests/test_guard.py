@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from r110 import common, guard, proc, watchdog
 
@@ -239,6 +240,72 @@ class Groups(GuardBase):
         self.assertEqual(proc.signal_if_same(ident, signal.SIGTERM), "gone")
 
 
+# A load that ends as soon as the run's stop file appears (as the real load
+# does), before the guard's next check.
+WATCHING = [sys.executable, "-I", "-c",
+            "import os,time\nopen('child.pid','w').write('0')\n"
+            "while not os.path.exists('stop.json'): time.sleep(0.01)\n"]
+
+
+class ReviewFindings(GuardBase):
+    """Cases from the independent review of P2."""
+
+    def test_the_guard_never_signals_itself(self):
+        p, ident, d = Resources.service(self)
+        with open(os.path.join(d, "node0.json"), "w") as f:
+            json.dump(ident, f)
+        me = proc.identity(os.getpid())
+        with open(os.path.join(d, "aaa.json"), "w") as f:
+            json.dump(me, f)  # sorted first: the guard's own record under another name
+        with open(os.path.join(d, "guard.json"), "w") as f:
+            json.dump(me, f)
+        # A sub-run's guard (another process): a guard is never a service.
+        other = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(300)"], cwd=self.dir)
+        self.extra.append(other)
+        for _ in range(50):
+            oid = proc.identity(other.pid)
+            if oid and oid["cwd"]:
+                break
+            time.sleep(0.05)
+        with open(os.path.join(d, "guard-smoke-hb.json"), "w") as f:
+            json.dump(oid, f)
+        self.free = lambda: 1 * GIB
+        rc, res = self.run_guard(LOAD, timeout=60, services=d)
+        self.assertEqual(res["services"]["aaa.json"], "skipped: the guard itself")
+        self.assertNotIn("guard", res["services"])
+        self.assertNotIn("guard-smoke-hb", res["services"])
+        self.assertIsNone(other.poll(), "a guard was signalled")
+        self.assertEqual(res["services"]["node0"], "signalled")
+        p.wait(10)
+
+    def test_a_load_that_ended_on_a_stop_still_gets_the_services_stopped(self):
+        p, ident, d = Resources.service(self)
+        with open(os.path.join(d, "node0.json"), "w") as f:
+            json.dump(ident, f)
+        self.beat(1)
+
+        def during():
+            self.child_pid()
+            common.StopFile(os.path.join(self.dir, "stop.json")).stop("disk-free", "watchdog", 1)
+
+        rc, res = self.run_guard(WATCHING, timeout=60, services=d, during=during)
+        self.assertEqual((res["reason"], res["source"]), ("disk-free", "stop-file"))
+        self.assertEqual(res["services"]["node0"], "signalled")
+        p.wait(10)
+
+    def test_limits_that_are_not_finite_are_refused(self):
+        for extra in (["--min-free-gib", "nan"], ["--heartbeat-timeout", "nan"], ["--min-mem-mib", "inf"],
+                      ["--interval", "nan"], ["--max-seconds", "inf"], ["--interval", "30"]):
+            with self.assertRaises(SystemExit, msg=extra):
+                guard.main(["run", "--run-dir", self.dir, "--heartbeat", self.hb, "--data-dir", self.dir]
+                           + extra + ["--", "true"])
+
+    def test_an_identity_record_that_is_not_one_is_refused(self):
+        for rec in (None, {}, {"pid": 1}, {"pid": 1, "start": "x", "cwd": None}):
+            with self.assertRaises(ValueError):
+                proc.matches(rec)
+
+
 class FakeHosts:
     """The watchdog's ssh: readings per host, scripted unreachable rounds,
     and every remote write recorded."""
@@ -268,6 +335,53 @@ def healthy(load_host=False, system=False):
     if system:
         r["system_fdb_available"] = True
     return r
+
+
+FAKE_SSH = """#!/bin/sh
+# Stands for OpenSSH: options, the target, then the remaining words joined
+# with spaces and given to the remote shell.
+while [ $# -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; -*) shift ;; *) shift; break ;; esac
+done
+exec sh -c "$*"
+"""
+
+
+class RealSsh(unittest.TestCase):
+    """The watchdog's real ssh_runner, through a stand-in ``ssh`` that
+    joins and re-splits the words as OpenSSH and the remote shell do."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        bindir = os.path.join(self.tmp.name, "bin")
+        os.mkdir(bindir)
+        with open(os.path.join(bindir, "ssh"), "w") as f:
+            f.write(FAKE_SSH)
+        os.chmod(os.path.join(bindir, "ssh"), 0o755)
+        self.env = mock.patch.dict(os.environ, {"PATH": bindir + os.pathsep + os.environ["PATH"]})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def test_the_check_script_gets_its_arguments(self):
+        rc, out = watchdog.ssh_runner("t", watchdog.CHECK_SCRIPT,
+                                      [json.dumps({"data_mount": "/", "detail": False, "x": "a b 'c'"})])
+        self.assertEqual(rc, 0, out)
+        self.assertIsNotNone(json.loads(out)["free_root"])
+
+    def test_the_heartbeat_and_the_stop_file_are_written(self):
+        hb = os.path.join(self.tmp.name, "hb dir", "hb.json")
+        os.mkdir(os.path.dirname(hb))
+        rec = json.dumps({"run_id": "r", "seq": 7})
+        rc, out = watchdog.ssh_runner("t", watchdog.WRITE_HEARTBEAT, [hb, rec])
+        self.assertEqual((rc, json.load(open(hb))), (0, {"run_id": "r", "seq": 7}), out)
+        stop = os.path.join(self.tmp.name, "stop.json")
+        rc, out = watchdog.ssh_runner("t", watchdog.WRITE_STOP, [stop, json.dumps({"reason": "memory"})])
+        self.assertEqual((rc, out.strip(), json.load(open(stop))["reason"]), (0, "written", "memory"))
+        rc, out = watchdog.ssh_runner("t", watchdog.WRITE_STOP, [stop, json.dumps({"reason": "load"})])
+        self.assertEqual((out.strip(), json.load(open(stop))["reason"]), ("exists", "memory"))
 
 
 class Watchdogs(unittest.TestCase):
@@ -353,6 +467,26 @@ class Watchdogs(unittest.TestCase):
                 self.assertNotIn(word, s)
         with self.assertRaises(ValueError):
             self.wd(limits={"min_free_gib": 2})
+
+    def test_a_lost_guard_is_a_monitor_stop(self):
+        for state, want in (("gone", ["guard-lost"]), (None, ["monitor-failed"])):
+            self.setUp()
+            self.hosts.readings["t2"]["guard"] = state
+            self.wd(remote_guard_record="/r/services/guard.json").run(max_rounds=2)
+            self.assertEqual(self.stops(), want, state)
+            self.tearDown()
+        for state in ("alive", "ended", "absent"):
+            self.setUp()
+            self.hosts.readings["t2"]["guard"] = state
+            self.assertEqual(self.wd(remote_guard_record="/r/services/guard.json").run(max_rounds=2), 0, state)
+            self.tearDown()
+        self.setUp()
+        self.assertEqual(common.reason_class("guard-lost"), "monitor")
+
+    def test_limits_that_are_not_finite_are_refused(self):
+        for bad in (float("nan"), float("inf"), -1):
+            with self.assertRaises(ValueError):
+                self.wd(limits={"min_free_gib": bad})
 
     def test_the_check_script_runs_and_reports_missing_readings_as_null(self):
         r = subprocess.run([sys.executable, "-I", "-", json.dumps({"data_mount": "/", "detail": True,

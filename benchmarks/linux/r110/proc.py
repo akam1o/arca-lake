@@ -52,6 +52,9 @@ def identity(pid):
 
 def matches(rec):
     """Whether the process ``rec`` (pid, start, cwd) still exists as itself."""
+    if not isinstance(rec, dict) or not isinstance(rec.get("pid"), int) or not rec.get("start") \
+            or not rec.get("cwd"):
+        raise ValueError(f"not a process identity: {rec!r}")
     now = identity(rec["pid"])
     return bool(now and now["start"] == rec["start"] and now["cwd"] == rec["cwd"])
 
@@ -59,6 +62,8 @@ def matches(rec):
 def signal_if_same(rec, sig):
     """Send ``sig`` to ``rec`` only if it is still the same process.
     Returns ``signalled``, ``gone`` or ``other`` (pid reused: nothing sent)."""
+    if not isinstance(rec, dict) or not isinstance(rec.get("pid"), int):
+        raise ValueError(f"not a process identity: {rec!r}")
     if start_token(rec["pid"]) is None:
         return "gone"
     if not matches(rec):

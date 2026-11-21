@@ -31,7 +31,9 @@ cannot be written.
 
 import argparse
 import json
+import math
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -115,6 +117,21 @@ if a.get("detail"):
                         pass
         return total
     tryit("test_dir_bytes", du)
+    if a.get("guard_record"):
+        def guard():
+            # The guard's own liveness: "absent" (not started yet), "ended"
+            # (it wrote its result), "alive" (its identity holds) or "gone".
+            if not os.path.exists(a["guard_record"]):
+                return "absent"
+            rec = json.load(open(a["guard_record"]))
+            if a.get("guard_result") and os.path.exists(a["guard_result"]):
+                return "ended"
+            try:
+                stat = open("/proc/%d/stat" % rec["pid"]).read()
+            except FileNotFoundError:
+                return "gone"
+            return "alive" if stat.rsplit(")", 1)[1].split()[19] == rec["start"] else "gone"
+        tryit("guard", guard)
     if a.get("test_fdb"):
         def tfdb():
             r = subprocess.run(["fdbcli", "-C", a["test_fdb"], "--timeout", "10", "--exec", "status minimal"],
@@ -131,10 +148,18 @@ print(json.dumps(out))
 '''
 
 
-def ssh_runner(target, script, args, timeout=40):
-    """Run ``script`` on ``target`` (BatchMode, a 10 s connect timeout)."""
+def remote_command(argv):
+    """The remote command line for ``python3 -I - ARGV...``: ssh joins its
+    words with spaces and the remote shell splits them again, so every
+    argument is quoted here, once."""
+    return " ".join(["python3", "-I", "-"] + [shlex.quote(str(a)) for a in argv])
+
+
+def ssh_runner(target, script, argv, timeout=40):
+    """Run ``script`` on ``target`` with the arguments ``argv`` (a list of
+    strings; BatchMode, a 10 s connect timeout)."""
     r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target,
-                        "python3", "-I", "-", json.dumps(args)],
+                        remote_command(argv)],
                        input=script, capture_output=True, text=True, timeout=timeout)
     return r.returncode, r.stdout
 
@@ -164,6 +189,10 @@ class Watchdog:
     def __init__(self, cfg, runner=None, clock=None):
         self.cfg = cfg
         self.limits = dict(LIMITS, **cfg.get("limits", {}))
+        for k, v in self.limits.items():
+            if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                                  or v <= 0):
+                raise ValueError(f"watchdog limit {k}={v!r}: a finite positive number")
         for k, how in _LOOSER.items():
             v, plan = self.limits[k], LIMITS[k]
             if (how == "lower" and v < plan) or (how == "higher" and v > plan):
@@ -192,9 +221,10 @@ class Watchdog:
                 "system_fdb": host in c.get("system_fdb_hosts", [])}
         if detail:
             args.update(detail=True, test_dirs=c.get("remote_test_dirs", []),
-                        test_fdb=c.get("remote_test_fdb_cluster"))
+                        test_fdb=c.get("remote_test_fdb_cluster"),
+                        guard_record=c.get("remote_guard_record"), guard_result=c.get("remote_guard_result"))
         try:
-            rc, out = self.runner(c["hosts"][host], CHECK_SCRIPT, args)
+            rc, out = self.runner(c["hosts"][host], CHECK_SCRIPT, [json.dumps(args)])
         except subprocess.TimeoutExpired:
             return None
         if rc != 0:
@@ -273,6 +303,12 @@ class Watchdog:
             pct = 100.0 * (iow[0] - w0) / (iow[1] - a0)
             if pct > lim["iowait_pct"]:
                 return "iowait", {"pct": round(pct, 1)}
+        if self.cfg.get("remote_guard_record"):
+            g = r.get("guard")
+            if g is None:
+                raise KeyError("guard")
+            if g == "gone":
+                return "guard-lost", {}
         alerts = opt("kernel_log", "kernel_alerts")
         if alerts:
             return "oom", {"lines": alerts[:5]}
