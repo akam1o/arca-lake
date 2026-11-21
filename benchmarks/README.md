@@ -145,6 +145,9 @@ Results are written by criterion to `target/criterion/`.
   which also stops by itself when the watchdog's heartbeat goes stale, on
   a 5xx other than 503, and when the baseline-key probe (a GET every 5 s)
   fails 3 times in a row or answers in more than 5 s.
+  `guard.py sentinel`: the run's host-side keeper from setup to teardown
+  (free space, memory, the watchdog's heartbeat and alarms; it stops
+  every load and the test's services by identity, with no network);
   `guard.py`: the on-host guard, parent of the load (its own session),
   stopping the load's whole process group without any network on a
   stale heartbeat, low free space or memory, a check it cannot make, its

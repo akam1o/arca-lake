@@ -5,6 +5,7 @@ and a test fails if anything tries to reach out."""
 
 import copy
 import datetime
+import shlex
 import hashlib
 import json
 import os
@@ -52,6 +53,9 @@ class Base(unittest.TestCase):
         with open(EXAMPLE) as f:
             self.cfg = json.load(f)
         self.cfg["local_dir"] = os.path.join(self.dir, "operator")
+        # A test value (the example leaves it undetermined, as a real run's
+        # is until its preflight): never an approved one.
+        self.cfg["fdb_memory"] = "3GiB"
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -115,6 +119,13 @@ class Configuration(Base):
         self.refused(lambda c: c["teardown"].update(scope="everything"))
         self.refused(lambda c: c["remote"]["ports"].update(gateway=80))
 
+    def test_optional_monitoring_is_only_what_the_configuration_declares(self):
+        self.refused(lambda c: c.update(optional_checks=["test_fdb"]))
+        self.refused(lambda c: c.update(optional_checks="kernel_log"))
+        cfg = copy.deepcopy(self.cfg)
+        cfg["optional_checks"] = ["kernel_log", "swap"]
+        driver.validate(cfg)
+
     def test_values_that_are_not_finite_are_refused(self):
         nan = float("nan")
         self.refused(lambda c: c["limits"].update(rate_per_s=nan))
@@ -126,7 +137,7 @@ class Configuration(Base):
 
     def test_tighter_values_are_accepted(self):
         cfg = copy.deepcopy(self.cfg)
-        cfg["limits"].update(rate_per_s=10, max_attempts=1000)
+        cfg["limits"].update(rate_per_s=10, max_attempts=5000)
         cfg["settings"]["allotment_bytes"] = 768 << 20
         cfg["stop_rules"]["max_test_dir_bytes"] = 4 << 30
         driver.validate(cfg)
@@ -245,10 +256,10 @@ class FakeCluster:
     def preflight(self):
         return {"space": {"ok": self.preflight_ok}}
 
-    def smoke(self):
+    def smoke(self, **kw):
         return self.smoke_result
 
-    def start_load(self):
+    def start_load(self, **kw):
         pass
 
     def sample(self):
@@ -381,7 +392,10 @@ class Engine(EngineBase):
         self.assertLessEqual(tl["3"]["end_ms"] - tl["3"]["start_ms"], (driver.STAGE_MAX_S["3"] + 30) * 1000)
         # A stop that is not a resource danger: the drain is observed.
         self.assertEqual(tl["drain"]["end_ms"] - tl["drain"]["start_ms"], driver.DRAIN_OBSERVE_S * 1000)
-        self.assertFalse(c.services_stopped)
+        self.assertNotIn("escalation", tl["drain"], "the drain stopped the services without a rule firing")
+        # At the end of the run the services are stopped all the same, the
+        # watching being about to end.
+        self.assertIn("stop_services", tl["final_stops"])
 
     def test_a_lost_part_of_the_evidence_never_passes(self):
         c = FakeCluster(self.cfg, self.clock)
@@ -419,9 +433,9 @@ def smp(target, t, labelled=None, **vals):
 class C1(unittest.TestCase):
     """The refusal from t=0 to t=30 min, samples every 15 s."""
 
-    def build(self, admission=3, refused_rises=False, backlog0=50, gap=False, reclaimed_end=3000):
+    def build(self, admission=3, refused_rises=False, backlog0=50, gap=False, reclaimed_end=3000, end_min=30):
         S, iv = [], 15_000
-        end = 30 * 60_000
+        end = end_min * 60_000
         for i, t in enumerate(range(0, end + 1, iv)):
             if gap and 10 * 60_000 < t < 12 * 60_000:
                 continue
@@ -439,7 +453,9 @@ class C1(unittest.TestCase):
             records += [{"type": "intent", "op_id": k, "attempt": 1, "key": f"b{k}", "op": "DELETE", "stage": "4",
                          "wall_ms": 0},
                         {"type": "outcome", "op_id": k, "attempt": 1, "result": "ack"}]
-        tl = {"4": {"start_ms": -60_000, "refusal_start_ms": 0, "refusal_end_ms": end, "reclaimed_before_refusal": 0}}
+        # D1's deletes ended 1 min before the refusal: it matures at 24 min.
+        tl = {"4": {"start_ms": -120_000, "d1_done_ms": -60_000, "refusal_start_ms": 0, "refusal_end_ms": end,
+                    "reclaimed_before_refusal": 0}}
         return S, records, tl
 
     def c1(self, **kw):
@@ -464,6 +480,29 @@ class C1(unittest.TestCase):
 
     def test_nothing_left_to_collect_at_the_refusal_is_inconclusive(self):
         self.assertEqual(self.c1(backlog0=0)["outcome"], judge.INCONCLUSIVE)
+
+    def test_a_refusal_cut_before_d1_matured_is_inconclusive_not_failed(self):
+        """F7: stopped at 10 min (a resource stop, say): little reclaimed
+        yet, which is no failure."""
+        r = self.c1(end_min=10, reclaimed_end=100)
+        self.assertEqual(r["outcome"], judge.INCONCLUSIVE, r)
+        self.assertIn("D1 matures", r["reasons"][0])
+
+    def test_a_violation_seen_before_maturity_still_fails(self):
+        r = self.c1(end_min=15, refused_rises=True)
+        self.assertEqual(r["outcome"], judge.FAILED, r)
+
+    def test_after_maturity_too_little_progress_fails_even_with_a_later_stop(self):
+        S, R, tl = self.build(reclaimed_end=2000)
+        res = judge.judge(S, R, tl, {"reason": "disk-free", "stage": "5"}, nodes=("node0", "node1"))
+        c1 = [c for c in res["criteria"] if c["criterion"] == "C1"][0]
+        self.assertEqual(c1["outcome"], judge.FAILED)
+        self.assertEqual(res["outcome"], judge.FAILED)
+
+    def test_the_end_of_d1_not_recorded_is_inconclusive(self):
+        S, R, tl = self.build()
+        del tl["4"]["d1_done_ms"]
+        self.assertEqual(judge.c1(S, R, tl, judge.VALUES, ["node0", "node1"])["outcome"], judge.INCONCLUSIVE)
 
     def test_unknown_reclaims_before_the_refusal_are_inconclusive(self):
         S, R, tl = self.build()
@@ -677,7 +716,7 @@ class ReviewFindingsEngine(EngineBase):
     def test_an_exception_in_a_stage_is_a_stop(self):
         c = FakeCluster(self.cfg, self.clock)
 
-        def boom():
+        def boom(**kw):
             raise RuntimeError("ssh failed")
 
         c.smoke = boom
@@ -828,6 +867,15 @@ class Commands(Base):
         c.stop_record()
         self.assertTrue(all("/smoke" not in cmd for _, cmd, _ in rec.commands))
 
+    def test_teardown_keeps_everything_when_a_stop_is_not_confirmed(self):
+        for verdict in ("not-stopped", "unverified"):
+            c, rec, _ = self.cluster(answers=[("ls ", "node0.json\n"),
+                                              ("stop_identified", json.dumps({"verdict": verdict}) + "\n"),
+                                              ('print("checked %d"', "checked 1\n")])
+            out = c.teardown()
+            self.assertIn("not confirmed", out["kept"], verdict)
+            self.assertFalse(any("rm " in cmd for _, cmd, _ in rec.commands), verdict)
+
     def test_teardown_keeps_everything_when_the_check_fails(self):
         for answer in ([], [('print("checked %d"', "")], [('print("checked %d"', "unreadable node0.json: x\n")]):
             c, rec, _ = self.cluster(answers=answer)
@@ -841,6 +889,7 @@ class Commands(Base):
         """remote.ALIVE run locally against identity records."""
         svc = os.path.join(self.dir, "services")
         os.mkdir(svc)
+        open(os.path.join(svc, "started.list"), "w").close()
 
         def check():
             r = subprocess.run([sys.executable, "-I", "-", HERE.rsplit("/", 1)[0], svc], input=remote.ALIVE,
@@ -849,19 +898,34 @@ class Commands(Base):
 
         self.assertEqual(check(), (0, "checked 0"))
         me = proc.identity(os.getpid())
+        # A record of a process gone: a short-lived child of its own session.
+        gone = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(30)"], start_new_session=True)
+        rec_gone = proc.identity(gone.pid)
+        gone.kill()
+        gone.wait()
         with open(os.path.join(svc, "a.json"), "w") as f:
-            json.dump(dict(me, start="not-its-start"), f)
+            json.dump(rec_gone, f)
+        with open(os.path.join(svc, "started.list"), "a") as f:
+            f.write("a\n")
         self.assertEqual(check(), (0, "checked 1"))
         with open(os.path.join(svc, "b.json"), "w") as f:
             json.dump(me, f)
+        with open(os.path.join(svc, "started.list"), "a") as f:
+            f.write("b\n")
         rc, out = check()
-        self.assertEqual((rc, out.splitlines()[0]), (1, "alive b.json"))
-        os.remove(os.path.join(svc, "b.json"))
-        with open(os.path.join(svc, "c.json"), "w") as f:
+        self.assertEqual(rc, 1)
+        self.assertTrue(out.splitlines()[0].startswith("alive b"), out)
+        os.remove(os.path.join(svc, "b.json"))  # a started process without its record
+        rc, out = check()
+        self.assertEqual(rc, 1)
+        self.assertTrue(out.startswith("unverified b: no readable record"), out)
+        with open(os.path.join(svc, "b.json"), "w") as f:
             f.write("null")
         rc, out = check()
         self.assertEqual(rc, 1)
-        self.assertTrue(out.startswith("unreadable c.json"), out)
+        self.assertTrue(out.startswith("unverified b"), out)
+        os.remove(os.path.join(svc, "started.list"))  # the list itself missing
+        self.assertEqual(check()[0], 1)
 
     def test_a_corrupt_or_missing_ledger_is_an_error_not_empty(self):
         from r110 import ledger as ledger_mod
@@ -917,12 +981,81 @@ class Commands(Base):
             self.assertEqual(firsts, {"smoke-hb": "create-bucket", "smoke-limit": "create-bucket",
                                       "smoke-ops": "create-bucket"})
 
-    def test_the_main_load_leaves_the_smoke_stages_budget(self):
-        lim = remote.main_limits({})
-        used = sum(v["max_attempts"] for v in remote.SMOKE_LIMITS.values())
-        self.assertEqual(lim["max_attempts"] + used, 70_000)
-        self.assertLessEqual(lim["max_body_bytes"] + sum(v["max_body_bytes"] for v in remote.SMOKE_LIMITS.values()),
-                             5 << 30)
+    def test_the_run_wide_limits_are_shared_by_the_smoke_stage_and_the_run(self):
+        """F6: the approved totals, not the plan's defaults, are divided."""
+        from r110 import budget
+        smoke = budget.SMOKE
+        for approved in ({}, {"max_attempts": 2000, "max_body_bytes": 1 << 30}):
+            alloc = budget.allocate(approved)
+            for k in ("max_attempts", "max_body_bytes"):
+                total = dict(budget.DEFAULTS, **approved)[k]
+                self.assertEqual(sum(alloc[n][k] for n in alloc), total, (approved, k))
+            self.assertEqual(alloc["main"]["rate_per_s"], 20)
+        self.assertEqual(budget.allocate({})["main"]["max_attempts"], 70_000 - sum(v["max_attempts"] for v in smoke.values()))
+        for too_tight in ({"max_attempts": 1020}, {"max_body_bytes": 200 << 20}):
+            with self.assertRaises(ValueError):
+                budget.allocate(too_tight)
+            cfg = copy.deepcopy(self.cfg)
+            cfg["limits"] = dict(too_tight)
+            with self.assertRaises(driver.ConfigError):
+                driver.validate(cfg)
+
+    def test_each_load_gets_its_share_and_the_runs_remaining_time(self):
+        c, rec, cfg = self.cluster()
+        c.cfg["limits"] = dict(c.cfg["limits"], max_attempts=5000)
+        c.start_load(remaining_s=3600)
+        c.start_load("smoke-ops", remaining_s=4000)
+        main, smoke = [cmd for _, cmd, s in rec.commands if s == remote.START]
+
+        def limits(cmd):
+            # START's command, its guard's, then the load's (each quoted once).
+            guard = shlex.split(shlex.split(cmd)[-1])
+            load = shlex.split(guard[-1])
+            return json.loads(load[load.index("--limits") + 1])
+
+        lim_main, lim_smoke = limits(main), limits(smoke)
+        self.assertEqual(lim_main["max_attempts"], 5000 - 1020)
+        self.assertEqual(lim_smoke["max_attempts"], 600)
+        self.assertEqual(lim_main["run_seconds"], 3600)
+        self.assertIn("--max-seconds 4200", main)
+
+    def test_the_fdb_memory_limit_reaches_the_command_line(self):
+        """F5: the approved value on fdbserver's command line; undetermined
+        or malformed refused for anything that runs."""
+        c, rec, cfg = self.cluster()
+        c.start_sampler = lambda: None
+        c.cluster_services()
+        fdb = [cmd for _, cmd, s in rec.commands if s == remote.START and "fdbserver -p" in cmd]
+        self.assertEqual(len(fdb), 1, [cmd for _, cmd, _ in rec.commands][:5])
+        self.assertIn("--memory 3GiB", fdb[0])
+        self.assertNotIn("--cache-memory", fdb[0])
+        c.cfg["fdb_cache_memory"] = "1GiB"
+        rec.commands.clear()
+        c.cluster_services()
+        fdb = [cmd for _, cmd, s in rec.commands if s == remote.START and "fdbserver -p" in cmd]
+        self.assertIn("--memory 3GiB --cache-memory 1GiB", fdb[0])
+        # Not above the cache memory (the default 2 GiB, or the one given):
+        # fdbserver would not start.
+        for mem, cache in (("2GiB", None), ("1GiB", "1GiB"), ("3GiB", "4GiB")):
+            cfg2 = copy.deepcopy(self.cfg)
+            cfg2.update(fdb_memory=mem, fdb_cache_memory=cache)
+            with self.assertRaises(driver.ConfigError, msg=(mem, cache)):
+                driver.validate(cfg2)
+        for bad in ("2G", "0GiB", "-1GiB", "2 GiB", 2, "nan"):
+            cfg2 = copy.deepcopy(self.cfg)
+            cfg2["fdb_memory"] = bad
+            with self.assertRaises(driver.ConfigError, msg=bad):
+                driver.validate(cfg2)
+        undetermined = copy.deepcopy(self.cfg)
+        undetermined["fdb_memory"] = None
+        driver.validate(copy.deepcopy(undetermined))  # check: accepted
+        with self.assertRaises(driver.ConfigError):
+            driver.validate(undetermined, execute=True)
+        p, sha = self.write(undetermined)
+        with NoContact():
+            self.assertEqual(driver.main(["preflight", p, "--execute", "--approval", self.approval(sha, ("preflight",))],
+                                         now=NOW, cluster_factory=lambda cfg: FakeCluster(cfg)), 2)
+            self.assertEqual(driver.main(["check", p]), 0)
 
     def test_setup_refuses_existing_directories(self):
         c, rec, cfg = self.cluster()

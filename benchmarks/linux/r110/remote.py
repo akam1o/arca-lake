@@ -34,19 +34,6 @@ Q = shlex.quote
 TOOLS_FILES = ("__init__.py", "common.py", "budget.py", "ledger.py", "s3.py", "load.py", "proc.py",
                "guard.py", "sampler.py")
 MARK = ".r110-run"
-# The smoke stage's sub-runs have budgets of their own, taken out of the
-# run's (plan §6.1: the limits are the whole run's): the main load gets
-# what is left.
-SMOKE_LIMITS = {"smoke-hb": {"max_attempts": 400, "max_body_bytes": 128 << 20},
-                "smoke-limit": {"max_attempts": 20, "max_body_bytes": 16 << 20},
-                "smoke-ops": {"max_attempts": 600, "max_body_bytes": 128 << 20}}
-
-
-def main_limits(limits):
-    out = dict(budget.DEFAULTS, **limits)
-    for k in ("max_attempts", "max_body_bytes"):
-        out[k] = min(out[k], budget.DEFAULTS[k] - sum(v[k] for v in SMOKE_LIMITS.values()))
-    return out
 
 START = r'''
 import json, os, subprocess, sys, time
@@ -54,60 +41,80 @@ sys.path.insert(0, sys.argv[1])
 from r110 import proc
 name, cwd, cmd = sys.argv[2], sys.argv[3], sys.argv[4:]
 svc = os.path.join(cwd, "services")
-os.makedirs(svc, exist_ok=True)
+if not os.path.isdir(svc):
+    print("no services directory", file=sys.stderr); sys.exit(1)
 rec_path = os.path.join(svc, name + ".json")
 if os.path.exists(rec_path):
-    rec = json.load(open(rec_path))
-    if proc.matches(rec):
-        print("already"); sys.exit(0)
+    print("a record exists already: not started twice", file=sys.stderr); sys.exit(1)
+# Listed before it starts: a process the run started is never unaccounted.
+with open(os.path.join(svc, "started.list"), "a") as f:
+    f.write(name + "\n"); f.flush(); os.fsync(f.fileno())
 log = open(os.path.join(cwd, "logs", name + ".log"), "ab")
 p = subprocess.Popen(cmd, cwd=cwd, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
 ident = None
 for _ in range(100):
-    ident = proc.identity(p.pid)
-    if ident and ident["cwd"]:
+    try:
+        ident = proc.identity(p.pid)
+    except proc.Unknown:
+        ident = None
+    if ident:
         break
     time.sleep(0.05)
-if not (ident and ident["cwd"]):
+if not ident:
     # A process whose identity cannot be recorded could never be stopped
-    # by it: it is not left running.
+    # by it: it is not left running (the caller's own child, reaped here).
     p.kill(); p.wait()
     print("identity unavailable", file=sys.stderr); sys.exit(1)
+ident["argv"] = cmd
 json.dump(ident, open(rec_path + ".tmp", "w")); os.replace(rec_path + ".tmp", rec_path)
 print(json.dumps(ident))
 '''
 
+# Exit 0 and one line "checked N" only when every service the run started
+# (services/started.list) has a readable record and none of them, nor any
+# member of its group, is alive; anything else (a missing list or record,
+# a process that cannot be checked, a reused pid with a live group) is
+# printed and exits 1: nothing is removed on a check that did not hold.
 ALIVE = r'''
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
 from r110 import proc
 d = sys.argv[2]
-names = sorted(n for n in os.listdir(d) if n.endswith(".json")) if os.path.isdir(d) else []
+if not os.path.isdir(d):
+    print("unverified: no services directory"); sys.exit(1)
+try:
+    started = [n for n in open(os.path.join(d, "started.list")).read().split() if n]
+except OSError as e:
+    print("unverified: no started.list: %s" % e); sys.exit(1)
 bad = 0
-for n in names:
+for name in sorted(set(started)):
     try:
-        if proc.matches(json.load(open(os.path.join(d, n)))):
-            print("alive " + n); bad = 1
+        rec = json.load(open(os.path.join(d, name + ".json")))
     except (OSError, ValueError) as e:
-        print("unreadable %s: %s" % (n, e)); bad = 1
+        print("unverified %s: no readable record: %s" % (name, e)); bad = 1; continue
+    c = proc.check(rec)
+    g = proc.group_state(rec.get("pgid", rec.get("pid"))) if proc.valid(rec) else "unknown"
+    if c == "same" or g == "alive":
+        print("alive %s (%s, group %s)" % (name, c, g)); bad = 1
+    elif c in ("unknown", "invalid") or g == "unknown":
+        print("unverified %s (%s, group %s)" % (name, c, g)); bad = 1
 if bad:
     sys.exit(1)
-print("checked %d" % len(names))
+print("checked %d" % len(set(started)))
 '''
 
+# Stop one recorded service and its group (proc.stop_identified): one JSON
+# line with its verdict (stopped, gone, not-stopped, unverified).
 STOP = r'''
-import json, os, signal, sys, time
+import json, sys
 sys.path.insert(0, sys.argv[1])
-from r110 import proc
+from r110 import common, proc
 path, wait = sys.argv[2], float(sys.argv[3])
-rec = json.load(open(path))
-r = proc.signal_if_same(rec, signal.SIGTERM)
-end = time.monotonic() + wait
-while r == "signalled" and time.monotonic() < end and proc.matches(rec):
-    time.sleep(0.1)
-if proc.matches(rec):
-    r = "killed:" + proc.signal_if_same(rec, signal.SIGKILL)
-print(r)
+try:
+    rec = json.load(open(path))
+except (OSError, ValueError) as e:
+    print(json.dumps({"verdict": "unverified", "reason": "record unreadable: %s" % e})); sys.exit(0)
+print(json.dumps(proc.stop_identified(rec, common.Clock(), term_wait=wait, kill_wait=wait / 2)))
 '''
 
 
@@ -129,6 +136,18 @@ out["free_root"] = s.f_bavail * s.f_frsize
 out["swaps"] = open("/proc/swaps").read().splitlines()[1:]
 print(json.dumps(out))
 '''
+
+
+# fdbserver's --cache-memory when none is given.
+FDB_DEFAULT_CACHE = 2 << 30
+
+
+def parse_memory(text):
+    """Bytes of a FoundationDB memory size (``NMiB`` / ``NGiB``)."""
+    m = re.fullmatch(r"([1-9][0-9]{0,6})(MiB|GiB)", text) if isinstance(text, str) else None
+    if not m:
+        raise ValueError(f"fdb_memory {text!r}: a whole number of MiB or GiB")
+    return int(m.group(1)) << (20 if m.group(2) == "MiB" else 30)
 
 
 class RemoteError(Exception):
@@ -177,7 +196,7 @@ class SshCluster:
     def required_checks(self):
         hosts = list(self.cfg["hosts"])
         return (["space", "dirs_absent", "ports_free", "binary", "tools", "proc_stat", "kernel_log",
-                 "fdb_memory", "retained"] + [f"host {h}" for h in hosts] + [f"clock {h}" for h in hosts]
+                 "fdb_memory", "fdb_memory_fits", "retained"] + [f"host {h}" for h in hosts] + [f"clock {h}" for h in hosts]
                 + [f"system_fdb {h}" for h in self.cfg.get("system_fdb_hosts", [])])
 
     def clock_offset_ms(self, host=None):
@@ -235,6 +254,15 @@ class SshCluster:
                 c[f"clock {h}"] = {"ok": True, "offset_ms": self.clock_offset_ms(h)}
             except (RemoteError, ValueError) as e:
                 c[f"clock {h}"] = {"ok": False, "error": str(e)[:200]}
+        # The test's FoundationDB under its approved limit, with the guard's
+        # floor still free beside it.
+        try:
+            fdb = parse_memory(self.cfg["fdb_memory"])
+            avail = c[f"host {self.host}"]["mem_available"]
+            c["fdb_memory_fits"] = {"ok": avail >= fdb + (1 << 30), "fdb_memory": self.cfg["fdb_memory"],
+                                    "mem_available": avail}
+        except (KeyError, TypeError, ValueError) as e:
+            c["fdb_memory_fits"] = {"ok": False, "error": str(e)[:200]}
         c["retained"] = self._retained()
         return c
 
@@ -261,13 +289,32 @@ class SshCluster:
         rid = self.cfg["run_id"]
         self.ssh(f"[ ! -e {Q(self.run_dir)} ] && [ ! -e {Q(self.fdb_data)} ] || "
                  f"{{ echo 'run directories exist' >&2; exit 1; }}; "
-                 f"mkdir -p {Q(self.run_dir)}/logs {Q(self.run_dir)}/services {Q(self.tools)}/r110 {Q(self.fdb_data)} && "
-                 f"echo {Q(rid)} > {Q(self.run_dir)}/{MARK} && echo {Q(rid)} > {Q(self.fdb_data)}/{MARK}")
+                 f"mkdir -p {Q(self.run_dir)}/logs {Q(self.run_dir)}/services {Q(self.run_dir)}/alarms "
+                 f"{Q(self.tools)}/r110 {Q(self.fdb_data)} && "
+                 f"echo {Q(rid)} > {Q(self.run_dir)}/{MARK} && echo {Q(rid)} > {Q(self.fdb_data)}/{MARK} && "
+                 f": > {Q(self.run_dir)}/services/started.list")
         for f in TOOLS_FILES:
             with open(os.path.join(self.tools_src, f)) as fh:
                 self.ssh(f"cat > {Q(self.tools)}/r110/{f}", stdin=fh.read())
         self.start_watchdog()
+        # From here to teardown the sentinel watches on the host itself: the
+        # smoke stage, the main run and the drain alike (plan §6.2).
+        self.start_sentinel()
         self.cluster_services()
+
+    def start_sentinel(self):
+        g = self.cfg["stop_rules"]["guard"]
+        cmd = self.tool("guard", "sentinel", "--run-dir", self.run_dir, "--heartbeat", f"{self.run_dir}/heartbeat.json",
+                        "--heartbeat-id", self.cfg["run_id"], "--data-dir", self.mount,
+                        "--services", f"{self.run_dir}/services", "--alarms", f"{self.run_dir}/alarms",
+                        "--stop-file", f"{self.load_dir}/stop.json",
+                        "--min-free-gib", g["min_free_gib"], "--min-mem-mib", g["min_mem_mib"],
+                        "--heartbeat-timeout", g["heartbeat_timeout_s"])
+        self.ssh(f"mkdir -p {Q(self.load_dir)}")
+        self.start("sentinel", ["sh", "-c", "exec " + cmd])
+
+    def stop_sentinel(self):
+        return self._stop("sentinel.json", 120)
 
     def start(self, name, command):
         return self.py(START, self.tools, name, self.run_dir, *command)
@@ -279,8 +326,12 @@ class SshCluster:
         cf = f"{self.run_dir}/fdb.cluster"
         addr = "127.0.0.1"
         self.ssh(f"echo {Q('r110:' + rid.replace('-', '') + '@' + addr + ':' + str(p['fdb']))} > {Q(cf)}")
+        # The approved memory limit of the test's FoundationDB (plan §4.1;
+        # validated, never left undetermined for a run), on its command line.
         self.start("fdb", ["fdbserver", "-p", f"{addr}:{p['fdb']}", "-C", cf, "-d", f"{self.fdb_data}/d",
-                           "-L", f"{self.fdb_data}/l"])
+                           "-L", f"{self.fdb_data}/l", "--memory", self.cfg["fdb_memory"],
+                           *(["--cache-memory", self.cfg["fdb_cache_memory"]] if self.cfg.get("fdb_cache_memory")
+                             else [])])
         self.ssh(f"for i in $(seq 1 60); do fdbcli -C {Q(cf)} --exec 'configure new single ssd' >/dev/null 2>&1; "
                  f"fdbcli -C {Q(cf)} --exec 'status minimal' | grep -q 'is available' && exit 0; sleep 1; done; exit 1")
         env = ["env", "ARCA_INSECURE_PLAINTEXT=1", "ARCA_FDB_INSECURE_PLAINTEXT=1"]
@@ -344,15 +395,20 @@ class SshCluster:
         cmd = self.tool("sampler", "--config", f"{self.run_dir}/sampler.json", "--out", f"{self.run_dir}/samples.jsonl")
         self.start("sampler", ["sh", "-c", "exec " + cmd])
 
-    def start_load(self, sub=None, limits=None, heartbeat=True):
+    def start_load(self, sub=None, limits=None, heartbeat=True, remaining_s=None):
         """The load (under the guard) in ``load_dir`` or a sub-run (both read
-        the main run's heartbeat, unless ``heartbeat`` is False)."""
+        the main run's heartbeat, unless ``heartbeat`` is False), with its
+        share of the approved run-wide limits (``budget.allocate``) and a
+        deadline no later than the run's (``remaining_s``: what is left of
+        the run's time; a stage switch never resets it)."""
         d = f"{self.run_dir}/{sub}" if sub else self.load_dir
         rid = self.cfg["run_id"] + (f"-{sub}" if sub else "")
         g = self.cfg["stop_rules"]["guard"]
         self.ssh(f"mkdir -p {Q(d)}/control && echo {Q(json.dumps({'run_id': rid}))} > {Q(d)}/run.json")
         hb = f"{self.run_dir}/heartbeat.json" if heartbeat else f"{d}/no-heartbeat.json"
-        lim = dict(self.cfg["limits"], **SMOKE_LIMITS[sub], **(limits or {})) if sub else main_limits(self.cfg["limits"])
+        lim = dict(budget.allocate(self.cfg["limits"])[sub or "main"], **(limits or {}))
+        if remaining_s is not None:
+            lim["run_seconds"] = max(1, min(lim["run_seconds"], int(remaining_s)))
         # Each sub-run has a bucket of its own (the main run's is created by
         # stage 3 and must not exist before). Without a heartbeat the load
         # does not read one at all, so that only the guard can stop it: the
@@ -365,6 +421,7 @@ class SshCluster:
         guard = self.tool("guard", "run", "--run-dir", d, "--heartbeat", hb, "--data-dir", self.mount,
                           "--min-free-gib", g["min_free_gib"], "--min-mem-mib", g["min_mem_mib"],
                           "--heartbeat-timeout", g["heartbeat_timeout_s"], "--heartbeat-id", self.cfg["run_id"],
+                          "--max-seconds", lim["run_seconds"] + 600,
                           # A smoke sub-run's exercised stop must not reach the
                           # main run's services: only the main guard gets them.
                           *([] if sub else ["--services", f"{self.run_dir}/services"]),
@@ -373,12 +430,12 @@ class SshCluster:
         self.step_n = 0
         return d
 
-    def smoke(self):
+    def smoke(self, remaining_s=None):
         """Stage 2 in sub-runs of their own: a withheld heartbeat stops a
         load; an attempt limit ends one; 100 PUT, GET, DELETE and a verify."""
         self.setup()
         res = {"errors": 0}
-        d = self.start_load("smoke-hb", heartbeat=False)
+        d = self.start_load("smoke-hb", heartbeat=False, remaining_s=remaining_s)
         self._send(d, 1, {"kind": "create-bucket"})
         self._send(d, 2, {"kind": "put", "keys": [f"s{i}" for i in range(10_000)], "rate": 2})
         st = self._wait_exit(d, 180)
@@ -389,12 +446,12 @@ class SshCluster:
         res["stop_layers_exercised"] = bool(st and st.get("stopped") == "heartbeat-lost" and g
                                             and g.get("reason") == "heartbeat-lost" and g.get("source") == "guard"
                                             and g.get("group_empty") is True)
-        d = self.start_load("smoke-limit")
+        d = self.start_load("smoke-limit", remaining_s=remaining_s)
         self._send(d, 1, {"kind": "create-bucket"})
         self._send(d, 2, {"kind": "put", "keys": [f"l{i}" for i in range(100)]})
         st = self._wait_exit(d, 120)
         res["limits_exercised"] = bool(st and st.get("stopped") == "attempts-limit")
-        d = self.start_load("smoke-ops")
+        d = self.start_load("smoke-ops", remaining_s=remaining_s)
         keys = [f"o{i}" for i in range(100)]
         for n, step in enumerate([{"kind": "create-bucket"}, {"kind": "put", "keys": keys},
                                   {"kind": "get", "keys": keys}, {"kind": "delete", "keys": keys},
@@ -479,6 +536,7 @@ class SshCluster:
                "hosts": self.cfg["hosts"], "load_host": self.host,
                "system_fdb_hosts": self.cfg.get("system_fdb_hosts", []),
                "remote_run_dir": self.load_dir, "remote_data_mount": self.mount,
+               "remote_alarms": f"{self.run_dir}/alarms",
                "remote_heartbeat": f"{self.run_dir}/heartbeat.json",
                "remote_test_dirs": [self.run_dir, self.fdb_data],
                "remote_test_fdb_cluster": f"{self.run_dir}/fdb.cluster",
@@ -578,38 +636,58 @@ class SshCluster:
     def stop_load(self):
         # The guard may be stopping services and the load's group (up to
         # 30 s each) when this arrives: time for it to write its result.
-        self.py(STOP, self.tools, f"{self.run_dir}/services/guard.json", 120, check=False)
-        self.stop_watchdog()
+        return self._stop("guard.json", 120)
 
     def escalation(self):
-        """The watchdog's own stop record (a rule that fired), if any."""
-        p = os.path.join(self.cfg["local_dir"], "stop.json")
-        rec = common.StopFile(p).reason() if os.path.exists(p) else None
-        return rec
+        """The first resource or monitor alarm the watchdog wrote (its local
+        copy), or the sentinel's result on the host, if any."""
+        d = os.path.join(self.cfg["local_dir"], "alarms")
+        for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            try:
+                with open(os.path.join(d, n)) as f:
+                    return json.load(f)
+            except (OSError, ValueError):
+                return {"reason": "stop-file-unreadable", "file": n}
+        return self._json(f"{self.run_dir}/sentinel.json")
+
+    def _stop(self, name, wait):
+        """One recorded process stopped by identity: its verdict (a dict)."""
+        out = self.py(STOP, self.tools, f"{self.run_dir}/services/{name}", wait, check=False).strip()
+        try:
+            return json.loads(out.splitlines()[-1])
+        except (ValueError, IndexError):
+            return {"verdict": "unverified", "reason": f"no verdict: {out[-200:]}"}
 
     def stop_services(self):
         """The test's gateway, controller, nodes and FoundationDB by
-        identity (never the guards or the sampler)."""
+        identity, each with its process group (never the guards, the
+        sentinel or the sampler): name -> verdict."""
         names = self.ssh(f"ls {Q(self.run_dir)}/services", check=False).split()
         out = {}
         for n in sorted(names, key=lambda n: n.startswith("fdb")):
-            if n.endswith(".json") and not n.startswith(("guard", "sampler")):
-                out[n] = self.py(STOP, self.tools, f"{self.run_dir}/services/{n}", 30, check=False).strip()
+            if n.endswith(".json") and not n.startswith(("guard", "sampler", "sentinel")):
+                out[n] = self._stop(n, 30)
         return out
 
     # -- teardown --------------------------------------------------------------
 
     def teardown(self):
         """Stop every recorded test process by identity, then remove the
-        run's two directories, only when their markers name this run and
-        nothing of the run is left running."""
+        run's two directories, only when every stop was confirmed, the
+        liveness check held (``ALIVE``) and their markers name this run.
+        Anything else keeps everything, with the verdicts as evidence."""
         rid = self.cfg["run_id"]
         out = {"stopped": {}, "removed": []}
         names = self.ssh(f"ls {Q(self.run_dir)}/services 2>/dev/null || true", check=False).split()
-        order = sorted(names, key=lambda n: (not n.startswith("guard"), n.startswith("fdb")))
+        order = sorted((n for n in names if n.endswith(".json")),
+                       key=lambda n: (not n.startswith("guard"), not n.startswith("sentinel"), n.startswith("fdb"),
+                                      n.startswith("sampler")))
         for n in order:
-            if n.endswith(".json"):
-                out["stopped"][n] = self.py(STOP, self.tools, f"{self.run_dir}/services/{n}", 30, check=False).strip()
+            out["stopped"][n] = self._stop(n, 30)
+        unconfirmed = {n: v for n, v in out["stopped"].items() if v.get("verdict") not in ("stopped", "gone")}
+        if unconfirmed:
+            out["kept"] = f"stop not confirmed: {sorted(unconfirmed)}"
+            return out
         # Nothing is removed unless this check ran to its end and found no
         # process of the run: an unreadable record or a failed check keeps
         # everything.

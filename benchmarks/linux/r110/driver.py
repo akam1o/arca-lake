@@ -83,8 +83,10 @@ def check_path(name, p, depth=3):
         raise ConfigError(f"{name}: a directory of the retained cluster")
 
 
-def validate(cfg):
-    """Raise ``ConfigError`` for anything missing or looser than the plan."""
+def validate(cfg, execute=False):
+    """Raise ``ConfigError`` for anything missing or looser than the plan.
+    ``execute``: the configuration is about to be run (preflight, run,
+    teardown): a value left undetermined (``fdb_memory`` null) is refused."""
     for k in ("run_id", "hosts", "load_host", "remote", "binary", "limits", "settings", "stage_max_s",
               "stop_rules", "judgement", "teardown"):
         if k not in cfg:
@@ -147,15 +149,37 @@ def validate(cfg):
             isinstance(k, str) and k.startswith("/") and os.path.normpath(k) == k
             and isinstance(d, str) and re.fullmatch(r"[0-9a-f]{64}", d) for k, d in rr.items()):
         raise ConfigError("retained_record: absolute directory -> sha256 of its listing (plan §10)")
+    opt = cfg.get("optional_checks", [])
+    if not isinstance(opt, list) or not set(opt) <= {"kernel_log", "swap"}:
+        raise ConfigError("optional_checks: a list of kernel_log, swap (declared and approved, never implied)")
+    try:
+        budget.allocate(cfg["limits"])
+    except ValueError as e:
+        raise ConfigError(f"limits: {e}") from None
+    mem = cfg.get("fdb_memory")
+    if mem is None:
+        if execute:
+            raise ConfigError("fdb_memory undetermined: set the test FoundationDB's memory limit (preflight)")
+    else:
+        from .remote import FDB_DEFAULT_CACHE, parse_memory
+        try:
+            cache = parse_memory(cfg["fdb_cache_memory"]) if cfg.get("fdb_cache_memory") is not None \
+                else FDB_DEFAULT_CACHE
+            # fdbserver refuses to start otherwise ("--memory has to be
+            # larger than --cache-memory").
+            if parse_memory(mem) <= cache:
+                raise ValueError(f"fdb_memory {mem} not above the cache memory ({cache >> 20} MiB)")
+        except ValueError as e:
+            raise ConfigError(str(e)) from None
     if cfg["teardown"] != {"scope": "run-directories-and-processes"}:
         raise ConfigError("teardown scope: the run's own directories and processes only")
     return cfg
 
 
-def load_config(path):
+def load_config(path, execute=False):
     with open(path, "rb") as f:
         raw = f.read()
-    return validate(json.loads(raw)), hashlib.sha256(raw).hexdigest()
+    return validate(json.loads(raw), execute), hashlib.sha256(raw).hexdigest()
 
 
 def check_approval(path, config_sha, scope, now):
@@ -190,6 +214,9 @@ def check_approval(path, config_sha, scope, now):
     return a
 
 
+BASE_KEY = "base-probe"
+
+
 def stages(cfg):
     """The stages and the load steps each sends (a pure description)."""
     s, mx = cfg["settings"], cfg["stage_max_s"]
@@ -200,7 +227,9 @@ def stages(cfg):
         {"stage": "1", "name": "preflight", "max_s": mx.get("1", STAGE_MAX_S["1"]), "steps": []},
         {"stage": "2", "name": "smoke", "max_s": mx.get("2", STAGE_MAX_S["2"]), "steps": []},
         {"stage": "3", "name": "fill and baseline", "max_s": mx.get("3", STAGE_MAX_S["3"]),
-         "steps": [{"kind": "create-bucket"}, {"kind": "put", "keys": l0, "rate": 20}]},
+         "steps": [{"kind": "create-bucket"}, {"kind": "put", "keys": l0, "rate": 20},
+                   # The baseline probe's own object: never deleted by the test.
+                   {"kind": "put", "keys": [BASE_KEY]}]},
         {"stage": "4", "name": "pressure", "max_s": mx.get("4", STAGE_MAX_S["4"]),
          "steps": [{"kind": "delete", "keys": d1, "rate": 20},
                    {"kind": "put-until-refused", "prefix": "p", "max_new": s["stage4_max_new"], "rate": 10,
@@ -208,7 +237,7 @@ def stages(cfg):
                    {"kind": "hold", "prefix": "h", "interval": 1.0, "until": "driver"}]},
         {"stage": "5", "name": "drain and recovery", "max_s": mx.get("5", STAGE_MAX_S["5"]),
          "steps": [{"kind": "probe", "prefix": "q", "put": True, "interval": 10.0,
-                    "until": "driver", "concurrent_with": "deletes"},
+                    "until": "driver", "background": True},
                    {"kind": "delete", "keys": "stage-4 keys + " + str(len(more)) + " baseline", "rate": 20}]},
         {"stage": "6", "name": "steady churn", "max_s": mx.get("6", STAGE_MAX_S["6"]),
          "steps": [{"kind": "churn", "prefix": "c", "seconds": s["churn_seconds"], "rate": s["churn_rate"],
@@ -246,7 +275,7 @@ class Evidence:
 # Plan §7: D1's chain (GC grace 600 s, a GC interval, the retention 600 s,
 # a reclaim interval: about 25 min) before the GC and reclaim gauges can
 # mean "done"; before it, 0 pending records is only "not retired yet".
-CHAIN_S = 1500
+CHAIN_S = judge.VALUES["d1_chain_s"]
 SETTLE_S = 180  # three compaction passes after the last reclaim (§8 C2)
 DRAIN_OBSERVE_S = 1800  # §6.2: observe the drain after a stop that is not a resource danger
 
@@ -268,6 +297,12 @@ class Run:
         self.offset_ms = 0
         self.iv_ms = judge.VALUES["interval_s"] * 1000
         self.start = self.clock.monotonic()
+        # The run's time: the approved limit (never above the plan's 7.5 h),
+        # counted once from the run's start, never reset by a stage.
+        self.run_max = min(RUN_MAX_S, cfg["limits"].get("run_seconds", RUN_MAX_S))
+
+    def remaining(self):
+        return max(0.0, self.run_max - (self.clock.monotonic() - self.start))
 
     def host_ms(self):
         return self.clock.wall_ms() + self.offset_ms
@@ -284,7 +319,7 @@ class Run:
             self.stop = dict(rec, stage=stage)
             self.ev.event(self.clock.wall_ms(), "stop", **self.stop)
             return True
-        if self.clock.monotonic() - self.start >= RUN_MAX_S:
+        if self.clock.monotonic() - self.start >= self.run_max:
             self._stop(stage, "run-deadline")
             return True
         return False
@@ -385,25 +420,27 @@ class Run:
         return bool(checks) and not missing and all(c.get("ok") for c in checks.values())
 
     def s2(self, st, deadline):
-        r = self.c.smoke()  # its own sub-runs: their stops are not this run's
+        r = self.c.smoke(remaining_s=self.remaining())  # its own sub-runs: their stops are not this run's
         self.tl["2"]["smoke"] = r
         return bool(r.get("stop_layers_exercised")) and bool(r.get("limits_exercised")) and r.get("errors") == 0
 
     def s3(self, st, deadline):
-        self.c.start_load()
-        bucket, fill = st["steps"]
+        self.c.start_load(remaining_s=self.remaining())
+        bucket, fill, base = st["steps"]
         if not self.c.run_step(dict(bucket, stage="3"), deadline) or self._stopped("3"):
             return False
-        r = self.c.run_step(dict(fill, stage="3"), deadline)
-        if not r or self._stopped("3"):
-            return False
-        counts = r.get("counts", {})
-        acked = counts.get("op-PUT-ack", 0) + counts.get("retry-PUT-ack", 0)
-        self.tl["3"]["l0_acknowledged"] = acked
-        if acked != len(fill["keys"]):
-            return False
-        # The baseline-key probe (plan §6.2), from here to the end.
-        if not self.c.run_step({"kind": "start-probe", "key": fill["keys"][-1], "interval": 5.0, "stage": "3"},
+        for step, name in ((fill, "l0_acknowledged"), (base, "base_acknowledged")):
+            r = self.c.run_step(dict(step, stage="3"), deadline)
+            if not r or self._stopped("3"):
+                return False
+            counts = r.get("counts", {})
+            acked = counts.get("op-PUT-ack", 0) + counts.get("retry-PUT-ack", 0)
+            self.tl["3"][name] = acked
+            if acked != len(step["keys"]):
+                return False
+        # The baseline-key probe (plan §6.2), from here to the end, on its
+        # own object (protected: no step of the run deletes it).
+        if not self.c.run_step({"kind": "start-probe", "key": BASE_KEY, "interval": 5.0, "stage": "3"},
                                deadline):
             return False
         return bool(self.wait("3", deadline, lambda s: self._quiet(s) and self._admission(s, 0) and self._complete(s)))
@@ -567,10 +604,18 @@ class Run:
                 self.drain()
             except Exception as e:  # noqa: BLE001
                 self.ev.failures.append(f"drain: {e}")
-        try:
-            self.c.stop_load()
-        except Exception as e:  # noqa: BLE001 - evidence first
-            self.ev.failures.append(f"stop_load: {e}")
+        # The load, then the services (confirmed), then the host-side
+        # sentinel and the watchdog: the services never outlive the watching.
+        for name in ("stop_load", "stop_services", "stop_sentinel", "stop_watchdog"):
+            f = getattr(self.c, name, None)
+            if f is None:
+                continue
+            try:
+                out = f()
+                if out is not None:
+                    self.tl.setdefault("final_stops", {})[name] = out
+            except Exception as e:  # noqa: BLE001 - evidence first
+                self.ev.failures.append(f"{name}: {e}")
         parts = {}
         for name, f in (("samples", self.c.samples), ("ledger", self.c.ledger_records),
                         ("logs", self.c.collect_logs)):
@@ -603,7 +648,7 @@ def main(argv=None, now=None, cluster_factory=None):
     p.add_argument("--evidence")
     a = p.parse_args(argv)
     try:
-        cfg, sha = load_config(a.config)
+        cfg, sha = load_config(a.config, execute=a.command != "check")
     except (ConfigError, OSError, ValueError) as e:
         print(f"configuration refused: {e}", file=sys.stderr)
         return 2

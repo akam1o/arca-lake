@@ -180,6 +180,14 @@ Closed loop, paced, and bounded by the generator itself (§9 P1):
 | Live set | at most 8,000 objects (2.0 GiB logical): L0 4,000, less the 1,000 early deletes, plus at most 5,000 new objects in stage 4; L1 = 2,000 objects in stage 6 |
 | Run time | 7.5 h in total: the stage maxima of §7 (400 min), transitions (≤ 30 min) and evidence collection (≤ 20 min) |
 
+The limits are the whole run's, the smoke stage's sub-runs included:
+`budget.allocate` gives each smoke sub-run a fixed share (1,020 attempts
+and 272 MiB of request bodies in all) out of the approved totals and the
+main load the rest, refusing before any start a configuration whose
+smoke shares would not fit; each load's deadline is what is left of the
+run's time, counted from the run's start (a stage switch or a restart
+resets neither).
+
 A refusing cluster therefore sees at most 25 requests in any second and
 20 per second on average over longer intervals, not the concurrency at
 refusal latency (ADR-0033 §4c: about 1,100 per second).
@@ -195,7 +203,8 @@ this allotment and would test something else.
 
 ### 6.2 Monitoring and stop rules
 
-Three layers, any one of which ends the load:
+Three layers, any one of which ends the load, and a host-side keeper
+that stops the test's services:
 
 1. **The generator** (on host 2) stops at its operation, byte and time
    limits, and is started under `timeout` with the stage's maximum.
@@ -213,7 +222,23 @@ Three layers, any one of which ends the load:
    itself, and rewrites the heartbeat only after a round in which every
    required check succeeded, so a watchdog that cannot see, or a lost
    connection, stops the generator through the guard within 120 s. It also
-   watches the guard's own identity (`guard-lost`).
+   watches the guard's own identity (`guard-lost`). A stop that is not a
+   resource danger (a limit, an anomaly such as the dedicated
+   FoundationDB down) does not end its watching: it goes on, round after
+   round and beating while the resources are fine, through the drain; a
+   resource or monitor rule writes an alarm file of its own on host 2
+   (whatever stop came first: the first reason is kept as the run's, an
+   alarm is never hidden by it).
+4. **The sentinel** (on host 2, from setup to teardown,
+   `guard.py sentinel`): apart from any load, it watches the data file
+   system's free space, the available memory, the watchdog's heartbeat
+   and alarms, and on any of them, on a check it cannot make, or on its
+   deadline it stops every load (the stop file) and the test's services
+   by identity, and records each stop's verdict. A lost driver, ssh or
+   watchdog leaves the heartbeat stale: the sentinel stops the services
+   within 120 s, with no network. The smoke stage's exercises (a withheld
+   heartbeat, a limit) run in sub-runs whose guards reach only their own
+   load; a real danger during the smoke stage is the sentinel's.
 
 | Rule | Threshold | Status |
 | --- | --- | --- |
@@ -224,7 +249,7 @@ Three layers, any one of which ends the load:
 | Kernel OOM or hung-task messages on host 2 | any | proposed; readability of the kernel log to be confirmed at preflight |
 | One-minute load per CPU, any host | > 4 | existing default |
 | CPU iowait on host 2 | > 50 % for 60 s | proposed |
-| A GET probe of one baseline key (1 per 5 s) | 3 consecutive failures, or > 5 s | proposed |
+| A GET probe of one baseline object (1 per 5 s; its own object, put in stage 3 and never deleted by the test; a SlowDown answer counts as a failure) | 3 consecutive failures, or > 5 s | proposed |
 | System FoundationDB of hosts 1 and 3 (`status minimal`) | not "available" once | existing |
 | The dedicated FoundationDB | not available for 60 s | proposed |
 | A host unreachable | 6 consecutive checks (60 s) | existing default; the on-host guard covers host 2 itself |
@@ -252,7 +277,7 @@ and the watchdog has not fired; anything else ends the run.
 | 2 Smoke | 1 passed | fresh cluster (marker, own port); the watchdog, guard and generator limits exercised (a heartbeat withheld stops a running load; an operation limit ends it); 100 PUT, GET, DELETE; verify | all exercised and stopped as designed; 0 errors | 30 min |
 | 3 Fill and baseline | 2 passed | PUT L0 at the limits; then idle, sampling, until the smoke stage's deletes have matured | L0 acknowledged; admission normal; GC backlog 0 and `arca_node_reclaim_pending_records` 0 on every node (no deletion in progress before D1); samples complete | 60 min |
 | 4 Pressure | 3 passed | first DELETE an identified set D1 of 1,000 baseline keys (≤ 20/s), then PUT new keys at ≤ 10/s until the gateway's admission state is write rejected, at most 5,000 new objects; then hold the refusal with one PUT attempt per second (refused attempts count against the limits) until D1's deletes have passed the GC grace, a GC interval, the retention and a reclaim interval (≈ 25 min after D1), or until admission recovers on its own | write rejected reached and held while D1 matures: C1 judged on D1 over the refused interval (no refusal reached: Inconclusive) | 60 min |
-| 5 Drain and recovery | 4 exit | no new data except a probe PUT every 10 s; DELETE every key stage 4 added and 1,000 more baseline keys (live set L1 = 2,000) at ≤ 20/s; observe GC, retention, reclaim, compaction, admission | C2 and C3a judged | 60 min (about 24 min of grace, retention and pass intervals, then the 10 min holds) |
+| 5 Drain and recovery | 4 exit | no new data except a probe PUT every 10 s (running beside the deletes, under the same budget and ledger); DELETE every key stage 4 added and 1,000 more baseline keys (live set L1 = 2,000) at ≤ 20/s; observe GC, retention, reclaim, compaction, admission | C2 and C3a judged | 60 min (about 24 min of grace, retention and pass intervals, then the 10 min holds) |
 | 6 Steady churn | C3a passed | 1 PUT of a new key and 1 DELETE of the oldest per second for 90 min, the live set within ±5 % of L1 | C3b judged over the whole stage, C4 on its last 60 min | 100 min |
 | 7 Integrity and evidence | 6 ended | verify (§8 C5), `admin integrity verify-manifests`, a scrub of every group; evidence saved; teardown only after review | C5 judged | 60 min |
 
@@ -269,6 +294,14 @@ changed after it.
 | C3b | over stage 6: PUTs ≥ 99 % acknowledged, none refused for capacity, admission never above warning | stage 6 |
 | C4 | over the last 60 min of stage 6, per node: the least-squares slope of retained bytes and of allocated bytes ≤ 1 % of the allotment per hour, their range ≤ 10 % of the allotment, admission never write rejected | stage 6 |
 | C5 | every key acknowledged and not deleted reads back with its exact body; every acknowledged delete (D1, stage 5 and churn, at most 12,400) answers 404; every unknown outcome reads as one of its candidates (recorded which); manifests and scrub 0 findings | stage 7 |
+
+C1's progress (GC collection, the backlog back to 0, reclaims, pending
+records) is judged only on a refusal observed until D1 matured (its chain,
+`d1_chain_s` = 1,500 s, after D1's last delete): a refusal cut short
+before (a stop, a lost monitor, admission recovering) is Inconclusive, not
+Failed for progress it had no time to show; a violation observed before
+(`reclaim_refused` or `reclaim_errors` rising) fails C1 all the same, as
+any integrity or protection violation fails the run whatever stopped it.
 
 Time relations taken into account: a deleted shard waits the GC grace
 (600 s) and a GC interval before its retirement, then the retention
@@ -357,7 +390,8 @@ of this plan.
   any stop (as `adr35-integration.py`).
 
 Implemented in `benchmarks/linux/r110/` (P1 `budget.py`, `ledger.py`,
-`load.py`; P2 `guard.py`, `watchdog.py`, `proc.py`; P3 `sampler.py`; P4
+`load.py`; P2 `guard.py` (the guard and the sentinel), `watchdog.py`,
+`proc.py`; P3 `sampler.py`; P4
 `driver.py`, `judge.py`, `remote.py`), tested locally without any host.
 `driver.py check` is the default and contacts nothing; every other command
 needs `--execute` and an approval file naming the sha256 of the run's
@@ -386,9 +420,24 @@ directories absent; the retained cluster's directories unchanged since
 the last record; clock offsets; the binary's commit, features
 (`--features fdb`, a release build without `fault-injection`) and
 sha256; that FoundationDB's memory options, `du`, `iostat` or
-`/proc/stat`, and the kernel log are available to the test user.
+`/proc/stat`, and the kernel log are available to the test user. The
+test FoundationDB's memory limit is chosen there (`fdb_memory`, at most
+what leaves the guard's 1 GiB floor free beside it), written in the
+configuration (the driver refuses to run with it undetermined) and
+passed as `fdbserver --memory`; the started command line is part of the
+evidence. Monitoring sources that may be missing (`optional_checks`:
+the kernel log, swap) are declared in the approved configuration, never
+made optional during a run.
 
 ## 11. Evidence
+
+Clocks: the samples and the ledger are stamped on host 2's clock; the
+driver's own marks (a stage's start, a window's start) are converted to
+it with the offset measured at each stage's start (the midpoint of an ssh
+round trip, recorded with its stage), so a mark's uncertainty is about
+half that round trip; the criteria's windows are on host 2's clock and
+their coverage is checked on its samples. No accuracy beyond that is
+claimed.
 
 One run identifier for every artefact: the commit, the build features,
 the binary's sha256, every setting and limit, the approved values of §8,

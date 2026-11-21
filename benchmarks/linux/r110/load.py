@@ -77,6 +77,8 @@ class Load:
         self._hb_lock = threading.Lock()
         self._probe = None
         self._probe_end = threading.Event()
+        # Keys no step of the load deletes (the baseline probe's object).
+        self.protected = set()
 
     @property
     def stop_reason(self):
@@ -320,7 +322,14 @@ class Load:
                 for k in s["keys"]:
                     if k not in self.live_order:
                         self.live_order.append(k)
-            self._pool(s["keys"], lambda k: self.operation(stage, "op", method, k, deadline),
+            keys = s["keys"]
+            if method == "DELETE":
+                with self._lock:
+                    kept = [k for k in keys if k in self.protected]
+                if kept:
+                    out["protected_not_deleted"] = kept
+                keys = [k for k in keys if k not in kept]
+            self._pool(keys, lambda k: self.operation(stage, "op", method, k, deadline),
                        s.get("rate"), deadline)
             if method == "DELETE":
                 gone = set(s["keys"]) - self.may_exist
@@ -376,8 +385,12 @@ class Load:
                     k = f"{prefix}{i:06d}"
                     if self.operation(stage, "op", "PUT", k, deadline) == "ack":
                         self.live_order.append(k)
-                    if self.live_order and len(self.live_order) > s.get("min_live", 0):
-                        old = self.live_order.pop(0)
+                    with self._lock:
+                        # The oldest live key that is not protected.
+                        idx = next((j for j, key in enumerate(self.live_order) if key not in self.protected), None)
+                        old = self.live_order.pop(idx) if (
+                            idx is not None and len(self.live_order) > s.get("min_live", 0)) else None
+                    if old is not None:
                         self.operation(stage, "op", "DELETE", old, deadline)
                 except (budget_mod.Stopped, budget_mod.LiveLimit):
                     break
@@ -406,6 +419,9 @@ class Load:
                     break
                 token = m.group(1)
             out["pages"] = pages
+        elif kind == "protect":
+            with self._lock:
+                self.protected.update(s["keys"])
         elif kind == "start-probe":
             self.start_probe(s["key"], s.get("interval", 5.0))
         elif kind == "stop-probe":
@@ -483,6 +499,8 @@ class Load:
         stop the run (``probe``). Requests time out after ``timeout``."""
         if self._probe is not None:
             return
+        with self._lock:
+            self.protected.add(key)
         self._probe_end.clear()
 
         def run():
@@ -540,6 +558,26 @@ def run(args, clock=None, client=None):
     os.makedirs(control, exist_ok=True)
     n, steps = 1, []
     rc = 0
+    lock = threading.Lock()
+    background = {}  # n -> thread of a step running beside the next ones
+    running = set()  # the background steps not ended yet
+    ending = threading.Event()  # set at the end: background steps stop
+
+    def status(current):
+        with lock:
+            write_status(args.run_dir, {"run_id": run_id, "step": n, "running": current, "steps": list(steps),
+                                        "background": sorted(running), "budget": load.budget.snapshot()})
+
+    def execute(num, s, done_path):
+        try:
+            out = load.step(s, done=lambda: os.path.exists(done_path) or ending.is_set() or bool(load.stopped()))
+        finally:
+            with lock:
+                running.discard(num)
+        with lock:
+            steps.append({"n": num, "kind": s["kind"], "stage": s.get("stage"), "result": out})
+        status(None)
+
     try:
         while True:
             if load.stopped():
@@ -551,20 +589,32 @@ def run(args, clock=None, client=None):
                 continue
             s = common.read_json(path)
             done_path = os.path.join(control, f"{n:06d}.done")
-            write_status(args.run_dir, {"run_id": run_id, "step": n, "running": s, "steps": steps,
-                                        "budget": load.budget.snapshot()})
-            out = load.step(s, done=lambda: os.path.exists(done_path) or bool(load.stopped()))
-            steps.append({"n": n, "kind": s["kind"], "stage": s.get("stage"), "result": out})
+            status(s)
+            if s.get("background"):
+                # The same Load (one budget, one ledger, one stop): a step
+                # that runs until its done file, beside the steps after it.
+                t = threading.Thread(target=execute, args=(n, s, done_path), daemon=True)
+                background[n] = t
+                with lock:
+                    running.add(n)
+                t.start()
+            else:
+                execute(n, s, done_path)
             n += 1
             if s["kind"] == "finish":
                 break
         if load.stopped():
             rc = 3
     finally:
+        ending.set()
+        for t in background.values():
+            t.join(120)
+        left = [k for k, t in background.items() if t.is_alive()]
         load.stop_probe()
-        write_status(args.run_dir, {"run_id": run_id, "step": n, "running": None, "steps": steps,
-                                    "budget": load.budget.snapshot(), "stopped": load.stop_reason,
-                                    "exit": "stopped" if rc else "finished"})
+        with lock:
+            write_status(args.run_dir, {"run_id": run_id, "step": n, "running": None, "steps": list(steps),
+                                        "background_left": left, "budget": load.budget.snapshot(),
+                                        "stopped": load.stop_reason, "exit": "stopped" if rc else "finished"})
         load.close()
     return rc
 

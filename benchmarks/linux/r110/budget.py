@@ -61,6 +61,38 @@ def valid_limit(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0
 
 
+# The smoke stage's sub-runs (plan §7 stage 2), each with a fixed share of
+# the run's attempts and request-body bytes: the main load gets the rest of
+# the approved totals, so that the whole run never sends more than they.
+SMOKE = {"smoke-hb": {"max_attempts": 400, "max_body_bytes": 128 << 20},
+         "smoke-limit": {"max_attempts": 20, "max_body_bytes": 16 << 20},
+         "smoke-ops": {"max_attempts": 600, "max_body_bytes": 128 << 20}}
+
+
+def allocate(limits):
+    """``{sub-run or "main": limits}`` from the approved run-wide ``limits``
+    (never above ``DEFAULTS``): each smoke sub-run its fixed share, the main
+    load what is left of the attempts and the bytes; every other limit (the
+    rate, the burst, the concurrency, the live set) as approved for each.
+    Raises ``ValueError`` when the smoke shares do not fit with something
+    left for the main load. Unused smoke shares are not given back (no
+    second count of the same attempts)."""
+    approved = dict(DEFAULTS, **limits)
+    bad = {k: v for k, v in approved.items() if k not in DEFAULTS or not valid_limit(v) or v > DEFAULTS[k]}
+    if bad:
+        raise ValueError(f"limits not within the plan's: {bad}")
+    out = {}
+    for name, share in SMOKE.items():
+        out[name] = dict(approved, **share)
+    main = dict(approved)
+    for k in ("max_attempts", "max_body_bytes"):
+        main[k] = approved[k] - sum(share[k] for share in SMOKE.values())
+        if main[k] <= 0:
+            raise ValueError(f"{k}={approved[k]}: the smoke stage's {approved[k] - main[k]} leave nothing for the run")
+    out["main"] = main
+    return out
+
+
 class Permit:
     def __init__(self, budget, kind, body_bytes, live):
         self.budget = budget
