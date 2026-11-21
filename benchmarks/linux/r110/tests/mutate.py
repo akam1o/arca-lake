@@ -45,7 +45,7 @@ muts = [
  ("driver: approval not checked", "r110/driver.py", "        check_approval(a.approval, sha, a.command, now)\n", "        pass\n", "test_driver"),
  ("driver: approval window ignored", "r110/driver.py", "    if not w0 <= now <= w1:", "    if False:", "test_driver"),
  ("driver: approval of another config accepted", "r110/driver.py", "    if a.get(\"config_sha256\") != config_sha:", "    if False:", "test_driver"),
- ("driver: looser limits accepted", "r110/driver.py", "        if k not in budget.DEFAULTS or v > budget.DEFAULTS[k]:", "        if False:", "test_driver"),
+ ("driver: looser limits accepted", "r110/driver.py", "        if k not in budget.DEFAULTS or not budget.valid_limit(v) or v > budget.DEFAULTS[k]:", "        if k not in budget.DEFAULTS or not budget.valid_limit(v):", "test_driver"),
  ("driver: looser judgement accepted", "r110/driver.py", "        if judge.VALUES.get(k) != v:", "        if False:", "test_driver"),
  ("driver: evidence overwritten", "r110/driver.py", "        os.mkdir(self.dir)", "        os.makedirs(self.dir, exist_ok=True)", "test_driver"),
  ("driver: evidence failure passes", "r110/driver.py", "            if self.result[\"outcome\"] == judge.PASSED:\n                self.result[\"outcome\"] = judge.INCONCLUSIVE", "            pass", "test_driver"),
@@ -85,7 +85,7 @@ muts = [
  ("judge: C3a one probe enough", "r110/judge.py", "    need = int(v[\"c3a_hold_s\"] // v[\"c3a_probe_interval_s\"])", "    need = 1", "test_driver"),
  ("judge: no-outcome probe dropped", "r110/judge.py", "        out.append(outcomes.get((i[\"op_id\"], i[\"attempt\"]), \"unknown\"))", "        if (i[\"op_id\"], i[\"attempt\"]) in outcomes:\n            out.append(outcomes[(i[\"op_id\"], i[\"attempt\"])])", "test_driver"),
  ("judge: partial samples dropped", "r110/judge.py", "        if s.get(\"target\") != target or s.get(\"status\") not in (\"ok\", \"partial\"):", "        if s.get(\"target\") != target or s.get(\"status\") != \"ok\":", "test_driver"),
- ("driver: stale values used", "r110/driver.py", "                if newest - x[\"ended_wall_ms\"] > 2 * self.iv_ms:\n                    return None\n                return", "                return", "test_driver"),
+ ("driver: stale values used", "r110/driver.py", "                if now - x[\"ended_wall_ms\"] > 2 * self.iv_ms:\n                    return None\n                return", "                return", "test_driver"),
  ("driver: exception not a stop", "r110/driver.py", "                except Exception as e:  # noqa: BLE001 - a failure of the driver is a stop", "                except ZeroDivisionError as e:", "test_driver"),
  ("driver: stage 7 stop unseen", "r110/driver.py", "        self.tl[\"7\"][\"verify\"] = r\n        if self._stopped(\"7\"):\n            return False", "        self.tl[\"7\"][\"verify\"] = r", "test_driver"),
  ("driver: final stop record not read", "r110/driver.py", "                rec = self.c.stop_record()\n                if rec:\n                    self.stop = dict(rec, stage=self.current)", "                pass", "test_driver"),
@@ -96,6 +96,18 @@ muts = [
  ("remote: teardown on a failed check", "r110/remote.py", "        if rc != 0 or not lines or not lines[-1].startswith(\"checked \") or len(lines) > 1:", "        if lines and not lines[-1].startswith((\"checked \", \"unreadable\")):", "test_driver"),
  ("remote: ledger unchecked", "r110/remote.py", "            recs, _torn = ledger_mod.read(f.name)", "            recs = [json.loads(x.split(' ', 1)[1]) for x in open(f.name) if x.strip()]", "test_driver"),
  ("remote: smoke budget not reserved", "r110/remote.py", "        out[k] = min(out[k], budget.DEFAULTS[k] - sum(v[k] for v in SMOKE_LIMITS.values()))", "        pass", "test_driver"),
+ # Review findings (third round).
+ ("remote: sub-runs share the main bucket", "r110/remote.py", "\"--bucket\", f\"r110-{sub}\" if sub else \"r110\",", "\"--bucket\", \"r110\",", "test_driver"),
+ ("remote: smoke-hb without its bucket", "r110/remote.py", "        self._send(d, 1, {\"kind\": \"create-bucket\"})\n        self._send(d, 2, {\"kind\": \"put\", \"keys\": [f\"s{i}\" for i in range(10_000)], \"rate\": 2})", "        self._send(d, 1, {\"kind\": \"put\", \"keys\": [f\"s{i}\" for i in range(10_000)], \"rate\": 2})", "test_driver"),
+ ("remote: smoke takes the load's own stop for the guard's", "r110/remote.py", "and g.get(\"reason\") == \"heartbeat-lost\" and g.get(\"source\") == \"guard\"", "", "test_driver"),
+ ("remote: smoke load reads the heartbeat", "r110/remote.py", "*([\"--heartbeat\", hb, \"--heartbeat-id\", self.cfg[\"run_id\"]] if heartbeat else []),", "\"--heartbeat\", hb, \"--heartbeat-id\", self.cfg[\"run_id\"],", "test_driver"),
+ ("guard: SIGTERM ignored", "r110/guard.py", "        if getattr(self, \"terminated\", False):\n            return \"operator\", \"guard\"", "", "test_guard"),
+ ("driver: a sampling gap ends the hold", "r110/driver.py", "        done = self.wait(\"4\", deadline, lambda s: self._left(s, 3) or (", "        done = self.wait(\"4\", deadline, lambda s: not self._admission(s, 3) or (", "test_driver"),
+ ("driver: early recovery continues", "r110/driver.py", "        return bool(done) and not early", "        return bool(done)", "test_driver"),
+ ("driver: C3a judged with a probe in flight", "r110/driver.py", "        if self.c.wait_step(n, deadline + 120) is None or self._stopped(\"5\"):\n            return False\n", "", "test_driver"),
+ ("driver: NaN limits accepted", "r110/driver.py", "        if k not in budget.DEFAULTS or not budget.valid_limit(v) or v > budget.DEFAULTS[k]:", "        if k not in budget.DEFAULTS or v > budget.DEFAULTS[k]:", "test_driver"),
+ ("driver: retained record unchecked", "r110/driver.py", "        raise ConfigError(\"retained_record: absolute directory -> sha256 of its listing (plan §10)\")", "        pass", "test_driver"),
+ ("driver: stale against the newest sample", "r110/driver.py", "                if now - x[\"ended_wall_ms\"] > 2 * self.iv_ms:", "                if max(y[\"ended_wall_ms\"] for y in samples) - x[\"ended_wall_ms\"] > 2 * self.iv_ms:", "test_driver"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]
