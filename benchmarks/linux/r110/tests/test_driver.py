@@ -10,11 +10,12 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from r110 import common, driver, judge, remote
+from r110 import common, driver, judge, proc, remote
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXAMPLE = os.path.join(HERE, "example-run.json")
@@ -151,6 +152,23 @@ class Approval(Base):
         self.assertEqual(self.invoke(["preflight", p, "--execute", "--approval", self.approval(sha, ("preflight",), by="")]),
                          (2, []))
 
+    def test_scope_and_window_are_strict(self):
+        p, sha = self.write(self.cfg)
+        bad = os.path.join(self.dir, "bad.json")
+        for a in ({"scope": "preflight-only"}, {"scope": ["preflight-only"]},
+                  {"window_end": "2027-01-03T00:00:01+00:00"}, {"window_end": "2026-12-31T00:00:00+00:00"}):
+            base = {"config_sha256": sha, "scope": ["preflight"], "window_start": "2027-01-01T00:00:00+00:00",
+                    "window_end": "2027-01-01T23:00:00+00:00", "approved_by": "approver"}
+            with open(bad, "w") as f:
+                json.dump(dict(base, **a), f)
+            self.assertEqual(self.invoke(["preflight", p, "--execute", "--approval", bad]), (2, []), a)
+
+    def test_teardown_needs_an_approval_too(self):
+        p, sha = self.write(self.cfg)
+        self.assertEqual(self.invoke(["teardown", p, "--execute"]), (2, []))
+        self.assertEqual(self.invoke(["teardown", p, "--execute", "--approval", self.approval(sha, ("run",))]),
+                         (2, []))
+
     def test_a_changed_configuration_voids_the_approval(self):
         p, sha = self.write(self.cfg)
         a = self.approval(sha, ("preflight",))
@@ -184,10 +202,32 @@ class FakeCluster:
         self.pending = 0
         self.reclaimed = 0
         self.preflight_ok = True
+        self.escalated = None
+        self.integrity_calls = []
+        self.services_stopped = False
         self._samples = []
 
     def nodes(self):
         return ["node0", "node1"]
+
+    def gateways(self):
+        return ["gateway0"]
+
+    def targets(self):
+        return ["gateway0", "controller"] + self.nodes()
+
+    def required_checks(self):
+        return ["space"]
+
+    def clock_offset_ms(self):
+        return 0
+
+    def escalation(self):
+        return self.escalated
+
+    def stop_services(self):
+        self.services_stopped = True
+        return {"node0.json": "signalled"}
 
     def preflight(self):
         return {"space": {"ok": self.preflight_ok}}
@@ -224,6 +264,8 @@ class FakeCluster:
             return {"refusal_reached": True}
         if step["kind"] == "verify":
             return {"complete": True, "violations": [], "keys": 10}
+        if step["kind"] == "put":
+            return {"ok": True, "counts": {"op-PUT-ack": len(step["keys"])}}
         return {"ok": True}
 
     def send_step(self, step):
@@ -244,6 +286,7 @@ class FakeCluster:
         return []
 
     def integrity(self, kind):
+        self.integrity_calls.append(kind)
         return 0
 
     def ledger_records(self):
@@ -258,7 +301,7 @@ class FakeCluster:
         pass
 
 
-class Engine(Base):
+class EngineBase(Base):
     def setUp(self):
         super().setUp()
         self.cfg = driver.validate(self.cfg)
@@ -272,6 +315,8 @@ class Engine(Base):
     def outcomes(self, res):
         return {c["criterion"]: c["outcome"] for c in res["criteria"]}
 
+
+class Engine(EngineBase):
     def test_a_resource_stop_in_stage_4_is_inconclusive_and_later_criteria_not_run(self):
         c = FakeCluster(self.cfg, self.clock)
         c.stop_at_stage, c.stop_reason = "4", "disk-free"
@@ -307,10 +352,13 @@ class Engine(Base):
     def test_a_stage_that_never_meets_its_exit_ends_at_its_maximum(self):
         c = FakeCluster(self.cfg, self.clock)
         c.backlog = 5  # stage 3 waits for 0
-        t0 = self.clock.monotonic()
-        res, _ = self.go(c)
+        res, ev = self.go(c)
         self.assertEqual((res["stop"]["reason"], res["stop"]["stage"]), ("stage-exit", "3"))
-        self.assertLessEqual(self.clock.monotonic() - t0, driver.STAGE_MAX_S["3"] + 120)
+        tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
+        self.assertLessEqual(tl["3"]["end_ms"] - tl["3"]["start_ms"], (driver.STAGE_MAX_S["3"] + 30) * 1000)
+        # A stop that is not a resource danger: the drain is observed.
+        self.assertEqual(tl["drain"]["end_ms"] - tl["drain"]["start_ms"], driver.DRAIN_OBSERVE_S * 1000)
+        self.assertFalse(c.services_stopped)
 
     def test_a_lost_part_of_the_evidence_never_passes(self):
         c = FakeCluster(self.cfg, self.clock)
@@ -493,6 +541,137 @@ class Overall(unittest.TestCase):
         self.assertEqual(judge.c5(tl)["outcome"], judge.INCONCLUSIVE)
 
 
+class ReviewFindingsJudge(unittest.TestCase):
+    """Cases from the independent review of P4 (judgement)."""
+
+    def all_pass(self):
+        ok = lambda name: lambda *a, **k: judge.verdict(name, judge.PASSED)  # noqa: E731
+        return [mock.patch.object(judge, n, ok(n.upper() if n != "c3a" and n != "c3b" else n.capitalize()))
+                for n in ("c1", "c2", "c3a", "c3b", "c4", "c5")]
+
+    def test_every_criterion_met_with_a_stop_is_not_a_pass(self):
+        ps = self.all_pass()
+        for p in ps:
+            p.start()
+        try:
+            self.assertEqual(judge.judge([], [], {})["outcome"], judge.PASSED)
+            for reason in ("disk-free", "heartbeat-lost", "smoke-exercise", "operator", "stage-exit"):
+                r = judge.judge([], [], {}, {"reason": reason, "stage": "7"})
+                self.assertEqual(r["outcome"], judge.INCONCLUSIVE, reason)
+        finally:
+            for p in ps:
+                p.stop()
+
+    def test_protection_counters_not_sampled_over_the_run_cannot_pass(self):
+        ps = self.all_pass()
+        for p in ps:
+            p.start()
+        try:
+            tl = {"3": {"start_ms": 0, "end_ms": 600_000}}
+            S = [smp("controller", t, arca_controller_gc_skipped_referenced_total=0) for t in range(0, 600_001, 15_000)]
+            S += [smp(n, t, arca_node_reclaim_damaged=0) for n in ("node0",) for t in range(0, 600_001, 15_000)]
+            self.assertEqual(judge.judge(S, [], tl, nodes=("node0",))["outcome"], judge.PASSED)
+            gap = [x for x in S if not (x["target"] == "node0" and 100_000 < x["ended_wall_ms"] < 200_000)]
+            r = judge.judge(gap, [], tl, nodes=("node0",))
+            self.assertEqual(r["outcome"], judge.INCONCLUSIVE)
+            self.assertEqual(r["protections_not_sampled"], ["node0 arca_node_reclaim_damaged"])
+        finally:
+            for p in ps:
+                p.stop()
+
+    def c3a(self, probes=60, unknown=0, partial=False):
+        t0, hold = 1_000_000, 600_000
+        S = []
+        for t in range(t0, t0 + hold + 1, 15_000):
+            S.append(smp("gateway0", t, arca_gateway_admission_state=0))
+            S.append(dict(smp("controller", t, arca_controller_backpressure_state=0),
+                          status="partial" if partial else "ok"))
+        R = []
+        for k in range(probes):
+            R.append({"type": "intent", "op_id": k, "attempt": 1, "key": f"q{k}", "op": "PUT", "stage": "5",
+                      "kind": "probe", "wall_ms": t0 + 5_000 + k * 9_900})
+            if k >= unknown:
+                R.append({"type": "outcome", "op_id": k, "attempt": 1, "result": "ack"})
+        tl = {"5": {"start_ms": 0, "c3a_window_start_ms": t0}}
+        return judge.c3a(S, R, tl, judge.VALUES)["outcome"]
+
+    def test_c3a_needs_the_plans_sixty_probes(self):
+        self.assertEqual(self.c3a(), judge.PASSED)
+        self.assertEqual(self.c3a(partial=True), judge.PASSED)  # values read in a partial scrape count
+        self.assertEqual(self.c3a(probes=1), judge.INCONCLUSIVE)
+        self.assertEqual(self.c3a(probes=59), judge.INCONCLUSIVE)
+
+    def test_a_probe_without_an_outcome_is_not_acknowledged(self):
+        self.assertEqual(self.c3a(unknown=1), judge.FAILED)
+
+
+class ReviewFindingsEngine(EngineBase):
+    """Cases from the independent review of P4 (stage engine)."""
+
+    def test_a_stop_during_stage_7_is_recorded(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.stop_at_stage, c.stop_reason = "7", "memory"
+        engine = driver.Run(self.cfg, c, driver.Evidence(os.path.join(self.dir, "e"), self.cfg["run_id"]), self.clock)
+        # Straight to stage 7 (the earlier stages' conditions are not modelled).
+        engine.stage(driver.stages(self.cfg)[6], engine.s7)
+        engine.finish()
+        self.assertEqual((engine.result["stop"]["reason"], engine.result["stop"]["stage"]), ("memory", "7"))
+        self.assertNotEqual(engine.result["outcome"], judge.PASSED)
+        self.assertEqual(c.integrity_calls, [], "a scrub started after the stop")
+
+    def test_a_stop_seen_only_at_the_end_is_recorded(self):
+        c = FakeCluster(self.cfg, self.clock)
+        engine = driver.Run(self.cfg, c, driver.Evidence(os.path.join(self.dir, "e"), self.cfg["run_id"]), self.clock)
+        engine.stage(driver.stages(self.cfg)[6], engine.s7)
+        self.assertIsNone(engine.stop)
+        c.stop = {"reason": "heartbeat-lost", "source": "guard"}
+        engine.finish()
+        self.assertEqual((engine.result["stop"]["reason"], engine.result["stop"]["stage"]), ("heartbeat-lost", "7"))
+
+    def test_an_exception_in_a_stage_is_a_stop(self):
+        c = FakeCluster(self.cfg, self.clock)
+
+        def boom():
+            raise RuntimeError("ssh failed")
+
+        c.smoke = boom
+        res, _ = self.go(c)
+        self.assertEqual((res["stop"]["reason"], res["stop"]["stage"]), ("driver-error", "2"))
+        self.assertIn("ssh failed", res["stop"]["error"])
+        self.assertNotEqual(res["outcome"], judge.PASSED)
+
+    def test_a_stale_value_is_not_used(self):
+        engine = driver.Run(self.cfg, FakeCluster(self.cfg, self.clock),
+                            driver.Evidence(os.path.join(self.dir, "e"), self.cfg["run_id"]), self.clock)
+        S = [smp("controller", 0, arca_controller_gc_backlog=0), smp("gateway0", 60_000, arca_gateway_admission_state=0)]
+        self.assertIsNone(engine._fresh(S, "controller", "arca_controller_gc_backlog"))
+        S.append(smp("controller", 50_000, arca_controller_gc_backlog=0))
+        self.assertEqual(engine._fresh(S, "controller", "arca_controller_gc_backlog"), 0)
+
+    def test_the_refusal_is_held_for_d1s_chain(self):
+        c = FakeCluster(self.cfg, self.clock)
+        res, ev = self.go(c)  # admission stays write rejected: stage 5 never recovers
+        tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
+        self.assertGreaterEqual(tl["4"]["refusal_end_ms"] - tl["4"]["d1_done_ms"], driver.CHAIN_S * 1000)
+        self.assertFalse(tl["4"]["admission_recovered_early"])
+        self.assertEqual(res["stop"]["stage"], "5")
+
+    def test_a_resource_rule_during_the_drain_stops_the_services(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.stop_at_stage, c.stop_reason = "4", "operator"
+        c.escalated = {"reason": "disk-free", "source": "watchdog"}
+        res, ev = self.go(c)
+        self.assertTrue(c.services_stopped)
+        tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
+        self.assertEqual(tl["drain"]["escalation"]["reason"], "disk-free")
+
+    def test_no_drain_after_a_resource_stop(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.stop_at_stage, c.stop_reason = "4", "disk-free"
+        res, ev = self.go(c)
+        self.assertNotIn("drain", common.read_json(os.path.join(ev.dir, "timeline.json")))
+
+
 # -- the hosts' commands, recorded (never run) ----------------------------------
 
 
@@ -516,7 +695,7 @@ class Commands(Base):
         return remote.SshCluster(cfg, runner=rec), rec, cfg
 
     def test_teardown_removes_only_marked_run_directories(self):
-        c, rec, cfg = self.cluster()
+        c, rec, cfg = self.cluster(answers=[('print("checked %d"', "checked 0\n")])
         out = c.teardown()
         rms = [cmd for _, cmd, _ in rec.commands if "rm " in cmd]
         self.assertEqual(len(rms), 2)
@@ -557,6 +736,66 @@ class Commands(Base):
         rec.commands.clear()
         c.stop_record()
         self.assertTrue(all("/smoke" not in cmd for _, cmd, _ in rec.commands))
+
+    def test_teardown_keeps_everything_when_the_check_fails(self):
+        for answer in ([], [('print("checked %d"', "")], [('print("checked %d"', "unreadable node0.json: x\n")]):
+            c, rec, _ = self.cluster(answers=answer)
+            if answer == []:
+                c.runner = lambda *a: (1, "", "Traceback")
+            out = c.teardown()
+            self.assertIn("kept", out, answer)
+            self.assertFalse(any("rm " in cmd for _, cmd, _ in rec.commands), answer)
+
+    def test_the_liveness_script_itself(self):
+        """remote.ALIVE run locally against identity records."""
+        svc = os.path.join(self.dir, "services")
+        os.mkdir(svc)
+
+        def check():
+            r = subprocess.run([sys.executable, "-I", "-", HERE.rsplit("/", 1)[0], svc], input=remote.ALIVE,
+                         capture_output=True, text=True, timeout=60)
+            return r.returncode, r.stdout.strip()
+
+        self.assertEqual(check(), (0, "checked 0"))
+        me = proc.identity(os.getpid())
+        with open(os.path.join(svc, "a.json"), "w") as f:
+            json.dump(dict(me, start="not-its-start"), f)
+        self.assertEqual(check(), (0, "checked 1"))
+        with open(os.path.join(svc, "b.json"), "w") as f:
+            json.dump(me, f)
+        rc, out = check()
+        self.assertEqual((rc, out.splitlines()[0]), (1, "alive b.json"))
+        os.remove(os.path.join(svc, "b.json"))
+        with open(os.path.join(svc, "c.json"), "w") as f:
+            f.write("null")
+        rc, out = check()
+        self.assertEqual(rc, 1)
+        self.assertTrue(out.startswith("unreadable c.json"), out)
+
+    def test_a_corrupt_or_missing_ledger_is_an_error_not_empty(self):
+        from r110 import ledger as ledger_mod
+        c, rec, _ = self.cluster(answers=[("ledger.jsonl", 'deadbeef {"type":"intent"}\n')])
+        with self.assertRaises(ledger_mod.LedgerFailure):
+            c.ledger_records()
+        c, rec, _ = self.cluster()
+        c.runner = lambda *a: (1, "", "No such file")
+        with self.assertRaises(remote.RemoteError):
+            c.ledger_records()
+
+    def test_samples_are_read_incrementally(self):
+        line = json.dumps(smp("controller", 1, x=1)) + "\n"
+        c, rec, _ = self.cluster(answers=[("samples.jsonl", line + line[:10])])
+        self.assertEqual(len(c.samples()), 1)
+        self.assertIn("tail -c +1 ", rec.commands[-1][1])
+        c.samples()
+        self.assertIn(f"tail -c +{len(line) + 1} ", rec.commands[-1][1])
+
+    def test_the_main_load_leaves_the_smoke_stages_budget(self):
+        lim = remote.main_limits({})
+        used = sum(v["max_attempts"] for v in remote.SMOKE_LIMITS.values())
+        self.assertEqual(lim["max_attempts"] + used, 70_000)
+        self.assertLessEqual(lim["max_body_bytes"] + sum(v["max_body_bytes"] for v in remote.SMOKE_LIMITS.values()),
+                             5 << 30)
 
     def test_setup_refuses_existing_directories(self):
         c, rec, cfg = self.cluster()

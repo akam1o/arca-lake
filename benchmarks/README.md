@@ -142,7 +142,9 @@ Results are written by criterion to `target/criterion/`.
   `ledger.py`: the outcome ledger (an intent before each request, an
   outcome after, CRC per line, fsync, unknown outcomes as candidate
   states); `load.py`: the load process, executing the driver's steps,
-  which also stops by itself when the watchdog's heartbeat goes stale.
+  which also stops by itself when the watchdog's heartbeat goes stale, on
+  a 5xx other than 503, and when the baseline-key probe (a GET every 5 s)
+  fails 3 times in a row or answers in more than 5 s.
   `guard.py`: the on-host guard, parent of the load (its own session),
   stopping the load's whole process group without any network on a
   stale heartbeat, low free space or memory, a check it cannot make, its

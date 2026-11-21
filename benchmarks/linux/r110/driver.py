@@ -64,6 +64,7 @@ SETTINGS = {
 STOP_RULES = {"guard": {"min_free_gib": 3.0, "min_mem_mib": 1024.0, "heartbeat_timeout_s": 120.0},
               "preflight_free_gib": 12.2, "preflight_root_free_gib": 3.0}
 SCOPES = ("preflight", "run", "teardown")
+MAX_WINDOW_H = 24
 
 
 class ConfigError(Exception):
@@ -78,7 +79,7 @@ def check_path(name, p, depth=3):
     if not isinstance(p, str) or not p.startswith("/") or os.path.normpath(p) != p \
             or p.count("/") < depth or not re.fullmatch(r"[A-Za-z0-9/._-]+", p):
         raise ConfigError(f"{name}={p!r}: an absolute, normalised path {depth} levels deep")
-    if "p41" in p:
+    if any(part.startswith("p41") for part in p.split("/")):
         raise ConfigError(f"{name}: a directory of the retained cluster")
 
 
@@ -96,6 +97,7 @@ def validate(cfg):
     for k in ("run_dir", "fdb_data"):
         check_path(k, r.get(k))
     check_path("data_mount", r.get("data_mount"), depth=2)
+    check_path("binary_path", r.get("binary_path"))
     if r["run_dir"] == r["fdb_data"] or r["run_dir"].startswith(r["fdb_data"] + "/") \
             or r["fdb_data"].startswith(r["run_dir"] + "/"):
         raise ConfigError("run_dir and fdb_data overlap")
@@ -137,8 +139,7 @@ def validate(cfg):
     cap = s["nodes"] * s["allotment_bytes"] + (3 << 30)
     if not 0 < cfg["stop_rules"].get("max_test_dir_bytes", 0) <= cap:
         raise ConfigError(f"stop_rules.max_test_dir_bytes: at most the allotments plus 3 GiB ({cap})")
-    if not isinstance(cfg.get("local_dir"), str) or not cfg["local_dir"].startswith("/"):
-        raise ConfigError("local_dir: an absolute path on this machine")
+    check_path("local_dir", cfg.get("local_dir"), depth=2)
     if cfg["teardown"] != {"scope": "run-directories-and-processes"}:
         raise ConfigError("teardown scope: the run's own directories and processes only")
     return cfg
@@ -161,7 +162,10 @@ def check_approval(path, config_sha, scope, now):
         raise NotApproved(f"approval unreadable: {e}") from None
     if a.get("config_sha256") != config_sha:
         raise NotApproved("the approval names another configuration")
-    if scope not in a.get("scope", []):
+    sc = a.get("scope")
+    if not isinstance(sc, list) or not all(isinstance(x, str) and x in SCOPES for x in sc):
+        raise NotApproved(f"scope: a list of {SCOPES}")
+    if scope not in sc:
         raise NotApproved(f"the approval does not cover {scope}")
     if not a.get("approved_by"):
         raise NotApproved("approved_by missing")
@@ -172,6 +176,8 @@ def check_approval(path, config_sha, scope, now):
         raise NotApproved(f"window: {e}") from None
     if w0.tzinfo is None or w1.tzinfo is None:
         raise NotApproved("window times need a time zone")
+    if not w0 < w1 or w1 - w0 > datetime.timedelta(hours=MAX_WINDOW_H):
+        raise NotApproved(f"the window must end after it starts, within {MAX_WINDOW_H} h")
     if not w0 <= now <= w1:
         raise NotApproved(f"now ({now.isoformat()}) is outside the approved window")
     return a
@@ -194,7 +200,7 @@ def stages(cfg):
                     "refused_for": 30},
                    {"kind": "hold", "prefix": "h", "interval": 1.0, "until": "driver"}]},
         {"stage": "5", "name": "drain and recovery", "max_s": mx.get("5", STAGE_MAX_S["5"]),
-         "steps": [{"kind": "probe", "prefix": "q", "put": True, "get_key": l0[-1], "interval": 10.0,
+         "steps": [{"kind": "probe", "prefix": "q", "put": True, "interval": 10.0,
                     "until": "driver", "concurrent_with": "deletes"},
                    {"kind": "delete", "keys": "stage-4 keys + " + str(len(more)) + " baseline", "rate": 20}]},
         {"stage": "6", "name": "steady churn", "max_s": mx.get("6", STAGE_MAX_S["6"]),
@@ -230,18 +236,38 @@ class Evidence:
             return False
 
 
+# Plan §7: D1's chain (GC grace 600 s, a GC interval, the retention 600 s,
+# a reclaim interval: about 25 min) before the GC and reclaim gauges can
+# mean "done"; before it, 0 pending records is only "not retired yet".
+CHAIN_S = 1500
+SETTLE_S = 180  # three compaction passes after the last reclaim (§8 C2)
+DRAIN_OBSERVE_S = 1800  # §6.2: observe the drain after a stop that is not a resource danger
+
+
 class Run:
     """The stage engine over a ``cluster`` (an object with the methods used
     below; ``SshCluster`` for hosts, a fake in tests). Polls every
-    ``poll_s``; every wait has its stage's maximum."""
+    ``poll_s``; every wait has its stage's maximum. Marks of the timeline
+    are on the load host's clock (the samples' and the ledger's): the
+    driver's wall clock plus the offset measured at each stage's start."""
 
     def __init__(self, cfg, cluster, evidence, clock=None, poll_s=15.0):
         self.cfg, self.c, self.ev = cfg, cluster, evidence
         self.clock = clock or common.Clock()
         self.poll_s = poll_s
-        self.tl = {}
+        self.tl = {"clock_offsets": []}
         self.stop = None
+        self.current = None
+        self.offset_ms = 0
+        self.iv_ms = judge.VALUES["interval_s"] * 1000
         self.start = self.clock.monotonic()
+
+    def host_ms(self):
+        return self.clock.wall_ms() + self.offset_ms
+
+    def _offset(self, stage):
+        self.offset_ms = int(self.c.clock_offset_ms())
+        self.tl["clock_offsets"].append({"stage": stage, "offset_ms": self.offset_ms})
 
     def _stopped(self, stage):
         if self.stop:
@@ -257,8 +283,12 @@ class Run:
         return False
 
     def _stop(self, stage, reason, **detail):
-        self.c.write_stop(reason)
-        rec = self.c.stop_record() or {"reason": reason}
+        try:
+            self.c.write_stop(reason)
+            rec = self.c.stop_record() or {"reason": reason}
+        except Exception as e:  # noqa: BLE001 - the stop is recorded whatever happens
+            self.ev.failures.append(f"write_stop: {e}")
+            rec = {"reason": reason}
         self.stop = dict(rec, stage=stage, **detail)
         self.ev.event(self.clock.wall_ms(), "stop", **self.stop)
 
@@ -275,13 +305,15 @@ class Run:
             self.clock.sleep(self.poll_s)
 
     def stage(self, st, body):
-        self.tl[st["stage"]] = {"start_ms": self.clock.wall_ms(), "name": st["name"]}
+        self.current = st["stage"]
+        self._offset(st["stage"])
+        self.tl[st["stage"]] = {"start_ms": self.host_ms(), "name": st["name"]}
         self.ev.event(self.clock.wall_ms(), "stage start", stage=st["stage"])
         deadline = self.clock.monotonic() + st["max_s"]
         try:
             ok = body(st, deadline)
         finally:
-            self.tl[st["stage"]]["end_ms"] = self.clock.wall_ms()
+            self.tl[st["stage"]]["end_ms"] = self.host_ms()
         self.ev.event(self.clock.wall_ms(), "stage end", stage=st["stage"], ok=bool(ok))
         if not ok and not self.stop:
             # Its exit condition not met by its maximum (or a precondition
@@ -289,92 +321,161 @@ class Run:
             self._stop(st["stage"], "stage-exit", stage_name=st["name"])
         return ok
 
+    # -- samples: fresh values only ---------------------------------------------
+
+    def _fresh(self, samples, target, key):
+        """``target``'s latest value of ``key``, or None when it is missing
+        or older than two intervals behind the newest sample (a target
+        whose scrapes now fail never shows its last good value)."""
+        newest = max((x.get("ended_wall_ms", 0) for x in samples), default=None)
+        for x in reversed(samples):
+            if x.get("target") == target and x.get("status") in ("ok", "partial") and key in x["values"]:
+                if newest - x["ended_wall_ms"] > 2 * self.iv_ms:
+                    return None
+                return x["values"][key]["value"]
+        return None
+
+    def _all_nodes(self, samples, key, pred):
+        vals = [self._fresh(samples, n, key) for n in self.c.nodes()]
+        return all(v is not None and pred(v) for v in vals)
+
+    def _complete(self, samples):
+        """Every sampler target's latest sample fresh and read (plan §7
+        stage 3: samples complete)."""
+        newest = max((x.get("ended_wall_ms", 0) for x in samples), default=None)
+        last = {}
+        for x in samples:
+            last[x.get("target")] = x
+        for t in self.c.targets():
+            x = last.get(t)
+            if x is None or x.get("status") not in ("ok", "partial") or newest - x["ended_wall_ms"] > 2 * self.iv_ms:
+                return False
+        return True
+
+    def _quiet(self, s):
+        return self._fresh(s, "controller", "arca_controller_gc_backlog") == 0 and \
+            self._all_nodes(s, "arca_node_reclaim_pending_records", lambda v: v == 0)
+
+    def _admission(self, s, state):
+        return all(self._fresh(s, g, "arca_gateway_admission_state") == state for g in self.c.gateways()) and \
+            (state != 0 or self._fresh(s, "controller", "arca_controller_backpressure_state") == 0)
+
     # -- stage bodies ---------------------------------------------------------
 
     def s1(self, st, deadline):
         checks = self.c.preflight()
         self.tl["1"]["checks"] = checks
-        return bool(checks) and all(c.get("ok") for c in checks.values())
+        missing = sorted(set(self.c.required_checks()) - set(checks))
+        self.tl["1"]["missing_checks"] = missing
+        return bool(checks) and not missing and all(c.get("ok") for c in checks.values())
 
     def s2(self, st, deadline):
-        r = self.c.smoke()  # its own sub-run: its stops are not this run's
+        r = self.c.smoke()  # its own sub-runs: their stops are not this run's
         self.tl["2"]["smoke"] = r
         return bool(r.get("stop_layers_exercised")) and bool(r.get("limits_exercised")) and r.get("errors") == 0
 
-    def _all_nodes(self, samples, key, pred):
-        nodes = self.c.nodes()
-        last = {}
-        for s in samples:
-            if s.get("target") in nodes and s.get("status") == "ok" and key in s["values"]:
-                last[s["target"]] = s["values"][key]["value"]
-        return len(last) == len(nodes) and all(pred(v) for v in last.values())
-
-    def _last(self, samples, target, key):
-        for s in reversed(samples):
-            if s.get("target") == target and s.get("status") == "ok" and key in s["values"]:
-                return s["values"][key]["value"]
-        return None
-
     def s3(self, st, deadline):
         self.c.start_load()
-        for step in st["steps"]:
-            if not self.c.run_step(dict(step, stage="3"), deadline) or self._stopped("3"):
-                return False
-        return self.wait("3", deadline, lambda s: self._last(s, "controller", "arca_controller_gc_backlog") == 0
-                         and self._all_nodes(s, "arca_node_reclaim_pending_records", lambda v: v == 0))
+        bucket, fill = st["steps"]
+        if not self.c.run_step(dict(bucket, stage="3"), deadline) or self._stopped("3"):
+            return False
+        r = self.c.run_step(dict(fill, stage="3"), deadline)
+        if not r or self._stopped("3"):
+            return False
+        counts = r.get("counts", {})
+        acked = counts.get("op-PUT-ack", 0) + counts.get("retry-PUT-ack", 0)
+        self.tl["3"]["l0_acknowledged"] = acked
+        if acked != len(fill["keys"]):
+            return False
+        # The baseline-key probe (plan §6.2), from here to the end.
+        if not self.c.run_step({"kind": "start-probe", "key": fill["keys"][-1], "interval": 5.0, "stage": "3"},
+                               deadline):
+            return False
+        return bool(self.wait("3", deadline, lambda s: self._quiet(s) and self._admission(s, 0) and self._complete(s)))
 
     def s4(self, st, deadline):
         d1, fill, hold = st["steps"]
-        self.tl["4"]["reclaimed_at_d1"] = self._last(self.c.samples(), "controller", "arca_controller_reclaimed_total")
+        tl = self.tl["4"]
         if not self.c.run_step(dict(d1, stage="4"), deadline) or self._stopped("4"):
             return False
+        d1_done = self.clock.monotonic()
+        tl["d1_done_ms"] = self.host_ms()
+        tl["fill_start_ms"] = self.host_ms()
         r = self.c.run_step(dict(fill, stage="4"), deadline)
         if not r or not r.get("refusal_reached") or self._stopped("4"):
             return False
-        t = self.wait("4", deadline, lambda s: self._last(s, "gateway0", "arca_gateway_admission_state") == 3)
-        if not t:
+        if not self.wait("4", deadline, lambda s: self._admission(s, 3)):
             return False
-        tl = self.tl["4"]
-        tl["refusal_start_ms"] = self.clock.wall_ms()
+        samples = self.c.samples()
+        # The refusal's start: the first sample showing write rejected after
+        # the fill began (host clock), not the driver's poll time.
+        first = [x["ended_wall_ms"] for x in samples
+                 if x.get("target") in self.c.gateways() and x.get("status") in ("ok", "partial")
+                 and x["ended_wall_ms"] >= tl["fill_start_ms"]
+                 and x["values"].get("arca_gateway_admission_state", {}).get("value") == 3]
+        tl["refusal_start_ms"] = min(first) if first else None
+        if tl["refusal_start_ms"] is None:
+            return False
+        ctl = judge.series(samples, "controller", "arca_controller_reclaimed_total")
+        at_d1 = judge.at_or_before(ctl, tl["d1_done_ms"], self.iv_ms)
+        at_r = judge.at_or_before(ctl, tl["refusal_start_ms"], self.iv_ms)
         # D1's reclaims before the refusal do not count for C1 (plan §8).
-        now_r = self._last(self.c.samples(), "controller", "arca_controller_reclaimed_total")
-        tl["reclaimed_before_refusal"] = (now_r - tl["reclaimed_at_d1"]) if (
-            now_r is not None and tl.get("reclaimed_at_d1") is not None) else None
+        tl["reclaimed_before_refusal"] = (at_r - at_d1) if at_r is not None and at_d1 is not None else None
         n = self.c.send_step(dict(hold, stage="4", max_seconds=max(1, deadline - self.clock.monotonic())))
-        done = self.wait("4", deadline, lambda s: (
-            self._last(s, "gateway0", "arca_gateway_admission_state") != 3 or
-            (self._last(s, "controller", "arca_controller_gc_backlog") == 0 and
-             self._all_nodes(s, "arca_node_reclaim_pending_records", lambda v: v == 0))))
-        tl["refusal_end_ms"] = self.clock.wall_ms()
+        done = self.wait("4", deadline, lambda s: not self._admission(s, 3) or (
+            self.clock.monotonic() >= d1_done + CHAIN_S and self._quiet(s)))
+        tl["refusal_end_ms"] = self.host_ms()
+        tl["admission_recovered_early"] = bool(done) and self.clock.monotonic() < d1_done + CHAIN_S
         self.c.step_done(n)
         return bool(done)
 
     def s5(self, st, deadline):
-        probe, dels = st["steps"]
-        n = self.c.send_step(dict(probe, stage="5", max_seconds=max(1, deadline - self.clock.monotonic())))
-        keys = self.c.stage4_keys() + [f"b{i:05d}" for i in range(self.cfg["settings"]["d1"],
-                                                                 self.cfg["settings"]["l0"] - self.cfg["settings"]["l1"])]
-        ok = self.c.run_step({"kind": "delete", "keys": keys, "rate": 20, "stage": "5"}, deadline)
-        if not ok or self._stopped("5"):
-            self.c.step_done(n)
-            return False
+        probe, _ = st["steps"]
         tl = self.tl["5"]
-        chain = self.wait("5", deadline, lambda s: self._last(s, "controller", "arca_controller_gc_backlog") == 0
-                          and self._all_nodes(s, "arca_node_reclaim_pending_records", lambda v: v == 0))
-        if chain:
-            # Three compaction passes after the last reclaim (plan §8 C2).
-            settle = self.clock.monotonic() + 180
-            if self.wait("5", min(deadline, settle + 1), lambda s: self.clock.monotonic() >= settle):
-                tl["c2_judge_ms"] = self.clock.wall_ms()
-        adm = self.wait("5", deadline, lambda s: self._last(s, "gateway0", "arca_gateway_admission_state") == 0
-                        and self._last(s, "controller", "arca_controller_backpressure_state") == 0)
-        if adm:
-            tl["c3a_window_start_ms"] = self.clock.wall_ms()
-        hold_end = self.clock.monotonic() + judge.VALUES["c3a_hold_s"]
-        ok = bool(chain and adm) and self.wait("5", min(deadline, hold_end + 1),
-                                               lambda s: self.clock.monotonic() >= hold_end)
-        self.c.step_done(n)
-        return ok
+        n = self.c.send_step(dict(probe, stage="5", max_seconds=max(1, deadline - self.clock.monotonic())))
+        try:
+            s = self.cfg["settings"]
+            keys = self.c.stage4_keys() + [f"b{i:05d}" for i in range(s["d1"], s["l0"] - s["l1"])]
+            if not self.c.run_step({"kind": "delete", "keys": keys, "rate": 20, "stage": "5"}, deadline) \
+                    or self._stopped("5"):
+                return False
+            dels_done = self.clock.monotonic()
+            # C2: the chain of the deletes, then three compaction passes.
+            if self.wait("5", deadline, lambda x: self.clock.monotonic() >= dels_done + CHAIN_S and self._quiet(x)):
+                settle = self.clock.monotonic() + SETTLE_S
+                if self.wait("5", deadline, lambda x: self.clock.monotonic() >= settle):
+                    tl["c2_judge_ms"] = self.host_ms()
+                    c2_end = self.clock.monotonic() + judge.VALUES["c2_hold_s"]
+            # C3a: an uninterrupted window of the hold; a flap restarts it.
+            hold = judge.VALUES["c3a_hold_s"]
+            win = None
+            while True:
+                if self._stopped("5") or self.clock.monotonic() >= deadline:
+                    break
+                ok = self._admission(self.c.samples(), 0)
+                now = self.clock.monotonic()
+                if ok and win is None:
+                    win = now
+                    tl["c3a_window_start_ms"] = self.host_ms()
+                elif not ok and win is not None:
+                    tl.setdefault("c3a_flaps", 0)
+                    tl["c3a_flaps"] += 1
+                    win = None
+                    tl.pop("c3a_window_start_ms", None)
+                if win is not None and now - win >= hold:
+                    break
+                self.clock.sleep(self.poll_s)
+            if win is None or self.clock.monotonic() - win < hold:
+                return False
+            if "c2_judge_ms" in tl and not self.wait("5", deadline, lambda x: self.clock.monotonic() >= c2_end):
+                return False
+        finally:
+            self.c.step_done(n)
+        tl["end_ms"] = self.host_ms()
+        # Stage 6 starts only when C3a passed (plan §7).
+        r = judge.c3a(self.c.samples(), self.c.ledger_records(), self.tl, judge.VALUES, self.c.gateways())
+        tl["c3a"] = r["outcome"]
+        return r["outcome"] == judge.PASSED
 
     def s6(self, st, deadline):
         (churn,) = st["steps"]
@@ -385,24 +486,65 @@ class Run:
     def s7(self, st, deadline):
         r = self.c.run_step({"kind": "verify", "stage": "7"}, deadline)
         self.tl["7"]["verify"] = r
+        if self._stopped("7"):
+            return False
         self.tl["7"]["manifest_findings"] = self.c.integrity("verify-manifests")
+        if self._stopped("7"):
+            return False
         self.tl["7"]["scrub_findings"] = self.c.integrity("scrub")
+        if self._stopped("7"):
+            return False
         self.c.run_step({"kind": "finish", "stage": "7"}, deadline)
-        return r is not None and r.get("complete") is not None
+        return r is not None and r.get("complete") is not None and not self._stopped("7")
 
     def execute(self):
         bodies = {"1": self.s1, "2": self.s2, "3": self.s3, "4": self.s4, "5": self.s5, "6": self.s6, "7": self.s7}
         try:
             for st in stages(self.cfg):
-                if self._stopped(st["stage"]) and st["stage"] != "7":
+                if self._stopped(st["stage"]):
                     break
-                if not self.stage(st, bodies[st["stage"]]):
+                try:
+                    ok = self.stage(st, bodies[st["stage"]])
+                except Exception as e:  # noqa: BLE001 - a failure of the driver is a stop
+                    self._stop(st["stage"], "driver-error", error=f"{type(e).__name__}: {e}"[:500])
+                    break
+                if not ok:
                     break
         finally:
             self.finish()
         return self.result
 
+    def drain(self):
+        """Plan §6.2: after a stop that is not a resource danger, keep the
+        samplers up to 30 min to observe the drain; a resource or monitor
+        rule firing meanwhile (the watchdog keeps watching) stops the test's
+        services too."""
+        d = self.tl["drain"] = {"start_ms": self.host_ms()}
+        end = self.clock.monotonic() + DRAIN_OBSERVE_S
+        while self.clock.monotonic() < end:
+            rec = self.c.escalation()
+            if rec and common.reason_class(rec.get("reason")) in ("resource", "monitor"):
+                d["escalation"] = rec
+                d["services"] = self.c.stop_services()
+                break
+            self.clock.sleep(self.poll_s)
+        d["end_ms"] = self.host_ms()
+
     def finish(self):
+        if self.stop is None:
+            try:
+                rec = self.c.stop_record()
+                if rec:
+                    self.stop = dict(rec, stage=self.current)
+            except Exception as e:  # noqa: BLE001
+                self.ev.failures.append(f"stop_record: {e}")
+                self.stop = {"reason": "monitor-failed", "stage": self.current, "detail": str(e)[:300]}
+        cls = common.reason_class(self.stop["reason"]) if self.stop else None
+        if self.stop and cls not in ("resource", "monitor") and self.stop.get("stage") not in (None, "1", "2"):
+            try:
+                self.drain()
+            except Exception as e:  # noqa: BLE001
+                self.ev.failures.append(f"drain: {e}")
         try:
             self.c.stop_load()
         except Exception as e:  # noqa: BLE001 - evidence first
@@ -416,12 +558,13 @@ class Run:
                 self.ev.failures.append(f"{name}: {e}")
                 parts[name] = None
         self.ev.save("timeline.json", self.tl)
-        if parts["samples"] is not None:
-            self.ev.save("samples.json", parts["samples"])
-        if parts["ledger"] is not None:
-            self.ev.save("ledger.json", parts["ledger"])
+        for name in ("samples", "ledger"):
+            if parts[name] is not None:
+                self.ev.save(f"{name}.json", parts[name])
+        if parts["logs"] is not None:
+            self.ev.save("logs.json", {"tail": parts["logs"]})
         self.result = judge.judge(parts["samples"] or [], parts["ledger"] or [], self.tl, self.stop,
-                                  self.cfg["judgement"])
+                                  self.cfg["judgement"], tuple(self.c.nodes()), tuple(self.c.gateways()))
         if self.ev.failures:
             self.result["evidence_failures"] = list(self.ev.failures)
             if self.result["outcome"] == judge.PASSED:
