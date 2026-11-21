@@ -50,6 +50,9 @@ class Client:
         try:
             if self._c is None:
                 self._c = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+            if self._c.sock is None:
+                # A failed connection sends nothing: ``not-sent``, not unknown.
+                self._c.connect()
             headers = {"Content-Length": str(len(data))} if data is not None else {}
             sent = True
             self._c.request(method, path, body=data, headers=headers)

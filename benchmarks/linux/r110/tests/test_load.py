@@ -316,6 +316,147 @@ class AgainstAFakeS3(Base):
         self.assertEqual(sum(1 for r in recs if r.get("result") == "refused"), 3)  # 1 + 2 retries
 
 
+class ReviewFindings(Base):
+    """Cases from the independent review of P1."""
+
+    def test_limits_that_are_not_finite_are_refused(self):
+        for bad in (float("nan"), float("inf"), -1, 0, True):
+            with self.assertRaises(ValueError, msg=bad):
+                budget.Budget(os.path.join(self.dir, f"r{bad}"), "r", {"max_attempts": bad}, common.FakeClock())
+        from r110 import load
+        for text in ('{"rate_per_s": NaN}', '{"max_body_bytes": Infinity}'):
+            with self.assertRaises(SystemExit):
+                load.main(["run", "--run-dir", self.dir, "--endpoint", "http://x:1", "--limits", text])
+
+    def test_bucket_and_listing_requests_are_in_the_ledger_and_the_budget(self):
+        clock = common.FakeClock()
+        c = fakes.Scripted(clock, lambda m, path, d: s3.Response(
+            200, b"<IsTruncated>true</IsTruncated><NextContinuationToken>a/b+c</NextContinuationToken>"
+            if "list-type" in path else b"", sent=True))
+        ld = self.load(c, clock=clock)
+        ld.step({"kind": "create-bucket"})
+        out = ld.step({"kind": "list", "max_pages": 3})
+        self.assertEqual(out["pages"], 3)
+        recs, _ = ledger.read(ld.ledger.path)
+        ops = [r["op"] for r in recs if r["type"] == "intent"]
+        self.assertEqual(ops, ["BUCKET-PUT", "LIST", "LIST", "LIST"])
+        self.assertEqual(sum(1 for r in recs if r["type"] == "outcome"), 4)
+        self.assertEqual(ld.budget.snapshot()["attempts"], len(c.sent))
+        self.assertIn("continuation-token=a%2Fb%2Bc", c.sent[-1][2])
+
+    def broken_after(self, ld, n):
+        real = ld.ledger._f
+
+        class Breaks:
+            count = 0
+
+            def write(self, text):
+                Breaks.count += 1
+                if Breaks.count > n:
+                    raise OSError(28, "No space left on device")
+                return real.write(text)
+
+            def flush(self):
+                real.flush()
+
+            def fileno(self):
+                return real.fileno()
+
+            def close(self):
+                real.close()
+
+        ld.ledger._f = Breaks()
+
+    def test_an_outcome_that_cannot_be_written_stops_the_load(self):
+        c = fakes.Scripted(common.FakeClock(), fakes.ok)
+        ld = self.load(c)
+        self.broken_after(ld, 1)  # the intent written, its outcome not
+        ld.step({"kind": "put", "keys": ["a"]})  # nothing after it to fail too
+        self.assertEqual(len(c.sent), 1)
+        self.assertEqual(ld.stop_reason, "ledger-failure")
+
+    def test_a_ledger_failure_during_the_verification_stops_the_run(self):
+        c = fakes.Scripted(common.FakeClock(), fakes.ok)
+        ld = self.load(c)
+        ld.step({"kind": "put", "keys": ["k"]})
+        self.broken_after(ld, 2)  # the verify GET's intent and outcome written, its check record not
+        out = ld.step({"kind": "verify"})
+        self.assertEqual(ld.stop_reason, "ledger-failure")
+        self.assertFalse(out["complete"])
+
+    def test_a_5xx_other_than_503_stops_the_run(self):
+        clock = common.FakeClock()
+        c = fakes.Scripted(clock, lambda *a: s3.Response(500, b"", sent=True))
+        ld = self.load(c, clock=clock)
+        ld.step({"kind": "put", "keys": [f"k{i}" for i in range(50)]})
+        self.assertEqual(ld.stop_reason, "unexpected-5xx")
+        self.assertLessEqual(len(c.sent), 4)  # the ones already in flight at most
+        self.assertEqual(common.reason_class("unexpected-5xx"), "anomaly")
+
+    def test_a_503_that_is_not_slow_down_is_unknown_and_does_not_stop(self):
+        clock = common.FakeClock()
+        c = fakes.Scripted(clock, lambda *a: s3.Response(503, b"<Code>ServiceUnavailable</Code>", sent=True))
+        ld = self.load(c, clock=clock)
+        ld.step({"kind": "put", "keys": ["a"]})
+        self.assertIsNone(ld.stop_reason)
+        self.assertEqual(ld.counts, {"op-PUT-unknown": 1})
+
+    def test_a_refused_new_key_gives_its_live_slot_back(self):
+        clock = common.FakeClock()
+        refuse = {"on": True}
+        c = fakes.Scripted(clock, lambda m, *a: fakes.slow_down() if refuse["on"] else fakes.ok(m))
+        ld = self.load(c, {"max_live": 3}, clock)
+        ld.step({"kind": "put", "keys": [f"r{i}" for i in range(20)], "max_seconds": 60})
+        self.assertEqual(ld.budget.live_count(), 0)
+        refuse["on"] = False
+        ld.step({"kind": "put", "keys": ["a", "b", "c"]})
+        self.assertEqual(ld.budget.live_count(), 3)
+        self.assertEqual(ld.counts.get("op-PUT-ack"), 3)
+
+    def test_a_refused_connection_was_not_sent(self):
+        import socket
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        srv.close()
+        r = s3.Client(f"http://127.0.0.1:{port}", timeout=2).request("PUT", "/b/k", b"x")
+        self.assertEqual((r.status, r.sent), (0, False))
+        recs = [{"type": "intent", "op_id": 1, "attempt": 1, "key": "k", "op": "PUT", "version": 1, "sha256": "a"},
+                {"type": "outcome", "op_id": 1, "attempt": 1, "result": "not-sent"}]
+        self.assertEqual(ledger.expected(recs)[0]["k"], {ledger.ABSENT})
+
+    def test_the_rate_wait_is_recorded_apart_from_the_response_time(self):
+        clock = common.FakeClock()
+        c = fakes.Scripted(clock, lambda m, *a: s3.Response(200, b"", sent=True, seconds=0.01))
+        ld = self.load(c, {"concurrency": 1}, clock)
+        ld.step({"kind": "put", "keys": [f"k{i}" for i in range(20)]})
+        outs = [r for r in ledger.read(ld.ledger.path)[0] if r["type"] == "outcome"]
+        self.assertTrue(all(o["seconds"] == 0.01 for o in outs))
+        self.assertGreater(max(o["rate_wait_s"] for o in outs), 0.0)
+        self.assertEqual(outs[0]["rate_wait_s"], 0.0)  # within the burst
+
+    def test_the_baseline_probe_stops_the_run_after_three_failures(self):
+        clock = common.Clock()
+        state = {"n": 0}
+
+        def answer(m, path, d):
+            state["n"] += 1
+            if state["n"] <= 2:
+                return s3.Response(200, b"x", sent=True, seconds=0.01)
+            return s3.Response(200, b"x", sent=True, seconds=6.0)  # too slow
+
+        c = fakes.Scripted(clock, answer)
+        ld = self.load(c, {"rate_per_s": 1000, "burst": 50}, clock)
+        ld.start_probe("b0", interval=0.05)
+        for _ in range(200):
+            if ld.stop_reason:
+                break
+            time.sleep(0.02)
+        self.assertEqual(ld.stop_reason, "probe")
+        self.assertEqual(state["n"], 5)
+        self.assertEqual(common.reason_class("probe"), "anomaly")
+
+
 class Process(Base):
     def test_steps_from_the_control_directory_and_the_exit_status(self):
         srv = fakes.FakeS3()
