@@ -3,9 +3,9 @@ name: CI
 # GitHub-hosted runners only (the repository is public; no self-hosted
 # runner is registered: docs/release/public-ci.md). Pull requests, forks
 # included, run with a read-only token and no secrets; first-time
-# contributors' runs wait for a maintainer's approval. The upgrade and
-# rollback job (several earlier releases built) runs on pushes to main and
-# on demand only.
+# contributors' runs wait for a maintainer's approval. The two upgrade
+# jobs (a version-bumped build of this tree; several earlier releases,
+# their binaries cached) run on pushes to main and on demand only.
 on:
   push:
     branches: [main]
@@ -336,9 +336,8 @@ jobs:
       ARCA_TEST_ARTIFACTS: ${{ github.workspace }}/test-artifacts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # No preinstalled SDK is removed (that took about 2 min): the earlier
-      # releases' build directories are deleted as each binary is copied,
-      # so at most one release and this tree's builds are on the disk.
+      # Two builds of this tree fit the runner's disk (about 85 GB free):
+      # no preinstalled SDK is removed.
       - name: free disk space before the builds
         run: df -h /
       - name: prepare the runner (compiler, pkg-config; idempotent)
@@ -379,7 +378,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99"
-      # Dependencies only: seven builds' output would take the repository's
+      # Dependencies only: the builds' output would take the repository's
       # whole cache quota and evict the other jobs' entries.
       - name: cache cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -470,6 +469,7 @@ jobs:
   # built once per set of release commits and cached (binaries only, debug
   # information stripped; the build directories are not kept): pushes to
   # main and on-demand runs only.
+
   fdb-upgrade:
     name: FoundationDB upgrade and rollback
     runs-on: ubuntu-24.04
@@ -539,8 +539,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99"
-      # Dependencies only: seven builds' output would take the repository's
-      # whole cache quota and evict the other jobs' entries.
+      # Dependencies only: the builds' output would take the repository's
+      # whole cache quota and evict the other jobs' entries (the earlier
+      # releases' binaries are cached apart, below).
       - name: cache cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -565,14 +566,22 @@ jobs:
             "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
           dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo dpkg -i "$deb"
       # The releases are fixed commits: their binaries are the same for the
-      # same toolchain, features and FoundationDB client. A manifest of
-      # their sha256 is cached with them and checked after a restore.
+      # same compiler (its exact version, read here), RUSTFLAGS, features and
+      # FoundationDB client, all in the key; bump its v1 for any other
+      # change to how they are built. A manifest of their sha256 is cached
+      # with them and checked after a restore (it detects a damaged entry,
+      # not who wrote it: only pushes to main and on-demand runs can).
+      - name: the compiler's version and flags (for the releases' cache key)
+        id: rustc
+        run: |
+          echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+          echo "flags=$(printf %s "$RUSTFLAGS" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: restore the earlier releases' binaries
         id: releases
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/arca-lake-releases
-          key: release-bins-v1-${{ runner.os }}-rust1.99-fdb${{ env.FDB_VERSION }}-features-fdb-${{ env.RELEASE_39 }}-${{ env.RELEASE_310 }}-${{ env.RELEASE_311 }}-${{ env.RELEASE_312 }}-${{ env.RELEASE_313 }}-${{ env.RELEASE_41 }}
+          key: release-bins-v1-${{ runner.os }}-rustc${{ steps.rustc.outputs.version }}-flags${{ steps.rustc.outputs.flags }}-fdb${{ env.FDB_VERSION }}-features-fdb-${{ env.RELEASE_39 }}-${{ env.RELEASE_310 }}-${{ env.RELEASE_311 }}-${{ env.RELEASE_312 }}-${{ env.RELEASE_313 }}-${{ env.RELEASE_41 }}
       - name: check the restored binaries
         if: steps.releases.outputs.cache-hit == 'true'
         run: cd ~/.cache/arca-lake-releases && sha256sum -c manifest.sha256
