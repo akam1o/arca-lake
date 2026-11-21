@@ -12,7 +12,8 @@ reports for reproduction details and the boundaries of each conclusion.
 | --- | --- |
 | [Phase 4.1: access records (ADR-0034)](phase-4.1-adr34.md) | Bounded recording and batching; the commits/GET target passed, but GET throughput remained 7–14% below recording disabled in the final campaign. Includes unresolved failure classifications and deferred work |
 | [Phase 4.1: background passes (ADR-0033)](phase-4.1-adr33.md) | Batched reconciliation and reclaim, cycle measurements, and capacity-pressure work whose convergence criteria remain incomplete |
-| [Phase 4.1: R-110 capacity retest plan](phase-4.1-r110-retest-plan.md) | A plan awaiting approval, not run: criteria, budgets, load limits, stop rules and judgement for a small-allotment capacity-pressure retest |
+| [Phase 4.1: R-110 capacity retest plan](phase-4.1-r110-retest-plan.md) | Criteria, budgets, load limits, stop rules and judgement for a small-allotment capacity-pressure retest |
+| [Phase 4.1: R-110 capacity retest results](phase-4.1-r110-retest-results.md) | The retest run once (2026-11-21): Inconclusive; GC and reclaim worked under refusal and their returned space ended it before D1 matured, so C1 could not be judged |
 | [Phase 4.1: access records where tiering acts (ADR-0035)](phase-4.1-adr35.md) | Option A measured (quiet controller background passes only) and integration-verified with two controllers and two gateways; R-109 stays Medium; residual resets tracked as R-118 |
 | [Phase 4.1: concurrent overwrites (R-112)](phase-4.1-r112.md) | S3 contention and commit-outcome investigation, fixes, and remaining hot-key availability limits |
 | [Phase 4.1: restore-test failures (R-113)](phase-4.1-r113.md) | Test-race classification, gateway restart ordering, and the separate residual product behavior |
