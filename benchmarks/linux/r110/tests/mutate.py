@@ -143,7 +143,7 @@ muts = [
  ("M1: the sentinel unwatched", "r110/watchdog.py", "            if k == \"gone\":\n                out.append((\"sentinel-lost\", {}))", "            pass", "test_guard"),
  ("malformed stop file crashes", "r110/common.py", "        if not isinstance(rec, dict) or not isinstance(rec.get(\"reason\"), str):\n            return {\"reason\": \"stop-file-unreadable\", \"detail\": text[:200]}\n        return rec", "        return rec", "test_integration"),
  ("L1: a record without its group", "r110/proc.py", "        and isinstance(rec.get(\"pgid\"), int) and not isinstance(rec[\"pgid\"], bool) and rec[\"pgid\"] > 1", "        and True", "test_guard"),
- ("L3: an unconfirmed guard ended", "r110/watchdog.py", "            return \"gone\" if res.get(\"group_empty\") is False else \"ended\"", "            return \"ended\"", "test_integration"),
+ ("L3: an unconfirmed guard ended", "r110/watchdog.py", "            unconfirmed = res.get(\"group_empty\") is False or res.get(\"services_confirmed\") is False", "            unconfirmed = res.get(\"services_confirmed\") is False", "test_integration"),
  ("P1: a slow probe answer passes", "r110/load.py", "                if bad >= failures or slow:", "                if bad >= failures:", "test_load"),
  ("P1: no live headroom", "r110/load.py", "                if self.budget.live_count() >= self.budget.limits[\"max_live\"] - headroom:", "                if False:", "test_integration"),
  ("P1: a full live set ends the hold", "r110/load.py", "                    self._count(f\"{kind}-live-limit\")", "                    break", "test_integration"),
@@ -154,7 +154,7 @@ muts = [
  ("P1: a late unknown write forgotten", "r110/ledger.py", "            state[key] = {new} | pending.get(key, set())", "            state[key] = {new}", "test_load"),
  ("P1: a failing step finishes", "r110/load.py", "                except Exception:  # noqa: BLE001 - a worker that fails stops the run, never silently\n                    self.stop(\"load-error\")", "                except Exception:  # noqa: BLE001 - a worker that fails stops the run, never silently\n                    pass", "test_load"),
  ("P1: an interrupt not a stop", "r110/driver.py", "                except KeyboardInterrupt:\n                    self._stop(st[\"stage\"], \"operator\", detail=\"interrupted (SIGINT)\")\n                    break", "", "test_driver"),
- ("P1: probe keys left after stage 5", "r110/driver.py", "        if probes and not self.c.run_step(", "        if False and not self.c.run_step(", "test_integration"),
+ ("P1: probe keys left after stage 5", "r110/driver.py", "        if probes and not self.run_step(", "        if False and not self.run_step(", "test_integration"),
  ("P1: system FDB hosts optional", "r110/driver.py", "    if not isinstance(sf, list) or not sf or not set(sf) <= set(cfg[\"hosts\"]):", "    if False:", "test_driver"),
  # Re-review of #24.
  ("a stop's ssh shorter than the stop", "r110/remote.py", "                          timeout=1.5 * wait + 60).strip()", "                          timeout=120).strip()", "test_driver"),
