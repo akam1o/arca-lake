@@ -878,6 +878,9 @@ class ReviewFindingsEngine(EngineBase):
         self.assertTrue(c.services_stopped)
         tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
         self.assertEqual(tl["drain"]["escalation"]["reason"], "disk-free")
+        # Stopped by the drain when the rule fired, not only at the end.
+        self.assertEqual(tl["drain"]["services"], {"node0.json": "signalled"})
+        self.assertLess(tl["drain"]["end_ms"] - tl["drain"]["start_ms"], driver.DRAIN_OBSERVE_S * 1000)
 
     def test_no_drain_after_a_resource_stop(self):
         c = FakeCluster(self.cfg, self.clock)
@@ -1010,6 +1013,22 @@ class Commands(Base):
         self.assertTrue(out.startswith("unverified b"), out)
         os.remove(os.path.join(svc, "started.list"))  # the list itself missing
         self.assertEqual(check()[0], 1)
+
+    def test_a_guards_stop_waits_longer_than_the_guards_own_stop(self):
+        """The guard, after a TERM: its grace, its load group's TERM and KILL
+        waits (20 + 10 s), the reap (5 s); teardown and stop_load must wait
+        longer, or they would kill a guard still confirming its load."""
+        from r110 import guard
+        self.assertGreater(remote.GUARD_STOP_S, guard.GRACE_S + 20 + 10 + 5 + 60)
+        c, rec, cfg = self.cluster(answers=[("ls ", "guard.json\n")])
+        waits = []
+        c._stop = lambda name, wait: waits.append((name, wait)) or {"verdict": "gone"}
+        c.stop_load()
+        c.teardown()
+        self.assertTrue(waits)
+        for name, wait in waits:
+            if name.startswith("guard"):
+                self.assertEqual(wait, remote.GUARD_STOP_S, name)
 
     def test_a_stops_ssh_outlasts_the_stop(self):
         c, rec, cfg = self.cluster()

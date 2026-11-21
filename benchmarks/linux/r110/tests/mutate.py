@@ -45,6 +45,8 @@ muts = [
  ("driver: approval not checked", "r110/driver.py", "        check_approval(a.approval, sha, a.command, now, duration)\n", "        pass\n", "test_driver"),
  ("driver: approval window ignored", "r110/driver.py", "    if not w0 <= now <= w1:", "    if False:", "test_driver"),
  ("driver: approval of another config accepted", "r110/driver.py", "    if a.get(\"config_sha256\") != config_sha:", "    if False:", "test_driver"),
+ # Survives by design: budget.allocate (called by validate) refuses the
+ # same limits (above the plan's or not finite): a second layer.
  ("driver: looser limits accepted", "r110/driver.py", "        if k not in budget.DEFAULTS or not budget.valid_limit(v) or v > budget.DEFAULTS[k]:", "        if k not in budget.DEFAULTS or not budget.valid_limit(v):", "test_driver"),
  ("driver: looser judgement accepted", "r110/driver.py", "        if judge.VALUES.get(k) != v:", "        if False:", "test_driver"),
  ("driver: evidence overwritten", "r110/driver.py", "        os.mkdir(self.dir)", "        os.makedirs(self.dir, exist_ok=True)", "test_driver"),
@@ -105,6 +107,7 @@ muts = [
  ("driver: a sampling gap ends the hold", "r110/driver.py", "        done = self.wait(\"4\", deadline, lambda s: self._left(s, 3) or (", "        done = self.wait(\"4\", deadline, lambda s: not self._admission(s, 3) or (", "test_driver"),
  ("driver: early recovery continues", "r110/driver.py", "        return bool(done) and not early", "        return bool(done)", "test_driver"),
  ("driver: C3a judged with a probe in flight", "r110/driver.py", "        if self.c.wait_step(n, deadline) is None or self._stopped(\"5\"):\n            return False\n", "", "test_driver"),
+ # Survives by design, as "driver: looser limits accepted" above.
  ("driver: NaN limits accepted", "r110/driver.py", "        if k not in budget.DEFAULTS or not budget.valid_limit(v) or v > budget.DEFAULTS[k]:", "        if k not in budget.DEFAULTS or v > budget.DEFAULTS[k]:", "test_driver"),
  ("driver: retained record unchecked", "r110/driver.py", "        raise ConfigError(\"retained_record: absolute directory -> sha256 of its listing (plan §10)\")", "        pass", "test_driver"),
  ("driver: stale against the newest sample", "r110/driver.py", "                if now - x[\"ended_wall_ms\"] > 2 * self.iv_ms:", "                if max(y[\"ended_wall_ms\"] for y in samples) - x[\"ended_wall_ms\"] > 2 * self.iv_ms:", "test_driver"),
@@ -146,7 +149,7 @@ muts = [
  ("L3: an unconfirmed guard ended", "r110/watchdog.py", "            unconfirmed = res.get(\"group_empty\") is False or res.get(\"services_confirmed\") is False", "            unconfirmed = res.get(\"services_confirmed\") is False", "test_integration"),
  ("P1: a slow probe answer passes", "r110/load.py", "                if bad >= failures or slow:", "                if bad >= failures:", "test_load"),
  ("P1: no live headroom", "r110/load.py", "                if self.budget.live_count() >= self.budget.limits[\"max_live\"] - headroom:", "                if False:", "test_integration"),
- ("P1: a full live set ends the hold", "r110/load.py", "                    self._count(f\"{kind}-live-limit\")", "                    break", "test_integration"),
+ ("P1: a full live set ends the hold", "r110/load.py", "                    self._count(f\"{kind}-live-limit\")", "                    break", "test_load"),
  ("P1: protection counters judged only afterwards", "r110/driver.py", "            bad = self.protection(samples)", "            bad = None", "test_driver"),
  ("P1: approval window only at the start", "r110/driver.py", "    if end > w1:", "    if False:", "test_driver"),
  ("P1: recovery only taken as recovered", "r110/driver.py", "        return v is not None and v >= 3", "        return v == 3", "test_driver"),

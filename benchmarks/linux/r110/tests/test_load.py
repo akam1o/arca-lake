@@ -185,6 +185,20 @@ class Limits(Base):
         self.assertEqual(ld.stop_reason, "heartbeat-lost")
 
 
+class FullLiveSet(Base):
+    def test_a_full_live_set_skips_hold_ticks_and_the_hold_goes_on(self):
+        """Each hold attempt is a new key: with the live set full every tick
+        is skipped (counted), and the schedule continues to its end."""
+        clock = common.FakeClock()
+        c = fakes.Scripted(clock, fakes.ok)
+        ld = self.load(c, {"max_live": 2}, clock)
+        ld.step({"kind": "put", "keys": ["a", "b"]})
+        out = ld.step({"kind": "hold", "prefix": "h", "interval": 1.0, "max_seconds": 10})
+        self.assertGreaterEqual(out["attempts"], 9)
+        self.assertGreaterEqual(ld.counts.get("hold-live-limit", 0), 9)
+        self.assertIsNone(ld.stop_reason)
+
+
 class LoadHeartbeat(Base):
     def test_the_load_stops_by_itself_when_the_heartbeat_goes_stale(self):
         """The guard gone too: the load reads the heartbeat itself."""
