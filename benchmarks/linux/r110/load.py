@@ -45,7 +45,7 @@ RETRIES, RETRY_BASE_S, RETRY_MAX_S, RETRY_WINDOW_S = 2, 0.2, 3.2, 10.0
 
 class Load:
     def __init__(self, run_dir, run_id, endpoints, limits=None, clock=None, client=None,
-                 bucket="r110", object_size=256 << 10, rng=None, heartbeat=None):
+                 bucket="r110", object_size=256 << 10, rng=None, heartbeat=None, heartbeat_id=None):
         self.clock = clock or common.Clock()
         self.run_dir = run_dir
         self.run_id = run_id
@@ -67,8 +67,8 @@ class Load:
         self._closed = False
         # The watchdog's heartbeat, read by the load itself too: if the
         # guard is gone as well, the load still stops within the timeout.
-        self._hb = common.Heartbeat(heartbeat, run_id, 120.0, self.clock) if heartbeat else None
-        self._hb_next = 0.0
+        self._hb = common.Heartbeat(heartbeat, heartbeat_id or run_id, 120.0, self.clock) if heartbeat else None
+        self._hb_lock = threading.Lock()
 
     @property
     def stop_reason(self):
@@ -99,11 +99,10 @@ class Load:
 
     def stopped(self):
         if self._hb is not None:
-            now = self.clock.monotonic()
-            if now >= self._hb_next:
-                self._hb_next = now + 1.0
-                if self._hb.check():
-                    self.budget.stop("heartbeat-lost", "load")
+            with self._hb_lock:
+                stale = self._hb.check()
+            if stale:
+                self.budget.stop("heartbeat-lost", "load")
         return self.budget.stopped()
 
     # -- one operation ------------------------------------------------------------
@@ -118,6 +117,11 @@ class Load:
         new_live = method == "PUT" and key not in self.may_exist
         permit = self.budget.acquire(kind, size, new_live, deadline)
         try:
+            # Checked again after the waits for a slot and a token, just
+            # before anything is written or sent.
+            reason = self.stopped()
+            if reason:
+                raise budget_mod.Stopped(reason)
             data = sha = None
             if method == "PUT":
                 data, sha = s3.body(key, version, size)
@@ -447,7 +451,7 @@ def run(args, clock=None, client=None):
         run_id = json.load(f)["run_id"]
     limits = json.loads(args.limits) if args.limits else None
     load = Load(args.run_dir, run_id, args.endpoint, limits, clock, client, args.bucket, args.object_size,
-                heartbeat=args.heartbeat)
+                heartbeat=args.heartbeat, heartbeat_id=args.heartbeat_id)
     control = os.path.join(args.run_dir, "control")
     os.makedirs(control, exist_ok=True)
     n, steps = 1, []
@@ -486,6 +490,7 @@ def main(argv=None):
     p.add_argument("--limits", help="JSON overrides of budget.DEFAULTS (never above them)")
     p.add_argument("--bucket", default="r110")
     p.add_argument("--object-size", type=int, default=256 << 10)
+    p.add_argument("--heartbeat-id", help="the run id the heartbeat names (default: this run's)")
     p.add_argument("--heartbeat", help="the watchdog's heartbeat file (stop 120 s after the last beat)")
     args = p.parse_args(argv)
     if args.limits:
