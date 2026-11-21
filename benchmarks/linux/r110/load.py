@@ -290,6 +290,9 @@ class Load:
                 except ledger_mod.LedgerFailure:
                     self.stop("ledger-failure")
                     return
+                except Exception:  # noqa: BLE001 - a worker that fails stops the run, never silently
+                    self.stop("load-error")
+                    return
                 if result == "refused":
                     refusals += 1
                     delay = self.rng.uniform(0, min(RETRY_MAX_S, RETRY_BASE_S * 2 ** min(refusals, 5)))
@@ -340,9 +343,17 @@ class Load:
                 self.live_order = [k for k in self.live_order if k not in gone]
         elif kind == "put-until-refused":
             prefix, max_new = s["prefix"], s["max_new"]
-            state = {"refused_since": None, "reached": False}
+            state = {"refused_since": None, "reached": False, "headroom_reached": False}
+
+            headroom = s.get("live_headroom", 0)
 
             def put_new(k):
+                # The fill keeps ``live_headroom`` live slots free for the
+                # hold's and the probes' attempts (each takes a slot while it
+                # runs; a refused one gives it back).
+                if self.budget.live_count() >= self.budget.limits["max_live"] - headroom:
+                    state["headroom_reached"] = True
+                    raise budget_mod.LiveLimit("headroom kept")
                 r = self.operation(stage, "op", "PUT", k, deadline)
                 now = self.clock.monotonic()
                 if r == "refused":
@@ -357,6 +368,7 @@ class Load:
             self._pool((f"{prefix}{i:06d}" for i in range(max_new)), put_new, s.get("rate"),
                        deadline, until=lambda: state["reached"])
             out["refusal_reached"] = state["reached"]
+            out["headroom_reached"] = state["headroom_reached"]
         elif kind in ("hold", "probe"):
             i = 0
             # A fixed schedule (start + i * interval): any window of n
@@ -371,7 +383,11 @@ class Load:
                                        f"{s['prefix']}{i:06d}", deadline, retries=0)
                     if kind == "probe" and s.get("get_key"):
                         self.operation(stage, "probe", "GET", s["get_key"], deadline, retries=0)
-                except (budget_mod.Stopped, budget_mod.LiveLimit):
+                except budget_mod.LiveLimit:
+                    # No live slot this tick (the live set is full): counted,
+                    # and the schedule goes on.
+                    self._count(f"{kind}-live-limit")
+                except budget_mod.Stopped:
                     break
                 i += 1
                 wait = t0 + i * interval - self.clock.monotonic()
@@ -519,10 +535,12 @@ class Load:
                 except (budget_mod.Stopped, budget_mod.LiveLimit, ledger_mod.LedgerFailure):
                     return
                 r = self.last_response()
-                ok = res == "found" and r is not None and r.seconds <= max_seconds
+                slow = r is not None and r.seconds > max_seconds
+                ok = res == "found" and not slow
                 bad = 0 if ok else bad + 1
                 self._count("baseline-probe-" + ("ok" if ok else "failed"))
-                if bad >= failures:
+                # Plan §6.2: 3 consecutive failures, or one answer over 5 s.
+                if bad >= failures or slow:
                     self.stop("probe")
                     return
                 i += 1
@@ -575,6 +593,9 @@ def run(args, clock=None, client=None):
     def execute(num, s, done_path):
         try:
             out = load.step(s, done=lambda: os.path.exists(done_path) or ending.is_set() or bool(load.stopped()))
+        except Exception as e:  # noqa: BLE001 - a step that fails stops the run, recorded
+            load.stop("load-error")
+            out = {"error": f"{type(e).__name__}: {e}"[:500]}
         finally:
             with lock:
                 running.discard(num)

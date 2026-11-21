@@ -93,7 +93,7 @@ for name in sorted(set(started)):
     except (OSError, ValueError) as e:
         print("unverified %s: no readable record: %s" % (name, e)); bad = 1; continue
     c = proc.check(rec)
-    g = proc.group_state(rec.get("pgid", rec.get("pid"))) if proc.valid(rec) else "unknown"
+    g = proc.group_state(rec["pgid"]) if proc.valid(rec) else "unknown"
     if c == "same" or g == "alive":
         print("alive %s (%s, group %s)" % (name, c, g)); bad = 1
     elif c in ("unknown", "invalid") or g == "unknown":
@@ -145,6 +145,10 @@ out["swaps"] = open("/proc/swaps").read().splitlines()[1:]
 print(json.dumps(out))
 '''
 
+
+# A guard's worst case after a SIGTERM: its grace (15 s), its load group's
+# TERM and KILL waits (20 + 10 s), the reap (5 s), the services' stops.
+GUARD_STOP_S = 180
 
 # fdbserver's --cache-memory when none is given.
 FDB_DEFAULT_CACHE = 2 << 30
@@ -263,7 +267,14 @@ class SshCluster:
             except (RemoteError, ValueError) as e:
                 c[f"clock {h}"] = {"ok": False, "error": str(e)[:200]}
         # The test's FoundationDB under its approved limit, with the guard's
-        # floor still free beside it.
+        # floor still free beside it; undetermined at a preflight, the most
+        # it may be is reported.
+        if self.cfg.get("fdb_memory") is None:
+            avail = c.get(f"host {self.host}", {}).get("mem_available")
+            c["fdb_memory_fits"] = {"ok": True, "fdb_memory": None,
+                                    "at_most_bytes": None if avail is None else avail - (1 << 30)}
+            c["retained"] = self._retained()
+            return c
         try:
             fdb = parse_memory(self.cfg["fdb_memory"])
             avail = c[f"host {self.host}"]["mem_available"]
@@ -430,6 +441,7 @@ class SshCluster:
                           "--min-free-gib", g["min_free_gib"], "--min-mem-mib", g["min_mem_mib"],
                           "--heartbeat-timeout", g["heartbeat_timeout_s"], "--heartbeat-id", self.cfg["run_id"],
                           "--max-seconds", lim["run_seconds"] + 600,
+                          "--record-dir", f"{self.run_dir}/services", "--record-name", "load-" + sub if sub else "load",
                           # A smoke sub-run's exercised stop must not reach the
                           # main run's services: only the main guard gets them.
                           *([] if sub else ["--services", f"{self.run_dir}/services"]),
@@ -443,7 +455,12 @@ class SshCluster:
         load; an attempt limit ends one; 100 PUT, GET, DELETE and a verify."""
         self.setup()
         res = {"errors": 0}
-        d = self.start_load("smoke-hb", heartbeat=False, remaining_s=remaining_s)
+        t0 = time.monotonic()
+
+        def left():
+            return None if remaining_s is None else max(1, remaining_s - (time.monotonic() - t0))
+
+        d = self.start_load("smoke-hb", heartbeat=False, remaining_s=left())
         self._send(d, 1, {"kind": "create-bucket"})
         self._send(d, 2, {"kind": "put", "keys": [f"s{i}" for i in range(10_000)], "rate": 2})
         st = self._wait_exit(d, 180)
@@ -454,12 +471,12 @@ class SshCluster:
         res["stop_layers_exercised"] = bool(st and st.get("stopped") == "heartbeat-lost" and g
                                             and g.get("reason") == "heartbeat-lost" and g.get("source") == "guard"
                                             and g.get("group_empty") is True)
-        d = self.start_load("smoke-limit", remaining_s=remaining_s)
+        d = self.start_load("smoke-limit", remaining_s=left())
         self._send(d, 1, {"kind": "create-bucket"})
         self._send(d, 2, {"kind": "put", "keys": [f"l{i}" for i in range(100)]})
         st = self._wait_exit(d, 120)
         res["limits_exercised"] = bool(st and st.get("stopped") == "attempts-limit")
-        d = self.start_load("smoke-ops", remaining_s=remaining_s)
+        d = self.start_load("smoke-ops", remaining_s=left())
         keys = [f"o{i}" for i in range(100)]
         for n, step in enumerate([{"kind": "create-bucket"}, {"kind": "put", "keys": keys},
                                   {"kind": "get", "keys": keys}, {"kind": "delete", "keys": keys},
@@ -550,6 +567,8 @@ class SshCluster:
                "remote_test_fdb_cluster": f"{self.run_dir}/fdb.cluster",
                "remote_guard_record": f"{self.run_dir}/services/guard.json",
                "remote_guard_result": f"{self.load_dir}/guard.json",
+               "remote_sentinel_record": f"{self.run_dir}/services/sentinel.json",
+               "remote_sentinel_result": f"{self.run_dir}/sentinel.json",
                "local_dir": self.cfg["local_dir"], "optional_checks": self.cfg.get("optional_checks", []),
                "limits": {"max_test_dir_bytes": self.cfg["stop_rules"]["max_test_dir_bytes"]}}
         os.makedirs(self.cfg["local_dir"], exist_ok=False)
@@ -617,6 +636,10 @@ class SshCluster:
             os.unlink(f.name)
         return recs
 
+    def live_count(self):
+        st = self._status(self.load_dir) or {}
+        return (st.get("budget") or {}).get("live")
+
     def stage4_keys(self):
         return sorted(set(ledger_mod.acknowledged(self.ledger_records(), "PUT", stage="4")))
 
@@ -644,9 +667,18 @@ class SshCluster:
         return self.ssh(f"tail -c 2000000 {Q(self.run_dir)}/logs/*.log 2>/dev/null || true", check=False, timeout=600)
 
     def stop_load(self):
-        # The guard may be stopping services and the load's group (up to
-        # 30 s each) when this arrives: time for it to write its result.
-        return self._stop("guard.json", 120)
+        """The main guard, then its load by its own record (confirmed), and
+        the guard's result (whether it confirmed its load's group empty)."""
+        # The guard's worst case after a TERM (its grace, its group's TERM
+        # and KILL waits, services' stops) is under this wait.
+        out = {"guard": self._stop("guard.json", GUARD_STOP_S), "load": self._stop("load.json", 60)}
+        # Any smoke sub-run left (a stage 2 that failed): its guard and load.
+        for n in self.ssh(f"ls {Q(self.run_dir)}/services 2>/dev/null || true", check=False).split():
+            if n.startswith(("guard-smoke", "load-smoke")) and n.endswith(".json"):
+                out[n] = self._stop(n, GUARD_STOP_S if n.startswith("guard") else 60)
+        res = self._json(f"{self.load_dir}/guard.json")
+        out["guard_result"] = {k: res.get(k) for k in ("reason", "group_empty", "load_reaped")} if res else None
+        return out
 
     def escalation(self):
         """The first resource or monitor alarm the watchdog wrote (its local
@@ -690,10 +722,10 @@ class SshCluster:
         out = {"stopped": {}, "removed": []}
         names = self.ssh(f"ls {Q(self.run_dir)}/services 2>/dev/null || true", check=False).split()
         order = sorted((n for n in names if n.endswith(".json")),
-                       key=lambda n: (not n.startswith("guard"), not n.startswith("sentinel"), n.startswith("fdb"),
-                                      n.startswith("sampler")))
+                       key=lambda n: (not n.startswith("guard"), not n.startswith("load"), not n.startswith("sentinel"),
+                                      n.startswith("fdb"), n.startswith("sampler")))
         for n in order:
-            out["stopped"][n] = self._stop(n, 30)
+            out["stopped"][n] = self._stop(n, GUARD_STOP_S if n.startswith("guard") else 30)
         unconfirmed = {n: v for n, v in out["stopped"].items()
                        if v.get("verdict") not in ("stopped", "gone", "not-started")}
         if unconfirmed:

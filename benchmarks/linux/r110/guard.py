@@ -38,6 +38,7 @@ import argparse
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -83,10 +84,10 @@ def stop_services(services_dir, clock):
             if not proc.valid(rec):
                 raise ValueError(f"not an identity: {rec!r}")
         except (OSError, ValueError) as e:
-            out[name] = {"verdict": "unverified", "reason": f"unreadable: {e}"}
+            out[name[:-5]] = {"verdict": "unverified", "reason": f"unreadable: {e}"}
             continue
         if rec["pid"] in mine:
-            out[name] = "skipped: the guard itself"
+            out[name[:-5]] = "skipped: the guard itself"
             continue
         out[name[:-5]] = proc.stop_identified(rec, clock)
     verdicts = [v["verdict"] for v in out.values() if isinstance(v, dict)]
@@ -140,13 +141,44 @@ class Guard:
         result like any other stop (never just dies, leaving the load)."""
         self.terminated = True
 
+    def record_load(self, child):
+        """The load's identity in the run's records (``--record-dir``), as
+        remote.START records a service: listed in started.list before it
+        starts (done by the caller), its record written once its identity
+        is read. Teardown and the sentinel then see it like any process of
+        the run. False if its identity cannot be read."""
+        d, name = self.args.record_dir, self.args.record_name
+        ident = None
+        for _ in range(100):
+            try:
+                ident = proc.identity(child.pid)
+            except proc.Unknown:
+                ident = None
+            if ident:
+                break
+            self.clock.sleep(0.05)
+        if not ident:
+            return False
+        ident["argv"] = list(child.args)
+        common.atomic_write_json(os.path.join(d, name + ".json"), ident)
+        return True
+
     def run(self, command):
         self.terminated = False
         try:
             signal.signal(signal.SIGTERM, self.terminate)
         except ValueError:
             pass  # not the main thread (tests call terminate() directly)
+        if getattr(self.args, "record_dir", None):
+            with open(os.path.join(self.args.record_dir, "started.list"), "a") as f:
+                f.write(self.args.record_name + "\n")
+                f.flush()
+                os.fsync(f.fileno())
         child = subprocess.Popen(command, start_new_session=True, cwd=self.args.run_dir)
+        if getattr(self.args, "record_dir", None) and not self.record_load(child):
+            # Not recordable, so not stoppable by its identity later: stopped now.
+            self.terminated = True
+            self.result["load_record"] = "identity unavailable: stopped"
         pgid = child.pid
         self.result["load"] = {"pid": child.pid, "command": command}
         reason = source = None
@@ -245,7 +277,9 @@ class Sentinel:
                 rec = common.read_json(os.path.join(d, n))
             except (OSError, ValueError):
                 return {"reason": "stop-file-unreadable", "file": n}
-            if common.reason_class(rec.get("reason")) in ("resource", "monitor"):
+            if not isinstance(rec, dict) or not isinstance(rec.get("reason"), str):
+                return {"reason": "stop-file-unreadable", "file": n}
+            if common.reason_class(rec["reason"]) in ("resource", "monitor"):
                 return dict(rec, file=n)
         return None
 
@@ -336,6 +370,8 @@ def main(argv=None, clock=None, checks=None):
     _common_args(p)
     p.add_argument("--grace", type=float, default=GRACE_S,
                    help="seconds the load has to end by itself after a stop (at most 60)")
+    p.add_argument("--record-dir", help="the run's records (services/): the load's identity is written there")
+    p.add_argument("--record-name", default="load")
     if "--" not in argv:
         p.error("the load command follows --")
     i = argv.index("--")
@@ -346,6 +382,8 @@ def main(argv=None, clock=None, checks=None):
     _check_limits(p, args, 7.5 * 3600 + 600)
     if not (math.isfinite(args.grace) and 0 <= args.grace <= 60):
         p.error("--grace: 0 to 60 s")
+    if args.record_dir and not re.fullmatch(r"load(-[a-z0-9-]+)?", args.record_name):
+        p.error("--record-name: load or load-<sub-run>")
     return Guard(args, clock, checks).run(cmd)
 
 

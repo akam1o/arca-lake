@@ -101,8 +101,35 @@ def identity(pid):
 
 
 def valid(rec):
+    """A recorded identity: pid, start token, working directory and the
+    process group (a record without its group could only guess one)."""
     return isinstance(rec, dict) and isinstance(rec.get("pid"), int) and not isinstance(rec["pid"], bool) \
-        and rec["pid"] > 1 and bool(rec.get("start")) and bool(rec.get("cwd"))
+        and rec["pid"] > 1 and bool(rec.get("start")) and bool(rec.get("cwd")) \
+        and isinstance(rec.get("pgid"), int) and not isinstance(rec["pgid"], bool) and rec["pgid"] > 1
+
+
+def threads_alive(pid):
+    """Linux: whether a thread of ``pid`` other than a zombie is left. A
+    process whose main thread has exited shows ``Z`` in its own stat while
+    its other threads still run (and hold their files). Raises ``Unknown``
+    when the task list cannot be read."""
+    try:
+        tids = os.listdir(f"/proc/{pid}/task")
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except OSError as e:
+        raise Unknown(f"/proc/{pid}/task: {e}") from None
+    for t in tids:
+        try:
+            with open(f"/proc/{pid}/task/{t}/stat") as f:
+                state = f.read().rsplit(")", 1)[1].split()[0]
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as e:
+            raise Unknown(f"/proc/{pid}/task/{t}/stat: {e}") from None
+        if state not in ("Z", "X"):
+            return True
+    return False
 
 
 def check(rec):
@@ -120,7 +147,12 @@ def check(rec):
     except Unknown:
         return "unknown"
     if cwd is None:
-        return "gone"
+        # The working directory is gone with the main thread; the pid and
+        # start token still name this process while any thread runs.
+        try:
+            return "same" if LINUX and threads_alive(rec["pid"]) else "gone"
+        except Unknown:
+            return "unknown"
     return "same" if cwd == rec["cwd"] else "other"
 
 
@@ -179,7 +211,10 @@ def members(pgid):
                 raise Unknown(f"/proc/{n}/stat: {e}") from None
             # After ')': state, ppid, pgrp, ...
             if int(rest[2]) == pgid:
-                out.append((int(n), rest[0]))
+                state = rest[0]
+                if state in ("Z", "X") and threads_alive(int(n)):
+                    state = "T*"  # the main thread gone, others running: alive
+                out.append((int(n), state))
         return out
     try:
         r = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True, text=True, timeout=20)
@@ -201,7 +236,7 @@ def group_state(pgid):
         ms = members(pgid)
     except Unknown:
         return "unknown"
-    return "alive" if any(st != "Z" for _, st in ms) else "empty"
+    return "alive" if any(st not in ("Z", "X") for _, st in ms) else "empty"
 
 
 def group_alive(pgid):
@@ -260,7 +295,7 @@ def stop_identified(rec, clock, term_wait=20.0, kill_wait=10.0):
     """
     if not valid(rec):
         return {"verdict": "unverified", "reason": "not a process identity"}
-    pgid = rec.get("pgid", rec["pid"])
+    pgid = rec["pgid"]
     c = check(rec)
     if c == "unknown":
         return {"verdict": "unverified", "reason": "the process cannot be checked"}

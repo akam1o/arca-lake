@@ -137,9 +137,12 @@ class StopFile:
         except OSError as e:
             return {"reason": "stop-file-unreadable", "detail": str(e)}
         try:
-            return json.loads(text)
+            rec = json.loads(text)
         except ValueError:
             return {"reason": "stop-file-unreadable", "detail": text[:200]}
+        if not isinstance(rec, dict) or not isinstance(rec.get("reason"), str):
+            return {"reason": "stop-file-unreadable", "detail": text[:200]}
+        return rec
 
 
 class Heartbeat:
@@ -197,6 +200,8 @@ REASONS = {
     "monitor-failed": "monitor",
     "stop-file-unreadable": "monitor",
     "guard-lost": "monitor",
+    "load-error": "monitor",
+    "sentinel-lost": "monitor",
     "driver-error": "monitor",
     # The evidence of C5 is lost, not shown violated.
     "ledger-failure": "monitor",
@@ -214,4 +219,4 @@ REASONS = {
 def reason_class(reason):
     """The class of a stop reason; an unknown reason is treated as a
     monitor failure (it stops everything that a monitor loss stops)."""
-    return REASONS.get(reason, "monitor")
+    return REASONS.get(reason, "monitor") if isinstance(reason, str) else "monitor"

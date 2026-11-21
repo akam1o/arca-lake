@@ -159,7 +159,7 @@ def c1(samples, records, tl, v, nodes):
     ev["matured_at_ms"] = matured_at
     if t_e < matured_at:
         return verdict("C1", INCONCLUSIVE, [f"the refusal observed until {t_e}, D1 matures at {matured_at}"], **ev)
-    if any(s != 3 for t, s in gw if t <= matured_at):
+    if any(s < 3 for t, s in gw if t <= matured_at):  # 3 write rejected, 4 recovery only
         return verdict("C1", INCONCLUSIVE, ["admission left write rejected before D1 matured"], **ev)
     backlog0 = ctl["arca_controller_gc_backlog"][0][1]
     if backlog0 == 0:

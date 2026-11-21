@@ -289,7 +289,7 @@ class ReviewFindings(GuardBase):
             json.dump(oid, f)
         self.free = lambda: 1 * GIB
         rc, res = self.run_guard(LOAD, timeout=60, services=d)
-        self.assertEqual(res["services"]["aaa.json"], "skipped: the guard itself")
+        self.assertEqual(res["services"]["aaa"], "skipped: the guard itself")
         self.assertNotIn("guard", res["services"])
         self.assertNotIn("guard-smoke-hb", res["services"])
         self.assertIsNone(other.poll(), "a guard was signalled")
@@ -456,8 +456,62 @@ class F3Stopping(GuardBase):
         p.wait()
         self.assertEqual(proc.stop_identified(ident, common.Clock())["verdict"], "gone")
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux threads")
+    def test_a_process_whose_main_thread_exited_is_alive_until_its_threads_end(self):
+        """The main thread gone (SYS_exit: that thread only), a worker
+        writing on: the process reads Z in its own stat, but is alive."""
+        code = ("import ctypes,threading,time\n"
+                "def w():\n"
+                "    while True:\n"
+                "        open('tick','a').write('x'); time.sleep(0.05)\n"
+                "threading.Thread(target=w).start()\n"
+                "open('child.pid','w').write('0')\n"
+                "time.sleep(0.3)\n"
+                "ctypes.CDLL(None).syscall(60, 0)\n")
+        p, ident = self.spawn([sys.executable, "-I", "-c", code])
+        time.sleep(1.0)
+        with open(f"/proc/{p.pid}/stat") as f:
+            self.assertIn(f.read().rsplit(")", 1)[1].split()[0], ("Z", "X"))
+        self.assertEqual(proc.group_state(ident["pgid"]), "alive")
+        self.assertEqual(proc.check(ident), "same")
+        res = proc.stop_identified(ident, common.Clock(), term_wait=2.0, kill_wait=2.0)
+        self.assertEqual(res["verdict"], "stopped", res)
+        self.assertTrue(res["signals"], "confirmed without a signal")
+        n = os.path.getsize(os.path.join(self.dir, "tick"))
+        time.sleep(0.3)
+        self.assertEqual(os.path.getsize(os.path.join(self.dir, "tick")), n, "the worker still writes")
+
+    def test_the_guard_records_its_load_for_teardown(self):
+        d = os.path.join(self.dir, "services")
+        os.makedirs(d)
+        open(os.path.join(d, "started.list"), "w").close()
+        seen = {}
+
+        def during():
+            for _ in range(100):
+                if os.path.exists(os.path.join(d, "load-x.json")):
+                    break
+                time.sleep(0.05)
+            seen["rec"] = common.read_json(os.path.join(d, "load-x.json"))
+            seen["check"] = proc.check(seen["rec"])
+
+        argv = ["run", "--run-dir", self.dir, "--heartbeat", self.hb, "--data-dir", self.dir,
+                "--heartbeat-timeout", "1", "--interval", "0.1", "--grace", "0.3", "--record-dir", d,
+                "--record-name", "load-x", "--", *LOAD]
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault("rc", guard.main(
+            argv, checks={"free": lambda _p: 100 << 30, "mem": lambda: 8 << 30})))
+        t.start()
+        during()
+        t.join(60)
+        self.assertEqual(open(os.path.join(d, "started.list")).read().split(), ["load-x"])
+        self.assertEqual(seen["check"], "same")
+        self.assertIn("argv", seen["rec"])
+        self.assertEqual(proc.check(seen["rec"]), "gone")
+
     def test_invalid_records(self):
-        for rec in (None, {}, {"pid": True, "start": "1", "cwd": "/"}, {"pid": 1, "start": "1", "cwd": "/"}):
+        for rec in (None, {}, {"pid": True, "start": "1", "cwd": "/"}, {"pid": 1, "start": "1", "cwd": "/"},
+                    {"pid": 1234, "start": "1", "cwd": "/"}):  # no process group: not an identity
             self.assertEqual(proc.check(rec), "invalid")
             self.assertEqual(proc.stop_identified(rec, common.Clock())["verdict"], "unverified")
 
@@ -625,6 +679,15 @@ class Watchdogs(unittest.TestCase):
                 self.assertNotIn(word, s)
         with self.assertRaises(ValueError):
             self.wd(limits={"min_free_gib": 2})
+
+    def test_a_lost_sentinel_is_a_monitor_stop(self):
+        self.hosts.readings["t2"]["sentinel"] = "gone"
+        self.wd(remote_sentinel_record="/r/services/sentinel.json").run(max_rounds=2)
+        self.assertEqual(self.stops(), ["sentinel-lost"])
+        self.setUp()
+        self.hosts.readings["t2"]["sentinel"] = None
+        self.wd(remote_sentinel_record="/r/services/sentinel.json").run(max_rounds=2)
+        self.assertEqual(self.stops(), ["monitor-failed"])
 
     def test_a_lost_guard_is_a_monitor_stop(self):
         for state, want in (("gone", ["guard-lost"]), (None, ["monitor-failed"])):

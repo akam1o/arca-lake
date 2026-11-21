@@ -88,9 +88,9 @@ class Stage5Concurrency(Base):
                 p.stop()
         recs = ld.records()
         order = [(r["type"], r.get("op"), r.get("kind")) for r in recs]
-        ops = {(r["op_id"], r["attempt"]): r["op"] for r in recs if r["type"] == "intent"}
+        ops = {(r["op_id"], r["attempt"]): (r["op"], r.get("stage")) for r in recs if r["type"] == "intent"}
         del_outcomes = [i for i, r in enumerate(recs)
-                        if r["type"] == "outcome" and ops[(r["op_id"], r["attempt"])] == "DELETE"]
+                        if r["type"] == "outcome" and ops[(r["op_id"], r["attempt"])] == ("DELETE", "5")]
         probes = [i for i, r in enumerate(recs) if r["type"] == "intent" and r.get("kind") == "probe"]
         self.assertTrue(del_outcomes, order[-20:])
         # Probe PUTs before the first delete's answer and after the last one:
@@ -101,6 +101,10 @@ class Stage5Concurrency(Base):
         # The stage went on to its judgement, and its probes are C3a's.
         self.assertTrue(ok, engine.tl.get("5"))
         self.assertEqual(engine.tl["5"]["c3a"], judge.PASSED)
+        # The probes' keys deleted after the holds, apart from C2's deletes.
+        self.assertGreater(engine.tl["5"]["probe_keys_deleted"], 0)
+        left = {r["key"] for r in recs if r["type"] == "intent" and r.get("stage") == "5-tail"}
+        self.assertTrue(left and all(k.startswith("q") for k in left))
         st = ld.status()
         self.assertEqual(st.get("background"), [], "a background step still runs")
 
@@ -124,6 +128,29 @@ class Stage5Concurrency(Base):
         time.sleep(0.5)
         self.assertEqual(len(self.s3.requests), n)
         self.assertLess(len([d for d in ld.records() if d.get("op") == "DELETE"]), 2 * 20)
+
+
+class LiveSet(Base):
+    """The fill keeps the live set's last slots for the hold (review of
+    #24): the hold's PUT attempts are sent at 1 per interval after it."""
+
+    def test_the_hold_sends_its_attempts_after_a_fill_to_the_limit(self):
+        ld = self.load(limits={"rate_per_s": 20, "burst": 5, "max_live": 30})
+        ld.send({"kind": "create-bucket"})
+        ld.result(ld.send({"kind": "put", "keys": [f"b{i}" for i in range(10)]}))
+        out = ld.result(ld.send({"kind": "put-until-refused", "prefix": "p", "max_new": 100, "live_headroom": 4,
+                                 "refused_for": 1}), 60)
+        self.assertTrue(out["headroom_reached"])
+        self.assertLessEqual(ld.status()["budget"]["live"], 26)
+        self.s3.refuse_puts = True
+        n = ld.send({"kind": "hold", "prefix": "h", "interval": 0.1, "max_seconds": 2, "background": True})
+        time.sleep(1.5)
+        ld.done(n)
+        res = ld.result(n)
+        self.assertGreater(res["attempts"], 5)
+        held = [r for r in ld.records() if r["type"] == "intent" and (r.get("key") or "").startswith("h")]
+        self.assertGreater(len(held), 5, "the hold sent nothing")
+        self.assertLessEqual(ld.status()["budget"]["live"], 30)
 
 
 class BaselineKey(Base):
@@ -361,6 +388,23 @@ class Watching(unittest.TestCase):
         self.assertEqual(res["reason"], "memory")
         node.wait(10)
 
+    def test_malformed_records_never_crash_a_keeper(self):
+        p = os.path.join(self.dir, "load", "stop.json")
+        for text in ("[1, 2]", '{"reason": 5}', '"x"', "{"):
+            with open(p, "w") as f:
+                f.write(text)
+            self.assertEqual(common.StopFile(p).reason()["reason"], "stop-file-unreadable", text)
+        os.remove(p)
+        node = self.service("node0")
+        self.beat(1)
+        with open(os.path.join(self.dir, "alarms", "0001-x.json"), "w") as f:
+            f.write('["not", "an", "object"]')
+        s, t, out = self.sentinel()
+        res = self.result(t)
+        self.assertEqual(res["reason"], "stop-file-unreadable")
+        self.assertTrue(res["services_confirmed"])
+        node.wait(10)
+
     def test_a_check_that_cannot_be_made_stops_and_confirms(self):
         node = self.service("node0")
         self.beat(1)
@@ -432,6 +476,18 @@ class WatchdogReadings(unittest.TestCase):
             f.write("#!/bin/sh\nexit 0\n")
         os.chmod(os.path.join(b, "journalctl"), 0o755)
         self.assertEqual(self.check({}, b)["kernel_alerts"], [])
+
+    def test_a_guard_that_did_not_confirm_its_load_is_lost(self):
+        rec = os.path.join(self.dir, "guard.json")
+        res = os.path.join(self.dir, "guard-result.json")
+        with open(rec, "w") as f:
+            json.dump({"pid": 999999, "start": "1", "cwd": "/", "pgid": 999999}, f)
+        with open(res, "w") as f:
+            json.dump({"group_empty": False}, f)
+        self.assertEqual(self.check({"guard_record": rec, "guard_result": res})["guard"], "gone")
+        with open(res, "w") as f:
+            json.dump({"group_empty": True}, f)
+        self.assertEqual(self.check({"guard_record": rec, "guard_result": res})["guard"], "ended")
 
     def test_a_missing_required_reading_holds_the_heartbeat_back(self):
         from r110.tests.test_guard import FakeHosts, healthy

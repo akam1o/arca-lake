@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from r110 import budget, common, ledger, s3
 from r110.load import Load
@@ -405,6 +406,29 @@ class ReviewFindings(Base):
         self.assertIsNone(ld.stop_reason)
         self.assertEqual(ld.counts, {"op-PUT-unknown": 1})
 
+    def test_a_new_key_stopped_in_its_waits_gives_its_live_slot_back(self):
+        clock = common.FakeClock()
+        b = budget.Budget(os.path.join(self.dir, "b"), "r", {"rate_per_s": 1, "burst": 1}, clock)
+        self.addCleanup(b.close)
+        b.acquire("op", 0, new_live=True).release()
+        with self.assertRaises(budget.Stopped):
+            b.acquire("op", 0, new_live=True, stage_deadline=clock.monotonic())  # stage deadline in the token wait
+        self.assertEqual(b.live_count(), 1)
+
+    def test_a_late_unknown_write_stays_a_candidate_after_an_acknowledged_one(self):
+        recs = [{"type": "intent", "op_id": 1, "attempt": 1, "key": "k", "op": "PUT", "version": 1, "sha256": "a"},
+                {"type": "outcome", "op_id": 1, "attempt": 1, "result": "unknown"},
+                {"type": "intent", "op_id": 2, "attempt": 1, "key": "k", "op": "DELETE"},
+                {"type": "outcome", "op_id": 2, "attempt": 1, "result": "ack"}]
+        self.assertEqual(ledger.expected(recs)[0]["k"], {ledger.ABSENT, ("body", 1, "a")})
+
+    def test_a_step_that_fails_stops_the_run(self):
+        c = fakes.Scripted(common.FakeClock(), fakes.ok)
+        ld = self.load(c)
+        with mock.patch.object(ld, "operation", side_effect=RuntimeError("bug")):
+            ld.step({"kind": "put", "keys": ["a"]})
+        self.assertEqual(ld.stop_reason, "load-error")
+
     def test_a_refused_new_key_gives_its_live_slot_back(self):
         clock = common.FakeClock()
         refuse = {"on": True}
@@ -456,8 +480,27 @@ class ReviewFindings(Base):
             if ld.stop_reason:
                 break
             time.sleep(0.02)
+        # Plan §6.2: one answer over 5 s stops it (two fast, then the slow one).
         self.assertEqual(ld.stop_reason, "probe")
-        self.assertEqual(state["n"], 5)
+        self.assertEqual(state["n"], 3)
+
+    def test_three_failures_in_a_row_stop_the_run(self):
+        clock = common.Clock()
+        state = {"n": 0}
+
+        def answer(m, path, d):
+            state["n"] += 1
+            return s3.Response(200 if state["n"] in (1, 3) else 404, b"x", sent=True, seconds=0.01)
+
+        c = fakes.Scripted(clock, answer)
+        ld = self.load(c, {"rate_per_s": 1000, "burst": 50}, clock)
+        ld.start_probe("b0", interval=0.05)
+        for _ in range(200):
+            if ld.stop_reason:
+                break
+            time.sleep(0.02)
+        # found, missing, found, missing, missing, missing: the third in a row.
+        self.assertEqual((ld.stop_reason, state["n"]), ("probe", 6))
         self.assertEqual(common.reason_class("probe"), "anomaly")
 
 

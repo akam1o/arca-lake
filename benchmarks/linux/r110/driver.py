@@ -40,7 +40,7 @@ import os
 import re
 import sys
 
-from . import budget, common, judge
+from . import budget, common, judge, ledger as ledger_mod
 
 # The plan's values (docs/verification/phase-4.1-r110-retest-plan.md).
 STAGE_MAX_S = {"1": 1800, "2": 1800, "3": 3600, "4": 3600, "5": 3600, "6": 6000, "7": 3600}
@@ -149,6 +149,9 @@ def validate(cfg, execute=False):
             isinstance(k, str) and k.startswith("/") and os.path.normpath(k) == k
             and isinstance(d, str) and re.fullmatch(r"[0-9a-f]{64}", d) for k, d in rr.items()):
         raise ConfigError("retained_record: absolute directory -> sha256 of its listing (plan §10)")
+    sf = cfg.get("system_fdb_hosts")
+    if not isinstance(sf, list) or not sf or not set(sf) <= set(cfg["hosts"]):
+        raise ConfigError("system_fdb_hosts: the hosts whose system FoundationDB is checked (plan §6.2)")
     opt = cfg.get("optional_checks", [])
     if not isinstance(opt, list) or not set(opt) <= {"kernel_log", "swap"}:
         raise ConfigError("optional_checks: a list of kernel_log, swap (declared and approved, never implied)")
@@ -182,7 +185,7 @@ def load_config(path, execute=False):
     return validate(json.loads(raw), execute), hashlib.sha256(raw).hexdigest()
 
 
-def check_approval(path, config_sha, scope, now):
+def check_approval(path, config_sha, scope, now, duration_s=0):
     """Raise ``NotApproved`` unless the approval names this configuration,
     this scope and a window containing ``now`` (an aware datetime)."""
     if not path:
@@ -211,6 +214,9 @@ def check_approval(path, config_sha, scope, now):
         raise NotApproved(f"the window must end after it starts, within {MAX_WINDOW_H} h")
     if not w0 <= now <= w1:
         raise NotApproved(f"now ({now.isoformat()}) is outside the approved window")
+    end = now + datetime.timedelta(seconds=duration_s)
+    if end > w1:
+        raise NotApproved(f"the {scope} would end ({end.isoformat()}) after the approved window")
     return a
 
 
@@ -232,7 +238,10 @@ def stages(cfg):
                    {"kind": "put", "keys": [BASE_KEY]}]},
         {"stage": "4", "name": "pressure", "max_s": mx.get("4", STAGE_MAX_S["4"]),
          "steps": [{"kind": "delete", "keys": d1, "rate": 20},
+                   # The live set's last slots kept for the hold's and the probes'
+                   # attempts (one per worker), inside the plan's 8,000.
                    {"kind": "put-until-refused", "prefix": "p", "max_new": s["stage4_max_new"], "rate": 10,
+                    "live_headroom": 4,
                     "refused_for": 30},
                    {"kind": "hold", "prefix": "h", "interval": 1.0, "until": "driver"}]},
         {"stage": "5", "name": "drain and recovery", "max_s": mx.get("5", STAGE_MAX_S["5"]),
@@ -334,12 +343,27 @@ class Run:
         self.stop = dict(rec, stage=stage, **detail)
         self.ev.event(self.clock.wall_ms(), "stop", **self.stop)
 
+    def protection(self, samples):
+        """A protection counter above 0 in any sample (plan §6.2): the run
+        stops at once (an integrity stop: Failed)."""
+        for x in samples[-200:]:
+            for k, t in (("arca_controller_gc_skipped_referenced_total", "controller"),
+                         ("arca_node_reclaim_damaged", None)):
+                if (t is None or x.get("target") == t) and x.get("values", {}).get(k, {}).get("value", 0) > 0:
+                    return {"target": x.get("target"), "counter": k}
+        return None
+
     def wait(self, stage, deadline, cond):
         """Poll ``cond(samples)`` until true, a stop, or the deadline."""
         while True:
             if self._stopped(stage):
                 return False
-            v = cond(self.c.samples())
+            samples = self.c.samples()
+            bad = self.protection(samples)
+            if bad:
+                self._stop(stage, "protection-violation", **bad)
+                return False
+            v = cond(samples)
             if v:
                 return v
             if self.clock.monotonic() >= deadline:
@@ -400,14 +424,23 @@ class Run:
         return self._fresh(s, "controller", "arca_controller_gc_backlog") == 0 and \
             self._all_nodes(s, "arca_node_reclaim_pending_records", lambda v: v == 0)
 
+    def _rejecting(self, v):
+        # 3 write rejected, 4 recovery only (stricter): client writes refused.
+        return v is not None and v >= 3
+
     def _left(self, s, state):
-        """A gateway's fresh value known and not ``state`` (a missing or
-        stale value is not a change)."""
+        """A gateway's fresh value known and out of ``state`` (3: no longer
+        rejecting); a missing or stale value is not a change."""
         vals = [self._fresh(s, g, "arca_gateway_admission_state") for g in self.c.gateways()]
+        if state == 3:
+            return any(v is not None and not self._rejecting(v) for v in vals)
         return any(v is not None and v != state for v in vals)
 
     def _admission(self, s, state):
-        return all(self._fresh(s, g, "arca_gateway_admission_state") == state for g in self.c.gateways()) and \
+        vals = [self._fresh(s, g, "arca_gateway_admission_state") for g in self.c.gateways()]
+        if state == 3:
+            return all(self._rejecting(v) for v in vals)
+        return all(v == state for v in vals) and \
             (state != 0 or self._fresh(s, "controller", "arca_controller_backpressure_state") == 0)
 
     # -- stage bodies ---------------------------------------------------------
@@ -464,7 +497,7 @@ class Run:
         first = [x["ended_wall_ms"] for x in samples
                  if x.get("target") in self.c.gateways() and x.get("status") in ("ok", "partial")
                  and x["ended_wall_ms"] >= tl["fill_start_ms"]
-                 and x["values"].get("arca_gateway_admission_state", {}).get("value") == 3]
+                 and self._rejecting(x["values"].get("arca_gateway_admission_state", {}).get("value"))]
         tl["refusal_start_ms"] = min(first) if first else None
         if tl["refusal_start_ms"] is None:
             return False
@@ -532,12 +565,24 @@ class Run:
             return False
         tl["end_ms"] = self.host_ms()
         # Stage 6 starts only when C3a passed (plan §7).
-        r = judge.c3a(self.c.samples(), self.c.ledger_records(), self.tl, judge.VALUES, self.c.gateways())
+        records = self.c.ledger_records()
+        r = judge.c3a(self.c.samples(), records, self.tl, judge.VALUES, self.c.gateways())
         tl["c3a"] = r["outcome"]
-        return r["outcome"] == judge.PASSED
+        if r["outcome"] != judge.PASSED:
+            return False
+        # The probe PUTs' keys, deleted after the holds (stage "5-tail", not
+        # C2's deletes): stage 6 starts at L1 (plan §7: within 5 % of it).
+        probes = sorted(set(ledger_mod.acknowledged(records, "PUT", stage="5")) - {BASE_KEY})
+        tl["probe_keys_deleted"] = len(probes)
+        if probes and not self.c.run_step({"kind": "delete", "keys": probes, "rate": 20, "stage": "5-tail"},
+                                          deadline + 300):
+            return False
+        return True
 
     def s6(self, st, deadline):
         (churn,) = st["steps"]
+        live = getattr(self.c, "live_count", lambda: None)()
+        self.tl["6"]["live_at_start"] = live
         r = self.c.run_step(dict(churn, stage="6"), deadline)
         self.tl["6"]["completed"] = bool(r) and not r.get("deadline_reached") and not self._stopped("6")
         return self.tl["6"]["completed"]
@@ -564,6 +609,9 @@ class Run:
                     break
                 try:
                     ok = self.stage(st, bodies[st["stage"]])
+                except KeyboardInterrupt:
+                    self._stop(st["stage"], "operator", detail="interrupted (SIGINT)")
+                    break
                 except Exception as e:  # noqa: BLE001 - a failure of the driver is a stop
                     self._stop(st["stage"], "driver-error", error=f"{type(e).__name__}: {e}"[:500])
                     break
@@ -614,6 +662,11 @@ class Run:
                 out = f()
                 if out is not None:
                     self.tl.setdefault("final_stops", {})[name] = out
+                gr = out.get("guard_result") if name == "stop_load" and isinstance(out, dict) else None
+                if gr and gr.get("group_empty") is False:
+                    # The guard could not confirm its load stopped: evidence of
+                    # a process possibly left, never a clean end.
+                    self.ev.failures.append(f"stop_load: the guard did not confirm its load's group empty: {gr}")
             except Exception as e:  # noqa: BLE001 - evidence first
                 self.ev.failures.append(f"{name}: {e}")
         parts = {}
@@ -648,7 +701,8 @@ def main(argv=None, now=None, cluster_factory=None):
     p.add_argument("--evidence")
     a = p.parse_args(argv)
     try:
-        cfg, sha = load_config(a.config, execute=a.command != "check")
+        # The memory limit is chosen at the preflight: only a run needs it.
+        cfg, sha = load_config(a.config, execute=a.command == "run")
     except (ConfigError, OSError, ValueError) as e:
         print(f"configuration refused: {e}", file=sys.stderr)
         return 2
@@ -663,7 +717,9 @@ def main(argv=None, now=None, cluster_factory=None):
         return 2
     now = now or datetime.datetime.now(datetime.timezone.utc)
     try:
-        check_approval(a.approval, sha, a.command, now)
+        # A run must end inside the window: its time and the drain's.
+        duration = (min(RUN_MAX_S, cfg["limits"]["run_seconds"]) + DRAIN_OBSERVE_S) if a.command == "run" else 0
+        check_approval(a.approval, sha, a.command, now, duration)
     except NotApproved as e:
         print(f"not approved: {e}", file=sys.stderr)
         return 2

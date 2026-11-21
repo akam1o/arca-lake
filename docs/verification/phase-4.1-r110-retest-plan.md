@@ -186,7 +186,10 @@ and 272 MiB of request bodies in all) out of the approved totals and the
 main load the rest, refusing before any start a configuration whose
 smoke shares would not fit; each load's deadline is what is left of the
 run's time, counted from the run's start (a stage switch or a restart
-resets neither).
+resets neither). Stage 4's fill keeps the live set's last 4 slots free (one
+per worker: at most 4,995 new objects, inside the 5,000 and the 8,000
+above), so that the hold's and the probes' attempts always have a slot; a
+refused or unsent attempt gives its slot back.
 
 A refusing cluster therefore sees at most 25 requests in any second and
 20 per second on average over longer intervals, not the concurrency at
@@ -238,7 +241,11 @@ that stops the test's services:
    watchdog leaves the heartbeat stale: the sentinel stops the services
    within 120 s, with no network. The smoke stage's exercises (a withheld
    heartbeat, a limit) run in sub-runs whose guards reach only their own
-   load; a real danger during the smoke stage is the sentinel's.
+   load; a real danger during the smoke stage is the sentinel's. The
+   loads are recorded like the services (by their guards), so the
+   sentinel's stop reaches them too, and teardown checks them; the
+   watchdog watches the sentinel's identity (`sentinel-lost`, a monitor
+   rule) as it watches the guard's.
 
 | Rule | Threshold | Status |
 | --- | --- | --- |
@@ -253,7 +260,7 @@ that stops the test's services:
 | System FoundationDB of hosts 1 and 3 (`status minimal`) | not "available" once | existing |
 | The dedicated FoundationDB | not available for 60 s | proposed |
 | A host unreachable | 6 consecutive checks (60 s) | existing default; the on-host guard covers host 2 itself |
-| Ledger violation, integrity error, `arca_controller_gc_skipped_referenced_total` > 0, `arca_node_reclaim_damaged` = 1, unexpected 5xx other than 503 | any | proposed |
+| Ledger violation, integrity error, `arca_controller_gc_skipped_referenced_total` > 0, `arca_node_reclaim_damaged` = 1, unexpected 5xx other than 503 | any (the counters: the driver stops the run at the first sample showing one, a protection violation) | proposed |
 | Operations, bytes, run time | the limits of §6.1 | proposed |
 
 On a stop, in this order: stop the load (generator); if no rule of
@@ -277,7 +284,7 @@ and the watchdog has not fired; anything else ends the run.
 | 2 Smoke | 1 passed | fresh cluster (marker, own port); the watchdog, guard and generator limits exercised (a heartbeat withheld stops a running load; an operation limit ends it); 100 PUT, GET, DELETE; verify | all exercised and stopped as designed; 0 errors | 30 min |
 | 3 Fill and baseline | 2 passed | PUT L0 at the limits; then idle, sampling, until the smoke stage's deletes have matured | L0 acknowledged; admission normal; GC backlog 0 and `arca_node_reclaim_pending_records` 0 on every node (no deletion in progress before D1); samples complete | 60 min |
 | 4 Pressure | 3 passed | first DELETE an identified set D1 of 1,000 baseline keys (≤ 20/s), then PUT new keys at ≤ 10/s until the gateway's admission state is write rejected, at most 5,000 new objects; then hold the refusal with one PUT attempt per second (refused attempts count against the limits) until D1's deletes have passed the GC grace, a GC interval, the retention and a reclaim interval (≈ 25 min after D1), or until admission recovers on its own | write rejected reached and held while D1 matures: C1 judged on D1 over the refused interval (no refusal reached: Inconclusive) | 60 min |
-| 5 Drain and recovery | 4 exit | no new data except a probe PUT every 10 s (running beside the deletes, under the same budget and ledger); DELETE every key stage 4 added and 1,000 more baseline keys (live set L1 = 2,000) at ≤ 20/s; observe GC, retention, reclaim, compaction, admission | C2 and C3a judged | 60 min (about 24 min of grace, retention and pass intervals, then the 10 min holds) |
+| 5 Drain and recovery | 4 exit | no new data except a probe PUT every 10 s (running beside the deletes, under the same budget and ledger; its keys deleted once C2's and C3a's holds are over, apart from C2's deletes, so that stage 6 starts at L1); DELETE every key stage 4 added and 1,000 more baseline keys (live set L1 = 2,000) at ≤ 20/s; observe GC, retention, reclaim, compaction, admission | C2 and C3a judged | 60 min (about 24 min of grace, retention and pass intervals, then the 10 min holds) |
 | 6 Steady churn | C3a passed | 1 PUT of a new key and 1 DELETE of the oldest per second for 90 min, the live set within ±5 % of L1 | C3b judged over the whole stage, C4 on its last 60 min | 100 min |
 | 7 Integrity and evidence | 6 ended | verify (§8 C5), `admin integrity verify-manifests`, a scrub of every group; evidence saved; teardown only after review | C5 judged | 60 min |
 
@@ -294,6 +301,9 @@ changed after it.
 | C3b | over stage 6: PUTs ≥ 99 % acknowledged, none refused for capacity, admission never above warning | stage 6 |
 | C4 | over the last 60 min of stage 6, per node: the least-squares slope of retained bytes and of allocated bytes ≤ 1 % of the allotment per hour, their range ≤ 10 % of the allotment, admission never write rejected | stage 6 |
 | C5 | every key acknowledged and not deleted reads back with its exact body; every acknowledged delete (D1, stage 5 and churn, at most 12,400) answers 404; every unknown outcome reads as one of its candidates (recorded which); manifests and scrub 0 findings | stage 7 |
+
+Admission states 3 (write rejected) and 4 (recovery only, stricter) both
+refuse client writes: both are the refusal for stage 4 and C1.
 
 C1's progress (GC collection, the backlog back to 0, reclaims, pending
 records) is judged only on a refusal observed until D1 matured (its chain,
@@ -411,6 +421,8 @@ the preflight and the smoke stage of an approved run.
   1 MiB, allotments), the limits of §6.1, the stop rules of §6.2 and the
   judgement values of §8.
 - The teardown scope: the run's own directories and processes only.
+- The window must contain the run's end (its time and the drain's), not
+  only its start: the driver refuses a run that would end after it.
 
 Preflight (read-only; a connection to the hosts, so only after its own
 approval, given before the execution approval above): reachability; each host's free
@@ -421,9 +433,11 @@ the last record; clock offsets; the binary's commit, features
 (`--features fdb`, a release build without `fault-injection`) and
 sha256; that FoundationDB's memory options, `du`, `iostat` or
 `/proc/stat`, and the kernel log are available to the test user. The
-test FoundationDB's memory limit is chosen there (`fdb_memory`, at most
+test FoundationDB's memory limit is chosen there (`fdb_memory`, above its
+cache memory, at most
 what leaves the guard's 1 GiB floor free beside it), written in the
-configuration (the driver refuses to run with it undetermined) and
+configuration (the driver refuses a run with it undetermined; the
+preflight reports the most it may be) and
 passed as `fdbserver --memory`; the started command line is part of the
 evidence. Monitoring sources that may be missing (`optional_checks`:
 the kernel log, swap) are declared in the approved configuration, never

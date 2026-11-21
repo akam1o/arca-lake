@@ -106,7 +106,9 @@ if a.get("detail"):
     def klog():
         # No alert is [], a log that cannot be read is an error (journalctl
         # answers 0 without the permission too, saying so).
-        r = subprocess.run(["journalctl", "-k", "--since", "-60s", "-o", "cat", "--no-pager"],
+        # 300 s: longer than any round (ssh timeouts and the interval), so
+        # no line falls between two rounds (a line seen twice is harmless).
+        r = subprocess.run(["journalctl", "-k", "--since", "-300s", "-o", "cat", "--no-pager"],
                            capture_output=True, text=True, timeout=20)
         said = r.stdout + r.stderr
         if r.returncode != 0 or "No journal files" in said or "not seeing messages" in said \
@@ -136,21 +138,26 @@ if a.get("detail"):
                 return total
         raise OSError("files vanished during each of 8 walks")
     tryit("test_dir_bytes", du)
+    def keeper(record, result):
+        # A keeper's liveness (the guard, the sentinel): "absent" (not
+        # started yet), "ended" (it wrote its result, and for the guard its
+        # load's group confirmed empty), "alive" (its identity holds) or
+        # "gone" (dead without a result, or a guard that could not confirm).
+        if not os.path.exists(record):
+            return "absent"
+        rec = json.load(open(record))
+        if result and os.path.exists(result):
+            res = json.load(open(result))
+            return "gone" if res.get("group_empty") is False else "ended"
+        try:
+            stat = open("/proc/%d/stat" % rec["pid"]).read()
+        except FileNotFoundError:
+            return "gone"
+        return "alive" if stat.rsplit(")", 1)[1].split()[19] == rec["start"] else "gone"
     if a.get("guard_record"):
-        def guard():
-            # The guard's own liveness: "absent" (not started yet), "ended"
-            # (it wrote its result), "alive" (its identity holds) or "gone".
-            if not os.path.exists(a["guard_record"]):
-                return "absent"
-            rec = json.load(open(a["guard_record"]))
-            if a.get("guard_result") and os.path.exists(a["guard_result"]):
-                return "ended"
-            try:
-                stat = open("/proc/%d/stat" % rec["pid"]).read()
-            except FileNotFoundError:
-                return "gone"
-            return "alive" if stat.rsplit(")", 1)[1].split()[19] == rec["start"] else "gone"
-        tryit("guard", guard)
+        tryit("guard", lambda: keeper(a["guard_record"], a.get("guard_result")))
+    if a.get("sentinel_record"):
+        tryit("sentinel", lambda: keeper(a["sentinel_record"], a.get("sentinel_result")))
     if a.get("test_fdb"):
         def tfdb():
             r = subprocess.run(["fdbcli", "-C", a["test_fdb"], "--timeout", "10", "--exec", "status minimal"],
@@ -248,7 +255,9 @@ class Watchdog:
         if detail:
             args.update(detail=True, test_dirs=c.get("remote_test_dirs", []),
                         test_fdb=c.get("remote_test_fdb_cluster"),
-                        guard_record=c.get("remote_guard_record"), guard_result=c.get("remote_guard_result"))
+                        guard_record=c.get("remote_guard_record"), guard_result=c.get("remote_guard_result"),
+                        sentinel_record=c.get("remote_sentinel_record"),
+                        sentinel_result=c.get("remote_sentinel_result"))
         try:
             rc, out = self.runner(c["hosts"][host], CHECK_SCRIPT, [json.dumps(args)])
         except subprocess.TimeoutExpired:
@@ -338,6 +347,12 @@ class Watchdog:
                 raise KeyError("guard")
             if g == "gone":
                 out.append(("guard-lost", {}))
+        if self.cfg.get("remote_sentinel_record"):
+            k = r.get("sentinel")
+            if k is None:
+                raise KeyError("sentinel")
+            if k == "gone":
+                out.append(("sentinel-lost", {}))
         alerts = opt("kernel_log", "kernel_alerts")
         if alerts:
             out.append(("oom", {"lines": alerts[:5]}))

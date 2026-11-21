@@ -119,6 +119,11 @@ class Configuration(Base):
         self.refused(lambda c: c["teardown"].update(scope="everything"))
         self.refused(lambda c: c["remote"]["ports"].update(gateway=80))
 
+    def test_the_system_foundationdb_hosts_are_required(self):
+        self.refused(lambda c: c.pop("system_fdb_hosts"))
+        self.refused(lambda c: c.update(system_fdb_hosts=[]))
+        self.refused(lambda c: c.update(system_fdb_hosts=["nohost"]))
+
     def test_optional_monitoring_is_only_what_the_configuration_declares(self):
         self.refused(lambda c: c.update(optional_checks=["test_fdb"]))
         self.refused(lambda c: c.update(optional_checks="kernel_log"))
@@ -182,6 +187,12 @@ class Approval(Base):
             with open(bad, "w") as f:
                 json.dump(dict(base, **a), f)
             self.assertEqual(self.invoke(["preflight", p, "--execute", "--approval", bad]), (2, []), a)
+
+    def test_a_run_must_end_inside_the_window(self):
+        p, sha = self.write(self.cfg)
+        # Starts inside, would end 8 h later: past a window ending in 2 h.
+        short = self.approval(sha, ("run",), start="2027-01-01T11:00:00+00:00", end="2027-01-01T14:00:00+00:00")
+        self.assertEqual(self.invoke(["run", p, "--execute", "--evidence", self.dir, "--approval", short]), (2, []))
 
     def test_teardown_needs_an_approval_too(self):
         p, sha = self.write(self.cfg)
@@ -786,6 +797,46 @@ class ReviewFindingsEngine(EngineBase):
         self.assertTrue(engine.stage(driver.stages(self.cfg)[4], engine.s5))
         self.assertEqual(engine.tl["5"]["c3a"], judge.PASSED)
 
+    def test_a_protection_counter_stops_the_run_at_once(self):
+        c = FakeCluster(self.cfg, self.clock)
+        real = c.sample
+
+        def sample():
+            real()
+            if c.admission == 3:  # during stage 4
+                c._samples[-1]["values"]["arca_node_reclaim_damaged"] = {"value": 1, "unit": "count"}
+
+        c.sample = sample
+        res, _ = self.go(c)
+        self.assertEqual((res["stop"]["reason"], res["stop"]["stage"]), ("protection-violation", "4"))
+        self.assertEqual(res["outcome"], judge.FAILED)
+
+    def test_recovery_only_is_still_a_refusal(self):
+        c = FakeCluster(self.cfg, self.clock)
+        real = c.run_step
+
+        def run_step(step, deadline):
+            r = real(step, deadline)
+            if step["kind"] == "put-until-refused":
+                c.admission = 4
+            return r
+
+        c.run_step = run_step
+        res, ev = self.go(c)
+        tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
+        self.assertFalse(tl["4"]["admission_recovered_early"])
+        self.assertIsNotNone(tl["4"]["refusal_start_ms"])
+
+    def test_an_interrupt_is_an_operator_stop(self):
+        c = FakeCluster(self.cfg, self.clock)
+
+        def interrupt(**kw):
+            raise KeyboardInterrupt
+
+        c.smoke = interrupt
+        res, _ = self.go(c)
+        self.assertEqual((res["stop"]["reason"], res["stop"]["stage"]), ("operator", "2"))
+
     def test_a_resource_rule_during_the_drain_stops_the_services(self):
         c = FakeCluster(self.cfg, self.clock)
         c.stop_at_stage, c.stop_reason = "4", "operator"
@@ -1053,7 +1104,11 @@ class Commands(Base):
             driver.validate(undetermined, execute=True)
         p, sha = self.write(undetermined)
         with NoContact():
+            # Chosen at the preflight: a preflight runs without it, a run never.
             self.assertEqual(driver.main(["preflight", p, "--execute", "--approval", self.approval(sha, ("preflight",))],
+                                         now=NOW, cluster_factory=lambda cfg: FakeCluster(cfg)), 0)
+            self.assertEqual(driver.main(["run", p, "--execute", "--evidence", self.dir,
+                                          "--approval", self.approval(sha, ("run",))],
                                          now=NOW, cluster_factory=lambda cfg: FakeCluster(cfg)), 2)
             self.assertEqual(driver.main(["check", p]), 0)
 
