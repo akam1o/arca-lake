@@ -83,7 +83,7 @@ muts = [
  ("judge: a stop with every criterion met passes", "r110/judge.py", "all(r[\"outcome\"] == PASSED for r in res) and not stop and not unwatched:", "all(r[\"outcome\"] == PASSED for r in res) and not unwatched:", "test_driver"),
  ("judge: unsampled protections pass", "r110/judge.py", "all(r[\"outcome\"] == PASSED for r in res) and not stop and not unwatched:", "all(r[\"outcome\"] == PASSED for r in res) and not stop:", "test_driver"),
  ("judge: C3a one probe enough", "r110/judge.py", "    need = int(v[\"c3a_hold_s\"] // v[\"c3a_probe_interval_s\"])", "    need = 1", "test_driver"),
- ("judge: no-outcome probe dropped", "r110/judge.py", "        out.append(outcomes.get((i[\"op_id\"], i[\"attempt\"]), \"unknown\"))", "        if (i[\"op_id\"], i[\"attempt\"]) in outcomes:\n            out.append(outcomes[(i[\"op_id\"], i[\"attempt\"])])", "test_driver"),
+ ("judge: no-outcome probe dropped", "r110/judge.py", "        out.append(outcomes.get((i[\"op_id\"], i[\"attempt\"]), \"no-outcome\"))", "        if (i[\"op_id\"], i[\"attempt\"]) in outcomes:\n            out.append(outcomes[(i[\"op_id\"], i[\"attempt\"])])", "test_driver"),
  ("judge: partial samples dropped", "r110/judge.py", "        if s.get(\"target\") != target or s.get(\"status\") not in (\"ok\", \"partial\"):", "        if s.get(\"target\") != target or s.get(\"status\") != \"ok\":", "test_driver"),
  ("driver: stale values used", "r110/driver.py", "                if now - x[\"ended_wall_ms\"] > 2 * self.iv_ms:\n                    return None\n                return", "                return", "test_driver"),
  ("driver: exception not a stop", "r110/driver.py", "                except Exception as e:  # noqa: BLE001 - a failure of the driver is a stop", "                except ZeroDivisionError as e:", "test_driver"),
@@ -104,10 +104,12 @@ muts = [
  ("guard: SIGTERM ignored", "r110/guard.py", "        if getattr(self, \"terminated\", False):\n            return \"operator\", \"guard\"", "", "test_guard"),
  ("driver: a sampling gap ends the hold", "r110/driver.py", "        done = self.wait(\"4\", deadline, lambda s: self._left(s, 3) or (", "        done = self.wait(\"4\", deadline, lambda s: not self._admission(s, 3) or (", "test_driver"),
  ("driver: early recovery continues", "r110/driver.py", "        return bool(done) and not early", "        return bool(done)", "test_driver"),
- ("driver: C3a judged with a probe in flight", "r110/driver.py", "        if self.c.wait_step(n, deadline + 120) is None or self._stopped(\"5\"):\n            return False\n", "", "test_driver"),
+ ("driver: C3a judged with a probe in flight", "r110/driver.py", "        if self.c.wait_step(n, deadline) is None or self._stopped(\"5\"):\n            return False\n", "", "test_driver"),
  ("driver: NaN limits accepted", "r110/driver.py", "        if k not in budget.DEFAULTS or not budget.valid_limit(v) or v > budget.DEFAULTS[k]:", "        if k not in budget.DEFAULTS or v > budget.DEFAULTS[k]:", "test_driver"),
  ("driver: retained record unchecked", "r110/driver.py", "        raise ConfigError(\"retained_record: absolute directory -> sha256 of its listing (plan §10)\")", "        pass", "test_driver"),
  ("driver: stale against the newest sample", "r110/driver.py", "                if now - x[\"ended_wall_ms\"] > 2 * self.iv_ms:", "                if max(y[\"ended_wall_ms\"] for y in samples) - x[\"ended_wall_ms\"] > 2 * self.iv_ms:", "test_driver"),
+ ("judge: a no-outcome probe passes", "r110/judge.py", "    elif not reasons and \"no-outcome\" in probes:", "    elif False:", "test_driver"),
+ ("judge: C3b no-outcome PUTs pass", "r110/judge.py", "        if acked + open_ >= v[\"c3b_ack_fraction\"] * len(ops) and not refused:", "        if acked + open_ >= v[\"c3b_ack_fraction\"] * len(ops):", "test_driver"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]
