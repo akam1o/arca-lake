@@ -68,7 +68,8 @@ class Guard:
         with open(os.path.join(args.run_dir, "run.json")) as f:
             self.run_id = json.load(f)["run_id"]
         self.stop_file = common.StopFile(os.path.join(args.run_dir, "stop.json"))
-        self.hb = common.Heartbeat(args.heartbeat, self.run_id, args.heartbeat_timeout, self.clock)
+        self.hb = common.Heartbeat(args.heartbeat, args.heartbeat_id or self.run_id, args.heartbeat_timeout,
+                                   self.clock)
         self.free = (checks or {}).get("free", free_bytes)
         self.mem = (checks or {}).get("mem", mem_available_bytes)
         self.deadline = self.clock.monotonic() + args.max_seconds
@@ -162,6 +163,7 @@ def main(argv=None, clock=None, checks=None):
     p.add_argument("--max-seconds", type=float, default=7.5 * 3600 + 600)
     p.add_argument("--interval", type=float, default=1.0)
     p.add_argument("--services")
+    p.add_argument("--heartbeat-id", help="the run id the heartbeat names (default: this run's)")
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--" not in argv:
         p.error("the load command follows --")
