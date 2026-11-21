@@ -239,7 +239,8 @@ class Sentinel:
             return {"reason": "monitor-failed", "detail": f"alarms: {e}"}
         for n in names:
             if not n.endswith(".json"):
-                continue
+                continue  # a temporary name is never read
+
             try:
                 rec = common.read_json(os.path.join(d, n))
             except (OSError, ValueError):

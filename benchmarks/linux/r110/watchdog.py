@@ -183,14 +183,20 @@ def ssh_runner(target, script, argv, timeout=40):
     return r.returncode, r.stdout
 
 
+# Written whole under a temporary name, then linked into place: exclusive
+# (the first record wins) and never seen half written.
 WRITE_STOP = r'''
 import json, os, sys
 p, rec = sys.argv[1], sys.argv[2]
+tmp = "%s.tmp-%d" % (p, os.getpid())
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+os.write(fd, rec.encode()); os.fsync(fd); os.close(fd)
 try:
-    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    os.link(tmp, p); print("written")
 except FileExistsError:
-    print("exists"); sys.exit(0)
-os.write(fd, rec.encode()); os.fsync(fd); os.close(fd); print("written")
+    print("exists")
+finally:
+    os.unlink(tmp)
 '''
 
 WRITE_HEARTBEAT = r'''
@@ -387,12 +393,7 @@ class Watchdog:
         rec = {"reason": reason, "source": "watchdog", "wall_ms": self.clock.wall_ms(), "detail": detail}
         name = f"{self.clock.wall_ms():013d}-{reason}.json"
         os.makedirs(self.local_alarms, exist_ok=True)
-        try:
-            fd = os.open(os.path.join(self.local_alarms, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-            with os.fdopen(fd, "w") as f:
-                json.dump(rec, f)
-        except FileExistsError:
-            pass
+        common.link_new(os.path.join(self.local_alarms, name), json.dumps(rec))
         written = None
         if self.cfg.get("remote_alarms"):
             for _ in range(3):

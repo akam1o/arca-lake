@@ -336,6 +336,31 @@ class Watching(unittest.TestCase):
         self.assertEqual(common.StopFile(os.path.join(self.dir, "load", "stop.json")).reason()["reason"],
                          "heartbeat-lost")
 
+    def test_a_file_being_written_is_never_read_as_a_stop(self):
+        """Stop files and alarms are linked into place whole: a temporary
+        name is never read, a second writer learns the first record."""
+        p = os.path.join(self.dir, "load", "stop.json")
+        self.assertTrue(common.link_new(p, json.dumps({"reason": "operator"})))
+        self.assertFalse(common.link_new(p, json.dumps({"reason": "memory"})))
+        self.assertEqual(common.StopFile(p).reason()["reason"], "operator")
+        self.assertEqual(sorted(os.listdir(os.path.dirname(p))), ["stop.json"])
+        r = subprocess.run([sys.executable, "-I", "-", os.path.join(self.dir, "x.json"), '{"reason": "load"}'],
+                           input=watchdog.WRITE_STOP, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout.strip(), "written")
+        self.assertEqual(sorted(n for n in os.listdir(self.dir) if n.startswith("x.json")), ["x.json"])
+        node = self.service("node0")
+        self.beat(1)
+        with open(os.path.join(self.dir, "alarms", "0001-memory.json.tmp-1"), "w") as f:
+            f.write('{"reason": "mem')  # a write in progress
+        s, t, out = self.sentinel()
+        time.sleep(0.5)
+        self.assertTrue(t.is_alive(), "a temporary file was read as an alarm")
+        self.assertIsNone(node.poll())
+        common.link_new(os.path.join(self.dir, "alarms", "0001-memory.json"), json.dumps({"reason": "memory"}))
+        res = self.result(t)
+        self.assertEqual(res["reason"], "memory")
+        node.wait(10)
+
     def test_a_check_that_cannot_be_made_stops_and_confirms(self):
         node = self.service("node0")
         self.beat(1)

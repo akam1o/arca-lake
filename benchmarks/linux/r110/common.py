@@ -92,25 +92,39 @@ def read_json(path):
         return json.load(f)
 
 
+def link_new(path, text):
+    """Create ``path`` holding ``text``, whole, only if it does not exist:
+    written and synced under a temporary name, then hard-linked into place
+    (atomic and exclusive). True if created, False if it existed."""
+    tmp = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.link(tmp, path)
+        created = True
+    except FileExistsError:
+        created = False
+    finally:
+        os.unlink(tmp)
+    fsync_dir(os.path.dirname(os.path.abspath(path)))
+    return created
+
+
 class StopFile:
-    """The run's stop file: the first reason written wins (``O_EXCL``);
-    later writers learn the existing reason. Readers poll ``reason()``."""
+    """The run's stop file: the first reason written wins; later writers
+    learn the existing reason. Readers poll ``reason()``. The record is
+    written whole to a file of its own, then linked to the path (``link``
+    fails if the path exists: exclusive, and a reader never sees a file
+    being written)."""
 
     def __init__(self, path):
         self.path = path
 
     def stop(self, reason, source, wall_ms):
         rec = {"reason": reason, "source": source, "wall_ms": wall_ms}
-        try:
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            return False
-        with os.fdopen(fd, "w") as f:
-            json.dump(rec, f)
-            f.flush()
-            os.fsync(f.fileno())
-        fsync_dir(os.path.dirname(os.path.abspath(self.path)))
-        return True
+        return link_new(self.path, json.dumps(rec))
 
     def reason(self):
         """The stop record, or None. An unreadable or partial file counts
