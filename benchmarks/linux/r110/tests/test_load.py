@@ -180,6 +180,22 @@ class Limits(Base):
         self.assertEqual(ld.stop_reason, "heartbeat-lost")
 
 
+class LoadHeartbeat(Base):
+    def test_the_load_stops_by_itself_when_the_heartbeat_goes_stale(self):
+        """The guard gone too: the load reads the heartbeat itself."""
+        clock = common.FakeClock()
+        c = fakes.Scripted(clock, fakes.ok)
+        hb = os.path.join(self.dir, "hb.json")
+        with open(hb, "w") as f:
+            json.dump({"run_id": "run-t", "seq": 1}, f)
+        lim = dict(budget.DEFAULTS)
+        ld = Load(self.dir, "run-t", ["http://x:1"], lim, clock, c.factory, object_size=10, heartbeat=hb)
+        self.addCleanup(ld.close)
+        ld.step({"kind": "put", "keys": [f"k{i}" for i in range(100_000)], "max_seconds": 600})
+        self.assertEqual(ld.stop_reason, "heartbeat-lost")
+        self.assertLessEqual(max(t for t, *_ in c.sent), 1000 + 121)
+
+
 class NoResume(Base):
     def test_a_run_is_never_restarted_with_a_fresh_budget(self):
         c = fakes.Scripted(common.FakeClock(), fakes.ok)
