@@ -237,10 +237,17 @@ class Budget:
             self.stop(over)
             raise Stopped(over)
         t0 = self.clock.monotonic()
-        self._take_slot()
-        t1 = self.clock.monotonic()
-        self._take_token(stage_deadline)
-        t2 = self.clock.monotonic()
+        try:
+            self._take_slot()
+            t1 = self.clock.monotonic()
+            self._take_token(stage_deadline)
+            t2 = self.clock.monotonic()
+        except Stopped:
+            # Never sent: the attempt and its bytes stay counted (reserved),
+            # but a live slot it reserved is given back.
+            if new_live:
+                self.live_release()
+            raise
         permit.concurrency_wait_s = t1 - t0
         permit.rate_wait_s = t2 - t1
         return permit

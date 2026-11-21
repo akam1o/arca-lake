@@ -139,6 +139,7 @@ def expected(records, initial=None):
         elif r.get("type") == "outcome":
             outcomes[(r["op_id"], r["attempt"])] = r
     state = {}
+    pending = {}  # key -> states of writes whose outcome is unknown
     unresolved = []
     for k in sorted(intents):
         i = intents[k]
@@ -151,12 +152,16 @@ def expected(records, initial=None):
         if o is None:
             unresolved.append(k)
             cur.add(new)
+            pending.setdefault(key, set()).add(new)
         elif o["result"] == "ack":
-            state[key] = {new}
+            # An earlier write of unknown outcome may still be applied after
+            # this one (a delayed request): its state stays a candidate.
+            state[key] = {new} | pending.get(key, set())
         elif o["result"] in ("refused", "not-sent"):
             pass
         else:
             cur.add(new)
+            pending.setdefault(key, set()).add(new)
     return state, unresolved
 
 
