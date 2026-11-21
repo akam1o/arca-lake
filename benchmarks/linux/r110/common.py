@@ -128,6 +128,32 @@ class StopFile:
             return {"reason": "stop-file-unreadable", "detail": text[:200]}
 
 
+class Heartbeat:
+    """The watchdog's heartbeat as the guard and the load read it: a JSON
+    file ``{"run_id", "seq"}`` that counts only when it names this run and
+    its ``seq`` is higher than the last seen; fresh for ``timeout`` seconds
+    of the reader's monotonic clock after that (file times and wall clocks
+    are not used). Before the first beat: ``timeout`` from the start."""
+
+    def __init__(self, path, run_id, timeout, clock):
+        self.path, self.run_id, self.timeout, self.clock = path, run_id, timeout, clock
+        self.seq = None
+        self.fresh_until = clock.monotonic() + timeout
+
+    def check(self):
+        """None when fresh, else the breach reason."""
+        try:
+            with open(self.path) as f:
+                rec = json.load(f)
+            if rec.get("run_id") == self.run_id and isinstance(rec.get("seq"), int) \
+                    and (self.seq is None or rec["seq"] > self.seq):
+                self.seq = rec["seq"]
+                self.fresh_until = self.clock.monotonic() + self.timeout
+        except (OSError, ValueError, AttributeError):
+            pass  # absent, partial or foreign: not a new beat
+        return None if self.clock.monotonic() < self.fresh_until else "heartbeat-lost"
+
+
 # Stop reasons (one vocabulary for the generator, the guard, the watchdog
 # and the driver). Classes decide what is stopped (plan §6.2) and how a
 # stop is judged (plan §8): ``integrity`` -> Failed; ``resource`` and
