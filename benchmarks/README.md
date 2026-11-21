@@ -132,6 +132,16 @@ Results are written by criterion to `target/criterion/`.
   needs a binary built with `--features fdb,fault-injection`.
   `linux/adr35-loader.py` its bounded GET load, logged per request;
   `linux/adr35-summary.py` a run's publishable summary.
+- `linux/r110/` (R-110 capacity retest,
+  `docs/verification/phase-4.1-r110-retest-plan.md`; standard library
+  only, tests in `linux/r110/tests`, run by CI without any host:
+  `cd benchmarks/linux && python3 -I -m unittest discover -s r110/tests -t .`).
+  `budget.py`: the run's one budget for every data-plane HTTP attempt
+  (token bucket, concurrency, attempts, body bytes reserved before
+  sending, live set, run deadline; one process per run, never resumed);
+  `ledger.py`: the outcome ledger (an intent before each request, an
+  outcome after, CRC per line, fsync, unknown outcomes as candidate
+  states); `load.py`: the load process, executing the driver's steps.
 
 ## Reports
 
