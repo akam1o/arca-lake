@@ -24,9 +24,13 @@ second one; proposal 3 is moot without self-hosted runners).
   about 14 minutes (its longest job); line-table debug information, a
   dependency cache refreshed by pushes to `main` and the split of the
   three-process jobs bring a pull request's run to about 7–9 minutes.
-- The upgrade and rollback job (`fdb-upgrade`: five earlier releases and
-  a version-bumped tree built) runs on pushes to `main` and on demand,
-  not on pull requests.
+- The upgrade jobs run on pushes to `main` and on demand, not on pull
+  requests, side by side, each on its own FoundationDB container:
+  `fdb-mixed-version` (this tree and a version-bumped build of it) and
+  `fdb-upgrade` (upgrades from and rollbacks to earlier releases, whose
+  binaries are built once per set of release commits and cached:
+  binaries only, debug information stripped, checked against a sha256
+  manifest after a restore).
 - Pull requests are merged by rebase or squash (merge commits disabled);
   the sign-off check skips merge commits.
 

@@ -320,25 +320,27 @@ jobs:
         if: always()
         run: sudo docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
 
-  # Five earlier releases and a version-bumped build of this tree are
-  # compiled here: pushes to main and on-demand runs only.
-  fdb-upgrade:
-    name: FoundationDB upgrade and rollback
+  # The mixed-version rolling upgrade: this tree and a version-bumped build
+  # of it. Apart from the previous releases' job so that both run at once
+  # (each on its own FoundationDB container): pushes to main and on-demand
+  # runs only.
+  fdb-mixed-version:
+    name: FoundationDB mixed-version upgrade
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request'
     timeout-minutes: 120
     env:
       FDB_VERSION: 7.3.77
-      FDB_CONTAINER: fdb-${{ github.run_id }}
+      FDB_CONTAINER: fdb-mixed-${{ github.run_id }}
       # A failing test copies its processes' logs here; uploaded on failure.
       ARCA_TEST_ARTIFACTS: ${{ github.workspace }}/test-artifacts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # Seven debug builds do not fit the runner's free disk otherwise.
-      - name: free disk space (preinstalled SDKs this workflow does not use)
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
+      # No preinstalled SDK is removed (that took about 2 min): the earlier
+      # releases' build directories are deleted as each binary is copied,
+      # so at most one release and this tree's builds are on the disk.
+      - name: free disk space before the builds
+        run: df -h /
       - name: prepare the runner (compiler, pkg-config; idempotent)
         run: |
           set -euo pipefail
@@ -442,32 +444,155 @@ jobs:
           ARCA_BIN_OLD="$CARGO_TARGET_DIR/debug/arca-lake" \
           ARCA_BIN_NEW="$CARGO_TARGET_DIR/bump/debug/arca-lake" \
             cargo test -p arca-lake-testkit --features fdb --test it mixed_version:: -- --nocapture --test-threads=1
-      - name: upgrade from and rollback to the previous release (ADR-0024)
-        env:
-          ARCA_FDB_TESTS: "1"
-          ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
-          # Earlier releases: Phase 3.9 (protocol 3, schema 2; the upgrade
-          # with a finalize), Phase 3.10 and 3.11 (protocol 4, schema 3, as
-          # this one; mixed versions without a finalize).
-          RELEASE_39: 9674894109ec7fe813e63da5fefc90208483b1d5
-          RELEASE_310: 3f67cb88eba23da6e66039c5a9b26a81cc56321e
-          RELEASE_311: 04e6fe418bd02e52222accc7254d9d719b6f30a5
-          # Phase 3.12 (deferred reclamation on both sides; Phase 3.13).
-          RELEASE_312: cddd078f6c60c9ca826f21b617e4ac30dc781e58
-          # Phase 3.13 (repair status; Phase 3.14 rollback residuals).
-          RELEASE_313: 54c468c64a0d0547b1f1bea807de13ad3667e858
-          # Phase 4.1, the last release of schema 3 (before the tiering
-          # record, ADR-0035): the upgrade to schema 4, and the pivot of the
-          # Phase 3.9 upgrade (schema 4 does not read schema 2).
-          RELEASE_41: 12bff5dad05290e60b103386e6db7aec3882bf37
+      - name: free disk space after the builds
+        if: always()
+        run: df -h /
+      - name: keep FoundationDB state (on failure)
+        if: failure()
+        run: |
+          mkdir -p "$ARCA_TEST_ARTIFACTS"
+          sudo docker exec "$FDB_CONTAINER" fdbcli --timeout 20 --exec "status json" > "$ARCA_TEST_ARTIFACTS/fdb-status.json" 2>&1 || true
+          sudo docker logs "$FDB_CONTAINER" > "$ARCA_TEST_ARTIFACTS/fdb-container.log" 2>&1 || true
+      - name: upload diagnostics (on failure)
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fdb-mixed-version-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-artifacts
+          retention-days: 14
+          if-no-files-found: ignore
+      - name: stop FoundationDB server
+        if: always()
+        run: sudo docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
+
+
+  # Upgrades from and rollbacks to earlier releases, whose binaries are
+  # built once per set of release commits and cached (binaries only, debug
+  # information stripped; the build directories are not kept): pushes to
+  # main and on-demand runs only.
+  fdb-upgrade:
+    name: FoundationDB upgrade and rollback
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 120
+    env:
+      FDB_VERSION: 7.3.77
+      FDB_CONTAINER: fdb-${{ github.run_id }}
+      # A failing test copies its processes' logs here; uploaded on failure.
+      ARCA_TEST_ARTIFACTS: ${{ github.workspace }}/test-artifacts
+      # Earlier releases: Phase 3.9 (protocol 3, schema 2; the upgrade
+      # with a finalize), Phase 3.10 and 3.11 (protocol 4, schema 3, as
+      # this one; mixed versions without a finalize).
+      RELEASE_39: 9674894109ec7fe813e63da5fefc90208483b1d5
+      RELEASE_310: 3f67cb88eba23da6e66039c5a9b26a81cc56321e
+      RELEASE_311: 04e6fe418bd02e52222accc7254d9d719b6f30a5
+      # Phase 3.12 (deferred reclamation on both sides; Phase 3.13).
+      RELEASE_312: cddd078f6c60c9ca826f21b617e4ac30dc781e58
+      # Phase 3.13 (repair status; Phase 3.14 rollback residuals).
+      RELEASE_313: 54c468c64a0d0547b1f1bea807de13ad3667e858
+      # Phase 4.1, the last release of schema 3 (before the tiering
+      # record, ADR-0035): the upgrade to schema 4, and the pivot of the
+      # Phase 3.9 upgrade (schema 4 does not read schema 2).
+      RELEASE_41: 12bff5dad05290e60b103386e6db7aec3882bf37
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # No preinstalled SDK is removed (that took about 2 min): the earlier
+      # releases' build directories are deleted as each binary is copied,
+      # so at most one release and this tree's builds are on the disk.
+      - name: free disk space before the builds
+        run: df -h /
+      - name: prepare the runner (compiler, pkg-config; idempotent)
         run: |
           set -euo pipefail
+          if ! command -v cc >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config
+          fi
+          # S3 compatibility tests drive the gateway with the AWS CLI and
+          # boto3 (they skip when the tools are absent; installed here).
+          # boto3 is pinned in a virtual environment put first on PATH: the
+          # distribution's python3-boto3 is too old to return the multipart
+          # checksum type the conformance script checks. The distribution's
+          # awscli package is unusable with Python 3.14 ("badly formed help
+          # string"), so the official AWS CLI v2 bundle is installed instead,
+          # pinned by version and SHA-256.
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install -q boto3==1.40.0
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+          if ! command -v unzip >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip
+          fi
+          if ! aws --version 2>/dev/null | grep -q 'aws-cli/2.37.9 .*exe/x86_64'; then
+            dpkg -s awscli >/dev/null 2>&1 && sudo apt-get remove -y -qq awscli
+            tmp="$(mktemp -d)"
+            curl -sSL --retry 5 -o "$tmp/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.9.zip"
+            echo "6b3a6a3d7bb3997928f0bdf7b866914224abf242c2e54e1dcebbe84bee64f356  $tmp/awscli.zip" | sha256sum -c -
+            (cd "$tmp" && unzip -q awscli.zip && sudo ./aws/install --update >/dev/null)
+            rm -rf "$tmp"
+          fi
+          # bindgen (foundationdb-sys) needs libclang.
+          if ! ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 && ! ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev
+          fi
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99"
+      # Dependencies only: seven builds' output would take the repository's
+      # whole cache quota and evict the other jobs' entries.
+      - name: cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
+      - run: echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
+      - name: cache downloaded tools and packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/arca-lake
+          key: tools-${{ runner.os }}-fdb7.3.77-v1
+      - name: install FoundationDB client library
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cache/arca-lake/fdb"
+          deb="$HOME/.cache/arca-lake/fdb/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          [ -f "$deb" ] || curl -sSL -o "$deb" \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo dpkg -i "$deb"
+      # The releases are fixed commits: their binaries are the same for the
+      # same toolchain, features and FoundationDB client. A manifest of
+      # their sha256 is cached with them and checked after a restore.
+      - name: restore the earlier releases' binaries
+        id: releases
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/arca-lake-releases
+          key: release-bins-v1-${{ runner.os }}-rust1.99-fdb${{ env.FDB_VERSION }}-features-fdb-${{ env.RELEASE_39 }}-${{ env.RELEASE_310 }}-${{ env.RELEASE_311 }}-${{ env.RELEASE_312 }}-${{ env.RELEASE_313 }}-${{ env.RELEASE_41 }}
+      - name: check the restored binaries
+        if: steps.releases.outputs.cache-hit == 'true'
+        run: cd ~/.cache/arca-lake-releases && sha256sum -c manifest.sha256
+      - name: build the earlier releases
+        if: steps.releases.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          out="$HOME/.cache/arca-lake-releases"
+          rm -rf "$out"
+          mkdir -p "$out"
           build() {
             git fetch --no-tags --depth=1 origin "$1"
             rm -rf "$RUNNER_TEMP/release-$2"
             mkdir -p "$RUNNER_TEMP/release-$2"
             git archive "$1" | tar -x -C "$RUNNER_TEMP/release-$2"
-            (cd "$RUNNER_TEMP/release-$2" && cargo build -p arca-lake --features fdb --target-dir "$CARGO_TARGET_DIR/release-$2")
+            (cd "$RUNNER_TEMP/release-$2" && cargo build -p arca-lake --features fdb --target-dir "$RUNNER_TEMP/target-$2")
+            cp "$RUNNER_TEMP/target-$2/debug/arca-lake" "$out/arca-lake-$2"
+            strip --strip-debug "$out/arca-lake-$2"
+            # Only one release's build on the disk at a time.
+            rm -rf "$RUNNER_TEMP/target-$2" "$RUNNER_TEMP/release-$2"
           }
           build "$RELEASE_39" 39
           build "$RELEASE_310" 310
@@ -475,16 +600,61 @@ jobs:
           build "$RELEASE_312" 312
           build "$RELEASE_313" 313
           build "$RELEASE_41" 41
+          (cd "$out" && sha256sum arca-lake-* > manifest.sha256 && ls -l)
+          df -h /
+      # Saved as soon as they are built: a failing test later does not throw
+      # the builds away.
+      - name: save the earlier releases' binaries
+        if: steps.releases.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/arca-lake-releases
+          key: ${{ steps.releases.outputs.cache-primary-key }}
+      - name: start FoundationDB server
+        run: |
+          set -euo pipefail
+          docker() { sudo docker "$@"; }
+          docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
+          # Bridge network, with the server advertising its container
+          # address (reachable from the runner host): no port shared with a
+          # concurrent run on the same host. Same topology as the failover
+          # job and deploy/dev/fdb-test.sh.
+          docker run -d --name "$FDB_CONTAINER" -e FDB_NETWORKING_MODE=container \
+            "foundationdb/foundationdb:${FDB_VERSION}"
+          # The image starts fdbserver without a database, and `status` on
+          # an unconfigured cluster prints nothing until fdbcli's timeout
+          # (polling it this way cost 30 x 30 s per run). Create the database
+          # right away and retry until the process answers.
+          for _ in $(seq 1 30); do
+            out="$(docker exec "$FDB_CONTAINER" fdbcli --timeout 10 --exec "configure new single memory" 2>&1 || true)"
+            echo "$out"
+            grep -qE "Database created|already exists" <<<"$out" && break
+            sleep 1
+          done
+          for _ in $(seq 1 60); do
+            docker exec "$FDB_CONTAINER" fdbcli --timeout 10 --exec "status minimal" 2>/dev/null | grep -q "is available" && break
+            sleep 1
+          done
+          docker exec "$FDB_CONTAINER" fdbcli --timeout 30 --exec "status minimal"
+          docker exec "$FDB_CONTAINER" cat /var/fdb/fdb.cluster | tee "$RUNNER_TEMP/fdb.cluster"
+      - name: upgrade from and rollback to the previous release (ADR-0024)
+        env:
+          ARCA_FDB_TESTS: "1"
+          ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
+        run: |
+          set -euo pipefail
+          r="$HOME/.cache/arca-lake-releases"
           cargo build -p arca-lake --features fdb
-          ARCA_BIN_PREV="$CARGO_TARGET_DIR/release-39/debug/arca-lake" \
-          ARCA_BIN_PREV_310="$CARGO_TARGET_DIR/release-310/debug/arca-lake" \
-          ARCA_BIN_PREV_311="$CARGO_TARGET_DIR/release-311/debug/arca-lake" \
-          ARCA_BIN_PREV_312="$CARGO_TARGET_DIR/release-312/debug/arca-lake" \
-          ARCA_BIN_PREV_313="$CARGO_TARGET_DIR/release-313/debug/arca-lake" \
-          ARCA_BIN_PREV_41="$CARGO_TARGET_DIR/release-41/debug/arca-lake" \
-          ARCA_BIN_PIVOT="$CARGO_TARGET_DIR/release-41/debug/arca-lake" \
+          ARCA_BIN_PREV="$r/arca-lake-39" \
+          ARCA_BIN_PREV_310="$r/arca-lake-310" \
+          ARCA_BIN_PREV_311="$r/arca-lake-311" \
+          ARCA_BIN_PREV_312="$r/arca-lake-312" \
+          ARCA_BIN_PREV_313="$r/arca-lake-313" \
+          ARCA_BIN_PREV_41="$r/arca-lake-41" \
+          ARCA_BIN_PIVOT="$r/arca-lake-41" \
           ARCA_BIN_CUR="$CARGO_TARGET_DIR/debug/arca-lake" \
             cargo test -p arca-lake-testkit --features fdb --test it previous_release:: -- --nocapture --test-threads=1
+          df -h /
       - name: keep FoundationDB state (on failure)
         if: failure()
         run: |
