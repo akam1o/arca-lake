@@ -188,12 +188,12 @@ class LoadHeartbeat(Base):
         hb = os.path.join(self.dir, "hb.json")
         with open(hb, "w") as f:
             json.dump({"run_id": "run-t", "seq": 1}, f)
-        lim = dict(budget.DEFAULTS)
+        lim = dict(budget.DEFAULTS, concurrency=1)  # one worker: the virtual clock moves only by its waits
         ld = Load(self.dir, "run-t", ["http://x:1"], lim, clock, c.factory, object_size=10, heartbeat=hb)
         self.addCleanup(ld.close)
         ld.step({"kind": "put", "keys": [f"k{i}" for i in range(100_000)], "max_seconds": 600})
         self.assertEqual(ld.stop_reason, "heartbeat-lost")
-        self.assertLessEqual(max(t for t, *_ in c.sent), 1000 + 121)
+        self.assertLessEqual(max(t for t, *_ in c.sent), 1000 + 120)
 
 
 class NoResume(Base):
