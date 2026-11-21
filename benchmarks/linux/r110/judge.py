@@ -32,6 +32,7 @@ VALUES = {
     "c2_hold_s": 600,
     "c2_du_tolerance": 0.05,
     "c3a_hold_s": 600,
+    "c3a_probe_interval_s": 10,
     "c3b_ack_fraction": 0.99,
     "c4_window_s": 3600,
     "c4_slope_fraction_per_hour": 0.01,
@@ -50,12 +51,14 @@ def verdict(name, outcome, reasons=(), **evidence):
 
 
 def series(samples, target, key, t0=None, t1=None):
-    """``[(wall_ms, value)]`` of ``key`` in ``target``'s ok samples between
-    ``t0`` and ``t1`` (inclusive); samples that are not ok, or lack the
-    key, are left out (the coverage checks then see the gap)."""
+    """``[(wall_ms, value)]`` of ``key`` in ``target``'s samples between
+    ``t0`` and ``t1`` (inclusive). A value counts when it was read: in an
+    ``ok`` sample, or a ``partial`` one (another family absent from the
+    same scrape); samples in error, or lacking the key, are left out (the
+    coverage checks then see the gap)."""
     out = []
     for s in samples:
-        if s.get("target") != target or s.get("status") != "ok":
+        if s.get("target") != target or s.get("status") not in ("ok", "partial"):
             continue
         t = s["ended_wall_ms"]
         if (t0 is not None and t < t0) or (t1 is not None and t > t1):
@@ -159,8 +162,8 @@ def c1(samples, records, tl, v, nodes):
             reasons.append(f"{k} rose during the refusal")
     for n in nodes:
         pend = series(samples, n, "arca_node_reclaim_pending_records", t_r, t_e)
-        if not pend:
-            return verdict("C1", INCONCLUSIVE, [f"{n}: pending records not sampled"], **ev)
+        if not covered(pend, t_r, t_e, iv, v["max_gap_factor"]):
+            return verdict("C1", INCONCLUSIVE, [f"{n}: pending records not sampled through the refusal"], **ev)
         if min(p for _, p in pend) != 0:
             reasons.append(f"{n}: pending records never back to 0")
     approx = [k for k in ("arca_gateway_node_capacity_refusals_total",)
@@ -266,11 +269,12 @@ def c2(samples, records, tl, v, nodes):
                    approximate_attribution=approx)
 
 
-def _admission_window(samples, t0, t1, v):
+def _admission_window(samples, t0, t1, v, gateways):
+    """Every configured gateway's admission state and the controller's
+    backpressure state over [t0, t1], or None if any is not covered."""
     iv = v["interval_s"] * 1000
-    gws = [t for t in {s["target"] for s in samples} if t.startswith("gateway")]
     out = {}
-    for g in gws + ["controller"]:
+    for g in list(gateways) + ["controller"]:
         key = "arca_controller_backpressure_state" if g == "controller" else "arca_gateway_admission_state"
         pts = series(samples, g, key, t0, t1)
         if not covered(pts, t0, t1, iv, v["max_gap_factor"]):
@@ -279,7 +283,7 @@ def _admission_window(samples, t0, t1, v):
     return out
 
 
-def c3a(samples, records, tl, v):
+def c3a(samples, records, tl, v, gateways=("gateway0",)):
     s5 = tl.get("5")
     if not s5:
         return verdict("C3a", NOT_RUN)
@@ -287,13 +291,14 @@ def c3a(samples, records, tl, v):
     if t0 is None:
         return verdict("C3a", INCONCLUSIVE, ["admission never 0 for the hold within stage 5"])
     t1 = t0 + v["c3a_hold_s"] * 1000
-    w = _admission_window(samples, t0, t1, v)
+    w = _admission_window(samples, t0, t1, v, gateways)
     if w is None:
         return verdict("C3a", INCONCLUSIVE, ["the window not sampled"])
     reasons = [f"{g} not 0 in the window" for g, pts in w.items() if any(x != 0 for _, x in pts)]
     probes = _attempts(records, "5", "probe", "PUT", t0, t1)
-    if not probes:
-        return verdict("C3a", INCONCLUSIVE, ["no probe PUT in the window"])
+    need = int(v["c3a_hold_s"] // v["c3a_probe_interval_s"])
+    if len(probes) < need:
+        return verdict("C3a", INCONCLUSIVE, [f"{len(probes)} probe PUTs in the window, {need} needed"])
     bad = [p for p in probes if p != "ack"]
     if bad:
         reasons.append(f"{len(bad)} of {len(probes)} probe PUTs not acknowledged")
@@ -301,27 +306,29 @@ def c3a(samples, records, tl, v):
 
 
 def _attempts(records, stage, kind, op, t0=None, t1=None):
-    intents = {(r["op_id"], r["attempt"]): r for r in records if r.get("type") == "intent"}
+    """The results of the attempts of ``op`` (and ``kind``) in ``stage``
+    whose intent falls in [t0, t1]; an intent without an outcome is
+    ``unknown`` (never left out)."""
+    outcomes = {(r["op_id"], r["attempt"]): r["result"] for r in records if r.get("type") == "outcome"}
     out = []
-    for r in records:
-        if r.get("type") != "outcome":
+    for i in records:
+        if i.get("type") != "intent":
             continue
-        i = intents.get((r["op_id"], r["attempt"]))
-        if not i or i.get("stage") != stage or i["op"] != op or (kind and i.get("kind") != kind):
+        if i.get("stage") != stage or i["op"] != op or (kind and i.get("kind") != kind):
             continue
         if (t0 is not None and i["wall_ms"] < t0) or (t1 is not None and i["wall_ms"] > t1):
             continue
-        out.append(r["result"])
+        out.append(outcomes.get((i["op_id"], i["attempt"]), "unknown"))
     return out
 
 
-def c3b(samples, records, tl, v):
+def c3b(samples, records, tl, v, gateways=("gateway0",)):
     s6 = tl.get("6")
     if not s6:
         return verdict("C3b", NOT_RUN)
     if not s6.get("completed"):
         return verdict("C3b", INCONCLUSIVE, ["stage 6 did not run its full time"])
-    w = _admission_window(samples, s6["start_ms"], s6["end_ms"], v)
+    w = _admission_window(samples, s6["start_ms"], s6["end_ms"], v, gateways)
     if w is None:
         return verdict("C3b", INCONCLUSIVE, ["stage 6 not sampled"])
     puts = _attempts(records, "6", "op", "PUT") + _attempts(records, "6", "retry", "PUT")
@@ -341,7 +348,7 @@ def c3b(samples, records, tl, v):
     return verdict("C3b", FAILED if reasons else PASSED, reasons, puts=len(ops), acked=acked)
 
 
-def c4(samples, records, tl, v, nodes):
+def c4(samples, records, tl, v, nodes, gateways=("gateway0",)):
     s6 = tl.get("6")
     if not s6:
         return verdict("C4", NOT_RUN)
@@ -364,7 +371,7 @@ def c4(samples, records, tl, v, nodes):
                 reasons.append(f"{n}: {key} slope {sl} per hour")
             if rng > v["c4_range_fraction"] * a:
                 reasons.append(f"{n}: {key} range {rng}")
-    w = _admission_window(samples, t0, t1, v)
+    w = _admission_window(samples, t0, t1, v, gateways)
     if w is None:
         return verdict("C4", INCONCLUSIVE, ["admission not sampled over the window"], **ev)
     for g, pts in w.items():
@@ -393,19 +400,33 @@ def c5(tl):
 CRITERIA_STAGE = {"C1": "4", "C2": "5", "C3a": "5", "C3b": "6", "C4": "6", "C5": "7"}
 
 
-def judge(samples, records, tl, stop=None, values=None, nodes=("node0", "node1", "node2", "node3")):
+def _run_span(tl):
+    """[first start, last end] of the stages with load (3 to 7) that ran."""
+    ts = [tl[s] for s in ("3", "4", "5", "6", "7") if s in tl and "start_ms" in tl[s]]
+    if not ts:
+        return None
+    return ts[0]["start_ms"], max(t.get("end_ms", t["start_ms"]) for t in ts)
+
+
+def judge(samples, records, tl, stop=None, values=None, nodes=("node0", "node1", "node2", "node3"),
+          gateways=("gateway0",)):
     """Every criterion and the run's outcome (see the module's order)."""
     v = dict(VALUES, **(values or {}))
     res = [c1(samples, records, tl, v, nodes), c2(samples, records, tl, v, nodes),
-           c3a(samples, records, tl, v), c3b(samples, records, tl, v),
-           c4(samples, records, tl, v, nodes), c5(tl)]
-    forbidden = []
-    for k in ("arca_controller_gc_skipped_referenced_total",):
-        if any(x > 0 for _, x in series(samples, "controller", k)):
-            forbidden.append(k)
-    for n in nodes:
-        if any(x > 0 for _, x in series(samples, n, "arca_node_reclaim_damaged")):
-            forbidden.append(f"{n} arca_node_reclaim_damaged")
+           c3a(samples, records, tl, v, gateways), c3b(samples, records, tl, v, gateways),
+           c4(samples, records, tl, v, nodes, gateways), c5(tl)]
+    forbidden, unwatched = [], []
+    watch = [("controller", "arca_controller_gc_skipped_referenced_total")] + \
+            [(n, "arca_node_reclaim_damaged") for n in nodes]
+    span = _run_span(tl)
+    for target, k in watch:
+        pts = series(samples, target, k)
+        if any(x > 0 for _, x in pts):
+            forbidden.append(f"{target} {k}")
+        # A protection counter not sampled over the run cannot show it held.
+        if span and not covered([p for p in pts if span[0] <= p[0] <= span[1]], span[0], span[1],
+                                v["interval_s"] * 1000, v["max_gap_factor"]):
+            unwatched.append(f"{target} {k}")
     cls = common.reason_class(stop["reason"]) if stop else None
     if stop and cls != "integrity":
         stop_stage = stop.get("stage")
@@ -423,10 +444,14 @@ def judge(samples, records, tl, stop=None, values=None, nodes=("node0", "node1",
         overall = FAILED
     elif any(r["outcome"] == FAILED for r in res):
         overall = FAILED
-    elif all(r["outcome"] == PASSED for r in res):
+    elif all(r["outcome"] == PASSED for r in res) and not stop and not unwatched:
+        # A stop that is not an integrity one (plan §8: a stop by the
+        # watchdog, the guard or a limit, a lost monitor) makes the run
+        # Inconclusive even when every criterion was met before it.
         overall = PASSED
     elif all(r["outcome"] == NOT_RUN for r in res):
         overall = NOT_RUN
     else:
         overall = INCONCLUSIVE
-    return {"outcome": overall, "criteria": res, "stop": stop, "forbidden": forbidden, "values": v}
+    return {"outcome": overall, "criteria": res, "stop": stop, "forbidden": forbidden,
+            "protections_not_sampled": unwatched, "values": v}

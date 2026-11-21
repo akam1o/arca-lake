@@ -60,9 +60,42 @@ muts = [
  ("judge: C2 du not checked", "r110/judge.py", "            if abs(d - (sg + sd)) > v[\"c2_du_tolerance\"] * (sg + sd):", "            if False:", "test_driver"),
  ("judge: C5 incomplete passes", "r110/judge.py", "    if not vr.get(\"complete\") or mf is None or sc is None:", "    if False:", "test_driver"),
  ("remote: teardown without marker", "r110/remote.py", "[ \\\"$(cat {Q(d)}/{MARK} 2>/dev/null)\\\" = {Q(rid)} ] && rm", "rm", "test_driver"),
- ("remote: teardown while running", "r110/remote.py", "        if alive is None or alive.strip():", "        if False:", "test_driver"),
+ ("remote: a running process not reported", "r110/remote.py", "            print(\"alive \" + n); bad = 1", "            pass", "test_driver"),
  ("remote: smoke guard stops main services", "r110/remote.py", "*([] if sub else [\"--services\", f\"{self.run_dir}/services\"]),", "\"--services\", f\"{self.run_dir}/services\",", "test_driver"),
  ("remote: setup reuses directories", "r110/remote.py", "        self.ssh(f\"[ ! -e {Q(self.run_dir)} ] && [ ! -e {Q(self.fdb_data)} ] || \"\n                 f\"{{ echo 'run directories exist' >&2; exit 1; }}; \"\n", "        self.ssh(\"true; \"\n", "test_driver"),
+ # Review findings (second round).
+ ("load: NaN limits accepted", "r110/budget.py", "    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0", "    return True"),
+ ("load: bucket and list not in the ledger", "r110/load.py", "            try:\n                self.ledger.write(rec)\n            except ledger_mod.LedgerFailure:\n                self.stop(\"ledger-failure\")\n                raise budget_mod.Stopped(\"ledger-failure\") from None\n            r = self._client()", "            try:\n                if op in (\"PUT\", \"DELETE\", \"GET\"):\n                    self.ledger.write(rec)\n            except ledger_mod.LedgerFailure:\n                self.stop(\"ledger-failure\")\n                raise budget_mod.Stopped(\"ledger-failure\") from None\n            r = self._client()"),
+ ("load: outcome write failure ignored", "r110/load.py", "            try:\n                self.ledger.write(out)\n            except ledger_mod.LedgerFailure:\n                self.stop(\"ledger-failure\")\n                raise budget_mod.Stopped(\"ledger-failure\") from None", "            try:\n                self.ledger.write(out)\n            except ledger_mod.LedgerFailure:\n                pass"),
+ ("load: verify ledger failure ignored", "r110/load.py", "                except ledger_mod.LedgerFailure:\n                    self.stop(\"ledger-failure\")\n                    raise budget_mod.Stopped(\"ledger-failure\") from None\n            with lock:", "                except ledger_mod.LedgerFailure:\n                    pass\n            with lock:"),
+ ("load: 5xx does not stop", "r110/load.py", "        if r.status >= 500 and r.status != 503:\n            self.stop(\"unexpected-5xx\")", "        pass"),
+ ("load: refused new key keeps its slot", "r110/load.py", "            if new_live and result in (None, \"refused\", \"not-sent\"):", "            if new_live and result is None:"),
+ ("load: connection refused taken as sent", "r110/s3.py", "            if self._c.sock is None:\n                # A failed connection sends nothing: ``not-sent``, not unknown.\n                self._c.connect()\n", ""),
+ ("load: probe failures ignored", "r110/load.py", "                if bad >= failures:\n                    self.stop(\"probe\")\n                    return", "                pass"),
+ ("watchdog: arguments not quoted", "r110/watchdog.py", "    return \" \".join([\"python3\", \"-I\", \"-\"] + [shlex.quote(str(a)) for a in argv])", "    return \" \".join([\"python3\", \"-I\", \"-\"] + [str(a) for a in argv])", "test_guard"),
+ ("guard: signals itself (pid)", "r110/guard.py", "            if rec[\"pid\"] in mine:", "            if False:", "test_guard"),
+ ("guard: signals the guard records", "r110/guard.py", "KEEP_PREFIXES = (\"guard\", \"sampler\")", "KEEP_PREFIXES = (\"sampler\",)", "test_guard"),
+ ("guard: stop file unread after the load exits", "r110/guard.py", "                rec = self.stop_file.reason()\n                if rec is not None:\n                    reason, source = rec.get(\"reason\", \"stop-file-unreadable\"), \"stop-file\"\n                break", "                break", "test_guard"),
+ ("guard: NaN accepted", "r110/guard.py", "    if not all(math.isfinite(x) and x > 0 for x in nums):", "    if False:", "test_guard"),
+ ("watchdog: guard loss ignored", "r110/watchdog.py", "            if g == \"gone\":\n                return \"guard-lost\", {}", "            pass", "test_guard"),
+ ("watchdog: NaN accepted", "r110/watchdog.py", "            if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)\n                                  or v <= 0):", "            if False:", "test_guard"),
+ ("proc: a null identity matches", "r110/proc.py", "    if not isinstance(rec, dict) or not isinstance(rec.get(\"pid\"), int) or not rec.get(\"start\") \\\n            or not rec.get(\"cwd\"):\n        raise ValueError(f\"not a process identity: {rec!r}\")\n    now", "    now", "test_guard"),
+ ("judge: a stop with every criterion met passes", "r110/judge.py", "all(r[\"outcome\"] == PASSED for r in res) and not stop and not unwatched:", "all(r[\"outcome\"] == PASSED for r in res) and not unwatched:", "test_driver"),
+ ("judge: unsampled protections pass", "r110/judge.py", "all(r[\"outcome\"] == PASSED for r in res) and not stop and not unwatched:", "all(r[\"outcome\"] == PASSED for r in res) and not stop:", "test_driver"),
+ ("judge: C3a one probe enough", "r110/judge.py", "    need = int(v[\"c3a_hold_s\"] // v[\"c3a_probe_interval_s\"])", "    need = 1", "test_driver"),
+ ("judge: no-outcome probe dropped", "r110/judge.py", "        out.append(outcomes.get((i[\"op_id\"], i[\"attempt\"]), \"unknown\"))", "        if (i[\"op_id\"], i[\"attempt\"]) in outcomes:\n            out.append(outcomes[(i[\"op_id\"], i[\"attempt\"])])", "test_driver"),
+ ("judge: partial samples dropped", "r110/judge.py", "        if s.get(\"target\") != target or s.get(\"status\") not in (\"ok\", \"partial\"):", "        if s.get(\"target\") != target or s.get(\"status\") != \"ok\":", "test_driver"),
+ ("driver: stale values used", "r110/driver.py", "                if newest - x[\"ended_wall_ms\"] > 2 * self.iv_ms:\n                    return None\n                return", "                return", "test_driver"),
+ ("driver: exception not a stop", "r110/driver.py", "                except Exception as e:  # noqa: BLE001 - a failure of the driver is a stop", "                except ZeroDivisionError as e:", "test_driver"),
+ ("driver: stage 7 stop unseen", "r110/driver.py", "        self.tl[\"7\"][\"verify\"] = r\n        if self._stopped(\"7\"):\n            return False", "        self.tl[\"7\"][\"verify\"] = r", "test_driver"),
+ ("driver: final stop record not read", "r110/driver.py", "                rec = self.c.stop_record()\n                if rec:\n                    self.stop = dict(rec, stage=self.current)", "                pass", "test_driver"),
+ ("driver: refusal not held for D1", "r110/driver.py", "            self.clock.monotonic() >= d1_done + CHAIN_S and self._quiet(s)))", "            self._quiet(s)))", "test_driver"),
+ ("driver: drain escalation ignored", "r110/driver.py", "                d[\"services\"] = self.c.stop_services()", "                pass", "test_driver"),
+ ("driver: approval scope unchecked", "r110/driver.py", "    if not isinstance(sc, list) or not all(isinstance(x, str) and x in SCOPES for x in sc):", "    if False:", "test_driver"),
+ ("driver: approval window unbounded", "r110/driver.py", "    if not w0 < w1 or w1 - w0 > datetime.timedelta(hours=MAX_WINDOW_H):", "    if False:", "test_driver"),
+ ("remote: teardown on a failed check", "r110/remote.py", "        if rc != 0 or not lines or not lines[-1].startswith(\"checked \") or len(lines) > 1:", "        if lines and not lines[-1].startswith((\"checked \", \"unreadable\")):", "test_driver"),
+ ("remote: ledger unchecked", "r110/remote.py", "            recs, _torn = ledger_mod.read(f.name)", "            recs = [json.loads(x.split(' ', 1)[1]) for x in open(f.name) if x.strip()]", "test_driver"),
+ ("remote: smoke budget not reserved", "r110/remote.py", "        out[k] = min(out[k], budget.DEFAULTS[k] - sum(v[k] for v in SMOKE_LIMITS.values()))", "        pass", "test_driver"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]
@@ -78,7 +111,7 @@ for entry in muts:
                             f"unittest.main(module='r110.tests.{module}', argv=['m'])"],
                            capture_output=True, text=True, timeout=600)
         last = [l for l in r.stderr.splitlines() if l.startswith(("OK", "FAILED"))]
-        print(f"{name}: {last[-1] if last else 'no result'}")
+        print(f"{name}: {last[-1] if last else f'KILLED rc {r.returncode} (detected: the run did not pass)'}")
     except subprocess.TimeoutExpired:
         print(f"{name}: TIMEOUT (counts as detected: the run did not pass)")
     finally:
