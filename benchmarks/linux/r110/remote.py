@@ -216,7 +216,9 @@ class SshCluster:
         c["binary"]["commit_and_features"] = "not readable from the binary: the approved build record's"
         c["proc_stat"] = {"ok": self.ssh("test -r /proc/stat && test -r /proc/vmstat && echo yes || true",
                                          check=False).strip() == "yes"}
-        klog = self.ssh("journalctl -k -n 1 --no-pager >/dev/null 2>&1 && echo yes || true", check=False).strip()
+        # A kernel line actually read: journalctl exits 0 without permission too.
+        klog = self.ssh("journalctl -k -n 1 -o cat --no-pager 2>/dev/null | grep -v -e '^-- ' -e 'No journal files' "
+                        "| grep -q . && echo yes || true", check=False).strip()
         c["kernel_log"] = {"ok": klog == "yes" or "kernel_log" in self.cfg.get("optional_checks", []),
                            "readable": klog == "yes"}
         mem = self.ssh("fdbserver --help 2>&1 | grep -c -- '--memory' || true", check=False).strip()
@@ -238,15 +240,18 @@ class SshCluster:
 
     def _retained(self):
         """The retained cluster's directories unchanged since the last
-        record (plan §10): size and modification time read with ``stat``
-        only, compared to ``retained_record`` of the configuration."""
+        record (plan §10): per directory, the sha256 of the sorted listing of
+        every entry below it (path, size, modification time; metadata only,
+        read with ``find``, nothing opened or changed), compared to
+        ``retained_record`` of the configuration."""
         rec = self.cfg.get("retained_record")
         if not rec:
             return {"ok": False, "detail": "no retained_record in the configuration to compare against"}
         host = self.cfg.get("retained_host", self.host)
         now = {}
         for path in sorted(rec):
-            out = self.ssh(f"stat -c '%s %Y' -- {Q(path)} 2>/dev/null || echo missing", check=False, host=host)
+            out = self.ssh(f"[ -d {Q(path)} ] && find {Q(path)} -printf '%P %s %T@\\n' | LC_ALL=C sort | sha256sum "
+                           f"| cut -c1-64 || echo missing", check=False, host=host)
             now[path] = out.strip()
         return {"ok": now == rec, "now": now}
 
@@ -348,9 +353,15 @@ class SshCluster:
         self.ssh(f"mkdir -p {Q(d)}/control && echo {Q(json.dumps({'run_id': rid}))} > {Q(d)}/run.json")
         hb = f"{self.run_dir}/heartbeat.json" if heartbeat else f"{d}/no-heartbeat.json"
         lim = dict(self.cfg["limits"], **SMOKE_LIMITS[sub], **(limits or {})) if sub else main_limits(self.cfg["limits"])
+        # Each sub-run has a bucket of its own (the main run's is created by
+        # stage 3 and must not exist before). Without a heartbeat the load
+        # does not read one at all, so that only the guard can stop it: the
+        # smoke stage exercises the guard's layer, not the load's.
         load = self.tool("load", "run", "--run-dir", d, "--endpoint", f"http://127.0.0.1:{self.ports['gateway']}",
-                         "--object-size", self.cfg["settings"]["object_size"], "--heartbeat", hb,
-                         "--heartbeat-id", self.cfg["run_id"], "--limits", json.dumps(lim))
+                         "--object-size", self.cfg["settings"]["object_size"],
+                         "--bucket", f"r110-{sub}" if sub else "r110",
+                         *(["--heartbeat", hb, "--heartbeat-id", self.cfg["run_id"]] if heartbeat else []),
+                         "--limits", json.dumps(lim))
         guard = self.tool("guard", "run", "--run-dir", d, "--heartbeat", hb, "--data-dir", self.mount,
                           "--min-free-gib", g["min_free_gib"], "--min-mem-mib", g["min_mem_mib"],
                           "--heartbeat-timeout", g["heartbeat_timeout_s"], "--heartbeat-id", self.cfg["run_id"],
@@ -368,9 +379,16 @@ class SshCluster:
         self.setup()
         res = {"errors": 0}
         d = self.start_load("smoke-hb", heartbeat=False)
-        self._send(d, 1, {"kind": "put", "keys": [f"s{i}" for i in range(10_000)], "rate": 2})
+        self._send(d, 1, {"kind": "create-bucket"})
+        self._send(d, 2, {"kind": "put", "keys": [f"s{i}" for i in range(10_000)], "rate": 2})
         st = self._wait_exit(d, 180)
-        res["stop_layers_exercised"] = bool(st and st.get("stopped") == "heartbeat-lost")
+        g = self._json(f"{d}/guard.json")
+        res["guard"] = g
+        # The guard (not the load, which reads no heartbeat here) stopped it,
+        # and nothing of the load's group was left.
+        res["stop_layers_exercised"] = bool(st and st.get("stopped") == "heartbeat-lost" and g
+                                            and g.get("reason") == "heartbeat-lost" and g.get("source") == "guard"
+                                            and g.get("group_empty") is True)
         d = self.start_load("smoke-limit")
         self._send(d, 1, {"kind": "create-bucket"})
         self._send(d, 2, {"kind": "put", "keys": [f"l{i}" for i in range(100)]})
@@ -378,13 +396,14 @@ class SshCluster:
         res["limits_exercised"] = bool(st and st.get("stopped") == "attempts-limit")
         d = self.start_load("smoke-ops")
         keys = [f"o{i}" for i in range(100)]
-        for n, step in enumerate([{"kind": "put", "keys": keys}, {"kind": "get", "keys": keys},
-                                  {"kind": "delete", "keys": keys}, {"kind": "verify"}, {"kind": "finish"}], 1):
+        for n, step in enumerate([{"kind": "create-bucket"}, {"kind": "put", "keys": keys},
+                                  {"kind": "get", "keys": keys}, {"kind": "delete", "keys": keys},
+                                  {"kind": "verify"}, {"kind": "finish"}], 1):
             self._send(d, n, step)
         st = self._wait_exit(d, 600)
         steps = st.get("steps", []) if st else []
-        verify = steps[3]["result"] if len(steps) > 3 else None
-        gets = steps[1]["result"].get("counts", {}).get("op-GET-found", 0) if len(steps) > 1 else 0
+        verify = steps[4]["result"] if len(steps) > 4 else None
+        gets = steps[2]["result"].get("counts", {}).get("op-GET-found", 0) if len(steps) > 2 else 0
         if not verify or verify.get("violations") or not verify.get("complete") or gets != len(keys):
             res["errors"] += 1
         res["ops"] = {"verify": verify, "gets_found": gets}
@@ -393,6 +412,26 @@ class SshCluster:
     def _send(self, d, n, step):
         self.ssh(f"cat > {Q(d)}/control/{n:06d}.json.tmp && mv {Q(d)}/control/{n:06d}.json.tmp "
                  f"{Q(d)}/control/{n:06d}.json", stdin=json.dumps(step))
+
+    def _json(self, path):
+        out = self.ssh(f"cat {Q(path)} 2>/dev/null || true", check=False)
+        try:
+            return json.loads(out)
+        except ValueError:
+            return None
+
+    def wait_step(self, n, deadline):
+        """The result of step ``n`` of the main load once it has ended."""
+        while time.monotonic() < deadline:
+            st = self._status(self.load_dir)
+            if st:
+                for s in st.get("steps", []):
+                    if s["n"] == n:
+                        return s["result"]
+                if st.get("exit"):
+                    return None
+            time.sleep(2)
+        return None
 
     def _status(self, d):
         out = self.ssh(f"cat {Q(d)}/status.json 2>/dev/null || true", check=False)

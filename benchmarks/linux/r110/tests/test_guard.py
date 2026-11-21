@@ -293,6 +293,24 @@ class ReviewFindings(GuardBase):
         self.assertEqual(res["services"]["node0"], "signalled")
         p.wait(10)
 
+    def test_a_terminated_guard_stops_the_load_and_reports(self):
+        import argparse
+        ns = argparse.Namespace(run_dir=self.dir, heartbeat=self.hb, heartbeat_id=None, heartbeat_timeout=60.0,
+                                data_dir=self.dir, min_free_gib=3.0, min_mem_mib=1024.0, max_seconds=60.0,
+                                interval=0.1, services=None)
+        self.beat(1)
+        g = guard.Guard(ns, checks={"free": lambda _p: self.free, "mem": lambda: self.mem})
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault("rc", g.run(LOAD)))
+        t.start()
+        child = self.child_pid()
+        g.terminate()
+        t.join(60)
+        self.assertEqual(out["rc"], 3)
+        res = common.read_json(os.path.join(self.dir, "guard.json"))
+        self.assertEqual((res["reason"], res["group_empty"]), ("operator", True))
+        self.assertFalse(alive(child))
+
     def test_limits_that_are_not_finite_are_refused(self):
         for extra in (["--min-free-gib", "nan"], ["--heartbeat-timeout", "nan"], ["--min-mem-mib", "inf"],
                       ["--interval", "nan"], ["--max-seconds", "inf"], ["--interval", "30"]):

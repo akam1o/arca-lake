@@ -113,7 +113,7 @@ def validate(cfg):
     if not re.fullmatch(r"[0-9a-f]{40}", b.get("commit", "")) or not re.fullmatch(r"[0-9a-f]{64}", b.get("sha256", "")):
         raise ConfigError("binary: the full commit and sha256")
     for k, v in cfg["limits"].items():
-        if k not in budget.DEFAULTS or v > budget.DEFAULTS[k]:
+        if k not in budget.DEFAULTS or not budget.valid_limit(v) or v > budget.DEFAULTS[k]:
             raise ConfigError(f"limit {k}={v} above the plan's {budget.DEFAULTS.get(k)}")
     for k, v in budget.DEFAULTS.items():
         cfg["limits"].setdefault(k, v)
@@ -126,10 +126,12 @@ def validate(cfg):
         elif got != v:
             raise ConfigError(f"setting {k}={got}: the plan's is {v}")
     for k, v in STAGE_MAX_S.items():
-        if cfg["stage_max_s"].get(k, v) > v:
+        if not budget.valid_limit(cfg["stage_max_s"].get(k, v)) or cfg["stage_max_s"].get(k, v) > v:
             raise ConfigError(f"stage {k} maximum above the plan's {v} s")
     g = cfg["stop_rules"].get("guard", {})
     pg = STOP_RULES["guard"]
+    if not all(budget.valid_limit(g.get(k)) for k in pg):
+        raise ConfigError("guard stop rules: finite positive numbers")
     if g.get("min_free_gib", 0) < pg["min_free_gib"] or g.get("min_mem_mib", 0) < pg["min_mem_mib"] \
             or g.get("heartbeat_timeout_s", 1e9) > pg["heartbeat_timeout_s"]:
         raise ConfigError("guard stop rules looser than the plan's")
@@ -140,6 +142,11 @@ def validate(cfg):
     if not 0 < cfg["stop_rules"].get("max_test_dir_bytes", 0) <= cap:
         raise ConfigError(f"stop_rules.max_test_dir_bytes: at most the allotments plus 3 GiB ({cap})")
     check_path("local_dir", cfg.get("local_dir"), depth=2)
+    rr = cfg.get("retained_record")
+    if not isinstance(rr, dict) or not rr or not all(
+            isinstance(k, str) and k.startswith("/") and os.path.normpath(k) == k
+            and isinstance(d, str) and re.fullmatch(r"[0-9a-f]{64}", d) for k, d in rr.items()):
+        raise ConfigError("retained_record: absolute directory -> sha256 of its listing (plan §10)")
     if cfg["teardown"] != {"scope": "run-directories-and-processes"}:
         raise ConfigError("teardown scope: the run's own directories and processes only")
     return cfg
@@ -327,10 +334,12 @@ class Run:
         """``target``'s latest value of ``key``, or None when it is missing
         or older than two intervals behind the newest sample (a target
         whose scrapes now fail never shows its last good value)."""
-        newest = max((x.get("ended_wall_ms", 0) for x in samples), default=None)
+        now = self.host_ms()
         for x in reversed(samples):
             if x.get("target") == target and x.get("status") in ("ok", "partial") and key in x["values"]:
-                if newest - x["ended_wall_ms"] > 2 * self.iv_ms:
+                # Against the host's time now (the offset measured at the
+                # stage's start): a dead sampler makes every value stale.
+                if now - x["ended_wall_ms"] > 2 * self.iv_ms:
                     return None
                 return x["values"][key]["value"]
         return None
@@ -342,19 +351,25 @@ class Run:
     def _complete(self, samples):
         """Every sampler target's latest sample fresh and read (plan §7
         stage 3: samples complete)."""
-        newest = max((x.get("ended_wall_ms", 0) for x in samples), default=None)
+        now = self.host_ms()
         last = {}
         for x in samples:
             last[x.get("target")] = x
         for t in self.c.targets():
             x = last.get(t)
-            if x is None or x.get("status") not in ("ok", "partial") or newest - x["ended_wall_ms"] > 2 * self.iv_ms:
+            if x is None or x.get("status") not in ("ok", "partial") or now - x["ended_wall_ms"] > 2 * self.iv_ms:
                 return False
         return True
 
     def _quiet(self, s):
         return self._fresh(s, "controller", "arca_controller_gc_backlog") == 0 and \
             self._all_nodes(s, "arca_node_reclaim_pending_records", lambda v: v == 0)
+
+    def _left(self, s, state):
+        """A gateway's fresh value known and not ``state`` (a missing or
+        stale value is not a change)."""
+        vals = [self._fresh(s, g, "arca_gateway_admission_state") for g in self.c.gateways()]
+        return any(v is not None and v != state for v in vals)
 
     def _admission(self, s, state):
         return all(self._fresh(s, g, "arca_gateway_admission_state") == state for g in self.c.gateways()) and \
@@ -422,12 +437,15 @@ class Run:
         # D1's reclaims before the refusal do not count for C1 (plan §8).
         tl["reclaimed_before_refusal"] = (at_r - at_d1) if at_r is not None and at_d1 is not None else None
         n = self.c.send_step(dict(hold, stage="4", max_seconds=max(1, deadline - self.clock.monotonic())))
-        done = self.wait("4", deadline, lambda s: not self._admission(s, 3) or (
+        done = self.wait("4", deadline, lambda s: self._left(s, 3) or (
             self.clock.monotonic() >= d1_done + CHAIN_S and self._quiet(s)))
         tl["refusal_end_ms"] = self.host_ms()
-        tl["admission_recovered_early"] = bool(done) and self.clock.monotonic() < d1_done + CHAIN_S
+        early = bool(done) and self.clock.monotonic() < d1_done + CHAIN_S
+        tl["admission_recovered_early"] = early
         self.c.step_done(n)
-        return bool(done)
+        # Recovered before D1 matured: the exit condition (held while D1
+        # matures) is not met; C1 is Inconclusive and the run ends (§7).
+        return bool(done) and not early
 
     def s5(self, st, deadline):
         probe, _ = st["steps"]
@@ -471,6 +489,10 @@ class Run:
                 return False
         finally:
             self.c.step_done(n)
+        # Every probe of the window has its outcome once the probe step has
+        # ended (it stops at done), before C3a is judged.
+        if self.c.wait_step(n, deadline + 120) is None or self._stopped("5"):
+            return False
         tl["end_ms"] = self.host_ms()
         # Stage 6 starts only when C3a passed (plan §7).
         r = judge.c3a(self.c.samples(), self.c.ledger_records(), self.tl, judge.VALUES, self.c.gateways())
