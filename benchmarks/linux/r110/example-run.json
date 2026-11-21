@@ -25,5 +25,7 @@
  "stop_rules": {"guard": {"min_free_gib": 3.0, "min_mem_mib": 1024.0, "heartbeat_timeout_s": 120.0},
                 "preflight_free_gib": 12.2, "max_test_dir_bytes": 7516192768},
  "judgement": {},
+ "retained_host": "host2",
+ "retained_record": {"/mnt/data/retained-cluster-placeholder": "0000000000000000000000000000000000000000000000000000000000000000"},
  "teardown": {"scope": "run-directories-and-processes"}
 }

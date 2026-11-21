@@ -304,7 +304,8 @@ class Load:
         kind, stage = s["kind"], s.get("stage", "")
         t0 = self.clock.monotonic()
         deadline = t0 + s["max_seconds"] if s.get("max_seconds") else None
-        before = dict(self.counts)
+        with self._lock:
+            before = dict(self.counts)
         out = {}
         if kind == "create-bucket":
             try:
@@ -415,7 +416,9 @@ class Load:
             pass
         else:
             raise ValueError(f"unknown step kind {kind!r}")
-        out["counts"] = {k: v - before.get(k, 0) for k, v in self.counts.items() if v != before.get(k, 0)}
+        with self._lock:
+            now = dict(self.counts)
+        out["counts"] = {k: v - before.get(k, 0) for k, v in now.items() if v != before.get(k, 0)}
         out["seconds"] = round(self.clock.monotonic() - t0, 3)
         out["deadline_reached"] = bool(deadline is not None and self.clock.monotonic() >= deadline)
         return out

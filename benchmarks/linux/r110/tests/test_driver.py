@@ -115,6 +115,15 @@ class Configuration(Base):
         self.refused(lambda c: c["teardown"].update(scope="everything"))
         self.refused(lambda c: c["remote"]["ports"].update(gateway=80))
 
+    def test_values_that_are_not_finite_are_refused(self):
+        nan = float("nan")
+        self.refused(lambda c: c["limits"].update(rate_per_s=nan))
+        self.refused(lambda c: c["stage_max_s"].update({"4": nan}))
+        self.refused(lambda c: c["stop_rules"]["guard"].update(min_free_gib=nan))
+        self.refused(lambda c: c["stop_rules"]["guard"].update(heartbeat_timeout_s=nan))
+        self.refused(lambda c: c.pop("retained_record"))
+        self.refused(lambda c: c.update(retained_record={"/x": "not-a-digest"}))
+
     def test_tighter_values_are_accepted(self):
         cfg = copy.deepcopy(self.cfg)
         cfg["limits"].update(rate_per_s=10, max_attempts=1000)
@@ -204,6 +213,10 @@ class FakeCluster:
         self.preflight_ok = True
         self.escalated = None
         self.integrity_calls = []
+        self.step_waited = False
+        self.drop_gateway = False
+        self.recover_after = None
+        self.polls = 0
         self.services_stopped = False
         self._samples = []
 
@@ -242,8 +255,14 @@ class FakeCluster:
         t = self.clock.wall_ms()
         mk = lambda target, vals: {"target": target, "status": "ok", "ended_wall_ms": t, "started_wall_ms": t,  # noqa: E731
                                    "values": {k: {"value": v, "unit": "count"} for k, v in vals.items()}}
-        self._samples += [mk("gateway0", {"arca_gateway_admission_state": self.admission}),
-                          mk("controller", {"arca_controller_gc_backlog": self.backlog,
+        self.polls += 1
+        if self.recover_after is not None and self.admission == 3:
+            self.recover_after -= 1
+            if self.recover_after < 0:
+                self.admission = 0
+        if not self.drop_gateway:
+            self._samples.append(mk("gateway0", {"arca_gateway_admission_state": self.admission}))
+        self._samples += [mk("controller", {"arca_controller_gc_backlog": self.backlog,
                                             "arca_controller_backpressure_state": 0,
                                             "arca_controller_reclaimed_total": self.reclaimed})]
         self._samples += [mk(n, {"arca_node_reclaim_pending_records": self.pending}) for n in self.nodes()]
@@ -274,6 +293,10 @@ class FakeCluster:
 
     def step_done(self, n):
         pass
+
+    def wait_step(self, n, deadline):
+        self.step_waited = True
+        return {"attempts": 1}
 
     def stop_record(self):
         return self.stop
@@ -643,9 +666,10 @@ class ReviewFindingsEngine(EngineBase):
     def test_a_stale_value_is_not_used(self):
         engine = driver.Run(self.cfg, FakeCluster(self.cfg, self.clock),
                             driver.Evidence(os.path.join(self.dir, "e"), self.cfg["run_id"]), self.clock)
-        S = [smp("controller", 0, arca_controller_gc_backlog=0), smp("gateway0", 60_000, arca_gateway_admission_state=0)]
+        now = engine.host_ms()
+        S = [smp("controller", now - 60_000, arca_controller_gc_backlog=0)]
         self.assertIsNone(engine._fresh(S, "controller", "arca_controller_gc_backlog"))
-        S.append(smp("controller", 50_000, arca_controller_gc_backlog=0))
+        S.append(smp("controller", now - 10_000, arca_controller_gc_backlog=0))
         self.assertEqual(engine._fresh(S, "controller", "arca_controller_gc_backlog"), 0)
 
     def test_the_refusal_is_held_for_d1s_chain(self):
@@ -655,6 +679,50 @@ class ReviewFindingsEngine(EngineBase):
         self.assertGreaterEqual(tl["4"]["refusal_end_ms"] - tl["4"]["d1_done_ms"], driver.CHAIN_S * 1000)
         self.assertFalse(tl["4"]["admission_recovered_early"])
         self.assertEqual(res["stop"]["stage"], "5")
+
+    def test_a_gap_in_the_gateways_samples_does_not_end_the_hold(self):
+        c = FakeCluster(self.cfg, self.clock)
+        real = c.run_step
+
+        def run_step(step, deadline):
+            r = real(step, deadline)
+            if step["kind"] == "put-until-refused":
+                c.samples()  # one sample showing the refusal
+                c.drop_gateway = True
+            return r
+
+        c.run_step = run_step
+        res, ev = self.go(c)
+        tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
+        self.assertFalse(tl["4"]["admission_recovered_early"])
+        self.assertGreaterEqual(tl["4"]["refusal_end_ms"] - tl["4"]["d1_done_ms"], driver.CHAIN_S * 1000)
+
+    def test_admission_recovering_before_d1_matured_ends_the_run(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.recover_after = 5
+        res, ev = self.go(c)
+        tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
+        self.assertTrue(tl["4"]["admission_recovered_early"])
+        self.assertEqual((res["stop"]["reason"], res["stop"]["stage"]), ("stage-exit", "4"))
+        self.assertNotIn("5", tl)
+
+    def test_c3a_is_judged_only_once_the_probe_step_ended(self):
+        c = FakeCluster(self.cfg, self.clock)
+        engine = driver.Run(self.cfg, c, driver.Evidence(os.path.join(self.dir, "e"), self.cfg["run_id"]), self.clock)
+
+        def ledger():
+            t0 = engine.tl["5"]["c3a_window_start_ms"]
+            R = []
+            for k in range(61):
+                R.append({"type": "intent", "op_id": k, "attempt": 1, "key": f"q{k}", "op": "PUT", "stage": "5",
+                          "kind": "probe", "wall_ms": t0 + k * 10_000})
+                if k < 60 or c.step_waited:  # the last one in flight until the step ended
+                    R.append({"type": "outcome", "op_id": k, "attempt": 1, "result": "ack"})
+            return R
+
+        c.ledger_records = ledger
+        self.assertTrue(engine.stage(driver.stages(self.cfg)[4], engine.s5))
+        self.assertEqual(engine.tl["5"]["c3a"], judge.PASSED)
 
     def test_a_resource_rule_during_the_drain_stops_the_services(self):
         c = FakeCluster(self.cfg, self.clock)
@@ -789,6 +857,42 @@ class Commands(Base):
         self.assertIn("tail -c +1 ", rec.commands[-1][1])
         c.samples()
         self.assertIn(f"tail -c +{len(line) + 1} ", rec.commands[-1][1])
+
+    def test_sub_runs_have_their_own_bucket_and_the_guard_alone_watches(self):
+        c, rec, cfg = self.cluster()
+        c.start_load("smoke-hb", heartbeat=False)
+        c.start_load()
+        smoke, main = [cmd for _, cmd, s in rec.commands if s == remote.START]
+        load_part = smoke.split(" -- ")[-1]
+        self.assertIn("r110-smoke-hb", load_part)
+        self.assertNotIn("--heartbeat", load_part.split("guard")[-1].split("load import main")[-1])
+        self.assertIn("--heartbeat", smoke.split(" -- ")[0])  # the guard's
+        self.assertIn("--bucket r110 ", main + " ")
+
+    def test_the_smoke_stage_needs_the_guards_own_stop(self):
+        c, rec, cfg = self.cluster()
+        c.setup = lambda: None
+        sent = []
+        c.start_load = lambda sub=None, **k: sub
+        c._send = lambda d, n, step: sent.append((d, n, step["kind"]))
+        ops_steps = [{"n": i, "result": {}} for i in range(1, 7)]
+        ops_steps[2]["result"] = {"counts": {"op-GET-found": 100}}
+        ops_steps[4]["result"] = {"complete": True, "violations": []}
+        status = {"smoke-hb": {"exit": "stopped", "stopped": "heartbeat-lost"},
+                  "smoke-limit": {"exit": "stopped", "stopped": "attempts-limit"},
+                  "smoke-ops": {"exit": "finished", "steps": ops_steps}}
+        c._wait_exit = lambda d, s: status[d]
+        for guard_rec, want in (({"reason": "heartbeat-lost", "source": "guard", "group_empty": True}, True),
+                                ({"reason": "heartbeat-lost", "source": "stop-file", "group_empty": True}, False),
+                                (None, False)):
+            sent.clear()
+            c._json = lambda path, g=guard_rec: g
+            res = c.smoke()
+            self.assertEqual(res["stop_layers_exercised"], want, guard_rec)
+            self.assertEqual(res["errors"], 0)
+            firsts = {d: k for d, n, k in sent if n == 1}
+            self.assertEqual(firsts, {"smoke-hb": "create-bucket", "smoke-limit": "create-bucket",
+                                      "smoke-ops": "create-bucket"})
 
     def test_the_main_load_leaves_the_smoke_stages_budget(self):
         lim = remote.main_limits({})

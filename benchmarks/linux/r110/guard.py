@@ -81,6 +81,8 @@ class Guard:
         rec = self.stop_file.reason()
         if rec is not None:
             return rec.get("reason", "stop-file-unreadable"), "stop-file"
+        if getattr(self, "terminated", False):
+            return "operator", "guard"
         r = self.hb.check()
         if r:
             return r, "guard"
@@ -140,7 +142,17 @@ class Guard:
             if alive(rec):
                 self.result["services"][name] = "killed: " + proc.signal_if_same(rec, signal.SIGKILL)
 
+    def terminate(self, *_):
+        """SIGTERM to the guard: it stops the load's group and writes its
+        result like any other stop (never just dies, leaving the load)."""
+        self.terminated = True
+
     def run(self, command):
+        self.terminated = False
+        try:
+            signal.signal(signal.SIGTERM, self.terminate)
+        except ValueError:
+            pass  # not the main thread (tests call terminate() directly)
         child = subprocess.Popen(command, start_new_session=True, cwd=self.args.run_dir)
         pgid = child.pid
         self.result["load"] = {"pid": child.pid, "command": command}
