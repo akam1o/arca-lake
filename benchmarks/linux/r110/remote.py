@@ -189,8 +189,9 @@ class SshCluster:
             raise RemoteError(f"rc {rc}: {err.strip()[-300:]}")
         return out
 
-    def py(self, script, *args, check=True):
-        return self.ssh("python3 -I - " + " ".join(Q(str(a)) for a in args), stdin=script, check=check)
+    def py(self, script, *args, check=True, timeout=120):
+        return self.ssh("python3 -I - " + " ".join(Q(str(a)) for a in args), stdin=script, check=check,
+                        timeout=timeout)
 
     def tool(self, module, *args):
         code = f"import sys; sys.path.insert(0, {self.tools!r}); from r110.{module} import main; sys.exit(main())"
@@ -541,9 +542,18 @@ class SshCluster:
     def step_done(self, n):
         self.ssh(f"touch {Q(self.load_dir)}/control/{n:06d}.done")
 
-    def run_step(self, step, deadline):
+    def run_step(self, step, deadline, check=None):
+        """Send ``step`` and wait for its result (None: the load ended or
+        the deadline passed). ``check()``, every 15 s while it runs, may
+        return a reason to stop (the driver's protection counters): the
+        step is then abandoned (None) and the caller stops the run."""
         n = self.send_step(dict(step, max_seconds=max(1, int(deadline - time.monotonic()))))
+        next_check = time.monotonic() + 15
         while time.monotonic() < deadline:
+            if check is not None and time.monotonic() >= next_check:
+                next_check = time.monotonic() + 15
+                if check():
+                    return None
             st = self._status(self.load_dir)
             if st:
                 for s in st.get("steps", []):
@@ -694,7 +704,13 @@ class SshCluster:
 
     def _stop(self, name, wait):
         """One recorded process stopped by identity: its verdict (a dict)."""
-        out = self.py(STOP, self.tools, f"{self.run_dir}/services/{name}", wait, check=False).strip()
+        # The ssh outlasts the stop it runs (TERM wait, then half of it for
+        # KILL): never cut short while the host still waits for a process.
+        try:
+            out = self.py(STOP, self.tools, f"{self.run_dir}/services/{name}", wait, check=False,
+                          timeout=1.5 * wait + 60).strip()
+        except subprocess.TimeoutExpired:
+            return {"verdict": "unverified", "reason": "the stop's ssh timed out"}
         try:
             return json.loads(out.splitlines()[-1])
         except (ValueError, IndexError):

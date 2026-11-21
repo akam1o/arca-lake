@@ -343,6 +343,17 @@ class Run:
         self.stop = dict(rec, stage=stage, **detail)
         self.ev.event(self.clock.wall_ms(), "stop", **self.stop)
 
+    def run_step(self, step, deadline):
+        """The cluster's run_step, the protection counters checked while it
+        runs (plan §6.2): a violation stops the run at once."""
+        def check():
+            bad = self.protection(self.c.samples())
+            if bad:
+                self._stop(self.current, "protection-violation", **bad)
+                return True
+            return False
+        return self.c.run_step(step, deadline, check=check)
+
     def protection(self, samples):
         """A protection counter above 0 in any sample (plan §6.2): the run
         stops at once (an integrity stop: Failed)."""
@@ -460,10 +471,10 @@ class Run:
     def s3(self, st, deadline):
         self.c.start_load(remaining_s=self.remaining())
         bucket, fill, base = st["steps"]
-        if not self.c.run_step(dict(bucket, stage="3"), deadline) or self._stopped("3"):
+        if not self.run_step(dict(bucket, stage="3"), deadline) or self._stopped("3"):
             return False
         for step, name in ((fill, "l0_acknowledged"), (base, "base_acknowledged")):
-            r = self.c.run_step(dict(step, stage="3"), deadline)
+            r = self.run_step(dict(step, stage="3"), deadline)
             if not r or self._stopped("3"):
                 return False
             counts = r.get("counts", {})
@@ -473,7 +484,7 @@ class Run:
                 return False
         # The baseline-key probe (plan §6.2), from here to the end, on its
         # own object (protected: no step of the run deletes it).
-        if not self.c.run_step({"kind": "start-probe", "key": BASE_KEY, "interval": 5.0, "stage": "3"},
+        if not self.run_step({"kind": "start-probe", "key": BASE_KEY, "interval": 5.0, "stage": "3"},
                                deadline):
             return False
         return bool(self.wait("3", deadline, lambda s: self._quiet(s) and self._admission(s, 0) and self._complete(s)))
@@ -481,12 +492,12 @@ class Run:
     def s4(self, st, deadline):
         d1, fill, hold = st["steps"]
         tl = self.tl["4"]
-        if not self.c.run_step(dict(d1, stage="4"), deadline) or self._stopped("4"):
+        if not self.run_step(dict(d1, stage="4"), deadline) or self._stopped("4"):
             return False
         d1_done = self.clock.monotonic()
         tl["d1_done_ms"] = self.host_ms()
         tl["fill_start_ms"] = self.host_ms()
-        r = self.c.run_step(dict(fill, stage="4"), deadline)
+        r = self.run_step(dict(fill, stage="4"), deadline)
         if not r or not r.get("refusal_reached") or self._stopped("4"):
             return False
         if not self.wait("4", deadline, lambda s: self._admission(s, 3)):
@@ -524,7 +535,7 @@ class Run:
         try:
             s = self.cfg["settings"]
             keys = self.c.stage4_keys() + [f"b{i:05d}" for i in range(s["d1"], s["l0"] - s["l1"])]
-            if not self.c.run_step({"kind": "delete", "keys": keys, "rate": 20, "stage": "5"}, deadline) \
+            if not self.run_step({"kind": "delete", "keys": keys, "rate": 20, "stage": "5"}, deadline) \
                     or self._stopped("5"):
                 return False
             dels_done = self.clock.monotonic()
@@ -574,8 +585,8 @@ class Run:
         # C2's deletes): stage 6 starts at L1 (plan §7: within 5 % of it).
         probes = sorted(set(ledger_mod.acknowledged(records, "PUT", stage="5")) - {BASE_KEY})
         tl["probe_keys_deleted"] = len(probes)
-        if probes and not self.c.run_step({"kind": "delete", "keys": probes, "rate": 20, "stage": "5-tail"},
-                                          deadline + 300):
+        if probes and not self.run_step({"kind": "delete", "keys": probes, "rate": 20, "stage": "5-tail"},
+                                        deadline):
             return False
         return True
 
@@ -583,12 +594,16 @@ class Run:
         (churn,) = st["steps"]
         live = getattr(self.c, "live_count", lambda: None)()
         self.tl["6"]["live_at_start"] = live
-        r = self.c.run_step(dict(churn, stage="6"), deadline)
+        l1 = self.cfg["settings"]["l1"]
+        # Plan §7: the churn holds the live set within 5 % of L1 (the
+        # baseline object counted on top).
+        self.tl["6"]["live_within_5pct_of_l1"] = None if live is None else abs(live - 1 - l1) <= 0.05 * l1
+        r = self.run_step(dict(churn, stage="6"), deadline)
         self.tl["6"]["completed"] = bool(r) and not r.get("deadline_reached") and not self._stopped("6")
         return self.tl["6"]["completed"]
 
     def s7(self, st, deadline):
-        r = self.c.run_step({"kind": "verify", "stage": "7"}, deadline)
+        r = self.run_step({"kind": "verify", "stage": "7"}, deadline)
         self.tl["7"]["verify"] = r
         if self._stopped("7"):
             return False
@@ -598,7 +613,7 @@ class Run:
         self.tl["7"]["scrub_findings"] = self.c.integrity("scrub")
         if self._stopped("7"):
             return False
-        self.c.run_step({"kind": "finish", "stage": "7"}, deadline)
+        self.run_step({"kind": "finish", "stage": "7"}, deadline)
         return r is not None and r.get("complete") is not None and not self._stopped("7")
 
     def execute(self):
@@ -650,6 +665,8 @@ class Run:
         if self.stop and cls not in ("resource", "monitor") and self.stop.get("stage") not in (None, "1", "2"):
             try:
                 self.drain()
+            except KeyboardInterrupt:
+                self.ev.failures.append("drain: interrupted (SIGINT): the stops and the evidence follow")
             except Exception as e:  # noqa: BLE001
                 self.ev.failures.append(f"drain: {e}")
         # The load, then the services (confirmed), then the host-side
@@ -667,6 +684,8 @@ class Run:
                     # The guard could not confirm its load stopped: evidence of
                     # a process possibly left, never a clean end.
                     self.ev.failures.append(f"stop_load: the guard did not confirm its load's group empty: {gr}")
+            except KeyboardInterrupt:
+                self.ev.failures.append(f"{name}: interrupted (SIGINT)")
             except Exception as e:  # noqa: BLE001 - evidence first
                 self.ev.failures.append(f"{name}: {e}")
         parts = {}

@@ -293,8 +293,10 @@ class FakeCluster:
         self.sample()
         return list(self._samples)
 
-    def run_step(self, step, deadline):
+    def run_step(self, step, deadline, check=None):
         self.steps.append(step)
+        if check is not None and check():
+            return None
         st = step.get("stage")
         if self.stop_at_stage == st:
             self.stop = {"reason": self.stop_reason, "source": "guard"}
@@ -757,8 +759,8 @@ class ReviewFindingsEngine(EngineBase):
         c = FakeCluster(self.cfg, self.clock)
         real = c.run_step
 
-        def run_step(step, deadline):
-            r = real(step, deadline)
+        def run_step(step, deadline, check=None):
+            r = real(step, deadline, check)
             if step["kind"] == "put-until-refused":
                 c.samples()  # one sample showing the refusal
                 c.drop_gateway = True
@@ -811,12 +813,43 @@ class ReviewFindingsEngine(EngineBase):
         self.assertEqual((res["stop"]["reason"], res["stop"]["stage"]), ("protection-violation", "4"))
         self.assertEqual(res["outcome"], judge.FAILED)
 
+    def test_a_protection_counter_stops_a_running_step(self):
+        """In a step (stage 6's churn), not only in the waits."""
+        c = FakeCluster(self.cfg, self.clock)
+        real = c.sample
+
+        def sample():
+            real()
+            if any(s.get("kind") == "churn" for s in c.steps):
+                c._samples[-1]["values"]["arca_node_reclaim_damaged"] = {"value": 1, "unit": "count"}
+
+        c.sample = sample
+        # Stage 5 never passes in the fake: straight to stage 6's body.
+        engine = driver.Run(self.cfg, c, driver.Evidence(os.path.join(self.dir, "e"), self.cfg["run_id"]), self.clock)
+        engine.stage(driver.stages(self.cfg)[5], engine.s6)
+        self.assertEqual((engine.stop["reason"], engine.stop["stage"]), ("protection-violation", "6"))
+
+    def test_an_interrupt_during_the_end_still_saves_the_evidence(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.stop_at_stage, c.stop_reason = "4", "operator"
+        calls = {"n": 0}
+
+        def escalation():
+            calls["n"] += 1
+            raise KeyboardInterrupt
+
+        c.escalation = escalation
+        res, ev = self.go(c)
+        self.assertTrue(os.path.exists(os.path.join(ev.dir, "result.json")))
+        self.assertIn("drain: interrupted (SIGINT): the stops and the evidence follow", res["evidence_failures"])
+        self.assertTrue(c.services_stopped)
+
     def test_recovery_only_is_still_a_refusal(self):
         c = FakeCluster(self.cfg, self.clock)
         real = c.run_step
 
-        def run_step(step, deadline):
-            r = real(step, deadline)
+        def run_step(step, deadline, check=None):
+            r = real(step, deadline, check)
             if step["kind"] == "put-until-refused":
                 c.admission = 4
             return r
@@ -977,6 +1010,20 @@ class Commands(Base):
         self.assertTrue(out.startswith("unverified b"), out)
         os.remove(os.path.join(svc, "started.list"))  # the list itself missing
         self.assertEqual(check()[0], 1)
+
+    def test_a_stops_ssh_outlasts_the_stop(self):
+        c, rec, cfg = self.cluster()
+        seen = []
+        c.runner = lambda target, command, stdin, timeout: seen.append(timeout) or (0, '{"verdict": "gone"}', "")
+        c._stop("guard.json", remote.GUARD_STOP_S)
+        self.assertGreater(seen[-1], remote.GUARD_STOP_S * 1.5)
+        import subprocess as sp
+
+        def slow(*a):
+            raise sp.TimeoutExpired("ssh", 1)
+
+        c.runner = slow
+        self.assertEqual(c._stop("guard.json", 10)["verdict"], "unverified")
 
     def test_a_corrupt_or_missing_ledger_is_an_error_not_empty(self):
         from r110 import ledger as ledger_mod

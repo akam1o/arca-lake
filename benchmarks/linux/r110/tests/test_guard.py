@@ -509,6 +509,21 @@ class F3Stopping(GuardBase):
         self.assertIn("argv", seen["rec"])
         self.assertEqual(proc.check(seen["rec"]), "gone")
 
+    def test_a_load_record_is_never_replaced(self):
+        d = os.path.join(self.dir, "services")
+        os.makedirs(d)
+        open(os.path.join(d, "started.list"), "w").close()
+        with open(os.path.join(d, "load.json"), "w") as f:
+            json.dump({"pid": 4242, "start": "s", "cwd": "/", "pgid": 4242}, f)
+        argv = ["run", "--run-dir", self.dir, "--heartbeat", self.hb, "--data-dir", self.dir, "--heartbeat-timeout",
+                "1", "--interval", "0.1", "--grace", "0.3", "--record-dir", d, "--", *LOAD]
+        rc = guard.main(argv, checks={"free": lambda _p: 100 << 30, "mem": lambda: 8 << 30})
+        res = common.read_json(os.path.join(self.dir, "guard.json"))
+        self.assertEqual(res["load_record"], "identity unavailable: stopped")
+        self.assertEqual(common.read_json(os.path.join(d, "load.json"))["pid"], 4242)
+        self.assertTrue(res["group_empty"])
+        self.assertEqual(rc, 3)
+
     def test_invalid_records(self):
         for rec in (None, {}, {"pid": True, "start": "1", "cwd": "/"}, {"pid": 1, "start": "1", "cwd": "/"},
                     {"pid": 1234, "start": "1", "cwd": "/"}):  # no process group: not an identity

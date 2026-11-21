@@ -488,6 +488,9 @@ class WatchdogReadings(unittest.TestCase):
         with open(res, "w") as f:
             json.dump({"group_empty": True}, f)
         self.assertEqual(self.check({"guard_record": rec, "guard_result": res})["guard"], "ended")
+        with open(res, "w") as f:
+            json.dump({"services_confirmed": False}, f)  # a sentinel that could not confirm
+        self.assertEqual(self.check({"sentinel_record": rec, "sentinel_result": res})["sentinel"], "gone")
 
     def test_a_missing_required_reading_holds_the_heartbeat_back(self):
         from r110.tests.test_guard import FakeHosts, healthy

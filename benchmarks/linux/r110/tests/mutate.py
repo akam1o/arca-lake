@@ -156,6 +156,12 @@ muts = [
  ("P1: an interrupt not a stop", "r110/driver.py", "                except KeyboardInterrupt:\n                    self._stop(st[\"stage\"], \"operator\", detail=\"interrupted (SIGINT)\")\n                    break", "", "test_driver"),
  ("P1: probe keys left after stage 5", "r110/driver.py", "        if probes and not self.c.run_step(", "        if False and not self.c.run_step(", "test_integration"),
  ("P1: system FDB hosts optional", "r110/driver.py", "    if not isinstance(sf, list) or not sf or not set(sf) <= set(cfg[\"hosts\"]):", "    if False:", "test_driver"),
+ # Re-review of #24.
+ ("a stop's ssh shorter than the stop", "r110/remote.py", "                          timeout=1.5 * wait + 60).strip()", "                          timeout=120).strip()", "test_driver"),
+ ("protection unchecked in a running step", "r110/driver.py", "        return self.c.run_step(step, deadline, check=check)", "        return self.c.run_step(step, deadline)", "test_driver"),
+ ("a load record replaced", "r110/guard.py", "        return common.link_new(os.path.join(d, name + \".json\"), json.dumps(ident))", "        common.atomic_write_json(os.path.join(d, name + \".json\"), ident)\n        return True", "test_guard"),
+ ("an unconfirmed sentinel ended", "r110/watchdog.py", "            unconfirmed = res.get(\"group_empty\") is False or res.get(\"services_confirmed\") is False", "            unconfirmed = res.get(\"group_empty\") is False", "test_integration"),
+ ("an interrupt in the drain loses the evidence", "r110/driver.py", "            except KeyboardInterrupt:\n                self.ev.failures.append(\"drain: interrupted (SIGINT): the stops and the evidence follow\")\n", "", "test_driver"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]
