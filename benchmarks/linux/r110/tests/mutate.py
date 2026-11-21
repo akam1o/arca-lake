@@ -34,6 +34,13 @@ muts = [
  ("TERM only", "r110/proc.py", "((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait))", "((signal.SIGTERM, term_wait),)", "test_guard"),
  ("watchdog beats on a failed round", "r110/watchdog.py", "        if required_ok:\n            self.beat()", "        self.beat()", "test_guard"),
  ("watchdog takes a missing reading as healthy", "r110/watchdog.py", "            except KeyError as e:\n                return \"monitor-failed\"", "            except KeyError as e:\n                continue\n                return \"monitor-failed\"", "test_guard"),
+ ("sampler: a vanished file is an error", "r110/sampler.py", "                except FileNotFoundError:\n                    vanished = True\n                    break", "                except FileNotFoundError:\n                    raise", "test_sampler"),
+ ("sampler: vanishing gives zeros", "r110/sampler.py", "            return \"partial\", {}, str(e)", "            return \"ok\", {\"apparent_bytes\": {\"value\": 0, \"unit\": \"bytes\"}}, None", "test_sampler"),
+ ("sampler: an absent family passes", "r110/sampler.py", "    if missing:\n        return \"partial\", values", "    if False:\n        return \"partial\", values", "test_sampler"),
+ ("sampler: a line being written is counted", "r110/sampler.py", "        end = data.rfind(b\"\\n\") + 1", "        end = len(data)", "test_sampler"),
+ ("sampler: rotation ignored", "r110/sampler.py", "        if size < self.offset:", "        if False:", "test_sampler"),
+ ("sampler: unbounded output", "r110/sampler.py", "            if self.written + len(line) > self.cfg[\"max_out_bytes\"]:", "            if False:", "test_sampler"),
+ ("sampler: other errors hidden", "r110/sampler.py", "        except OSError as e:\n            return \"error\", {}, f\"{errno", "        except OSError as e:\n            return \"ok\", {}, f\"{errno", "test_sampler"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]
