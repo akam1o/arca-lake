@@ -1,10 +1,12 @@
 # R-110: capacity-pressure retest plan
 
-Status: **plan, not run.** Nothing in this document has been executed.
-Any connection to the test hosts, the read-only preflight included, is
-made only after a separate approval; the run itself then needs an
-approval of its hosts, budgets, limits, test settings and stop rules,
-given on the preflight's measurements (§10). A passed run
+Status: **run once, Inconclusive** (2026-11-21:
+[results](phase-4.1-r110-retest-results.md); C1 not judgeable, admission
+recovered by itself before D1 matured; the run ended in stage 4). Any
+connection to the test hosts, the read-only preflight included, is made
+only after an approval; the run itself needs an approval of its hosts,
+budgets, limits, test settings and stop rules, given on the preflight's
+measurements (§10). A passed run
 of this plan would verify the small-allotment step only (§3); it would
 not by itself close R-110.
 
