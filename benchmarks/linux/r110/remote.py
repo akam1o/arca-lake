@@ -586,9 +586,11 @@ class SshCluster:
             return {"reason": "stop-file-unreadable"}
 
     def write_stop(self, reason):
+        """The run's stop file (the first reason wins), written whole."""
+        from .watchdog import WRITE_STOP
         rec = json.dumps({"reason": reason, "source": "driver"})
-        self.ssh(f"mkdir -p {Q(self.load_dir)} && set -C && cat > {Q(self.load_dir)}/stop.json || true",
-                 stdin=rec, check=False)
+        self.ssh(f"mkdir -p {Q(self.load_dir)}", check=False)
+        self.py(WRITE_STOP, f"{self.load_dir}/stop.json", rec, check=False)
 
     def samples(self):
         """The sampler's records so far, read incrementally (only the bytes
