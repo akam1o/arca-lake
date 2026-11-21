@@ -171,13 +171,19 @@ REASONS = {
     "load": "resource",
     "iowait": "resource",
     "system-fdb": "resource",
-    "test-fdb": "resource",
+    # Not among the plan's resource rules (§6.2: space, memory, swap, OOM,
+    # load, iowait, system FoundationDB): the load stops, the services stay
+    # for the drain's observation.
+    "test-fdb": "anomaly",
     "test-dirs": "resource",
-    "probe": "resource",
+    "probe": "anomaly",
+    "unexpected-5xx": "anomaly",
     "heartbeat-lost": "monitor",
     "host-unreachable": "monitor",
     "monitor-failed": "monitor",
     "stop-file-unreadable": "monitor",
+    "guard-lost": "monitor",
+    "driver-error": "monitor",
     # The evidence of C5 is lost, not shown violated.
     "ledger-failure": "monitor",
     "attempts-limit": "limit",
