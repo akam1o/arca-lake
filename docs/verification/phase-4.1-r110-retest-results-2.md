@@ -8,7 +8,8 @@ small-allotment step only (plan §3).
 | Run | Plan | Outcome | Criteria |
 | --- | --- | --- | --- |
 | `r110-20261122T030322Z` (run 1) | 2 | **Failed** | C1a, C1b, C2, C3a, C3b, C4 Passed; C5 Failed (scrub findings 1,809; by class only after the run: all unexpected shards; §2) |
-| `r110-20261122T082126Z` (run 2) | 3 | **Passed** | C1a, C1b, C2, C3a, C3b, C4, C5 Passed (§3) |
+| `r110-20261122T082126Z` (run 2) | 3 | **Passed** | C1a, C1b, C2, C3a, C3b, C4, C5 Passed (§3; the first 0.1.0 candidate's binary) |
+| `r110-20261122T162239Z` (run 3) | 3 | *running* | §4 (the final 0.1.0 candidate's binary) |
 
 At most three runs of the new plan versions were allowed (0.1.0
 preparation); before each, the previous run's cause, the change and the
@@ -84,7 +85,7 @@ class, or more unexpected shards, Failed). Run 1 stays Failed.
 
 ## 3. Run 2 (plan version 3): Passed
 
-Binary: the 0.1.0 candidate archive's (commit `1ae2c5c`), fdb feature,
+Binary: the first 0.1.0 candidate archive's (commit `1ae2c5c`), fdb feature,
 sha256 `73cbf390fd736d16ae52771bbe4909ec421169b15702fe8ae0c7a2a21b7e7a5e`;
 tooling `22c5696`. No stop, no protection violation, every final stop
 confirmed.
@@ -121,3 +122,14 @@ R-110 stays open (Medium).
 Runs of the new plan versions used: two of the three allowed. The
 earlier rehearsal `r110-20261122T030003Z` never reached a host (the
 operator's command failed before any connection) and is not counted.
+
+## 4. Run 3 (plan version 3, the final candidate)
+
+After run 2 the candidate changed: `url` 2.5.9 (RUSTSEC-2026-0592) and
+R-120's fix (a repair task for a chunk committed in another group is
+dropped). Run 3 repeats run 2 unchanged (plan, tooling, values) on the
+final candidate archive's binary (commit `45ca5f3`), sha256
+`c1cd2221991a11e9eaaacc2e96227599ef86e1769b2d126ebe8598d7c9addd56`;
+tooling `6b714fe` (`benchmarks/linux/r110` identical to `22c5696`).
+Smoke before it: final stops all confirmed. *Result to be added when the
+run ends.*
