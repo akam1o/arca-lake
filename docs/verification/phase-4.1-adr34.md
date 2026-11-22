@@ -50,7 +50,7 @@ restarted pending a decision.
 ## 2. The shared system FoundationDB
 
 *Correction (2026-11-22): the three test hosts are dedicated to
-arca-lake; the system FoundationDB is not shared with other users. A
+arca-lake; per the maintainer, not shared with other users. A
 single-process system cluster runs on each of hosts 1 and 2, host 3 has
 none. The findings below are unchanged.*
 

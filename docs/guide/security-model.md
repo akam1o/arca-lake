@@ -22,8 +22,10 @@ Summary of [RFC-012](../rfcs/RFC-012-security-architecture.md), the
   (ADR-0016, ADR-0019). A storage node that has adopted an incarnation
   refuses a shard write carrying another one (R-117): a writer of another
   cluster reaching it at a reused address is refused, not counted
-  written. A node that has not adopted any incarnation yet (new, never
-  reached by its controller) still accepts such a write.
+  written. Still accepted: a write carrying no incarnation (a writer that
+  holds none, such as a tool or a process of an earlier build; deletes
+  refuse that case), and any write to a node that has not adopted an
+  incarnation yet (new, never reached by its controller).
 - **One trust domain per cluster.** The handshake pins a node's SPIFFE ID,
   and node IDs are small integers that repeat across clusters: give each
   cluster its own CA or its own trust domain (`arca-lake tls init-ca`
