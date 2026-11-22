@@ -594,13 +594,16 @@ class Run:
                 self.c.step_done(n)
             return self.clock.monotonic() >= d1_done + CHAIN_S and self._quiet(s)
 
-        quiet = False
+        quiet = failed = False
         try:
             quiet = self.wait("4", c1b_end, cond)
+        except BaseException:
+            failed = True
+            raise
         finally:
             if hold_on:
                 tl["refusal_end_ms"] = self.host_ms()
-                tl["refusal_ended_by"] = ("stop" if self.stop is not None
+                tl["refusal_ended_by"] = ("stop" if self.stop is not None else "error" if failed
                                           else "D1's chain over" if quiet else "stage end")
                 self.c.step_done(n)
         tl["admission_recovered_early"] = tl.get("refusal_ended_by") == "natural recovery" and \
