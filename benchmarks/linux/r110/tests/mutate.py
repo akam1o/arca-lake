@@ -179,6 +179,10 @@ muts = [
  ("v2: C1b deadline ignored", "r110/judge.py", "    if t_q > deadline:", "    if False:", "test_driver"),
  ("v2: C1b lost retirements pass", "r110/judge.py", "    return verdict(\"C1b\", FAILED, [f\"{parts['reclaimed']} records reclaimed by the quiet point, {need} needed\"], **ev)", "    return verdict(\"C1b\", PASSED, [], **ev)", "test_driver"),
  ("v2: stage 5 before D1 quiet", "r110/driver.py", "        # Not quiet by the deadline: stage 5 cannot take a clean baseline.\n        return bool(quiet)", "        return True", "test_driver"),
+ ("v2: C1a fails before D1 was due", "r110/judge.py", "    if t_d is None or t_e < t_d + v[\"d1_chain_s\"] * 1000:", "    if t_d is None:", "test_driver"),
+ ("v2: subtractions inside only", "r110/judge.py", "             \"node_capacity_refusals\": _increase_outer(samples, \"gateway0\",", "             \"node_capacity_refusals\": _increase(samples, \"gateway0\",", "test_driver"),
+ ("v2: C1b read at the quiet point", "r110/judge.py", "    bound, parts = d1_reclaimed_bound(samples, t_d, t_q + 2 * iv, v)", "    bound, parts = d1_reclaimed_bound(samples, t_d, t_q, v)", "test_driver"),
+ ("v2: C1b unsampled violations ignored", "r110/judge.py", "    if unsampled:\n        return", "    if False:\n        return", "test_driver"),
  ("v2: natural recovery ends the run", "r110/driver.py", "                tl[\"refusal_ended_by\"] = \"natural recovery\"\n                self.c.step_done(n)\n            return", "                tl[\"refusal_ended_by\"] = \"natural recovery\"\n                self.c.step_done(n)\n                return True\n            return", "test_driver"),
 ]
 for entry in muts:
