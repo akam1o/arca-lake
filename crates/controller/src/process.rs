@@ -3181,16 +3181,23 @@ pub(crate) fn choose_for(
 ) -> Result<Option<GroupMember>, ControlError> {
     let node_list: Vec<NodeRecord> = nodes.values().filter(|n| healthy(n.id)).cloned().collect();
     let devices = groups::devices_of(&node_list, all_groups);
-    let remaining: Vec<arca_lake_placement::Member> = g
-        .members
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != index)
-        .map(|(_, m)| arca_lake_placement::Member {
-            node_id: m.node_id,
-            device_id: m.device_id,
-        })
-        .collect();
+    // The remaining members' domains come from every node record, healthy
+    // or not, and never from the candidates (which leave the members out):
+    // a replacement sharing a domain with any of them would leave the group
+    // one domain short. A member whose record is gone has no known domain:
+    // no replacement is chosen for this group.
+    let all_nodes: Vec<NodeRecord> = nodes.values().cloned().collect();
+    let all_devices = groups::devices_of(&all_nodes, all_groups);
+    let mut remaining = Vec::new();
+    for (_, m) in g.members.iter().enumerate().filter(|(i, _)| *i != index) {
+        match all_devices
+            .iter()
+            .find(|d| d.node_id == m.node_id && d.device_id == m.device_id)
+        {
+            Some(d) => remaining.push(d.clone()),
+            None => return Ok(None),
+        }
+    }
     // Never pick a node that is already a member, and stay on the device
     // class the group's other members use (a durable member must not move
     // onto a cache-tier node, nor the reverse).
@@ -3596,6 +3603,65 @@ async fn tiering_pass<S: KvStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Three-host validation of 0.1.0: the replacement of a failed member
+    /// keeps every member on its own host, the unhealthy members' hosts
+    /// included; with no free host, none is chosen.
+    #[test]
+    fn a_replacement_member_keeps_the_groups_hosts_distinct() {
+        use arca_lake_metadata::records::{GroupRole, GroupState};
+        // Nodes 1..=6: hosts a b c a b c.
+        let nodes: HashMap<u64, NodeRecord> = (1..=6u64)
+            .map(|id| {
+                let host = ["a", "b", "c"][usize::try_from((id - 1) % 3).unwrap()];
+                let rec = NodeRecord {
+                    id,
+                    address: format!("127.0.0.1:{}", 9000 + id),
+                    labels: vec![
+                        ("host".into(), host.into()),
+                        ("device_class".into(), "hdd".into()),
+                    ],
+                    devices: vec![0],
+                    registered_ms: 1,
+                    last_seen_ms: 1,
+                };
+                (id, rec)
+            })
+            .collect();
+        let group = |id: u64, members: [u64; 3]| GroupRecord {
+            id,
+            profile: "p".into(),
+            tier: "default".into(),
+            scheme: "rs".into(),
+            data_shards: 2,
+            parity_shards: 1,
+            members: members
+                .iter()
+                .map(|&node_id| GroupMember {
+                    node_id,
+                    device_id: 0,
+                })
+                .collect(),
+            epoch: 1,
+            state: GroupState::Active,
+            repair_cursor: None,
+            role: GroupRole::Durable,
+        };
+        let groups = vec![group(1, [1, 2, 3]), group(2, [4, 5, 6])];
+        let pick = |down: &[u64]| {
+            choose_for(&nodes, &groups, &groups[1], 1, "host", &|id| {
+                !down.contains(&id)
+            })
+            .unwrap()
+            .map(|m| m.node_id)
+        };
+        // Node 5 (host b) failed: node 2 is the only node on a free host.
+        assert_eq!(pick(&[5]), Some(2));
+        // Node 6 (host c) unhealthy as well: its host still counts.
+        assert_eq!(pick(&[5, 6]), Some(2));
+        // Node 2 unavailable too: no node on a free host, none chosen.
+        assert_eq!(pick(&[5, 2]), None);
+    }
 
     /// ADR-0035 §10.1: the controller's flags only seed an absent record;
     /// the record wins over different flags; a leader acknowledges for its
