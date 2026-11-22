@@ -7,7 +7,7 @@ small-allotment step only (plan §3).
 
 | Run | Plan | Outcome | Criteria |
 | --- | --- | --- | --- |
-| `r110-20261122T030322Z` (run 1) | 2 | **Failed** | C1a, C1b, C2, C3a, C3b, C4 Passed; C5 Failed (scrub findings 1,809, all unexpected shards; §2) |
+| `r110-20261122T030322Z` (run 1) | 2 | **Failed** | C1a, C1b, C2, C3a, C3b, C4 Passed; C5 Failed (scrub findings 1,809; by class only after the run: all unexpected shards; §2) |
 | `r110-20261122T082126Z` (run 2) | 3 | *running* | §3 |
 
 At most three runs of the new plan versions were allowed (0.1.0
@@ -51,27 +51,36 @@ tooling `e7b1e60`.
 | C4 | Passed | allocated and retained bytes within the slope and range limits |
 | C5 | **Failed** | "manifest findings 0, scrub findings 1809" |
 
-Cause, from a diagnosis after the run (not part of the judgement):
+The run's tooling kept only the scrub's total, not its classes: the
+run's own 1,809 findings are not broken down, and their classes are not
+known. Cause, from a diagnosis after the run (not part of the judgement):
 FoundationDB and the four nodes were restarted from the run's records
 (no controller, no gateway) and every group scrubbed again: group 1
 879 and group 2 855 findings, **all unexpected shards**, every damage
 class 0, the repair queue empty. The nodes' records pending reclaim at
 the run's last sample add up to 578 + 578 + 293 + 285 = 1,734 = 879 + 855:
-the unexpected shards are the records the nodes retained for the 600 s
-reclaim retention after stage 6's last deletes (06:03:50), and stage 7
-scrubbed inside that window. Reconciliation ran every 5 min through
-stage 7 and removed 0 or 16 orphans a pass: these were not orphans.
+the unexpected shards of the rescrub are the records the nodes retained
+for the 600 s reclaim retention after stage 6's last deletes (06:03:50).
+During the run's own scrub (06:04–06:14) the records pending reclaim on
+the four nodes ranged from 1,752 to 1,929 (GC was still retiring stage 6's
+last deletes), so its 1,809 findings are consistent with the same
+records, but that is not proven. Reconciliation removed no orphan in the
+passes inside stage 7 (06:04, 06:09, 06:14; 16 at 05:59, in stage 6).
 
 The scrub lists a retired record waiting out the retention as an
 unexpected shard (it stays in the store's index until reclaimed); that is
 not data damage, but it is operator-visible noise after any delete
 ([known limitations](../guide/known-limitations.md)).
 
-Change for run 2 ([plan](phase-4.1-r110-retest-plan.md) version 3): C5's
-rule stays (0 findings, every class); stage 7 reads the manifests and the
-scrub only after the background passes settled (the orphan age and two
-reconcile intervals after stage 6, no GC backlog, nothing pending
-reclaim), and records the findings by class. Run 1 stays Failed.
+Change for run 2 ([plan](phase-4.1-r110-retest-plan.md) version 3):
+stage 7 reads the manifests and the scrub only after the background
+passes settled (the orphan age and two reconcile intervals after stage
+6, no GC backlog, nothing pending reclaim), and records the findings by
+class. Settled, C5's rule is unchanged (0 findings, every class).
+Version 3 adds one outcome: if stage 7 does not settle in its time,
+findings that are all unexpected shards and no more than the records
+pending reclaim just before the scrub make C5 **Inconclusive** (any other
+class, or more unexpected shards, Failed). Run 1 stays Failed.
 
 ## 3. Run 2 (plan version 3)
 
