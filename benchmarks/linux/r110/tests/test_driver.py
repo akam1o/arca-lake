@@ -476,14 +476,16 @@ class C1(unittest.TestCase):
     15 s to ``end_min``."""
 
     def build(self, refusal_min=20, quiet_min=25, end_min=30, reclaimed=3000, refused_rises=False,
-              gap=False, refusals=0, reconcile=0, reset=False, no_log=False):
+              gap=False, refusals=0, reconcile=0, reset=False, no_log=False, lag_s=0, no_errors=False):
         S, iv = [], 15_000
         t_d, t_q, t_e = -60_000, quiet_min * 60_000, end_min * 60_000
         for t in range(t_d, t_e + 1, iv):
             if gap and 3 * 60_000 < t < 5 * 60_000:
                 continue
             done = min(1.0, max(0.0, (t - t_d) / (t_q - t_d)))
-            rec = int(300 + reclaimed * done)  # 300: earlier records, reclaimed before D1
+            # 300: earlier records, reclaimed before D1; lag_s: the
+            # controller counts its last pass after the nodes read 0.
+            rec = int(300 + reclaimed * min(1.0, max(0.0, (t - t_d - lag_s * 1000) / (t_q - t_d))))
             if reset and t > 8 * 60_000:
                 rec -= 300
             S.append(smp("gateway0", t, arca_gateway_admission_state=3 if 0 <= t < refusal_min * 60_000 else 0,
@@ -492,7 +494,7 @@ class C1(unittest.TestCase):
                          arca_controller_gc_backlog=0 if t >= t_q else max(1, int(1000 * (1 - done * 2))),
                          arca_controller_reclaimed_total=rec,
                          arca_controller_reclaim_refused_total=(1 if refused_rises and t > 6 * 60_000 else 0),
-                         arca_controller_reclaim_errors_total=0))
+                         **({} if no_errors else {"arca_controller_reclaim_errors_total": 0})))
             if not no_log:
                 S.append(smp("controller-log", t, reconcile_deleted=int(reconcile * done)))
             for n in ("node0", "node1"):
@@ -528,7 +530,15 @@ class C1(unittest.TestCase):
         self.assertEqual(self.judge("c1a", refusal_min=5)["outcome"], judge.INCONCLUSIVE)
 
     def test_c1a_no_progress_fails(self):
-        self.assertEqual(self.judge("c1a", reclaimed=50)["outcome"], judge.FAILED)
+        """Refused past D1's chain (25 min after D1) with no progress."""
+        r = self.judge("c1a", reclaimed=50, refusal_min=28, quiet_min=30, end_min=35)
+        self.assertEqual(r["outcome"], judge.FAILED, r)
+
+    def test_c1a_no_progress_before_d1_was_due_is_inconclusive(self):
+        """Review of #30: a refusal over before D1's reclaim could start
+        shows nothing; never a failure."""
+        r = self.judge("c1a", reclaimed=50, refusal_min=15)
+        self.assertEqual(r["outcome"], judge.INCONCLUSIVE, r)
 
     def test_c1a_reclaim_refusals_fail_it(self):
         self.assertEqual(self.judge("c1a", refused_rises=True)["outcome"], judge.FAILED)
@@ -573,6 +583,33 @@ class C1(unittest.TestCase):
     def test_c1b_not_attributable_is_inconclusive(self):
         r = self.judge("c1b", reconcile=500)
         self.assertEqual(r["outcome"], judge.INCONCLUSIVE, r)
+
+    def test_c1b_a_reclaim_counted_just_after_the_quiet_point_passes(self):
+        """Review of #30: the nodes read 0 pending 15 s before the
+        controller counts its last pass."""
+        r = self.judge("c1b", lag_s=15)
+        self.assertEqual(r["outcome"], judge.PASSED, r)
+
+    def test_c1b_violation_counters_not_sampled_are_inconclusive(self):
+        self.assertEqual(self.judge("c1b", no_errors=True)["outcome"], judge.INCONCLUSIVE)
+
+    def test_the_subtractions_reach_the_samples_outside_the_window(self):
+        """Review of #30: a refusal counted between the last sample before
+        the window and its start is still subtracted."""
+        S = [smp("gateway0", 0, arca_gateway_node_capacity_refusals_total=0),
+             smp("gateway0", 15_000, arca_gateway_node_capacity_refusals_total=10),
+             smp("gateway0", 30_000, arca_gateway_node_capacity_refusals_total=10),
+             smp("gateway0", 45_000, arca_gateway_node_capacity_refusals_total=12)]
+        k = "arca_gateway_node_capacity_refusals_total"
+        self.assertEqual(judge._increase(S, "gateway0", k, 10_000, 40_000, 15_000, 2.0), 0)
+        self.assertEqual(judge._increase_outer(S, "gateway0", k, 10_000, 40_000, 15_000, 2.0), 12)
+        # In the bound: the reclaims inside, the refusals outside.
+        S += [smp("controller", t, arca_controller_reclaimed_total=t // 1000) for t in (0, 15_000, 30_000, 45_000)]
+        S += [smp("controller-log", t, reconcile_deleted=0) for t in (0, 15_000, 30_000, 45_000)]
+        bound, parts = judge.d1_reclaimed_bound(S, 10_000, 40_000, judge.VALUES)
+        self.assertEqual((parts["reclaimed"], parts["node_capacity_refusals"]), (15, 12))
+        self.assertEqual(bound, 15 - 36)
+        self.assertIsNone(judge._increase_outer(S, "gateway0", k, 10_000, 90_000, 15_000, 2.0))
 
     def test_c1b_reclaim_errors_fail_it(self):
         self.assertEqual(self.judge("c1b", refused_rises=True)["outcome"], judge.FAILED)

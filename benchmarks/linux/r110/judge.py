@@ -142,18 +142,37 @@ def _increase(samples, target, key, t0, t1, iv, gap):
     return pts[-1][1] - pts[0][1]
 
 
+def _increase_outer(samples, target, key, t0, t1, iv, gap):
+    """The increase of a counter from its last sample at or before ``t0``
+    to its first at or after ``t1`` (each within the gap), or None: an
+    upper bound of what happened over [t0, t1]."""
+    pts = series(samples, target, key)
+    before = [p for p in pts if p[0] <= t0 and t0 - p[0] <= gap * iv]
+    after = [p for p in pts if p[0] >= t1 and p[0] - t1 <= gap * iv]
+    if not before or not after:
+        return None
+    a, b = before[-1], after[0]
+    inner = [p for p in pts if a[0] <= p[0] <= b[0]]
+    if not covered(inner, a[0], b[0], iv, gap) or not _monotone(inner):
+        return None
+    return b[1] - a[1]
+
+
 def d1_reclaimed_bound(samples, t0, t1, v):
     """A lower bound of D1's records reclaimed over [t0, t1] (plan v2 §8.3):
     the reclaimed records, less those reconciliation's orphans could account
     for (each removed orphan one record), less 3 per shard write a node
     refused for capacity (each marks at most one aborted object, whose at
-    most 3 shards GC retires). ``(bound, parts)``; bound None when a part is
+    most 3 shards GC retires). The reclaims are counted from the samples
+    inside the interval (a lower bound), what is subtracted from the
+    samples just outside it (an upper bound), so that the bound stays a
+    lower bound at the edges. ``(bound, parts)``; bound None when a part is
     not sampled over the interval."""
     iv, gap = v["interval_s"] * 1000, v["max_gap_factor"]
     parts = {"reclaimed": _increase(samples, "controller", "arca_controller_reclaimed_total", t0, t1, iv, gap),
-             "reconcile_deleted": _increase(samples, "controller-log", "reconcile_deleted", t0, t1, iv, gap),
-             "node_capacity_refusals": _increase(samples, "gateway0", "arca_gateway_node_capacity_refusals_total",
-                                                 t0, t1, iv, gap)}
+             "reconcile_deleted": _increase_outer(samples, "controller-log", "reconcile_deleted", t0, t1, iv, gap),
+             "node_capacity_refusals": _increase_outer(samples, "gateway0",
+                                                       "arca_gateway_node_capacity_refusals_total", t0, t1, iv, gap)}
     if any(x is None for x in parts.values()):
         return None, parts
     return parts["reclaimed"] - parts["reconcile_deleted"] - 3 * parts["node_capacity_refusals"], parts
@@ -166,7 +185,8 @@ def _d1(records, tl):
 
 def c1a(samples, records, tl, v, nodes):
     """C1a, plan v2: GC and reclaim make progress on D1 while writes are
-    refused. Over the observed refusal (at least ``c1a_min_refusal_s``):
+    refused. Over the observed refusal (at least ``c1a_min_refusal_s``;
+    no progress fails only on a refusal lasting past D1's chain):
     GC collected generations, D1's reclaimed records (the lower bound)
     reached ``c1a_min_fraction`` of D1's records, and neither reclaim
     refusals nor reclaim errors rose."""
@@ -199,12 +219,21 @@ def c1a(samples, records, tl, v, nodes):
         return verdict("C1a", INCONCLUSIVE, ["GC or reclaim counters not sampled through the refusal"], **ev)
     need = v["c1a_min_fraction"] * v["c1_records_per_object"] * d1
     ev["d1_reclaimed_needed"] = need
+    if collected > 0 and bound >= need:
+        return verdict("C1a", PASSED, [], **ev)
+    if bound < need <= parts["reclaimed"]:
+        return verdict("C1a", INCONCLUSIVE, ["reclaim progress not attributable to D1 (orphans or aborted "
+                                             "writes in the same counter)"], **ev)
+    # No progress shown: a failure only once D1's reclaim was due (its chain
+    # after D1's last delete) while writes were still refused; a refusal
+    # that ended before shows nothing either way (independent review).
+    t_d = s4.get("d1_done_ms")
+    if t_d is None or t_e < t_d + v["d1_chain_s"] * 1000:
+        return verdict("C1a", INCONCLUSIVE, ["the refusal ended before D1's reclaim was due, with no progress "
+                                             "shown"], **ev)
     if collected <= 0:
         reasons.append("no GC collection during the refusal")
     if bound < need:
-        if parts["reclaimed"] >= need:
-            return verdict("C1a", INCONCLUSIVE, ["reclaim progress not attributable to D1 (orphans or aborted "
-                                                 "writes in the same counter)"], **ev)
         reasons.append(f"at least {bound} of D1's records reclaimed during the refusal, {need:.0f} needed")
     return verdict("C1a", FAILED if reasons else PASSED, reasons, **ev)
 
@@ -226,13 +255,17 @@ def c1b(samples, records, tl, v, nodes):
     end = s4.get("end_ms")
     iv, gap = v["interval_s"] * 1000, v["max_gap_factor"]
     ev = {"d1": d1, "deadline_ms": deadline, "quiet_ms": t_q}
-    reasons = []
+    reasons, unsampled = [], []
     for k in ("arca_controller_reclaim_refused_total", "arca_controller_reclaim_errors_total"):
         inc = _increase(samples, "controller", k, t_d, min(t_q or end or deadline, deadline), iv, gap)
-        if inc is not None and inc > 0:
+        if inc is None:
+            unsampled.append(k)
+        elif inc > 0:
             reasons.append(f"{k} rose after D1")
     if reasons:
         return verdict("C1b", FAILED, reasons, **ev)
+    if unsampled:
+        return verdict("C1b", INCONCLUSIVE, [f"{k} not sampled after D1" for k in unsampled], **ev)
     if t_q is None:
         if end is not None and end >= deadline:
             # Observed to the deadline without D1's chain over.
@@ -240,6 +273,8 @@ def c1b(samples, records, tl, v, nodes):
         return verdict("C1b", INCONCLUSIVE, ["stage 4 ended before D1's chain was over or the deadline"], **ev)
     if t_q > deadline:
         return verdict("C1b", FAILED, [f"D1's chain over at {t_q}, after the deadline {deadline}"], **ev)
+    if t_q < t_d + v["d1_chain_s"] * 1000:
+        return verdict("C1b", INCONCLUSIVE, ["the quiet point recorded before D1's chain time"], **ev)
     # The quiet point itself, read again from the samples (fresh, every node).
     gc = at_or_before(series(samples, "controller", "arca_controller_gc_backlog"), t_q, iv)
     pend = {n: at_or_before(series(samples, n, "arca_node_reclaim_pending_records"), t_q, iv) for n in nodes}
@@ -247,7 +282,10 @@ def c1b(samples, records, tl, v, nodes):
         return verdict("C1b", INCONCLUSIVE, ["GC backlog or pending records not sampled at the quiet point"], **ev)
     if gc != 0 or any(p != 0 for p in pend.values()):
         return verdict("C1b", INCONCLUSIVE, ["the quiet point not confirmed by the samples"], **ev)
-    bound, parts = d1_reclaimed_bound(samples, t_d, t_q, v)
+    # The controller counts a reclaim pass after it went over every node: a
+    # node can read 0 pending before that pass is counted, so the count is
+    # read up to two intervals after the quiet point (independent review).
+    bound, parts = d1_reclaimed_bound(samples, t_d, t_q + 2 * iv, v)
     need = v["c1_records_per_object"] * d1
     ev.update(d1_reclaimed_at_least=bound, d1_reclaimed_needed=need, **{f"reclaim_{k}": x for k, x in parts.items()})
     if bound is None:

@@ -583,17 +583,25 @@ class Run:
             nonlocal hold_on
             if hold_on and self._left(s, 3):
                 hold_on = False
-                tl["refusal_end_ms"] = self.host_ms()
+                # The first sample out of the refusal (host clock), as for its
+                # start; the poll's time if none is found.
+                out = [x["ended_wall_ms"] for x in self.c.samples()
+                       if x.get("target") in self.c.gateways() and x.get("status") in ("ok", "partial")
+                       and x["ended_wall_ms"] >= tl["refusal_start_ms"]
+                       and not self._rejecting(x["values"].get("arca_gateway_admission_state", {}).get("value", 3))]
+                tl["refusal_end_ms"] = min(out) if out else self.host_ms()
                 tl["refusal_ended_by"] = "natural recovery"
                 self.c.step_done(n)
             return self.clock.monotonic() >= d1_done + CHAIN_S and self._quiet(s)
 
+        quiet = False
         try:
             quiet = self.wait("4", c1b_end, cond)
         finally:
             if hold_on:
                 tl["refusal_end_ms"] = self.host_ms()
-                tl["refusal_ended_by"] = "D1's chain over" if self.clock.monotonic() < c1b_end else "stage end"
+                tl["refusal_ended_by"] = ("stop" if self.stop is not None
+                                          else "D1's chain over" if quiet else "stage end")
                 self.c.step_done(n)
         tl["admission_recovered_early"] = tl.get("refusal_ended_by") == "natural recovery" and \
             tl["refusal_end_ms"] < tl["d1_done_ms"] + CHAIN_S * 1000
