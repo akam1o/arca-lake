@@ -632,7 +632,7 @@ class C1(unittest.TestCase):
         o = {c["criterion"]: c["outcome"] for c in res["criteria"]}
         self.assertEqual(o["C1b"], judge.FAILED)
         self.assertEqual(res["outcome"], judge.FAILED)
-        self.assertEqual(res["plan_version"], 2)
+        self.assertEqual(res["plan_version"], judge.PLAN_VERSION)
 
     def test_the_end_of_d1_not_recorded_is_inconclusive(self):
         S, R, tl = self.build()
@@ -726,6 +726,28 @@ class Overall(unittest.TestCase):
         r = judge.judge([], [], {})
         self.assertEqual({c["outcome"] for c in r["criteria"]} - {judge.INCONCLUSIVE}, {judge.NOT_RUN})
         self.assertNotEqual(r["outcome"], judge.PASSED)
+
+    def c5(self, sc, by, settled="absent"):
+        s7 = {"verify": {"violations": [], "complete": True, "keys": 1}, "manifest_findings": 0,
+              "scrub_findings": sc, "scrub_by_class": by}
+        if settled != "absent":
+            s7["settled_ms"] = settled
+        return judge.c5({"7": s7})["outcome"]
+
+    def test_c5_unexpected_shards_after_the_settle_fail(self):
+        """Plan v3: settled, every finding fails C5, unexpected shards too."""
+        self.assertEqual(self.c5(5, [0, 0, 0, 0, 5, 0, 0, 0], settled=100), judge.FAILED)
+
+    def test_c5_unexpected_shards_before_the_settle_are_inconclusive_only_alone(self):
+        self.assertEqual(self.c5(5, [0, 0, 0, 0, 5, 0, 0, 0], settled=None), judge.INCONCLUSIVE)
+        self.assertEqual(self.c5(6, [1, 0, 0, 0, 5, 0, 0, 0], settled=None), judge.FAILED)
+        self.assertEqual(self.c5(5, None, settled=None), judge.FAILED, "no breakdown: no excuse")
+        self.assertEqual(self.c5(5, [0, 0, 0, 0, 4, 0, 0, 0], settled=None), judge.FAILED, "inconsistent")
+
+    def test_c5_of_a_timeline_without_the_settle_step_is_judged_as_before(self):
+        """Run r110-20261122T030322Z (plan v2): its Failed stays Failed."""
+        self.assertEqual(self.c5(1809, [0, 0, 0, 0, 1809, 0, 0, 0]), judge.FAILED)
+        self.assertEqual(self.c5(0, [0] * 8), judge.PASSED)
 
     def test_c5_incomplete_is_not_a_pass(self):
         tl = {"7": {"verify": {"violations": [], "complete": False, "keys": 1}, "manifest_findings": 0,
@@ -888,6 +910,45 @@ class ReviewFindingsEngine(EngineBase):
         tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
         self.assertFalse(tl["4"]["admission_recovered_early"])
         self.assertGreaterEqual(tl["4"]["refusal_end_ms"] - tl["4"]["d1_done_ms"], driver.CHAIN_S * 1000)
+
+    def stage7(self, c):
+        """Stage 7 alone (the earlier stages' conditions are not modelled),
+        stage 6 having ended now."""
+        engine = driver.Run(self.cfg, c, driver.Evidence(os.path.join(self.dir, "e7"), self.cfg["run_id"]),
+                            self.clock)
+        engine.tl["6"] = {"end_ms": engine.host_ms()}
+        engine.stage(driver.stages(self.cfg)[6], engine.s7)
+        return engine
+
+    def test_stage_7_scrubs_only_after_the_background_passes_settled(self):
+        """Plan v3: the manifests and the scrub are read after the orphan age
+        and two reconcile intervals from stage 6's end, with no GC backlog
+        and nothing pending reclaim."""
+        c = FakeCluster(self.cfg, self.clock)
+        calls = []
+        real = c.integrity
+        c.integrity = lambda kind: calls.append((kind, self.clock.wall_ms())) or real(kind)
+        e = self.stage7(c)
+        t7 = e.tl["7"]
+        self.assertEqual(t7["settle_after_ms"], e.tl["6"]["end_ms"] + driver.SETTLE7_S * 1000)
+        self.assertIsNotNone(t7["settled_ms"])
+        self.assertGreaterEqual(t7["settled_ms"], t7["settle_after_ms"])
+        self.assertEqual([k for k, _ in calls], ["verify-manifests", "scrub"])
+        self.assertTrue(all(t >= t7["settle_after_ms"] for _, t in calls), calls)
+
+    def test_stage_7_not_settled_still_scrubs_and_says_so(self):
+        c = FakeCluster(self.cfg, self.clock)
+        real = c.sample
+
+        def sample():
+            real()
+            c._samples[-1]["values"]["arca_node_reclaim_pending_records"] = {"value": 7, "unit": "count"}
+
+        c.sample = sample
+        e = self.stage7(c)
+        self.assertIn("settled_ms", e.tl["7"])
+        self.assertIsNone(e.tl["7"]["settled_ms"])
+        self.assertEqual(c.integrity_calls, ["verify-manifests", "scrub"])
 
     def test_a_natural_recovery_ends_the_hold_and_the_run_goes_on(self):
         """Plan v2: admission recovering before D1 matured ends the hold;

@@ -185,6 +185,11 @@ muts = [
  ("v2: C1b unsampled violations ignored", "r110/judge.py", "    if unsampled:\n        return", "    if False:\n        return", "test_driver"),
  ("v2: C1a subtractions from the refusal only", "r110/judge.py", "    bound, parts = d1_reclaimed_bound(samples, t_r, t_e, v, sub_from=s4.get(\"d1_done_ms\"))", "    bound, parts = d1_reclaimed_bound(samples, t_r, t_e, v)", "test_driver"),
  ("v2: natural recovery ends the run", "r110/driver.py", "                tl[\"refusal_ended_by\"] = \"natural recovery\"\n                self.c.step_done(n)\n            return", "                tl[\"refusal_ended_by\"] = \"natural recovery\"\n                self.c.step_done(n)\n                return True\n            return", "test_driver"),
+ # Plan v3: stage 7 after the background passes settled.
+ ("v3: scrub without the settle", "r110/driver.py", "        settled = self.wait(\"7\", wait_end, lambda s: self.host_ms() >= tl7[\"settle_after_ms\"] and self._quiet(s)) \\\n            if self.clock.monotonic() < wait_end else False", "        settled = True", "test_driver"),
+ ("v3: settle by time only", "r110/driver.py", "lambda s: self.host_ms() >= tl7[\"settle_after_ms\"] and self._quiet(s)", "lambda s: self.host_ms() >= tl7[\"settle_after_ms\"]", "test_driver"),
+ ("v3: unexpected shards excused after the settle", "r110/judge.py", "        if \"settled_ms\" in s7 and s7[\"settled_ms\"] is None and isinstance(by, list)", "        if isinstance(by, list)", "test_driver"),
+ ("v3: other classes excused", "r110/judge.py", "                and sum(by) == sc and sum(by) == by[4]:", "                and sum(by) == sc:", "test_driver"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]

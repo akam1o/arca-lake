@@ -698,6 +698,11 @@ class SshCluster:
             m = re.search(r"roots (\d+) findings (\d+)", out)
             return int(m.group(2)) if m else None
         total = 0
+        # The findings by class, summed over the groups (kept for the
+        # evidence; the order of FindingClass: missing, checksum, truncated,
+        # header, unexpected shard, stale epoch, metadata/data, unrecoverable).
+        self.last_scrub_classes = None
+        classes = None
         out = self.ssh(f"{admin} status 2>&1 | grep '^group '", check=False)
         groups = re.findall(r"^group (\d+)", out, re.M)
         if not groups:
@@ -707,7 +712,10 @@ class SshCluster:
             m = re.search(r"findings \[([\d, ]*)\] enqueued \d+ errors (\d+)", o)
             if not m or int(m.group(2)) > 0:
                 return None
-            total += sum(int(x) for x in m.group(1).split(",") if x.strip())
+            row = [int(x) for x in m.group(1).split(",") if x.strip()]
+            classes = row if classes is None else [a + b for a, b in zip(classes, row)]
+            total += sum(row)
+        self.last_scrub_classes = classes
         return total
 
     def collect_logs(self):

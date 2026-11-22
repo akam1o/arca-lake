@@ -328,6 +328,11 @@ def services_problems(svc, setup_started):
 # mean "done"; before it, 0 pending records is only "not retired yet".
 CHAIN_S = judge.VALUES["d1_chain_s"]
 SETTLE_S = 180  # three compaction passes after the last reclaim (§8 C2)
+# Plan v3 §7 stage 7: the controller's orphan age (900 s) and two reconcile
+# intervals (2 x 300 s) after stage 6's end before the scrub; the scrub keeps
+# this reserve of the stage's time.
+SETTLE7_S = 1500
+SCRUB_RESERVE_S = 900
 DRAIN_OBSERVE_S = 1800  # §6.2: observe the drain after a stop that is not a resource danger
 
 
@@ -692,10 +697,26 @@ class Run:
         self.tl["7"]["verify"] = r
         if self._stopped("7"):
             return False
-        self.tl["7"]["manifest_findings"] = self.c.integrity("verify-manifests")
+        # Plan v3 §7: the manifests and the scrub are read once the background
+        # passes had their time after stage 6's last write and delete: the
+        # orphan age and two reconcile intervals, no GC backlog, no record
+        # pending reclaim on any node. Retained records (deleted, waiting out
+        # the retention) are listed by the scrub as unexpected shards (run
+        # r110-20261122T030322Z). Bounded: the scrub keeps a reserve.
+        tl7 = self.tl["7"]
+        settle_from = (self.tl.get("6") or {}).get("end_ms") or tl7["start_ms"]
+        tl7["settle_after_ms"] = settle_from + SETTLE7_S * 1000
+        wait_end = deadline - SCRUB_RESERVE_S
+        settled = self.wait("7", wait_end, lambda s: self.host_ms() >= tl7["settle_after_ms"] and self._quiet(s)) \
+            if self.clock.monotonic() < wait_end else False
         if self._stopped("7"):
             return False
-        self.tl["7"]["scrub_findings"] = self.c.integrity("scrub")
+        tl7["settled_ms"] = self.host_ms() if settled else None
+        tl7["manifest_findings"] = self.c.integrity("verify-manifests")
+        if self._stopped("7"):
+            return False
+        tl7["scrub_findings"] = self.c.integrity("scrub")
+        tl7["scrub_by_class"] = getattr(self.c, "last_scrub_classes", None)
         if self._stopped("7"):
             return False
         self.run_step({"kind": "finish", "stage": "7"}, deadline)
