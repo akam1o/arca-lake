@@ -105,7 +105,7 @@ design knowingly does not prevent the threat and says why.
 | --- | --- | --- | --- |
 | Malicious or vulnerable dependency | T8 | all | C-11 `cargo-deny` advisories and licenses in CI, `Cargo.lock` committed, dependency review on update |
 | Third-party GitHub Action compromise | T8 | A3 (CI secrets), build integrity | C-11 actions pinned, minimal `permissions`, no secrets in CI beyond the default token (read-only) |
-| Untrusted code on a persistent self-hosted runner | T8, T1 | runner host, everything it can reach | C-11 self-hosted runners run only code from `main` pushed by maintainers; pull requests from forks run on GitHub-hosted or ephemeral runners or not at all; runner hosts have no access to production or validation hosts |
+| Untrusted code on a persistent self-hosted runner | T8, T1 | runner host, everything it can reach | C-11 self-hosted runners run only code from `main` pushed by maintainers; pull requests from forks run on GitHub-hosted or ephemeral runners or not at all; runner hosts have no access to production or validation hosts. *Note (2026-11-22): no self-hosted runner is registered since publication (2026-11-19); every job runs on GitHub-hosted runners ([public CI](../release/public-ci.md#current-arrangement-2026-11-19))* |
 | Benchmark artifacts leaking environment identifiers | T7 | reconnaissance | `docs/security/public-artifacts.md` sanitizer and CI check |
 
 ## 5. Accepted risks (with reasons)

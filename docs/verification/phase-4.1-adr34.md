@@ -49,6 +49,11 @@ restarted pending a decision.
 
 ## 2. The shared system FoundationDB
 
+*Correction (2026-11-22): the three test hosts are dedicated to
+arca-lake; the system FoundationDB is not shared with other users. A
+single-process system cluster runs on each of hosts 1 and 2, host 3 has
+none. The findings below are unchanged.*
+
 Read-only status after the restart (no command other than `status`):
 available and healthy, fully recovered, one process, not degraded, no
 cluster or process messages, its data size as before (3.7 MB), one

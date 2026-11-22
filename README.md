@@ -5,8 +5,9 @@ written in Rust. It combines stateless S3 gateways, FoundationDB metadata,
 an append-only storage engine, erasure coding or replication, and native
 multi-tier storage.
 
-> **Status: experimental, not released.** There is no release yet. The
-> code on `main` is under active development; it has been verified by
+> **Status: experimental, not production-ready.** 0.1.0 is the first
+> experimental release (candidate; not yet published), for evaluation
+> and development. The code is under active development; it has been verified by
 > automated tests and short, dense load and fault-injection runs on
 > virtual machines, **not** by long-duration operation or on physical
 > storage. Do not store data you cannot afford to lose. What is and is
@@ -30,8 +31,9 @@ not imply production readiness or support for every S3 API.
 
 The [quick start](docs/guide/quick-start.md) walks through a local S3 smoke
 test and a development cluster on one Linux host, including an AWS CLI
-round trip and cleanup. Build from source; no release binary or container
-image is published yet.
+round trip and cleanup. Use the 0.1.0 Linux x86_64 binary archive once
+published, or build from source; no container image or crates.io package
+is published.
 
 ```sh
 git clone https://github.com/akam1o/arca-lake.git
@@ -39,7 +41,8 @@ cd arca-lake
 ```
 
 Use the Rust toolchain pinned in `rust-toolchain.toml`. The distributed
-example also needs FoundationDB 7.3 and its client library. See
+example also needs FoundationDB 7.3, and every host running the `fdb`
+build (the release binary included) needs its client library. See
 [supported platforms](docs/guide/supported-platforms.md) for tested
 platforms and prerequisites.
 

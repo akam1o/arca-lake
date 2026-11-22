@@ -37,3 +37,7 @@ testing surface for durability-critical code.
   build.
 - CI matrix: Linux (x86-64) on self-hosted runners; macOS is a development platform and is verified by developers, not by CI (Phase 2.3)
   for build and unit tests; Linux only for crash and io_uring tests.
+  *Note (2026-11-22): the self-hosted runners were removed at publication
+  (2026-11-19); CI runs on GitHub-hosted `ubuntu-24.04` runners
+  ([public CI](../release/public-ci.md#current-arrangement-2026-11-19),
+  [supported platforms](../guide/supported-platforms.md)).*

@@ -392,6 +392,10 @@ in benchmark artifacts (`docs/security/public-artifacts.md`).
   VM per host rebuild, no production credentials on them) and have no
   network path to validation or production hosts. Details and the
   public-repository checklist: RFC-013 §9.
+  *Note (2026-11-22): the self-hosted runners were removed at publication
+  (2026-11-19); CI runs on GitHub-hosted runners on pull requests, pushes
+  to `main` and on demand
+  ([public CI](../release/public-ci.md#current-arrangement-2026-11-19)).*
 
 ## 6. Alternatives considered
 
