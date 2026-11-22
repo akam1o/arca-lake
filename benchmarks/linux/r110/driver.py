@@ -570,15 +570,37 @@ class Run:
         # D1's reclaims before the refusal do not count for C1 (plan §8).
         tl["reclaimed_before_refusal"] = (at_r - at_d1) if at_r is not None and at_d1 is not None else None
         n = self.c.send_step(dict(hold, stage="4", max_seconds=max(1, deadline - self.clock.monotonic())))
-        done = self.wait("4", deadline, lambda s: self._left(s, 3) or (
-            self.clock.monotonic() >= d1_done + CHAIN_S and self._quiet(s)))
-        tl["refusal_end_ms"] = self.host_ms()
-        early = bool(done) and self.clock.monotonic() < d1_done + CHAIN_S
-        tl["admission_recovered_early"] = early
-        self.c.step_done(n)
-        # Recovered before D1 matured: the exit condition (held while D1
-        # matures) is not met; C1 is Inconclusive and the run ends (§7).
-        return bool(done) and not early
+        # Plan v2 §7: the hold lasts while admission refuses; a natural
+        # recovery ends the hold (no write is sent to a cluster that accepts
+        # again), not the stage. The stage waits for D1's chain to be over
+        # (GC backlog 0, no pending record on any node, D1's chain time
+        # passed) until C1b's deadline; only then does stage 5 take its
+        # baseline, so that D1's reclaim never counts in C2.
+        c1b_end = min(deadline, d1_done + judge.VALUES["c1b_deadline_s"])
+        hold_on = True
+
+        def cond(s):
+            nonlocal hold_on
+            if hold_on and self._left(s, 3):
+                hold_on = False
+                tl["refusal_end_ms"] = self.host_ms()
+                tl["refusal_ended_by"] = "natural recovery"
+                self.c.step_done(n)
+            return self.clock.monotonic() >= d1_done + CHAIN_S and self._quiet(s)
+
+        try:
+            quiet = self.wait("4", c1b_end, cond)
+        finally:
+            if hold_on:
+                tl["refusal_end_ms"] = self.host_ms()
+                tl["refusal_ended_by"] = "D1's chain over" if self.clock.monotonic() < c1b_end else "stage end"
+                self.c.step_done(n)
+        tl["admission_recovered_early"] = tl.get("refusal_ended_by") == "natural recovery" and \
+            tl["refusal_end_ms"] < tl["d1_done_ms"] + CHAIN_S * 1000
+        if quiet:
+            tl["d1_quiet_ms"] = self.host_ms()
+        # Not quiet by the deadline: stage 5 cannot take a clean baseline.
+        return bool(quiet)
 
     def s5(self, st, deadline):
         probe, _ = st["steps"]
