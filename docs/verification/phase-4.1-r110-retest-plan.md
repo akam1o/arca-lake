@@ -1,12 +1,12 @@
 # R-110: capacity-pressure retest plan
 
-Status: **run once, Inconclusive** (2026-11-21:
-[results](phase-4.1-r110-retest-results.md); C1 not judgeable, admission
-recovered by itself before D1 matured; the run ended in stage 4). Any
-connection to the test hosts, the read-only preflight included, is made
-only after an approval; the run itself needs an approval of its hosts,
-budgets, limits, test settings and stop rules, given on the preflight's
-measurements (§10). A passed run
+Status: **version 2** (2026-11-22; C1 split into C1a and C1b, §8.3;
+stage 4 goes on after a natural recovery, §7). Version 1 was run twice on
+2026-11-21, both Inconclusive ([results](phase-4.1-r110-retest-results.md));
+those runs stay judged under version 1. The three test hosts are
+dedicated to arca-lake (corrected 2026-11-22, §4.1); runs are approved
+by the maintainer's delegation, recorded in each run's approval file
+(§10). A passed run
 of this plan would verify the small-allotment step only (§3); it would
 not by itself close R-110.
 
@@ -27,7 +27,8 @@ an immediate new request (about 1,100 refusals per second).
 
 | # | Criterion | Not evidence of it alone |
 | --- | --- | --- |
-| C1 | Under capacity pressure and write refusal, GC and reclaim keep making the progress the deletes need | a DELETE answered 204 |
+| C1a | Under write refusal, GC and reclaim make progress on an identified set of deletes (D1) | a DELETE answered 204 |
+| C1b | D1 is fully reclaimed within a fixed time of its last delete, whether the refusal held or admission recovered | a DELETE answered 204; space returned |
 | C2 | Physical space returns: compaction lowers the segment bytes the admission counts, and the available bytes the nodes report rise accordingly (not only records reclaimed) | GC backlog falling; reclaim counters rising |
 | C3 | Admission recovers and writes resume, held over a window (judged as C3a, recovery with probes only, and C3b, sustained writes) | one PUT succeeding |
 | C4 | With a constant live set and bounded churn, retained bytes and allocated capacity reach a steady state instead of growing | a level over a few minutes |
@@ -87,9 +88,12 @@ alone, nor a pass of the first, is a resolution of R-110.
 
 ### 4.1 Placement (proposed; to be approved)
 
-The three test hosts of the earlier reports; two of them also run a
-shared system FoundationDB of other users (hosts 1 and 3, numbered as in
-[ADR-0035's report](phase-4.1-adr35.md) §1 and §7.1). A separate process on the
+The three test hosts of the earlier reports (numbered as in
+[ADR-0035's report](phase-4.1-adr35.md) §1 and §7.1). Correction
+(2026-11-22): the hosts are dedicated to arca-lake, not shared with other
+users, and the single-process system FoundationDB clusters run on hosts 1
+and 2 (host 3 has none); the text below as first written said hosts 1
+and 3. The watchdog reads the system FoundationDB of hosts 1 and 2. A separate process on the
 same host still shares the device, file system, CPU and memory with it.
 
 - **Option 1 (proposed):** every test process on host 2, which runs no
@@ -259,7 +263,7 @@ that stops the test's services:
 | One-minute load per CPU, any host | > 4 | existing default |
 | CPU iowait on host 2 | > 50 % for 60 s | proposed |
 | A GET probe of one baseline object (1 per 5 s; its own object, put in stage 3 and never deleted by the test; a SlowDown answer counts as a failure) | 3 consecutive failures, or > 5 s | proposed |
-| System FoundationDB of hosts 1 and 3 (`status minimal`) | not "available" once | existing |
+| System FoundationDB of hosts 1 and 2 (`status minimal`; corrected, §4.1) | not "available" once | existing |
 | The dedicated FoundationDB | not available for 60 s | proposed |
 | A host unreachable | 6 consecutive checks (60 s) | existing default; the on-host guard covers host 2 itself |
 | Ledger violation, integrity error, `arca_controller_gc_skipped_referenced_total` > 0, `arca_node_reclaim_damaged` = 1, unexpected 5xx other than 503 | any (the counters: the driver stops the run at the first sample showing one, a protection violation) | proposed |
@@ -285,7 +289,7 @@ and the watchdog has not fired; anything else ends the run.
 | 1 Preflight (read-only) | the separate approval to connect to the hosts (§10) | §10 | every check recorded and within its requirement | 30 min |
 | 2 Smoke | 1 passed | fresh cluster (marker, own port); the watchdog, guard and generator limits exercised (a heartbeat withheld stops a running load; an operation limit ends it); 100 PUT, GET, DELETE; verify | all exercised and stopped as designed; 0 errors | 30 min |
 | 3 Fill and baseline | 2 passed | PUT L0 at the limits; then idle, sampling, until the smoke stage's deletes have matured | L0 acknowledged; admission normal; GC backlog 0 and `arca_node_reclaim_pending_records` 0 on every node (no deletion in progress before D1); samples complete | 60 min |
-| 4 Pressure | 3 passed | first DELETE an identified set D1 of 1,000 baseline keys (≤ 20/s), then PUT new keys at ≤ 10/s until the gateway's admission state is write rejected, at most 5,000 new objects; then hold the refusal with one PUT attempt per second (refused attempts count against the limits) until D1's deletes have passed the GC grace, a GC interval, the retention and a reclaim interval (≈ 25 min after D1), or until admission recovers on its own | write rejected reached and held while D1 matures: C1 judged on D1 over the refused interval (no refusal reached: Inconclusive) | 60 min |
+| 4 Pressure | 3 passed | first DELETE an identified set D1 of 1,000 baseline keys (≤ 20/s), then PUT new keys at ≤ 10/s until the gateway's admission state is write rejected, at most 5,000 new objects; then hold the refusal with one PUT attempt per second (refused attempts count against the limits) while admission refuses; v2: a natural recovery ends the hold (nothing more is written), not the stage; the stage then waits, with no load, until D1's chain is over (GC backlog 0, no pending record on any node, at least D1's chain time ≈ 25 min after D1) or C1b's deadline (50 min after D1) | D1's chain over (fresh samples): C1a and C1b judged; not over by C1b's deadline: the run ends (stage 5 cannot take a clean baseline) | 60 min |
 | 5 Drain and recovery | 4 exit | no new data except a probe PUT every 10 s (running beside the deletes, under the same budget and ledger; its keys deleted once C2's and C3a's holds are over, apart from C2's deletes, so that stage 6 starts at L1); DELETE every key stage 4 added and 1,000 more baseline keys (live set L1 = 2,000) at ≤ 20/s; observe GC, retention, reclaim, compaction, admission | C2 and C3a judged | 60 min (about 24 min of grace, retention and pass intervals, then the 10 min holds) |
 | 6 Steady churn | C3a passed | 1 PUT of a new key and 1 DELETE of the oldest per second for 90 min, the live set within ±5 % of L1 | C3b judged over the whole stage, C4 on its last 60 min | 100 min |
 | 7 Integrity and evidence | 6 ended | verify (§8 C5), `admin integrity verify-manifests`, a scrub of every group; evidence saved; teardown only after review | C5 judged | 60 min |
@@ -297,7 +301,7 @@ changed after it.
 
 | Criterion | Pass | Window |
 | --- | --- | --- |
-| C1 | counted from the moment the refusal starts (a snapshot of every C1 counter and gauge then; work on D1 finished before it does not count): over the refused interval of stage 4, GC progress after the snapshot (`arca_controller_gc_collected_total` rising from its snapshot value, and D1's generations, still in the GC backlog at the snapshot, collected until it is back to 0; none of D1 left to collect at the snapshot: Inconclusive) and their shards' retired records reclaimed once past their retention (`arca_controller_reclaimed_total` up by D1's record count, 3 shards × 1,000 objects, less any reclaimed before the snapshot, which is recorded; and pending records back to 0); D1's deletes are issued just before the fill, and the fill takes minutes against D1's ≈ 25 min chain, so most of D1's GC and all of its reclaim fall after the snapshot; `arca_controller_reclaim_refused_total` and `arca_controller_reclaim_errors_total` unchanged. The attribution to D1 is conditional: stage 3 ends with no deletion in progress and D1 is stage 4's only delete, but orphans that reconciliation removes (its log counts, §2) and the leftovers of a PUT that failed after writing some shards (`arca_gateway_node_capacity_refusals_total` > 0) add to the same counters; any of them makes the attribution approximate, and the report says so. Admission recovering before D1 matured under refusal: Inconclusive | stage 4, from D1 to the end of the refusal |
+| C1 (v1, runs of 2026-11-21; replaced by C1a and C1b, §8.3) | counted from the moment the refusal starts (a snapshot of every C1 counter and gauge then; work on D1 finished before it does not count): over the refused interval of stage 4, GC progress after the snapshot (`arca_controller_gc_collected_total` rising from its snapshot value, and D1's generations, still in the GC backlog at the snapshot, collected until it is back to 0; none of D1 left to collect at the snapshot: Inconclusive) and their shards' retired records reclaimed once past their retention (`arca_controller_reclaimed_total` up by D1's record count, 3 shards × 1,000 objects, less any reclaimed before the snapshot, which is recorded; and pending records back to 0); D1's deletes are issued just before the fill, and the fill takes minutes against D1's ≈ 25 min chain, so most of D1's GC and all of its reclaim fall after the snapshot; `arca_controller_reclaim_refused_total` and `arca_controller_reclaim_errors_total` unchanged. The attribution to D1 is conditional: stage 3 ends with no deletion in progress and D1 is stage 4's only delete, but orphans that reconciliation removes (its log counts, §2) and the leftovers of a PUT that failed after writing some shards (`arca_gateway_node_capacity_refusals_total` > 0) add to the same counters; any of them makes the attribution approximate, and the report says so. Admission recovering before D1 matured under refusal: Inconclusive | stage 4, from D1 to the end of the refusal |
 | C2 | per node, `allocated − live` (reclaimable) ≤ max(2 segments, 10 % of allocated), and `available` up by at least half the deleted shards' bytes, held for 10 min; `du` within 5 % of segment plus side-file bytes | stage 5, after retention + reclaim interval + 3 compaction intervals |
 | C3a | every gateway's admission state 0 and the controller's backpressure state 0, uninterrupted for 10 min; every probe PUT in that window (60) acknowledged | stage 5 |
 | C3b | over stage 6: PUTs ≥ 99 % acknowledged, none refused for capacity, admission never above warning | stage 6 |
@@ -331,6 +335,37 @@ a precondition not formed, such as no refusal in stage 4); **Not run**
 (a stage never started). A later run is a new run: it does not turn an
 earlier Failed or Inconclusive into a pass, and the earlier evidence is
 kept.
+
+### 8.3 Version 2: C1a and C1b
+
+Why: in both runs of version 1 the space D1's reclaim returned ended the
+refusal before D1 matured (the fill stops at the refusal, the hold adds
+one refused attempt a second), so version 1's C1, "D1 fully reclaimed
+while the refusal persists", could not be observed; another run would
+most likely end the same way. Version 2 judges the two things separately.
+What version 1's C1 required and version 2 does not: D1's *whole*
+reclaim *under a persisting refusal*. That stays unverified (results
+report), and no shortening of D1's chain or of any wait is made to fit a
+run.
+
+D1's reclaimed records, a lower bound (`judge.d1_reclaimed_bound`), over
+an interval: the increase of `arca_controller_reclaimed_total`, less the
+increase of the reconciliation log's `deleted=` count (each orphan it
+removes is at most one record), less 3 per increase of
+`arca_gateway_node_capacity_refusals_total` (a shard write a node refused
+for capacity marks at most one aborted object, whose at most 3 shards GC
+retires). Any of the three not sampled over the interval (gaps above two
+intervals) or decreasing (a restart or reset): no bound.
+
+| | Passed | Failed | Inconclusive |
+| --- | --- | --- | --- |
+| C1a, over the observed refusal (its start: the first sample of 3 or 4 after the fill began; its end: the first fresh sample below 3, or D1's chain over, or the stage's end) | the refusal lasted at least 600 s; `arca_controller_gc_collected_total` rose; D1's reclaimed records (the bound) reached 10 % of D1's records (300) | `reclaim_refused` or `reclaim_errors` rose (whatever else); or, with the counters sampled, no GC collection, or fewer than 10 % reclaimed even before the bound's subtractions | a refusal under 600 s; counters not sampled; enough reclaims in the counter but not by the bound (not attributable) |
+| C1b, from D1's last delete to the deadline (D1 + 3,000 s, twice D1's chain) | D1's chain seen over by the deadline (GC backlog 0 and every node's pending records 0 in the samples at that point), and the bound from D1 to that point ≥ D1's records (3,000) | `reclaim_refused` or `reclaim_errors` rose; observed to the deadline without D1's chain over; over after the deadline; over with fewer records reclaimed than D1's (retirements lost) | stopped before the deadline with D1's chain not over; counters not sampled; enough in the counter but not by the bound |
+
+The values (600 s, 10 %, 3,000 s, the bound) are fixed before any run of
+version 2. Stage 5 starts only after D1's chain is over, from a fresh
+baseline (§8.1), so D1's reclaim never counts in C2; C2 to C5 are judged
+as in version 1 whatever C1a and C1b gave.
 
 ### 8.1 C2 in detail
 

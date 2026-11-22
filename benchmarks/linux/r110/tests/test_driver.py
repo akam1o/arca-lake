@@ -393,7 +393,7 @@ class Engine(EngineBase):
         res, ev = self.go(c)
         self.assertEqual(res["outcome"], judge.INCONCLUSIVE)
         o = self.outcomes(res)
-        self.assertEqual(o["C1"], judge.INCONCLUSIVE)
+        self.assertEqual(o["C1a"], judge.INCONCLUSIVE)
         self.assertEqual({o[k] for k in ("C2", "C3a", "C3b", "C4", "C5")}, {judge.NOT_RUN})
         for f in ("timeline.json", "result.json", "samples.json"):
             self.assertTrue(os.path.exists(os.path.join(ev.dir, f)), f)
@@ -467,83 +467,124 @@ def smp(target, t, labelled=None, **vals):
 
 
 class C1(unittest.TestCase):
-    """The refusal from t=0 to t=30 min, samples every 15 s."""
+    """Plan v2 §8.3. D1's 1,000 deletes end at t = -1 min; the refusal from
+    0 to ``refusal_min``; D1's chain over at ``quiet_min``; samples every
+    15 s to ``end_min``."""
 
-    def build(self, admission=3, refused_rises=False, backlog0=50, gap=False, reclaimed_end=3000, end_min=30):
+    def build(self, refusal_min=20, quiet_min=25, end_min=30, reclaimed=3000, refused_rises=False,
+              gap=False, refusals=0, reconcile=0, reset=False, no_log=False):
         S, iv = [], 15_000
-        end = end_min * 60_000
-        for i, t in enumerate(range(0, end + 1, iv)):
-            if gap and 10 * 60_000 < t < 12 * 60_000:
+        t_d, t_q, t_e = -60_000, quiet_min * 60_000, end_min * 60_000
+        for t in range(t_d, t_e + 1, iv):
+            if gap and 3 * 60_000 < t < 5 * 60_000:
                 continue
-            frac = t / end
-            S.append(smp("gateway0", t, arca_gateway_admission_state=admission if t < end - 60_000 else 3))
-            S.append(smp("controller", t, arca_controller_gc_collected_total=int(1000 * frac),
-                         arca_controller_gc_backlog=max(0, int(backlog0 * (1 - 2 * frac))),
-                         arca_controller_reclaimed_total=int(reclaimed_end * frac),
-                         arca_controller_reclaim_refused_total=(1 if refused_rises and t > 600_000 else 0),
+            done = min(1.0, max(0.0, (t - t_d) / (t_q - t_d)))
+            rec = int(300 + reclaimed * done)  # 300: earlier records, reclaimed before D1
+            if reset and t > 8 * 60_000:
+                rec -= 300
+            S.append(smp("gateway0", t, arca_gateway_admission_state=3 if 0 <= t < refusal_min * 60_000 else 0,
+                         arca_gateway_node_capacity_refusals_total=int(refusals * done)))
+            S.append(smp("controller", t, arca_controller_gc_collected_total=int(1000 * min(1.0, done * 2)),
+                         arca_controller_gc_backlog=0 if t >= t_q else max(1, int(1000 * (1 - done * 2))),
+                         arca_controller_reclaimed_total=rec,
+                         arca_controller_reclaim_refused_total=(1 if refused_rises and t > 6 * 60_000 else 0),
                          arca_controller_reclaim_errors_total=0))
+            if not no_log:
+                S.append(smp("controller-log", t, reconcile_deleted=int(reconcile * done)))
             for n in ("node0", "node1"):
-                S.append(smp(n, t, arca_node_reclaim_pending_records=0 if frac > 0.9 else 100))
+                S.append(smp(n, t, arca_node_reclaim_pending_records=0 if t >= t_q else 100))
         records = []
         for k in range(1000):
             records += [{"type": "intent", "op_id": k, "attempt": 1, "key": f"b{k}", "op": "DELETE", "stage": "4",
-                         "wall_ms": 0},
+                         "wall_ms": -120_000},
                         {"type": "outcome", "op_id": k, "attempt": 1, "result": "ack"}]
-        # D1's deletes ended 1 min before the refusal: it matures at 24 min.
-        tl = {"4": {"start_ms": -120_000, "d1_done_ms": -60_000, "refusal_start_ms": 0, "refusal_end_ms": end,
-                    "reclaimed_before_refusal": 0}}
-        return S, records, tl
+        s4 = {"start_ms": -120_000, "d1_done_ms": t_d, "refusal_start_ms": 0,
+              "refusal_end_ms": min(refusal_min * 60_000, t_e), "end_ms": t_e,
+              "refusal_ended_by": "natural recovery" if refusal_min < quiet_min else "D1's chain over"}
+        if quiet_min <= end_min:
+            s4["d1_quiet_ms"] = t_q
+        return S, records, {"4": s4}
 
-    def c1(self, **kw):
+    def judge(self, which, **kw):
         S, R, tl = self.build(**kw)
-        return judge.c1(S, R, tl, judge.VALUES, ["node0", "node1"])
+        return getattr(judge, which)(S, R, tl, judge.VALUES, ["node0", "node1"])
 
-    def test_pass(self):
-        r = self.c1()
+    # -- C1a: progress under refusal -------------------------------------------
+
+    def test_c1a_pass(self):
+        r = self.judge("c1a")
         self.assertEqual(r["outcome"], judge.PASSED, r)
 
-    def test_reclaim_refusals_rising_fail(self):
-        self.assertEqual(self.c1(refused_rises=True)["outcome"], judge.FAILED)
+    def test_c1a_pass_with_a_natural_recovery(self):
+        """The refusal ends by itself after 12 min: progress was shown."""
+        r = self.judge("c1a", refusal_min=12)
+        self.assertEqual(r["outcome"], judge.PASSED, r)
 
-    def test_too_few_reclaims_fail(self):
-        self.assertEqual(self.c1(reclaimed_end=2000)["outcome"], judge.FAILED)
+    def test_c1a_too_short_a_refusal_is_inconclusive(self):
+        self.assertEqual(self.judge("c1a", refusal_min=5)["outcome"], judge.INCONCLUSIVE)
 
-    def test_a_gap_in_the_samples_is_inconclusive(self):
-        self.assertEqual(self.c1(gap=True)["outcome"], judge.INCONCLUSIVE)
+    def test_c1a_no_progress_fails(self):
+        self.assertEqual(self.judge("c1a", reclaimed=50)["outcome"], judge.FAILED)
 
-    def test_admission_recovering_early_is_inconclusive(self):
-        self.assertEqual(self.c1(admission=2)["outcome"], judge.INCONCLUSIVE)
+    def test_c1a_reclaim_refusals_fail_it(self):
+        self.assertEqual(self.judge("c1a", refused_rises=True)["outcome"], judge.FAILED)
 
-    def test_nothing_left_to_collect_at_the_refusal_is_inconclusive(self):
-        self.assertEqual(self.c1(backlog0=0)["outcome"], judge.INCONCLUSIVE)
-
-    def test_a_refusal_cut_before_d1_matured_is_inconclusive_not_failed(self):
-        """F7: stopped at 10 min (a resource stop, say): little reclaimed
-        yet, which is no failure."""
-        r = self.c1(end_min=10, reclaimed_end=100)
+    def test_c1a_progress_not_attributable_is_inconclusive(self):
+        """Enough reclaims, but aborted writes could account for them."""
+        r = self.judge("c1a", refusal_min=12, refusals=2000)
         self.assertEqual(r["outcome"], judge.INCONCLUSIVE, r)
-        self.assertIn("D1 matures", r["reasons"][0])
+        self.assertIn("not attributable", r["reasons"][0])
 
-    def test_a_violation_seen_before_maturity_still_fails(self):
-        r = self.c1(end_min=15, refused_rises=True)
+    def test_c1a_unsampled_reconcile_counts_are_inconclusive(self):
+        self.assertEqual(self.judge("c1a", no_log=True)["outcome"], judge.INCONCLUSIVE)
+
+    def test_c1a_a_gap_is_inconclusive(self):
+        self.assertEqual(self.judge("c1a", gap=True)["outcome"], judge.INCONCLUSIVE)
+
+    def test_c1a_a_counter_reset_is_inconclusive(self):
+        self.assertEqual(self.judge("c1a", reset=True)["outcome"], judge.INCONCLUSIVE)
+
+    # -- C1b: D1 fully reclaimed by the deadline --------------------------------
+
+    def test_c1b_pass_whether_the_refusal_held_or_not(self):
+        for refusal_min in (30, 12):
+            r = self.judge("c1b", refusal_min=refusal_min)
+            self.assertEqual(r["outcome"], judge.PASSED, (refusal_min, r))
+
+    def test_c1b_too_few_reclaims_at_the_quiet_point_fail(self):
+        self.assertEqual(self.judge("c1b", reclaimed=2000)["outcome"], judge.FAILED)
+
+    def test_c1b_not_quiet_by_the_deadline_fails(self):
+        r = self.judge("c1b", quiet_min=70, end_min=52)
         self.assertEqual(r["outcome"], judge.FAILED, r)
 
-    def test_after_maturity_too_little_progress_fails_even_with_a_later_stop(self):
-        S, R, tl = self.build(reclaimed_end=2000)
+    def test_c1b_stopped_before_the_deadline_is_inconclusive(self):
+        """A stop at 20 min, D1 not yet over: no evidence either way."""
+        r = self.judge("c1b", quiet_min=40, end_min=20)
+        self.assertEqual(r["outcome"], judge.INCONCLUSIVE, r)
+
+    def test_c1b_quiet_after_the_deadline_fails(self):
+        self.assertEqual(self.judge("c1b", quiet_min=55, end_min=60)["outcome"], judge.FAILED)
+
+    def test_c1b_not_attributable_is_inconclusive(self):
+        r = self.judge("c1b", reconcile=500)
+        self.assertEqual(r["outcome"], judge.INCONCLUSIVE, r)
+
+    def test_c1b_reclaim_errors_fail_it(self):
+        self.assertEqual(self.judge("c1b", refused_rises=True)["outcome"], judge.FAILED)
+
+    def test_both_in_the_overall_outcome(self):
+        S, R, tl = self.build(reclaimed=2000)
         res = judge.judge(S, R, tl, {"reason": "disk-free", "stage": "5"}, nodes=("node0", "node1"))
-        c1 = [c for c in res["criteria"] if c["criterion"] == "C1"][0]
-        self.assertEqual(c1["outcome"], judge.FAILED)
+        o = {c["criterion"]: c["outcome"] for c in res["criteria"]}
+        self.assertEqual(o["C1b"], judge.FAILED)
         self.assertEqual(res["outcome"], judge.FAILED)
+        self.assertEqual(res["plan_version"], 2)
 
     def test_the_end_of_d1_not_recorded_is_inconclusive(self):
         S, R, tl = self.build()
         del tl["4"]["d1_done_ms"]
-        self.assertEqual(judge.c1(S, R, tl, judge.VALUES, ["node0", "node1"])["outcome"], judge.INCONCLUSIVE)
-
-    def test_unknown_reclaims_before_the_refusal_are_inconclusive(self):
-        S, R, tl = self.build()
-        tl["4"]["reclaimed_before_refusal"] = None
-        self.assertEqual(judge.c1(S, R, tl, judge.VALUES, ["node0", "node1"])["outcome"], judge.INCONCLUSIVE)
+        self.assertEqual(judge.c1b(S, R, tl, judge.VALUES, ["node0", "node1"])["outcome"], judge.INCONCLUSIVE)
 
 
 class C2(unittest.TestCase):
@@ -644,8 +685,8 @@ class ReviewFindingsJudge(unittest.TestCase):
 
     def all_pass(self):
         ok = lambda name: lambda *a, **k: judge.verdict(name, judge.PASSED)  # noqa: E731
-        return [mock.patch.object(judge, n, ok(n.upper() if n != "c3a" and n != "c3b" else n.capitalize()))
-                for n in ("c1", "c2", "c3a", "c3b", "c4", "c5")]
+        return [mock.patch.object(judge, n, ok(n.upper() if n in ("c2", "c4", "c5") else n[:2].upper() + n[2:]))
+                for n in ("c1a", "c1b", "c2", "c3a", "c3b", "c4", "c5")]
 
     def test_every_criterion_met_with_a_stop_is_not_a_pass(self):
         ps = self.all_pass()
@@ -795,13 +836,37 @@ class ReviewFindingsEngine(EngineBase):
         self.assertFalse(tl["4"]["admission_recovered_early"])
         self.assertGreaterEqual(tl["4"]["refusal_end_ms"] - tl["4"]["d1_done_ms"], driver.CHAIN_S * 1000)
 
-    def test_admission_recovering_before_d1_matured_ends_the_run(self):
+    def test_a_natural_recovery_ends_the_hold_and_the_run_goes_on(self):
+        """Plan v2: admission recovering before D1 matured ends the hold;
+        the stage waits for D1's chain to be over, then stage 5 runs."""
         c = FakeCluster(self.cfg, self.clock)
         c.recover_after = 5
+        hold_done = []
+        real = c.step_done
+        c.step_done = lambda n: hold_done.append((n, self.clock.monotonic())) or real(n)
         res, ev = self.go(c)
         tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
         self.assertTrue(tl["4"]["admission_recovered_early"])
+        self.assertEqual(tl["4"]["refusal_ended_by"], "natural recovery")
+        self.assertGreaterEqual(tl["4"]["d1_quiet_ms"] - tl["4"]["d1_done_ms"], driver.CHAIN_S * 1000)
+        self.assertIn("5", tl, "stage 5 did not start")
+        self.assertGreaterEqual(tl["5"]["start_ms"], tl["4"]["d1_quiet_ms"])
+
+    def test_not_quiet_by_the_c1b_deadline_ends_the_run_in_stage_4(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.recover_after = 5
+        real = c.sample
+
+        def sample():
+            real()
+            if any(s.get("kind") == "put-until-refused" for s in c.steps):  # stage 4 on
+                c._samples[-1]["values"]["arca_node_reclaim_pending_records"] = {"value": 7, "unit": "count"}
+
+        c.sample = sample
+        res, ev = self.go(c)
+        tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
         self.assertEqual((res["stop"]["reason"], res["stop"]["stage"]), ("stage-exit", "4"))
+        self.assertNotIn("d1_quiet_ms", tl["4"])
         self.assertNotIn("5", tl)
 
     def test_c3a_is_judged_only_once_the_probe_step_ended(self):

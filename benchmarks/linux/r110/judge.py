@@ -21,6 +21,10 @@ from . import common, ledger as ledger_mod
 
 PASSED, FAILED, INCONCLUSIVE, NOT_RUN = "Passed", "Failed", "Inconclusive", "Not run"
 
+# The plan version these criteria implement (recorded with every result;
+# runs judged under v1 are never re-judged under it).
+PLAN_VERSION = 2
+
 VALUES = {
     "interval_s": 15,
     "max_gap_factor": 2.0,  # a gap above this many intervals breaks a window
@@ -35,6 +39,12 @@ VALUES = {
     # retention and a reclaim interval after D1, about 25 min): C1 is
     # judged on progress only once the refusal was observed that far.
     "d1_chain_s": 1500,
+    # Plan v2 §8.3: C1a needs at least this long a refusal, and this share
+    # of D1's records reclaimed during it; C1b, all of D1's records
+    # reclaimed within this of D1's last delete (twice D1's chain).
+    "c1a_min_refusal_s": 600,
+    "c1a_min_fraction": 0.1,
+    "c1b_deadline_s": 3000,
     "c3a_hold_s": 600,
     "c3a_probe_interval_s": 10,
     "c3b_ack_fraction": 0.99,
@@ -117,79 +127,139 @@ def slope_per_hour(points):
 # -- criteria ---------------------------------------------------------------
 
 
-def c1(samples, records, tl, v, nodes):
-    """GC and reclaim under refusal, on the early delete set D1, counted
-    from the refusal's start (plan §8 C1)."""
-    s4 = tl.get("4")
-    if not s4 or "refusal_start_ms" not in s4:
-        return verdict("C1", INCONCLUSIVE, ["no refusal formed in stage 4"])
+def _monotone(points):
+    """A counter series with no decrease (a decrease is a restart or reset:
+    the increase over it is unknown)."""
+    return all(b >= a for (_, a), (_, b) in zip(points, points[1:]))
+
+
+def _increase(samples, target, key, t0, t1, iv, gap):
+    """The increase of a counter over [t0, t1] from samples covering it, or
+    None (not covered, or reset)."""
+    pts = series(samples, target, key, t0, t1)
+    if not covered(pts, t0, t1, iv, gap) or not _monotone(pts):
+        return None
+    return pts[-1][1] - pts[0][1]
+
+
+def d1_reclaimed_bound(samples, t0, t1, v):
+    """A lower bound of D1's records reclaimed over [t0, t1] (plan v2 §8.3):
+    the reclaimed records, less those reconciliation's orphans could account
+    for (each removed orphan one record), less 3 per shard write a node
+    refused for capacity (each marks at most one aborted object, whose at
+    most 3 shards GC retires). ``(bound, parts)``; bound None when a part is
+    not sampled over the interval."""
+    iv, gap = v["interval_s"] * 1000, v["max_gap_factor"]
+    parts = {"reclaimed": _increase(samples, "controller", "arca_controller_reclaimed_total", t0, t1, iv, gap),
+             "reconcile_deleted": _increase(samples, "controller-log", "reconcile_deleted", t0, t1, iv, gap),
+             "node_capacity_refusals": _increase(samples, "gateway0", "arca_gateway_node_capacity_refusals_total",
+                                                 t0, t1, iv, gap)}
+    if any(x is None for x in parts.values()):
+        return None, parts
+    return parts["reclaimed"] - parts["reconcile_deleted"] - 3 * parts["node_capacity_refusals"], parts
+
+
+def _d1(records, tl):
+    s4 = tl.get("4") or {}
+    return len(ledger_mod.acknowledged(records, "DELETE", stage="4")), s4
+
+
+def c1a(samples, records, tl, v, nodes):
+    """C1a, plan v2: GC and reclaim make progress on D1 while writes are
+    refused. Over the observed refusal (at least ``c1a_min_refusal_s``):
+    GC collected generations, D1's reclaimed records (the lower bound)
+    reached ``c1a_min_fraction`` of D1's records, and neither reclaim
+    refusals nor reclaim errors rose."""
+    d1, s4 = _d1(records, tl)
+    if not s4 or "refusal_start_ms" not in s4 or s4.get("refusal_start_ms") is None:
+        return verdict("C1a", INCONCLUSIVE if s4 else NOT_RUN, ["no refusal formed in stage 4"] if s4 else [])
     t_r, t_e = s4["refusal_start_ms"], s4.get("refusal_end_ms") or s4.get("end_ms")
     if t_e is None:
-        return verdict("C1", INCONCLUSIVE, ["the refusal's end not recorded"])
-    iv = v["interval_s"] * 1000
-    d1 = len(ledger_mod.acknowledged(records, "DELETE", stage="4"))
+        return verdict("C1a", INCONCLUSIVE, ["the refusal's end not recorded"])
     if d1 == 0:
-        return verdict("C1", INCONCLUSIVE, ["no acknowledged delete of D1"])
-    gw = series(samples, "gateway0", "arca_gateway_admission_state", t_r, t_e)
-    if not covered(gw, t_r, t_e, iv, v["max_gap_factor"]):
-        return verdict("C1", INCONCLUSIVE, ["the admission state not sampled through the refusal"])
-    ctl = {k: series(samples, "controller", k, t_r, t_e) for k in (
-        "arca_controller_gc_collected_total", "arca_controller_gc_backlog",
-        "arca_controller_reclaimed_total", "arca_controller_reclaim_refused_total",
-        "arca_controller_reclaim_errors_total")}
-    for k, pts in ctl.items():
-        if not covered(pts, t_r, t_e, iv, v["max_gap_factor"]):
-            return verdict("C1", INCONCLUSIVE, [f"{k} not sampled through the refusal"])
-    reasons, ev = [], {"d1": d1, "refusal_s": (t_e - t_r) / 1000}
-    # Observed violations fail C1 whenever they happened, matured or not.
+        return verdict("C1a", INCONCLUSIVE, ["no acknowledged delete of D1"])
+    iv, gap = v["interval_s"] * 1000, v["max_gap_factor"]
+    ev = {"d1": d1, "refusal_s": (t_e - t_r) / 1000, "refusal_ended_by": s4.get("refusal_ended_by")}
+    reasons = []
     for k in ("arca_controller_reclaim_refused_total", "arca_controller_reclaim_errors_total"):
-        pts = ctl[k]
-        if pts[-1][1] != pts[0][1]:
+        inc = _increase(samples, "controller", k, t_r, t_e, iv, gap)
+        if inc is None:
+            return verdict("C1a", INCONCLUSIVE, [f"{k} not sampled through the refusal"], **ev)
+        if inc > 0:
             reasons.append(f"{k} rose during the refusal")
-    if reasons:
-        return verdict("C1", FAILED, reasons, **ev)
-    # Progress is judged only on an observation that reached D1's maturity
-    # (its chain after D1's last delete); one cut short (a stop, a lost
-    # monitor, the stage's end) is Inconclusive, never Failed for progress
-    # it had no time to show.
-    d1_done = s4.get("d1_done_ms")
-    if d1_done is None:
-        return verdict("C1", INCONCLUSIVE, ["the end of D1's deletes not recorded"], **ev)
-    matured_at = d1_done + v["d1_chain_s"] * 1000
-    ev["matured_at_ms"] = matured_at
-    if t_e < matured_at:
-        return verdict("C1", INCONCLUSIVE, [f"the refusal observed until {t_e}, D1 matures at {matured_at}"], **ev)
-    if any(s < 3 for t, s in gw if t <= matured_at):  # 3 write rejected, 4 recovery only
-        return verdict("C1", INCONCLUSIVE, ["admission left write rejected before D1 matured"], **ev)
-    backlog0 = ctl["arca_controller_gc_backlog"][0][1]
-    if backlog0 == 0:
-        return verdict("C1", INCONCLUSIVE, ["no D1 generation left to collect at the refusal's start"], **ev)
-    collected = ctl["arca_controller_gc_collected_total"][-1][1] - ctl["arca_controller_gc_collected_total"][0][1]
-    reclaimed = ctl["arca_controller_reclaimed_total"][-1][1] - ctl["arca_controller_reclaimed_total"][0][1]
-    ev.update(backlog_at_refusal=backlog0, gc_collected=collected, reclaimed=reclaimed)
-    before = s4.get("reclaimed_before_refusal")
-    if before is None:
-        return verdict("C1", INCONCLUSIVE, ["the reclaims before the refusal not known"], **ev)
-    for n in nodes:
-        pend = series(samples, n, "arca_node_reclaim_pending_records", t_r, t_e)
-        if not covered(pend, t_r, t_e, iv, v["max_gap_factor"]):
-            return verdict("C1", INCONCLUSIVE, [f"{n}: pending records not sampled through the refusal"], **ev)
-        if pend[-1][1] != 0:
-            reasons.append(f"{n}: pending records not back to 0 at the end of the refusal")
+    if reasons:  # an observed violation fails it whatever else
+        return verdict("C1a", FAILED, reasons, **ev)
+    if (t_e - t_r) < v["c1a_min_refusal_s"] * 1000:
+        return verdict("C1a", INCONCLUSIVE, [f"the refusal lasted {(t_e - t_r) / 1000:.0f} s, "
+                                             f"{v['c1a_min_refusal_s']} s needed"], **ev)
+    collected = _increase(samples, "controller", "arca_controller_gc_collected_total", t_r, t_e, iv, gap)
+    bound, parts = d1_reclaimed_bound(samples, t_r, t_e, v)
+    ev.update(gc_collected=collected, d1_reclaimed_at_least=bound, **{f"reclaim_{k}": x for k, x in parts.items()})
+    if collected is None or bound is None:
+        return verdict("C1a", INCONCLUSIVE, ["GC or reclaim counters not sampled through the refusal"], **ev)
+    need = v["c1a_min_fraction"] * v["c1_records_per_object"] * d1
+    ev["d1_reclaimed_needed"] = need
     if collected <= 0:
-        reasons.append("no GC collection after the refusal's start")
-    if min(b for _, b in ctl["arca_controller_gc_backlog"]) != 0:
-        reasons.append("the GC backlog did not reach 0 during the refusal")
-    need = v["c1_records_per_object"] * d1 - before
-    ev["reclaimed_needed"] = need
-    if reclaimed < need:
-        reasons.append(f"reclaimed {reclaimed} records after the refusal's start, {need} needed")
-    approx = [k for k in ("arca_gateway_node_capacity_refusals_total",)
-              if (lambda p: p and p[-1][1] > p[0][1])(series(samples, "gateway0", k, t_r, t_e))]
-    if tl.get("reconcile_deleted_during_refusal"):
-        approx.append("reconcile removed orphans")
-    ev["approximate_attribution"] = approx
-    return verdict("C1", FAILED if reasons else PASSED, reasons, **ev)
+        reasons.append("no GC collection during the refusal")
+    if bound < need:
+        if parts["reclaimed"] >= need:
+            return verdict("C1a", INCONCLUSIVE, ["reclaim progress not attributable to D1 (orphans or aborted "
+                                                 "writes in the same counter)"], **ev)
+        reasons.append(f"at least {bound} of D1's records reclaimed during the refusal, {need:.0f} needed")
+    return verdict("C1a", FAILED if reasons else PASSED, reasons, **ev)
+
+
+def c1b(samples, records, tl, v, nodes):
+    """C1b, plan v2: D1 is fully reclaimed within ``c1b_deadline_s`` of
+    D1's last delete, whether the refusal held or admission recovered: at
+    some point by the deadline the GC backlog is 0, every node's pending
+    records are 0, and D1's reclaimed records (the lower bound, from D1's
+    end) reach all of D1's records."""
+    d1, s4 = _d1(records, tl)
+    if not s4:
+        return verdict("C1b", NOT_RUN)
+    t_d = s4.get("d1_done_ms")
+    if t_d is None or d1 == 0:
+        return verdict("C1b", INCONCLUSIVE, ["D1's deletes not recorded"])
+    deadline = t_d + v["c1b_deadline_s"] * 1000
+    t_q = s4.get("d1_quiet_ms")  # when the driver saw D1's chain over
+    end = s4.get("end_ms")
+    iv, gap = v["interval_s"] * 1000, v["max_gap_factor"]
+    ev = {"d1": d1, "deadline_ms": deadline, "quiet_ms": t_q}
+    reasons = []
+    for k in ("arca_controller_reclaim_refused_total", "arca_controller_reclaim_errors_total"):
+        inc = _increase(samples, "controller", k, t_d, min(t_q or end or deadline, deadline), iv, gap)
+        if inc is not None and inc > 0:
+            reasons.append(f"{k} rose after D1")
+    if reasons:
+        return verdict("C1b", FAILED, reasons, **ev)
+    if t_q is None:
+        if end is not None and end >= deadline:
+            # Observed to the deadline without D1's chain over.
+            return verdict("C1b", FAILED, ["D1 not fully reclaimed by the deadline"], **ev)
+        return verdict("C1b", INCONCLUSIVE, ["stage 4 ended before D1's chain was over or the deadline"], **ev)
+    if t_q > deadline:
+        return verdict("C1b", FAILED, [f"D1's chain over at {t_q}, after the deadline {deadline}"], **ev)
+    # The quiet point itself, read again from the samples (fresh, every node).
+    gc = at_or_before(series(samples, "controller", "arca_controller_gc_backlog"), t_q, iv)
+    pend = {n: at_or_before(series(samples, n, "arca_node_reclaim_pending_records"), t_q, iv) for n in nodes}
+    if gc is None or any(p is None for p in pend.values()):
+        return verdict("C1b", INCONCLUSIVE, ["GC backlog or pending records not sampled at the quiet point"], **ev)
+    if gc != 0 or any(p != 0 for p in pend.values()):
+        return verdict("C1b", INCONCLUSIVE, ["the quiet point not confirmed by the samples"], **ev)
+    bound, parts = d1_reclaimed_bound(samples, t_d, t_q, v)
+    need = v["c1_records_per_object"] * d1
+    ev.update(d1_reclaimed_at_least=bound, d1_reclaimed_needed=need, **{f"reclaim_{k}": x for k, x in parts.items()})
+    if bound is None:
+        return verdict("C1b", INCONCLUSIVE, ["reclaim counters not sampled from D1 to the quiet point"], **ev)
+    if bound >= need:
+        return verdict("C1b", PASSED, [], **ev)
+    if parts["reclaimed"] >= need:
+        return verdict("C1b", INCONCLUSIVE, ["D1's reclaim not attributable (orphans or aborted writes in the "
+                                             "same counter)"], **ev)
+    # Nothing pending, nothing in the GC backlog, and fewer reclaims than
+    # D1's records: retirements lost or never made.
+    return verdict("C1b", FAILED, [f"{parts['reclaimed']} records reclaimed by the quiet point, {need} needed"], **ev)
 
 
 def c2(samples, records, tl, v, nodes):
@@ -425,7 +495,7 @@ def c5(tl):
     return verdict("C5", PASSED, [], keys=vr["keys"], unknown_resolved=vr.get("unknown_resolved"))
 
 
-CRITERIA_STAGE = {"C1": "4", "C2": "5", "C3a": "5", "C3b": "6", "C4": "6", "C5": "7"}
+CRITERIA_STAGE = {"C1a": "4", "C1b": "4", "C2": "5", "C3a": "5", "C3b": "6", "C4": "6", "C5": "7"}
 
 
 def _run_span(tl):
@@ -440,7 +510,8 @@ def judge(samples, records, tl, stop=None, values=None, nodes=("node0", "node1",
           gateways=("gateway0",)):
     """Every criterion and the run's outcome (see the module's order)."""
     v = dict(VALUES, **(values or {}))
-    res = [c1(samples, records, tl, v, nodes), c2(samples, records, tl, v, nodes),
+    res = [c1a(samples, records, tl, v, nodes), c1b(samples, records, tl, v, nodes),
+           c2(samples, records, tl, v, nodes),
            c3a(samples, records, tl, v, gateways), c3b(samples, records, tl, v, gateways),
            c4(samples, records, tl, v, nodes, gateways), c5(tl)]
     forbidden, unwatched = [], []
@@ -481,5 +552,5 @@ def judge(samples, records, tl, stop=None, values=None, nodes=("node0", "node1",
         overall = NOT_RUN
     else:
         overall = INCONCLUSIVE
-    return {"outcome": overall, "criteria": res, "stop": stop, "forbidden": forbidden,
+    return {"outcome": overall, "plan_version": PLAN_VERSION, "criteria": res, "stop": stop, "forbidden": forbidden,
             "protections_not_sampled": unwatched, "values": v}

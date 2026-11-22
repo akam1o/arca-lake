@@ -55,8 +55,6 @@ muts = [
  ("judge: integrity stop not a failure", "r110/judge.py", "    if cls == \"integrity\" or forbidden or", "    if forbidden or", "test_driver"),
  ("judge: forbidden counters ignored", "r110/judge.py", "    if cls == \"integrity\" or forbidden or", "    if cls == \"integrity\" or", "test_driver"),
  ("judge: sample gaps allowed", "r110/judge.py", "    return all(b - a <= factor * interval_ms for a, b in zip(ts, ts[1:]))", "    return True", "test_driver"),
- ("judge: C1 no backlog passes", "r110/judge.py", "    if backlog0 == 0:", "    if False:", "test_driver"),
- ("judge: C1 unknown pre-refusal reclaims as 0", "r110/judge.py", "    if before is None:\n        return verdict(\"C1\"", "    if before is None:\n        before = 0\n    if False:\n        return verdict(\"C1\"", "test_driver"),
  ("judge: C2 D1 pending ignored", "r110/judge.py", "        if p0 > 0:", "        if False:", "test_driver"),
  ("judge: C2 probes not bounded", "r110/judge.py", "        freed = decrease + probe_puts * shard", "        freed = decrease", "test_driver"),
  ("judge: C2 du not checked", "r110/judge.py", "            if abs(d - (sg + sd)) > v[\"c2_du_tolerance\"] * (sg + sd):", "            if False:", "test_driver"),
@@ -91,7 +89,7 @@ muts = [
  ("driver: exception not a stop", "r110/driver.py", "                except Exception as e:  # noqa: BLE001 - a failure of the driver is a stop", "                except ZeroDivisionError as e:", "test_driver"),
  ("driver: stage 7 stop unseen", "r110/driver.py", "        self.tl[\"7\"][\"verify\"] = r\n        if self._stopped(\"7\"):\n            return False", "        self.tl[\"7\"][\"verify\"] = r", "test_driver"),
  ("driver: final stop record not read", "r110/driver.py", "                rec = self.c.stop_record()\n                if rec:\n                    self.stop = dict(rec, stage=self.current)", "                pass", "test_driver"),
- ("driver: refusal not held for D1", "r110/driver.py", "            self.clock.monotonic() >= d1_done + CHAIN_S and self._quiet(s)))", "            self._quiet(s)))", "test_driver"),
+ ("driver: refusal not held for D1", "r110/driver.py", "            return self.clock.monotonic() >= d1_done + CHAIN_S and self._quiet(s)", "            return self._quiet(s)", "test_driver"),
  ("driver: drain escalation ignored", "r110/driver.py", "                d[\"services\"] = self.c.stop_services()", "                pass", "test_driver"),
  ("driver: approval scope unchecked", "r110/driver.py", "    if not isinstance(sc, list) or not all(isinstance(x, str) and x in SCOPES for x in sc):", "    if False:", "test_driver"),
  ("driver: approval window unbounded", "r110/driver.py", "    if not w0 < w1 or w1 - w0 > datetime.timedelta(hours=MAX_WINDOW_H):", "    if False:", "test_driver"),
@@ -104,8 +102,7 @@ muts = [
  ("remote: smoke takes the load's own stop for the guard's", "r110/remote.py", "and g.get(\"reason\") == \"heartbeat-lost\" and g.get(\"source\") == \"guard\"", "", "test_driver"),
  ("remote: smoke load reads the heartbeat", "r110/remote.py", "*([\"--heartbeat\", hb, \"--heartbeat-id\", self.cfg[\"run_id\"]] if heartbeat else []),", "\"--heartbeat\", hb, \"--heartbeat-id\", self.cfg[\"run_id\"],", "test_driver"),
  ("guard: SIGTERM ignored", "r110/guard.py", "        if getattr(self, \"terminated\", False):\n            return \"operator\", \"guard\"", "", "test_guard"),
- ("driver: a sampling gap ends the hold", "r110/driver.py", "        done = self.wait(\"4\", deadline, lambda s: self._left(s, 3) or (", "        done = self.wait(\"4\", deadline, lambda s: not self._admission(s, 3) or (", "test_driver"),
- ("driver: early recovery continues", "r110/driver.py", "        return bool(done) and not early", "        return bool(done)", "test_driver"),
+ ("driver: a sampling gap ends the hold", "r110/driver.py", "            if hold_on and self._left(s, 3):", "            if hold_on and not self._admission(s, 3):", "test_driver"),
  ("driver: C3a judged with a probe in flight", "r110/driver.py", "        if self.c.wait_step(n, deadline) is None or self._stopped(\"5\"):\n            return False\n", "", "test_driver"),
  # Survives by design, as "driver: looser limits accepted" above.
  ("driver: NaN limits accepted", "r110/driver.py", "        if k not in budget.DEFAULTS or not budget.valid_limit(v) or v > budget.DEFAULTS[k]:", "        if k not in budget.DEFAULTS or v > budget.DEFAULTS[k]:", "test_driver"),
@@ -134,8 +131,6 @@ muts = [
  ("F5: an undetermined memory limit runs", "r110/driver.py", "        if execute:\n            raise ConfigError(\"fdb_memory undetermined", "        if False:\n            raise ConfigError(\"fdb_memory undetermined", "test_driver"),
  ("F6: the run's remaining time not applied", "r110/remote.py", "            lim[\"run_seconds\"] = max(1, min(lim[\"run_seconds\"], int(remaining_s)))", "            pass", "test_driver"),
  ("F6: smoke shares that do not fit pass", "r110/budget.py", "        if main[k] <= 0:", "        if False:", "test_driver"),
- ("F7: C1 judged before D1 matured", "r110/judge.py", "    if t_e < matured_at:", "    if False:", "test_driver"),
- ("F7: a violation before maturity not failed", "r110/judge.py", "    if reasons:\n        return verdict(\"C1\", FAILED, reasons, **ev)", "    if False:\n        return verdict(\"C1\", FAILED, reasons, **ev)", "test_driver"),
  ("F8: walk errors ignored", "r110/watchdog.py", "                    for d, _, files in os.walk(root, onerror=fail):", "                    for d, _, files in os.walk(root):", "test_integration"),
  ("F8: an unreadable kernel log is no alert", "r110/watchdog.py", "        if r.returncode != 0 or \"No journal files\" in said", "        if r.returncode != 0 and \"No journal files\" in said", "test_integration"),
  ("F8: any monitoring may be optional", "r110/driver.py", "    if not isinstance(opt, list) or not set(opt) <= {\"kernel_log\", \"swap\"}:", "    if False:", "test_driver"),
@@ -171,6 +166,15 @@ muts = [
  ("finish: an empty listing after setup passes", "r110/driver.py", "    if setup_started and not started:\n        out[\"listing\"] = \"started.list is empty after setup\"", "    pass", "test_driver"),
  ("finish: no retry", "r110/driver.py", "FINAL_STOP_ROUNDS = 2  # retries", "FINAL_STOP_ROUNDS = 0  # retries", "test_driver"),
  ("protection: only the last 200 samples", "r110/driver.py", "        for x in samples[self._prot_n:]:", "        for x in samples[-200:]:", "test_driver"),
+ # Plan v2: C1a and C1b.
+ ("v2: C1a short refusal judged", "r110/judge.py", "    if (t_e - t_r) < v[\"c1a_min_refusal_s\"] * 1000:", "    if False:", "test_driver"),
+ ("v2: C1a progress not required", "r110/judge.py", "        reasons.append(f\"at least {bound} of D1's records reclaimed during the refusal, {need:.0f} needed\")", "        pass", "test_driver"),
+ ("v2: attribution ignored", "r110/judge.py", "    return parts[\"reclaimed\"] - parts[\"reconcile_deleted\"] - 3 * parts[\"node_capacity_refusals\"], parts", "    return parts[\"reclaimed\"], parts", "test_driver"),
+ ("v2: a counter reset accepted", "r110/judge.py", "    if not covered(pts, t0, t1, iv, gap) or not _monotone(pts):", "    if not covered(pts, t0, t1, iv, gap):", "test_driver"),
+ ("v2: C1b deadline ignored", "r110/judge.py", "    if t_q > deadline:", "    if False:", "test_driver"),
+ ("v2: C1b lost retirements pass", "r110/judge.py", "    return verdict(\"C1b\", FAILED, [f\"{parts['reclaimed']} records reclaimed by the quiet point, {need} needed\"], **ev)", "    return verdict(\"C1b\", PASSED, [], **ev)", "test_driver"),
+ ("v2: stage 5 before D1 quiet", "r110/driver.py", "        # Not quiet by the deadline: stage 5 cannot take a clean baseline.\n        return bool(quiet)", "        return True", "test_driver"),
+ ("v2: natural recovery ends the run", "r110/driver.py", "                tl[\"refusal_ended_by\"] = \"natural recovery\"\n                self.c.step_done(n)\n            return", "                tl[\"refusal_ended_by\"] = \"natural recovery\"\n                self.c.step_done(n)\n                return True\n            return", "test_driver"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]
