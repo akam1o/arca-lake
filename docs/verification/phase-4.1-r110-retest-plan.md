@@ -354,13 +354,21 @@ increase of the reconciliation log's `deleted=` count (each orphan it
 removes is at most one record), less 3 per increase of
 `arca_gateway_node_capacity_refusals_total` (a shard write a node refused
 for capacity marks at most one aborted object, whose at most 3 shards GC
-retires). Any of the three not sampled over the interval (gaps above two
-intervals) or decreasing (a restart or reset): no bound.
+retires). The reclaims are counted from the samples inside the interval,
+the two subtractions from the samples just outside it (the last at or
+before its start, the first at or after its end), so that the bound stays
+a lower bound at the edges. Any of the three not sampled over the interval
+(gaps above two intervals) or decreasing (a restart or reset): no bound.
+Limits of the bound, recorded with each result: a reconciliation pass
+that ends early on a store or leadership error writes no log line, so
+orphans it removed are not subtracted; aborted writes for reasons other
+than capacity, and capacity refusals at a gateway other than the run's
+one, are not subtracted (the run has one gateway).
 
 | | Passed | Failed | Inconclusive |
 | --- | --- | --- | --- |
-| C1a, over the observed refusal (its start: the first sample of 3 or 4 after the fill began; its end: the first fresh sample below 3, or D1's chain over, or the stage's end) | the refusal lasted at least 600 s; `arca_controller_gc_collected_total` rose; D1's reclaimed records (the bound) reached 10 % of D1's records (300) | `reclaim_refused` or `reclaim_errors` rose (whatever else); or, with the counters sampled, no GC collection, or fewer than 10 % reclaimed even before the bound's subtractions | a refusal under 600 s; counters not sampled; enough reclaims in the counter but not by the bound (not attributable) |
-| C1b, from D1's last delete to the deadline (D1 + 3,000 s, twice D1's chain) | D1's chain seen over by the deadline (GC backlog 0 and every node's pending records 0 in the samples at that point), and the bound from D1 to that point ≥ D1's records (3,000) | `reclaim_refused` or `reclaim_errors` rose; observed to the deadline without D1's chain over; over after the deadline; over with fewer records reclaimed than D1's (retirements lost) | stopped before the deadline with D1's chain not over; counters not sampled; enough in the counter but not by the bound |
+| C1a, over the observed refusal (its start: the first sample of 3 or 4 after the fill began; its end: the first sample below 3, or D1's chain over, or the stage's end) | the refusal lasted at least 600 s; `arca_controller_gc_collected_total` rose; D1's reclaimed records (the bound) reached 10 % of D1's records (300) | `reclaim_refused` or `reclaim_errors` rose (whatever else); or, the refusal lasting past D1's chain (`d1_chain_s` after D1's last delete, when D1's reclaim is due) with the counters sampled, no GC collection, or fewer than 10 % reclaimed even before the bound's subtractions | a refusal under 600 s; a refusal over before D1's chain with too little progress shown (D1's first reclaims cannot come before the GC grace and the retention, 1,200 s after D1); counters not sampled; enough reclaims in the counter but not by the bound (not attributable) |
+| C1b, from D1's last delete to the deadline (D1 + 3,000 s, twice D1's chain) | D1's chain seen over by the deadline, at least D1's chain time after D1 (GC backlog 0 and every node's pending records 0 in the samples at that point), and the bound from D1 to two intervals after that point (the controller counts a pass after it went over every node) ≥ D1's records (3,000) | `reclaim_refused` or `reclaim_errors` rose; observed to the deadline without D1's chain over; over after the deadline; over with fewer records reclaimed than D1's (retirements lost) | stopped before the deadline with D1's chain not over; counters (the violation counters included) not sampled; enough in the counter but not by the bound |
 
 The values (600 s, 10 %, 3,000 s, the bound) are fixed before any run of
 version 2. Stage 5 starts only after D1's chain is over, from a fresh
