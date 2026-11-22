@@ -45,13 +45,19 @@ if grep -E 'feature "(fault-injection|version-bump)"' <<<"$TREE" >/dev/null; the
   echo "a test-only feature is enabled in the release build" >&2; exit 1
 fi
 
-# Build paths (the checkout, the cargo home) are remapped, so that the
-# line tables and panic locations name no directory of the build host.
+# Build paths (the checkout, the cargo home, the target directory with its
+# generated sources) are remapped, so that the line tables and panic
+# locations name no directory of the build host: rustc's for Rust, the C
+# compiler's for C code built by build scripts (ring's, through cc).
 CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
-REMAP="--remap-path-prefix=$ROOT=/arca-lake --remap-path-prefix=$CARGO_HOME_DIR=/cargo"
-RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$REMAP" \
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+mkdir -p "$TARGET_DIR"
+TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
+REMAP="--remap-path-prefix=$TARGET_DIR=/target --remap-path-prefix=$ROOT=/arca-lake --remap-path-prefix=$CARGO_HOME_DIR=/cargo"
+CREMAP="-ffile-prefix-map=$TARGET_DIR=/target -ffile-prefix-map=$ROOT=/arca-lake -ffile-prefix-map=$CARGO_HOME_DIR=/cargo"
+RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$REMAP" CFLAGS="${CFLAGS:+$CFLAGS }$CREMAP" \
   cargo build --release --locked -p arca-lake --features "$FEATURES" --target "$TARGET"
-BIN="${CARGO_TARGET_DIR:-$ROOT/target}/$TARGET/release/arca-lake"
+BIN="$TARGET_DIR/$TARGET/release/arca-lake"
 
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
@@ -76,7 +82,7 @@ fi
   echo "target: $TARGET"
   echo "features: $FEATURES (default features of every crate; no fault-injection, no version-bump)"
   echo "command: cargo build --release --locked -p arca-lake --features $FEATURES --target $TARGET"
-  echo "path remapping: the checkout as /arca-lake, the cargo home as /cargo (RUSTFLAGS --remap-path-prefix)"
+  echo "path remapping: the checkout as /arca-lake, the cargo home as /cargo, the target directory as /target (RUSTFLAGS --remap-path-prefix, CFLAGS -ffile-prefix-map)"
   echo "Cargo.lock sha256: $(sha256sum Cargo.lock | cut -d' ' -f1)"
   echo "binary sha256: $(sha256sum "$D/arca-lake" | cut -d' ' -f1)"
   echo "highest glibc symbol version: ${GLIBC:-unknown}"

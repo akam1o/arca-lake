@@ -23,9 +23,11 @@ The script:
   outside `deny.toml`'s allow list;
 - refuses to build when `HEAD` is not `SOURCE_SHA` or the checkout has
   local changes;
-- remaps build paths (`--remap-path-prefix`: the checkout as `/arca-lake`,
-  the cargo home as `/cargo`) and refuses an archive whose binary still
-  names a build-host path;
+- remaps build paths (the checkout as `/arca-lake`, the cargo home as
+  `/cargo`, the target directory as `/target`; `--remap-path-prefix` for
+  Rust, `-ffile-prefix-map` in `CFLAGS` for C code built by build
+  scripts) and refuses an archive whose binary still names a build-host
+  path;
 - records `BUILD-INFO.txt`: source commit, target, features, command,
   `Cargo.lock` and binary sha256, the highest glibc symbol version the
   binary needs, its dynamic libraries, the build host's OS and toolchain;
