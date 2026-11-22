@@ -40,8 +40,16 @@ entry in the [risk register](../architecture/risks.md).
 - R-117 (residual): a node that has adopted no cluster incarnation yet
   accepts shard writes from another cluster's gateway at a reused
   address. Use one CA or trust domain per cluster; plaintext is for tests
-  only. A pending change (pull request #28) adds the incarnation check
-  to `PutShard`.
+  only. A node that has adopted an incarnation refuses shard writes of
+  another one (0.1.0).
+- R-119 (residual): replacements use the controller's
+  `--failure-domain` (a group's own label is not recorded); groups whose
+  members were put in one domain by an earlier release are not reported.
+- During a FoundationDB outage, S3 requests fail with `500` after the
+  metadata timeout (about 10 s), not `503`; acknowledged writes stay
+  readable, and a write with an unknown outcome reads as one of its
+  candidates (the earlier body, the new one, or absent) once FoundationDB
+  returns (three-host validation).
 - R-118: tiering resets a generation's whole access record after
   outcomes that may not have acted on it; tiering accuracy is limited.
 - R-111: small objects cost far more node capacity than their payload
