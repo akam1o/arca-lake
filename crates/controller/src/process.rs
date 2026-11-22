@@ -1745,7 +1745,7 @@ async fn health_pass<S: KvStore>(
                         node = n.id,
                         node_seq = h.incarnation_seq,
                         cluster_seq = gate.incarnation_seq,
-                        "storage node holds another incarnation at or above this one's sequence: it refuses this cluster's deletes; run `admin recovery begin`"
+                        "storage node holds another incarnation at or above this one's sequence: it refuses this cluster's deletes and shard writes; run `admin recovery begin`"
                     );
                     metrics
                         .incarnation_conflicts_total
