@@ -811,7 +811,16 @@ def step7a():
     groups_of = {g: x["members"].index(vid) for g, x in st["groups"].items() if vid in x["members"]}
     ec = [g for g in groups_of if st["groups"][g]["scheme"] == "rs-gf8-v1"]
     rep = [g for g in groups_of if st["groups"][g]["scheme"] == "replication-v1"]
-    cands = [(k, z) for k, z in live_keys() if z > 65536][:12] + [(k, z) for k, z in live_keys() if z <= 65536][:12]
+    # Only keys last written while every node was up (steps 2 and 4): a
+    # write diverted from a group with a member down can leave a stray copy
+    # of its chunk there, which is not the object's (run rc2).
+    last_put = {}
+    for r in ledger():
+        if r["op"] == "PUT":
+            last_put[r["key"]] = r
+    safe = {k for k, r in last_put.items() if r["phase"] in ("s2", "s4") and r["outcome"] == "ack"}
+    live = [(k, z) for k, z in live_keys() if k in safe]
+    cands = [(k, z) for k, z in live if z > 65536][:12] + [(k, z) for k, z in live if z <= 65536][:12]
     gens = {}
     for k, z in cands:
         rc, o, e = admin(f"integrity verify-object --bucket v3h --key {shlex.quote(k)}", timeout=120)
@@ -837,6 +846,11 @@ def step7a():
                 break
     start("c", f"n-{victim}", node_cmd(victim))
     time.sleep(10)
+    # Each flipped shard must be the object's own: verify-object (read-only)
+    # lists the chunk, in that group, as affected.
+    for c in corrupted:
+        rc, o, e = admin(f"integrity verify-object --bucket v3h --key {shlex.quote(c['key'])}", timeout=300)
+        c["referenced"] = bool(re.search(rf"^  part \S+ chunk 0 id \S+ group {c['group']} good ", o, re.M))
     sc1 = scrub(sorted(groups_of))
     found = sum(v for r in sc1.values() for c, v in r.get("findings", {}).items() if c != "UnexpectedShard")
     q = wait_queue_empty(300)
@@ -847,14 +861,16 @@ def step7a():
         objs[c["key"]] = {"rc": rc, "out": redact(o).strip().splitlines()[:4]}
     v = verify("s7a-verify")
     _, nlog, _ = ssh("c", f"grep -E 'damaged|quarantin' {R}/logs/n-{victim}.log | tail -5")
-    ok = (len(corrupted) == 3 and found >= len(corrupted) and q[0] and q[0]["depth"] == 0
+    ok = (len(corrupted) == 3 and all(c.get("referenced") for c in corrupted)
+          and found >= len(corrupted) and q[0] and q[0]["depth"] == 0
           and q[0]["unrecoverable"] == 0 and q[0]["failed"] == 0 and damage_free(sc2)
           and all(o["rc"] == 0 for o in objs.values()) and v["ok"])
     return result("7a-scrub-repair-corrupt", "PASS" if ok else "FAIL",
                   {"victim": victim, "corrupted": corrupted, "node_log": redact(nlog).strip().splitlines(),
                    "scrub_before_repair": sc1, "damage_findings_before_repair": found, "repair_queue": q[0],
                    "scrub_after_repair": sc2, "verify_object_after": objs, "verify": v},
-                  "one byte flipped in chunk 0 of 2 live EC objects and 1 live replicated object on c1's member; "
+                  "one byte flipped in chunk 0 of 2 live EC objects and 1 live replicated object on c1's member "
+                  "(keys last written while every node was up; verify-object shows each flipped chunk affected); "
                   "scrub reports at least one damage finding per flipped shard; the repair queue empties within "
                   "300 s; a second scrub finds no damage; verify-object --decode exits 0 for each; verify clean")
 

@@ -538,6 +538,22 @@ async fn attribute_one<X: Txn>(
     Ok(ShardAttribution::Unreferenced)
 }
 
+/// Whether a pending generation with `prefix` exists: its chunk records
+/// may still be appended (a committed generation's are all written).
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn generation_is_pending<S: KvStore>(store: &S, prefix: &[u8; 12]) -> Result<bool> {
+    transact(store, *prefix, |tx, prefix| {
+        Box::pin(async move {
+            let gens = generations_with_prefix(tx, prefix).await?;
+            Ok(gens.iter().any(|(_, h)| is_pending(h.as_ref())))
+        })
+    })
+    .await
+}
+
 /// Whether a pending or committed generation with `prefix` exists (a
 /// retiring or finished generation's chunks are garbage).
 ///

@@ -1141,7 +1141,12 @@ async fn repair_one<S: KvStore>(
     };
     let (prefix, index) = split_chunk_id(&chunk_id);
     let Some(record) = gc::chunk_record_in_group(meta, &prefix, index, group_id).await? else {
-        if gc::generation_is_live(meta, &prefix).await? {
+        // Only a pending generation's record may still arrive here. A
+        // committed one with its record in another group (a write diverted
+        // there while this group's shard was written) leaves nothing of
+        // this group referenced: the task is dropped, never retried forever
+        // (0.1.0 three-host validation).
+        if gc::generation_is_pending(meta, &prefix).await? {
             // Pending generation: its record may still arrive. Try later.
             task.next_attempt_ms = now_ms + 60_000;
             task.updated_ms = now_ms;

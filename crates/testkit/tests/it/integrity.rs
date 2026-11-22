@@ -155,6 +155,52 @@ fn shards_of(c: &TestCluster, group: &GroupRecord) -> usize {
         .sum()
 }
 
+/// 0.1.0 three-host validation: a task for a chunk of a committed
+/// generation whose record is in another group (the write was diverted
+/// there; this group holds at most a stray copy) is dropped, not retried
+/// every minute forever with the queue never empty.
+#[tokio::test]
+async fn a_task_for_a_chunk_committed_in_another_group_is_dropped() {
+    let c = TestCluster::start(ClusterOptions {
+        groups: 2,
+        ..ClusterOptions::rs(6, 2, 1, MIB, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let objects = seed_objects(&c, 1, 4096).await;
+    let (home, chunk) = first_chunk(&c, &objects[0].0).await;
+    let other = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| g.id != home.id)
+        .unwrap();
+    assert!(
+        itasks::enqueue(
+            c.meta.as_ref(),
+            other.id,
+            chunk.chunk_id,
+            Finding::ChecksumMismatch,
+            &[],
+            now_ms(),
+        )
+        .await
+        .unwrap()
+    );
+    let mut now = now_ms();
+    for _ in 0..4 {
+        repair(&c, now).await;
+        now += 120_000;
+    }
+    assert!(
+        tasks(&c).await.is_empty(),
+        "the task stayed queued: {:?}",
+        tasks(&c).await
+    );
+    assert_all_readable(&c, &objects).await;
+    c.shutdown().await;
+}
+
 #[tokio::test]
 async fn scrub_detects_checksum_mismatch_quarantines_and_repair_rewrites_the_shard() {
     let c = cluster(3, 2, 1).await;

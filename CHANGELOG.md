@@ -121,6 +121,11 @@ evaluation and development; **not production-ready**.
 
 ### Fixed
 
+- A repair task for a chunk whose committed object lives in another
+  group (a stray copy left by a write diverted while a member was down)
+  is dropped instead of being retried every minute forever with the
+  repair queue never empty (R-120; found in the 0.1.0 three-host
+  validation).
 - Dependency `url` 2.5.9 (with `form_urlencoded` 1.2.3), used through
   the S3 request layer (`s3s`): `url` 2.5.8 and earlier overflow the
   stack in `Url::origin()` on nested `blob:` URLs (RUSTSEC-2026-0592).
