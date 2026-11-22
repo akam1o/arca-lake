@@ -773,9 +773,11 @@ impl StorageNode for StorageNodeService {
                 payload.len()
             )));
         }
-        // Re-check the epoch after receiving the body: a membership change
-        // may have landed while the data was in flight.
+        // Re-check the epoch and the incarnation after receiving the body: a
+        // membership change, or an incarnation adopted, may have landed while
+        // the data was in flight.
         self.check_epoch(key.group_id, header.group_epoch)?;
+        self.check_write_incarnation(&header.incarnation)?;
         self.stats.put_recv.observe(started.elapsed());
         let crc = crc32c_of(&payload);
         // The group's role, noted before the record exists (independent

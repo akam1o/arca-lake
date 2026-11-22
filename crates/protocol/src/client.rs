@@ -646,10 +646,10 @@ impl NodeClients {
         }
     }
 
-    /// Stamp `DeleteShard` requests with the cluster incarnation this
-    /// process started under (RFC-015 §5.3). Set once after the startup
-    /// gate; a node that adopted a different incarnation then rejects the
-    /// deletes of this process.
+    /// Stamp `DeleteShard` and `PutShard` requests with the cluster
+    /// incarnation this process started under (RFC-015 §5.3, R-117). Set once
+    /// after the startup gate; a node that adopted a different incarnation
+    /// then rejects the deletes and the shard writes of this process.
     pub fn set_incarnation(&self, incarnation: Option<[u8; 16]>) {
         *self
             .incarnation
@@ -708,7 +708,7 @@ impl NodeClients {
             && status.message().starts_with("delete fence")
     }
 
-    /// The incarnation stamped on deletes.
+    /// The incarnation stamped on deletes and shard writes.
     #[must_use]
     pub fn incarnation(&self) -> Option<[u8; 16]> {
         *self
