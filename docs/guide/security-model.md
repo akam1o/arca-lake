@@ -19,7 +19,18 @@ Summary of [RFC-012](../rfcs/RFC-012-security-architecture.md), the
   the terminator with `--trusted-proxy`.
 - **Fencing.** A cluster incarnation and group epochs fence deletes and
   writes of stale processes; record tokens make deletes conditional
-  (ADR-0016, ADR-0019).
+  (ADR-0016, ADR-0019). A storage node that has adopted an incarnation
+  refuses a shard write carrying another one (R-117): a writer of another
+  cluster reaching it at a reused address is refused, not counted
+  written. A node that has not adopted any incarnation yet (new, never
+  reached by its controller) still accepts such a write.
+- **One trust domain per cluster.** The handshake pins a node's SPIFFE ID,
+  and node IDs are small integers that repeat across clusters: give each
+  cluster its own CA or its own trust domain (`arca-lake tls init-ca`
+  per cluster). Clusters sharing a CA and a trust domain can authenticate
+  each other's nodes. Plaintext (`--insecure-plaintext`) has no peer
+  verification at all and is for tests on a private loopback or
+  network only.
 - **Audit.** One audit record per S3 request, without secrets.
 - **Not provided.** Encryption at rest, KMS integration, object ACLs,
   per-principal rate limits and quotas.

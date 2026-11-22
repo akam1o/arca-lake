@@ -1170,6 +1170,11 @@ impl NodeClients {
                 group_epoch: epoch,
                 payload_len: data.len() as u64,
                 write_class: class.into(),
+                incarnation: self
+                    .incarnation()
+                    .map(|i| i.to_vec())
+                    .unwrap_or_default()
+                    .into(),
             })),
         };
         let frame = frame_bytes.max(1);

@@ -69,6 +69,55 @@ async fn deletes_without_the_adopted_incarnation_are_refused() {
     n.shutdown().await;
 }
 
+/// R-117: a writer of another cluster (another incarnation) reaching this
+/// node at an address it still maps to one of its own is refused before
+/// the body is taken: nothing is stored and the write is not counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn writes_of_another_incarnation_are_refused() {
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let addr = n.local_addr.to_string();
+    let c = NodeClients::new(Duration::from_secs(5));
+    let data = Bytes::from(vec![4u8; 4096]);
+    c.health_with(
+        &addr,
+        HealthRequest {
+            format_write: 1,
+            incarnation: Bytes::from_static(&[7; 16]),
+            incarnation_changed_ms: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    // Another cluster's writer.
+    c.set_incarnation(Some([9; 16]));
+    let e = c
+        .put_shard(&addr, shard(5), 0, data.clone(), 1024)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), tonic::Code::FailedPrecondition, "{e}");
+    assert!(e.message().contains("incarnation rejected"), "{e}");
+    assert!(
+        c.get_shard(&addr, shard(5), 0, 0).await.is_err(),
+        "the shard was stored"
+    );
+    // This cluster's writer, and one that holds no incarnation.
+    c.set_incarnation(Some([7; 16]));
+    c.put_shard(&addr, shard(5), 0, data.clone(), 1024)
+        .await
+        .unwrap();
+    c.set_incarnation(None);
+    c.put_shard(&addr, shard(6), 0, data.clone(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(c.get_shard(&addr, shard(5), 0, 0).await.unwrap(), data);
+    n.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_epoch_raise_is_acknowledged_only_after_deletes_past_the_old_fence() {
     let _serial = faults::serial();
