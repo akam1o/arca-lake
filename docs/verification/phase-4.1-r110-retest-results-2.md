@@ -62,8 +62,8 @@ the run's last sample add up to 578 + 578 + 293 + 285 = 1,734 = 879 + 855:
 the unexpected shards of the rescrub are the records the nodes retained
 for the 600 s reclaim retention after stage 6's last deletes (06:03:50).
 During the run's own scrub (06:04–06:14) the records pending reclaim on
-the four nodes ranged from 1,752 to 1,929 (GC was still retiring stage 6's
-last deletes), so its 1,809 findings are consistent with the same
+the four nodes ranged from 1,752 to 1,929 (summed over samples of the four
+nodes taken at different moments), so its 1,809 findings are consistent with the same
 records, but that is not proven. Reconciliation removed no orphan in the
 passes inside stage 7 (06:04, 06:09, 06:14; 16 at 05:59, in stage 6).
 
