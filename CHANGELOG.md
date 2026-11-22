@@ -121,6 +121,9 @@ evaluation and development; **not production-ready**.
 
 ### Fixed
 
+- Dependency `url` 2.5.9 (with `form_urlencoded` 1.2.3), used through
+  the S3 request layer (`s3s`): `url` 2.5.8 and earlier overflow the
+  stack in `Url::origin()` on nested `blob:` URLs (RUSTSEC-2026-0592).
 - A replacement member (`replace-member`, automatic repair, drain, the
   planner) is never placed in a failure domain the group already uses
   (R-119; found in the 0.1.0 three-host validation, where a 2+1 group on
