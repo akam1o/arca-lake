@@ -669,6 +669,7 @@ async fn run_client(a: ClientArgs) {
                                                 group_epoch: 1,
                                                 payload_len: shard as u64,
                                                 write_class: 0,
+                                                ..Default::default()
                                             },
                                         )),
                                     };
