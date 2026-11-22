@@ -129,27 +129,26 @@ pub fn choose_group_members(
         .collect())
 }
 
-/// Choose a replacement for a failed member: a device whose failure domain
-/// differs from every remaining member's and from the failed member's own
-/// domain (if known).
+/// Choose a replacement for a failed member among `candidates`: a device
+/// whose failure domain differs from every remaining member's. The
+/// remaining members are given as devices, labels included, so that each
+/// one's domain is known (the candidates usually leave them out, and may
+/// leave out members that are unhealthy: their domains still count).
 ///
 /// # Errors
 ///
-/// As [`choose_group_members`].
+/// As [`choose_group_members`]; [`PlacementError::MissingLabel`] for a
+/// remaining member without the failure-domain label.
 pub fn choose_replacement(
-    devices: &[Device],
+    candidates: &[Device],
     spec: &GroupSpec,
-    remaining: &[Member],
+    remaining: &[Device],
 ) -> Result<Member, PlacementError> {
     let mut excluded = BTreeSet::new();
-    for m in remaining {
-        if let Some(d) = devices
-            .iter()
-            .find(|d| d.node_id == m.node_id && d.device_id == m.device_id)
-        {
-            excluded.insert(domain_of(d, &spec.failure_domain)?.to_string());
-        }
+    for d in remaining {
+        excluded.insert(domain_of(d, &spec.failure_domain)?.to_string());
     }
+    let devices = candidates;
     let one = GroupSpec {
         total_shards: 1,
         failure_domain: spec.failure_domain.clone(),
@@ -233,8 +232,52 @@ mod tests {
             "{err}"
         );
 
-        let repl = choose_replacement(&devices, &spec, &[m[1], m[2]]).unwrap();
+        let of = |m: Member| {
+            devices
+                .iter()
+                .find(|d| d.node_id == m.node_id)
+                .unwrap()
+                .clone()
+        };
+        let repl = choose_replacement(&devices, &spec, &[of(m[1]), of(m[2])]).unwrap();
         assert_eq!(repl.node_id, 5, "replacement must avoid h4 and h2");
+    }
+
+    /// Three-host validation of 0.1.0: the candidates leave the remaining
+    /// members out (they cannot be chosen again), and their domains must
+    /// still be avoided.
+    #[test]
+    fn a_replacement_avoids_the_domains_of_members_not_among_the_candidates() {
+        let a0 = dev(1, "a", "r1", 100, 2);
+        let a1 = dev(4, "a", "r1", 100, 1);
+        let b0 = dev(2, "b", "r1", 100, 2);
+        let c1 = dev(6, "c", "r1", 100, 1);
+        let spec = GroupSpec {
+            total_shards: 3,
+            failure_domain: "host".into(),
+        };
+        // Group [a1, b1, c1], b1 failed: a0 (fewer free domains, fewer
+        // groups) must not be taken; b0 is the only valid choice.
+        let repl = choose_replacement(&[a0.clone(), b0], &spec, &[a1.clone(), c1.clone()]).unwrap();
+        assert_eq!(repl.node_id, 2);
+        assert!(matches!(
+            choose_replacement(&[a0], &spec, &[a1, c1]),
+            Err(PlacementError::InsufficientDomains { .. })
+        ));
+    }
+
+    #[test]
+    fn a_remaining_member_without_the_label_is_an_error() {
+        let mut m = dev(4, "a", "r1", 100, 1);
+        m.labels.remove("host");
+        let spec = GroupSpec {
+            total_shards: 3,
+            failure_domain: "host".into(),
+        };
+        assert!(matches!(
+            choose_replacement(&[dev(2, "b", "r1", 100, 0)], &spec, &[m]),
+            Err(PlacementError::MissingLabel { .. })
+        ));
     }
 
     #[test]
