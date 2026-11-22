@@ -727,9 +727,9 @@ class Overall(unittest.TestCase):
         self.assertEqual({c["outcome"] for c in r["criteria"]} - {judge.INCONCLUSIVE}, {judge.NOT_RUN})
         self.assertNotEqual(r["outcome"], judge.PASSED)
 
-    def c5(self, sc, by, settled="absent"):
+    def c5(self, sc, by, settled="absent", pending=10):
         s7 = {"verify": {"violations": [], "complete": True, "keys": 1}, "manifest_findings": 0,
-              "scrub_findings": sc, "scrub_by_class": by}
+              "scrub_findings": sc, "scrub_by_class": by, "pending_before_scrub": pending}
         if settled != "absent":
             s7["settled_ms"] = settled
         return judge.c5({"7": s7})["outcome"]
@@ -743,6 +743,10 @@ class Overall(unittest.TestCase):
         self.assertEqual(self.c5(6, [1, 0, 0, 0, 5, 0, 0, 0], settled=None), judge.FAILED)
         self.assertEqual(self.c5(5, None, settled=None), judge.FAILED, "no breakdown: no excuse")
         self.assertEqual(self.c5(5, [0, 0, 0, 0, 4, 0, 0, 0], settled=None), judge.FAILED, "inconsistent")
+        # More unexpected shards than records pending reclaim: not retained
+        # records alone (a stuck reclaim or orphans): Failed.
+        self.assertEqual(self.c5(11, [0, 0, 0, 0, 11, 0, 0, 0], settled=None), judge.FAILED)
+        self.assertEqual(self.c5(5, [0, 0, 0, 0, 5, 0, 0, 0], settled=None, pending=None), judge.FAILED)
 
     def test_c5_of_a_timeline_without_the_settle_step_is_judged_as_before(self):
         """Run r110-20261122T030322Z (plan v2): its Failed stays Failed."""
@@ -948,7 +952,38 @@ class ReviewFindingsEngine(EngineBase):
         e = self.stage7(c)
         self.assertIn("settled_ms", e.tl["7"])
         self.assertIsNone(e.tl["7"]["settled_ms"])
+        self.assertGreaterEqual(e.tl["7"]["pending_before_scrub"], 7)
         self.assertEqual(c.integrity_calls, ["verify-manifests", "scrub"])
+
+    def test_stage_7_with_no_time_left_for_the_wait_still_scrubs(self):
+        """The verify ends after the wait's cutoff: no wait, not settled."""
+        c = FakeCluster(self.cfg, self.clock)
+        real = c.run_step
+
+        def slow(step, deadline, check=None):
+            if step.get("kind") == "verify":
+                self.clock.sleep(driver.stages(self.cfg)[6]["max_s"] - driver.SCRUB_RESERVE_S + 60)
+            return real(step, deadline, check=check)
+
+        c.run_step = slow
+        e = self.stage7(c)
+        self.assertIsNone(e.tl["7"]["settled_ms"])
+        self.assertEqual(c.integrity_calls, ["verify-manifests", "scrub"])
+
+    def test_stage_7_settling_late_but_in_time_is_settled(self):
+        c = FakeCluster(self.cfg, self.clock)
+        real = c.sample
+        t0 = self.clock.monotonic()
+
+        def sample():
+            real()
+            if self.clock.monotonic() - t0 < driver.SETTLE7_S + 300:
+                c._samples[-1]["values"]["arca_node_reclaim_pending_records"] = {"value": 3, "unit": "count"}
+
+        c.sample = sample
+        e = self.stage7(c)
+        self.assertIsNotNone(e.tl["7"]["settled_ms"])
+        self.assertGreaterEqual(e.tl["7"]["settled_ms"] - e.tl["7"]["settle_after_ms"], 250_000)
 
     def test_a_natural_recovery_ends_the_hold_and_the_run_goes_on(self):
         """Plan v2: admission recovering before D1 matured ends the hold;

@@ -535,15 +535,20 @@ def c5(tl):
         return verdict("C5", FAILED, [f"manifest findings {mf}, scrub findings {sc}"])
     if sc is not None and sc > 0:
         by = s7.get("scrub_by_class")
-        # Plan v3: a scrub read before the background passes settled may list
-        # retained records and young orphans as unexpected shards (class 4):
-        # those alone are Inconclusive there; any other class fails. Settled
-        # (or a timeline without the settle step), every finding fails.
+        # Plan v3: a scrub read before the background passes settled lists
+        # the records retained for reclaim as unexpected shards (class 4):
+        # those alone, no more of them than the records pending reclaim just
+        # before the scrub, are Inconclusive there; any other class, or more
+        # unexpected shards, fails. Settled (or a timeline without the settle
+        # step), every finding fails.
+        pend = s7.get("pending_before_scrub")
         if "settled_ms" in s7 and s7["settled_ms"] is None and isinstance(by, list) and len(by) == 8 \
-                and sum(by) == sc and sum(by) == by[4]:
-            return verdict("C5", INCONCLUSIVE, [f"{sc} unexpected shards, the scrub read before the background "
-                                                "passes settled"], scrub_by_class=by)
-        return verdict("C5", FAILED, [f"manifest findings {mf}, scrub findings {sc}"], scrub_by_class=by)
+                and sum(by) == sc and sum(by) == by[4] and isinstance(pend, (int, float)) and by[4] <= pend:
+            return verdict("C5", INCONCLUSIVE, [f"{sc} unexpected shards, at most the {pend:.0f} records pending "
+                                                "reclaim, the scrub read before the background passes settled"],
+                           scrub_by_class=by, pending_before_scrub=pend)
+        return verdict("C5", FAILED, [f"manifest findings {mf}, scrub findings {sc}"], scrub_by_class=by,
+                       pending_before_scrub=pend)
     if not vr.get("complete") or mf is None or sc is None:
         return verdict("C5", INCONCLUSIVE, ["the verification, the manifests or the scrub incomplete"])
     return verdict("C5", PASSED, [], keys=vr["keys"], unknown_resolved=vr.get("unknown_resolved"))
