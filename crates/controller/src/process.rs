@@ -3181,22 +3181,29 @@ pub(crate) fn choose_for(
 ) -> Result<Option<GroupMember>, ControlError> {
     let node_list: Vec<NodeRecord> = nodes.values().filter(|n| healthy(n.id)).cloned().collect();
     let devices = groups::devices_of(&node_list, all_groups);
-    // The remaining members' domains come from every node record, healthy
-    // or not, and never from the candidates (which leave the members out):
-    // a replacement sharing a domain with any of them would leave the group
-    // one domain short. A member whose record is gone has no known domain:
-    // no replacement is chosen for this group.
-    let all_nodes: Vec<NodeRecord> = nodes.values().cloned().collect();
-    let all_devices = groups::devices_of(&all_nodes, all_groups);
+    // The remaining members' domains come from their node records' labels,
+    // healthy or not, and never from the candidates (which leave the
+    // members out): a replacement sharing a domain with any of them would
+    // leave the group one domain short. The device need not be registered
+    // any more (a node restarted without a dead disk); a member whose node
+    // record is gone has no known domain: no replacement is chosen.
     let mut remaining = Vec::new();
     for (_, m) in g.members.iter().enumerate().filter(|(i, _)| *i != index) {
-        match all_devices
-            .iter()
-            .find(|d| d.node_id == m.node_id && d.device_id == m.device_id)
-        {
-            Some(d) => remaining.push(d.clone()),
-            None => return Ok(None),
-        }
+        let Some(n) = nodes.get(&m.node_id) else {
+            warn!(
+                group = g.id,
+                node = m.node_id,
+                "no replacement chosen: a remaining member's node record is gone, so its failure domain is unknown"
+            );
+            return Ok(None);
+        };
+        remaining.push(arca_lake_placement::Device {
+            node_id: m.node_id,
+            device_id: m.device_id,
+            labels: n.labels.iter().cloned().collect(),
+            free_bytes: 0,
+            group_count: 0,
+        });
     }
     // Never pick a node that is already a member, and stay on the device
     // class the group's other members use (a durable member must not move
@@ -3661,6 +3668,17 @@ mod tests {
         assert_eq!(pick(&[5, 6]), Some(2));
         // Node 2 unavailable too: no node on a free host, none chosen.
         assert_eq!(pick(&[5, 2]), None);
+        // A remaining member's node re-registered without its device (a dead
+        // disk): its host still counts.
+        let mut n = nodes.clone();
+        n.get_mut(&6).unwrap().devices.clear();
+        let r = choose_for(&n, &groups, &groups[1], 1, "host", &|id| id != 5).unwrap();
+        assert_eq!(r.map(|m| m.node_id), Some(2));
+        // A remaining member's node record gone: its domain is unknown.
+        let mut n = nodes.clone();
+        n.remove(&6);
+        let r = choose_for(&n, &groups, &groups[1], 1, "host", &|id| id != 5).unwrap();
+        assert_eq!(r, None);
     }
 
     /// ADR-0035 §10.1: the controller's flags only seed an absent record;
