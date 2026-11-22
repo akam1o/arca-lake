@@ -8,7 +8,7 @@ small-allotment step only (plan §3).
 | Run | Plan | Outcome | Criteria |
 | --- | --- | --- | --- |
 | `r110-20261122T030322Z` (run 1) | 2 | **Failed** | C1a, C1b, C2, C3a, C3b, C4 Passed; C5 Failed (scrub findings 1,809; by class only after the run: all unexpected shards; §2) |
-| `r110-20261122T082126Z` (run 2) | 3 | *running* | §3 |
+| `r110-20261122T082126Z` (run 2) | 3 | **Passed** | C1a, C1b, C2, C3a, C3b, C4, C5 Passed (§3) |
 
 At most three runs of the new plan versions were allowed (0.1.0
 preparation); before each, the previous run's cause, the change and the
@@ -82,9 +82,42 @@ findings that are all unexpected shards and no more than the records
 pending reclaim just before the scrub make C5 **Inconclusive** (any other
 class, or more unexpected shards, Failed). Run 1 stays Failed.
 
-## 3. Run 2 (plan version 3)
+## 3. Run 2 (plan version 3): Passed
 
-*To be added when the run ends.* Binary: the 0.1.0 candidate archive's
-(commit `1ae2c5c`), sha256
-`73cbf390fd736d16ae52771bbe4909ec421169b15702fe8ae0c7a2a21b7e7a5e`;
-tooling `22c5696`.
+Binary: the 0.1.0 candidate archive's (commit `1ae2c5c`), fdb feature,
+sha256 `73cbf390fd736d16ae52771bbe4909ec421169b15702fe8ae0c7a2a21b7e7a5e`;
+tooling `22c5696`. No stop, no protection violation, every final stop
+confirmed.
+
+| Stage | UTC | Result |
+| --- | --- | --- |
+| 1 preflight, 2 smoke | 08:21–08:24 | passed |
+| 3 fill and baseline | 08:24–08:45 | L0 4,000 acknowledged |
+| 4 pressure | 08:45–09:11 | D1's 1,000 deletes by 08:45:58; refusal 08:52:50–09:08:05 (915 s), ended by a natural recovery; D1's chain over at 09:11:12 |
+| 5 drain and recovery | 09:11–09:51 | C2 judged at 09:41:36; C3a's 600 s window with 60 probes |
+| 6 steady churn | 09:51–11:22 | completed; live objects within 5 % of L1 |
+| 7 integrity | 11:22–11:47 | read-back of 12,111 keys: 0 violations, 0 unresolved; settle point 11:47:01 (stage 6's end + 1,500 s), settled at 11:47:14 (no GC backlog, 0 records pending reclaim on every node); manifests 0 findings (0 multipart roots: vacuous here); scrub of every group: **0 findings in every class** |
+
+| Criterion | Outcome | Evidence |
+| --- | --- | --- |
+| C1a | Passed | during the 915 s refusal: GC collected 1,004 generations; D1's reclaimed records at least 3,000 (lower bound), 300 needed; no reclaim refusal or error |
+| C1b | Passed | D1 fully reclaimed (3,000 records by the bound) when its chain was seen over, 25 min after D1, before the 50 min deadline |
+| C2 | Passed | 2,666 deletes; live bytes down 976.4 MB of 1,048.3 MB expected; every node's available space rose as the rule needs |
+| C3a | Passed | 60 probes over 600 s |
+| C3b | Passed | 5,256 of 5,256 churn PUTs acknowledged |
+| C4 | Passed | allocated and retained bytes within the slope and range limits |
+| C5 | Passed | every acknowledged key read back exactly, every acknowledged delete 404; scrub findings by class `[0, 0, 0, 0, 0, 0, 0, 0]` |
+
+What it verifies, as far as it goes: on one host, with four 1 GiB nodes
+and the plan's small allotments, GC and reclaim progress on an
+identified set of deletes while writes are refused and complete it in
+time; space returns through compaction; writes recover and stay
+acknowledged through steady churn; capacity stays level; data is intact
+afterwards. Not verified: D1's whole reclaim *while the refusal
+persists* (both runs' refusals ended naturally, by the space D1's reclaim
+returned), larger allotments and object counts, more hosts, longer runs.
+R-110 stays open (Medium).
+
+Runs of the new plan versions used: two of the three allowed. The
+earlier rehearsal `r110-20261122T030003Z` never reached a host (the
+operator's command failed before any connection) and is not counted.
