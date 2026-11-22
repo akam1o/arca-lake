@@ -95,6 +95,14 @@ entry in the [risk register](../architecture/risks.md).
 
 ## Known behaviours to plan for
 
+- A scrub reports a record that was deleted and waits out the reclaim
+  retention (`--reclaim-retention-secs`) as an unexpected shard, as it
+  does for shards no object references. Unexpected shards are not damage
+  (missing, checksum, truncated or unrecoverable findings are); expect
+  them after deletes until the retention and a reclaim pass have passed.
+- `admin integrity verify-manifests` checks multipart uploads' manifests
+  only; a store without multipart uploads has nothing for it to check.
+
 - Under capacity pressure writes are throttled and then refused with
   `503 SlowDown`; small devices fill faster than one evaluation
   interval, and the nodes' reserve is then the stop (R-83).
