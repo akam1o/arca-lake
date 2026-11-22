@@ -32,24 +32,30 @@ The S3 [compatibility matrix](s3-compatibility.md) is maintained by hand
 from the test suite (RFC-007's acceptance table); it is not generated
 from test results.
 
+## Behaviour during a metadata outage
+
+While FoundationDB is unavailable, S3 requests fail with `500` after the
+metadata timeout (about 10 s), not `503`. In the 0.1.0 three-host
+validation, acknowledged writes stayed readable and every write with an
+unknown outcome read as one of its candidates (the earlier body, the new
+one, or absent) once FoundationDB returned
+([report](../verification/0.1.0-three-host-validation.md)).
+
 ## Open risks to plan for in 0.1.0
 
 0.1.0 is experimental and not production-ready. Each item links its
 entry in the [risk register](../architecture/risks.md).
 
-- R-117 (residual): a node that has adopted no cluster incarnation yet
-  accepts shard writes from another cluster's gateway at a reused
-  address. Use one CA or trust domain per cluster; plaintext is for tests
-  only. A node that has adopted an incarnation refuses shard writes of
-  another one (0.1.0).
+- R-117 (residual): a node that has adopted an incarnation refuses
+  shard writes of another one (0.1.0), but still accepts a write that
+  carries no incarnation, and a node that has adopted none yet accepts
+  any. Use one CA or trust domain per cluster; plaintext is for tests
+  only.
 - R-119 (residual): replacements use the controller's
   `--failure-domain` (a group's own label is not recorded); groups whose
-  members were put in one domain by an earlier release are not reported.
-- During a FoundationDB outage, S3 requests fail with `500` after the
-  metadata timeout (about 10 s), not `503`; acknowledged writes stay
-  readable, and a write with an unknown outcome reads as one of its
-  candidates (the earlier body, the new one, or absent) once FoundationDB
-  returns (three-host validation).
+  members were put in one domain by a replacement made before the fix are
+  not reported; a node without the failure-domain label stalls the
+  replacement of its groups (nothing is placed in a wrong domain).
 - R-118: tiering resets a generation's whole access record after
   outcomes that may not have acted on it; tiering accuracy is limited.
 - R-111: small objects cost far more node capacity than their payload
