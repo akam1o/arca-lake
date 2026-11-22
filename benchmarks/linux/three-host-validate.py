@@ -622,7 +622,10 @@ def step3c():
     recs = ledger(phase)
     win = [r for r in recs if within(r, t_kill, t_restart)]
     get_bad = [r for r in win if r["op"] == "GET" and r["outcome"] in BAD]
-    put_acked = [r for r in win if r["op"] == "PUT" and r["outcome"] == "ack"]
+    # Any PUT started while both nodes were down must never be acknowledged,
+    # whenever it finished (independent review: not only those finished
+    # before the restart).
+    put_acked = [r for r in recs if r["op"] == "PUT" and t_kill <= r["t0"] < t_restart and r["outcome"] == "ack"]
     put_failed = [r for r in win if r["op"] == "PUT" and r["outcome"] != "ack"]
     after_bad = [r for r in recs if r["t0"] >= t_restart + 10 and r["outcome"] in BAD]
     viol = [r for r in recs if r["outcome"] == "VIOLATION"]
@@ -639,7 +642,8 @@ def step3c():
                    "put_failure_samples": samples(put_failed, 3), "errors_after_restart_10s": samples(after_bad),
                    "violations": len(viol), "repair_queue_after": q[0], "verify": v},
                   "both nodes of host B down: every group lacks one member; GETs answered (k of 3), no PUT started "
-                  "after the kill is acked (all shards required), PUTs fail explicitly; 0 errors 10 s after restart")
+                  "while they were down is ever acked (all shards required), PUTs in the window fail (by kind: "
+                  "status and error recorded); 0 errors 10 s after restart")
 
 
 def step4():
@@ -696,7 +700,7 @@ def step5():
     bad_win = [r for r in win if r["outcome"] in BAD]
     viol = [r for r in recs if r["outcome"] == "VIOLATION"]
     after_bad = [r for r in recs if r["t0"] >= t_restart + 10 and r["outcome"] in BAD]
-    end = time.time() + 60
+    end = t_restart + 60  # counted from the restart (host clock, NTP-synchronised)
     healthy_after = None
     while time.time() < end:
         _, val = ctl_metric("arca_controller_nodes_unhealthy")
@@ -843,7 +847,8 @@ def step7a():
         objs[c["key"]] = {"rc": rc, "out": redact(o).strip().splitlines()[:4]}
     v = verify("s7a-verify")
     _, nlog, _ = ssh("c", f"grep -E 'damaged|quarantin' {R}/logs/n-{victim}.log | tail -5")
-    ok = (len(corrupted) == 3 and found >= len(corrupted) and q[0] and q[0]["depth"] == 0 and damage_free(sc2)
+    ok = (len(corrupted) == 3 and found >= len(corrupted) and q[0] and q[0]["depth"] == 0
+          and q[0]["unrecoverable"] == 0 and q[0]["failed"] == 0 and damage_free(sc2)
           and all(o["rc"] == 0 for o in objs.values()) and v["ok"])
     return result("7a-scrub-repair-corrupt", "PASS" if ok else "FAIL",
                   {"victim": victim, "corrupted": corrupted, "node_log": redact(nlog).strip().splitlines(),
