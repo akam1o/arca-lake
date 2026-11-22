@@ -158,7 +158,7 @@ def _increase_outer(samples, target, key, t0, t1, iv, gap):
     return b[1] - a[1]
 
 
-def d1_reclaimed_bound(samples, t0, t1, v):
+def d1_reclaimed_bound(samples, t0, t1, v, sub_from=None):
     """A lower bound of D1's records reclaimed over [t0, t1] (plan v2 §8.3):
     the reclaimed records, less those reconciliation's orphans could account
     for (each removed orphan one record), less 3 per shard write a node
@@ -166,13 +166,16 @@ def d1_reclaimed_bound(samples, t0, t1, v):
     most 3 shards GC retires). The reclaims are counted from the samples
     inside the interval (a lower bound), what is subtracted from the
     samples just outside it (an upper bound), so that the bound stays a
-    lower bound at the edges. ``(bound, parts)``; bound None when a part is
-    not sampled over the interval."""
+    lower bound at the edges. ``sub_from``: the subtractions start there
+    instead (an earlier time whose aborted writes or orphans can be
+    reclaimed inside the interval). ``(bound, parts)``; bound None when a
+    part is not sampled over the interval."""
+    s0 = t0 if sub_from is None else min(sub_from, t0)
     iv, gap = v["interval_s"] * 1000, v["max_gap_factor"]
     parts = {"reclaimed": _increase(samples, "controller", "arca_controller_reclaimed_total", t0, t1, iv, gap),
-             "reconcile_deleted": _increase_outer(samples, "controller-log", "reconcile_deleted", t0, t1, iv, gap),
+             "reconcile_deleted": _increase_outer(samples, "controller-log", "reconcile_deleted", s0, t1, iv, gap),
              "node_capacity_refusals": _increase_outer(samples, "gateway0",
-                                                       "arca_gateway_node_capacity_refusals_total", t0, t1, iv, gap)}
+                                                       "arca_gateway_node_capacity_refusals_total", s0, t1, iv, gap)}
     if any(x is None for x in parts.values()):
         return None, parts
     return parts["reclaimed"] - parts["reconcile_deleted"] - 3 * parts["node_capacity_refusals"], parts
@@ -213,7 +216,9 @@ def c1a(samples, records, tl, v, nodes):
         return verdict("C1a", INCONCLUSIVE, [f"the refusal lasted {(t_e - t_r) / 1000:.0f} s, "
                                              f"{v['c1a_min_refusal_s']} s needed"], **ev)
     collected = _increase(samples, "controller", "arca_controller_gc_collected_total", t_r, t_e, iv, gap)
-    bound, parts = d1_reclaimed_bound(samples, t_r, t_e, v)
+    # Writes a node refused during the fill, before admission showed the
+    # refusal, are reclaimed inside it: subtracted from D1's end on.
+    bound, parts = d1_reclaimed_bound(samples, t_r, t_e, v, sub_from=s4.get("d1_done_ms"))
     ev.update(gc_collected=collected, d1_reclaimed_at_least=bound, **{f"reclaim_{k}": x for k, x in parts.items()})
     if collected is None or bound is None:
         return verdict("C1a", INCONCLUSIVE, ["GC or reclaim counters not sampled through the refusal"], **ev)

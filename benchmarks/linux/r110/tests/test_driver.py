@@ -549,6 +549,18 @@ class C1(unittest.TestCase):
         self.assertEqual(r["outcome"], judge.INCONCLUSIVE, r)
         self.assertIn("not attributable", r["reasons"][0])
 
+    def test_c1a_subtracts_the_fills_capacity_refusals(self):
+        """Review of #30: writes refused for capacity during the fill (before
+        the refusal's start) are reclaimed inside it; they are not D1's."""
+        S, R, tl = self.build(refusal_min=12)
+        for s in S:
+            if s["target"] == "gateway0":
+                s["values"]["arca_gateway_node_capacity_refusals_total"] = {
+                    "value": 0 if s["ended_wall_ms"] < -30_000 else 400, "unit": "count"}
+        r = judge.c1a(S, R, tl, judge.VALUES, ["node0", "node1"])
+        self.assertEqual(r["outcome"], judge.INCONCLUSIVE, r)
+        self.assertEqual(r["evidence"]["reclaim_node_capacity_refusals"], 400)
+
     def test_c1a_unsampled_reconcile_counts_are_inconclusive(self):
         self.assertEqual(self.judge("c1a", no_log=True)["outcome"], judge.INCONCLUSIVE)
 

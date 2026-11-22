@@ -357,13 +357,17 @@ for capacity marks at most one aborted object, whose at most 3 shards GC
 retires). The reclaims are counted from the samples inside the interval,
 the two subtractions from the samples just outside it (the last at or
 before its start, the first at or after its end), so that the bound stays
-a lower bound at the edges. Any of the three not sampled over the interval
+a lower bound at the edges; for C1a the subtractions start at D1's last
+delete, not at the refusal's start (writes a node refused for capacity
+during the fill are reclaimed during the refusal). Any of the three not sampled over the interval
 (gaps above two intervals) or decreasing (a restart or reset): no bound.
 Limits of the bound, recorded with each result: a reconciliation pass
 that ends early on a store or leadership error writes no log line, so
 orphans it removed are not subtracted; aborted writes for reasons other
 than capacity, and capacity refusals at a gateway other than the run's
-one, are not subtracted (the run has one gateway).
+one, are not subtracted (the run has one gateway); for C1b, orphans
+reconciliation removed in the minutes between stage 3's end and D1's last
+delete.
 
 | | Passed | Failed | Inconclusive |
 | --- | --- | --- | --- |

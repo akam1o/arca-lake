@@ -183,6 +183,7 @@ muts = [
  ("v2: subtractions inside only", "r110/judge.py", "             \"node_capacity_refusals\": _increase_outer(samples, \"gateway0\",", "             \"node_capacity_refusals\": _increase(samples, \"gateway0\",", "test_driver"),
  ("v2: C1b read at the quiet point", "r110/judge.py", "    bound, parts = d1_reclaimed_bound(samples, t_d, t_q + 2 * iv, v)", "    bound, parts = d1_reclaimed_bound(samples, t_d, t_q, v)", "test_driver"),
  ("v2: C1b unsampled violations ignored", "r110/judge.py", "    if unsampled:\n        return", "    if False:\n        return", "test_driver"),
+ ("v2: C1a subtractions from the refusal only", "r110/judge.py", "    bound, parts = d1_reclaimed_bound(samples, t_r, t_e, v, sub_from=s4.get(\"d1_done_ms\"))", "    bound, parts = d1_reclaimed_bound(samples, t_r, t_e, v)", "test_driver"),
  ("v2: natural recovery ends the run", "r110/driver.py", "                tl[\"refusal_ended_by\"] = \"natural recovery\"\n                self.c.step_done(n)\n            return", "                tl[\"refusal_ended_by\"] = \"natural recovery\"\n                self.c.step_done(n)\n                return True\n            return", "test_driver"),
 ]
 for entry in muts:
