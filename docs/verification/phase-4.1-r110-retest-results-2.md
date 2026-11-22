@@ -153,8 +153,12 @@ stop). Fixed in PR #42 (the record's time kept apart; the tests' fake
 records now carry it as the real ones do).
 
 The ledger could not be read (host 2 unreachable), hence C1a and C1b
-Inconclusive. Not yet done when this was written: confirming on host 2,
-by their records, that the test's processes are stopped (the guard and
-the sentinel on the host stop the load and the services when the
-driver's heartbeat stops), then the teardown. This was the last of the
-three runs allowed; R-110's verified scope rests on run 2.
+Inconclusive. Cause of the lost connection: the virtualisation host of the
+three test hosts rebooted (per the maintainer); the hosts came back at
+23:30 UTC. Every process of the run had ended with that reboot; the
+teardown then found each recorded process gone (17 of 17) and removed the
+run's directories. Whether the guard had stopped the load before the
+reboot (on the lost heartbeat) is not known: the host's logs were in the
+removed run directory and were not collected (the hosts were unreachable
+when the run ended). This was the last of the three runs allowed;
+R-110's verified scope rests on run 2.
