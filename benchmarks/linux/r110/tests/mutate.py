@@ -189,7 +189,8 @@ muts = [
  ("v3: scrub without the settle", "r110/driver.py", "        settled = self.wait(\"7\", wait_end, lambda s: self.host_ms() >= tl7[\"settle_after_ms\"] and self._quiet(s)) \\\n            if self.clock.monotonic() < wait_end else False", "        settled = True", "test_driver"),
  ("v3: settle by time only", "r110/driver.py", "lambda s: self.host_ms() >= tl7[\"settle_after_ms\"] and self._quiet(s)", "lambda s: self.host_ms() >= tl7[\"settle_after_ms\"]", "test_driver"),
  ("v3: unexpected shards excused after the settle", "r110/judge.py", "        if \"settled_ms\" in s7 and s7[\"settled_ms\"] is None and isinstance(by, list)", "        if isinstance(by, list)", "test_driver"),
- ("v3: other classes excused", "r110/judge.py", "                and sum(by) == sc and sum(by) == by[4]:", "                and sum(by) == sc:", "test_driver"),
+ ("v3: unbounded unexpected shards excused", "r110/judge.py", " and isinstance(pend, (int, float)) and by[4] <= pend:", ":", "test_driver"),
+ ("v3: other classes excused", "r110/judge.py", "                and sum(by) == sc and sum(by) == by[4] and isinstance(pend", "                and sum(by) == sc and isinstance(pend", "test_driver"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]

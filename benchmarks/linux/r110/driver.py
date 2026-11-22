@@ -712,6 +712,11 @@ class Run:
         if self._stopped("7"):
             return False
         tl7["settled_ms"] = self.host_ms() if settled else None
+        # The records pending reclaim on every node just before the scrub
+        # (fresh; None if any is missing): the bound of the unexpected
+        # shards a scrub read before the settle may excuse (independent review).
+        pend = [self._fresh(self.c.samples(), n, "arca_node_reclaim_pending_records") for n in self.c.nodes()]
+        tl7["pending_before_scrub"] = sum(pend) if pend and all(p is not None for p in pend) else None
         tl7["manifest_findings"] = self.c.integrity("verify-manifests")
         if self._stopped("7"):
             return False

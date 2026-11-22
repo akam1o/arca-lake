@@ -315,7 +315,7 @@ changed after it.
 | C3a | every gateway's admission state 0 and the controller's backpressure state 0, uninterrupted for 10 min; every probe PUT in that window (60) acknowledged | stage 5 |
 | C3b | over stage 6: PUTs ≥ 99 % acknowledged, none refused for capacity, admission never above warning | stage 6 |
 | C4 | over the last 60 min of stage 6, per node: the least-squares slope of retained bytes and of allocated bytes ≤ 1 % of the allotment per hour, their range ≤ 10 % of the allotment, admission never write rejected | stage 6 |
-| C5 | every key acknowledged and not deleted reads back with its exact body; every acknowledged delete (D1, stage 5 and churn, at most 12,400) answers 404; every unknown outcome reads as one of its candidates (recorded which); manifests and scrub 0 findings, every class (v3: when the background passes did not settle in stage 7's time, findings that are all unexpected shards are Inconclusive, any other class Failed) | stage 7 |
+| C5 | every key acknowledged and not deleted reads back with its exact body; every acknowledged delete (D1, stage 5 and churn, at most 12,400) answers 404; every unknown outcome reads as one of its candidates (recorded which); manifests and scrub 0 findings, every class (v3: when the background passes did not settle in stage 7's time, findings that are all unexpected shards and no more than the records pending reclaim on the nodes just before the scrub are Inconclusive; any other class, or more unexpected shards, Failed) | stage 7 |
 
 Admission states 3 (write rejected) and 4 (recovery only, stricter) both
 refuse client writes: both are the refusal for stage 4 and C1.
