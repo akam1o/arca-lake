@@ -394,6 +394,10 @@ async fn forced_finalize_needs_a_reason_keeps_every_finding_and_later_passes_kee
     )
     .await
     .unwrap();
+    // The pass runs as a controller started after the restore would: on
+    // the restored incarnation, which the nodes adopted (R-117: a shard
+    // write of the old one is refused).
+    c.clients.set_incarnation(Some(inc));
     let tiers = arca_lake_controller::tiering::TieringPolicy {
         tiers: vec!["cold".into(), "default".into()],
         promote_reads: 1,
