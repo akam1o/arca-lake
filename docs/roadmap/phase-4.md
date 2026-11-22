@@ -63,9 +63,13 @@ the environments described in their reports.
    at 10⁶ objects a reconcile pass 2,733 s → 146 s, reclaim 2.74 → 0.55 ms
    per record, retained bytes level for an hour; the reclaim-at-capacity
    run is incomplete (load host stopped; §4c): the reclaim criterion is
-   not met, R-110 stays Medium; a
-   [retest plan](../verification/phase-4.1-r110-retest-plan.md) awaits
-   approval (not run).* The implementation uses batched read-only
+   not met, R-110 stays Medium; the
+   [retest plan](../verification/phase-4.1-r110-retest-plan.md) (version
+   1) was run twice on 2026-11-21 (one run interrupted by the operator at
+   stage 3 for a tooling finding, one ended in stage 4), both Inconclusive
+   ([results](../verification/phase-4.1-r110-retest-results.md)); plan
+   version 2 (C1 split into C1a and C1b) is being prepared.* The
+   implementation uses batched read-only
    judgments per listing page, bounded parallelism, settle time from the
    measured cycle, and a "pass running since" gauge. The subsequent
    [recovery and integrity check](../verification/phase-4.1-adr34.md)

@@ -491,6 +491,11 @@ process exports). Severity `page` = data at risk or service down, `ticket`
 
 Checklist applied before the repository becomes public (RFC-012 §5.11):
 
+*Note (2026-11-22): at publication (2026-11-19) the self-hosted runners
+were removed and CI moved to GitHub-hosted runners on pull requests,
+pushes to `main` and on demand; items 2 and 3 no longer apply
+([public CI](../release/public-ci.md#current-arrangement-2026-11-19)).*
+
 1. Workflows declare `permissions: contents: read`; no secrets beyond
    `GITHUB_TOKEN`; third-party actions pinned to commit SHAs.
 2. Self-hosted runners execute only `push` to `main` by maintainers;

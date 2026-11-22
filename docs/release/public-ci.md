@@ -39,6 +39,10 @@ becomes public and proposes the workflow and settings changes to make
 first. **None of the setting changes below has been applied**; they need
 the maintainer's decision.
 
+*Note (2026-11-22): the paragraph above is the Phase 3.7 state and has
+been superseded: the repository is public since 2026-11-19 and CI runs
+on GitHub-hosted runners ([current arrangement](#current-arrangement-2026-11-19)).*
+
 ## State at the Phase 3.7 review
 
 - One workflow (`.github/workflows/ci.yml`), triggered only by `push` to

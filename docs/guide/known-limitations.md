@@ -28,6 +28,30 @@ The full register is [risks.md](../architecture/risks.md).
 | mTLS for node RPCs, FoundationDB TLS, SigV4, bucket policy subset | Verified |
 | Batched access records for automatic tiering | Experimental: bounded work and fault behavior tested; the commit-count target is met, but the GET throughput target is not ([details below](#access-record-performance)) |
 
+The S3 [compatibility matrix](s3-compatibility.md) is maintained by hand
+from the test suite (RFC-007's acceptance table); it is not generated
+from test results.
+
+## Open risks to plan for in 0.1.0
+
+0.1.0 is experimental and not production-ready. Each item links its
+entry in the [risk register](../architecture/risks.md).
+
+- R-117 (residual): a node that has adopted no cluster incarnation yet
+  accepts shard writes from another cluster's gateway at a reused
+  address. Use one CA or trust domain per cluster; plaintext is for tests
+  only. A pending change (pull request #28) adds the incarnation check
+  to `PutShard`.
+- R-118: tiering resets a generation's whole access record after
+  outcomes that may not have acted on it; tiering accuracy is limited.
+- R-111: small objects cost far more node capacity than their payload
+  (about 24 KiB for a 1 KiB object with three replicas).
+- R-112: concurrent overwrites of one hot key are often answered `503
+  SlowDown` (55 % of PUTs with 64 writers on one key, measured).
+- R-109: access recording costs GET throughput: 7–14 % below
+  `--access-records off`, 12–19 % where tiering acts; with tiering not
+  wanted, `admin tiering disable` (after finalizing schema 4) removes it.
+
 ## Not verified
 
 - A completed 24-hour soak and sustained operation beyond the reported
@@ -35,8 +59,10 @@ The full register is [risks.md](../architecture/risks.md).
   stopped by decision after 14 h 13 min 43 s (12 h 50 min 10 s with
   faults); earlier soaks stopped on FoundationDB I/O timeouts (R-79).
   Long-duration behaviour of backpressure remains unverified.
-- Physical storage devices; real disk failures during capacity
-  exhaustion.
+- Physical storage devices and power loss: no test on either; real disk
+  failures during capacity exhaustion.
+- Network impairment between hosts on their real interfaces (only
+  between namespaces on one host; R-40).
 - Clusters larger than a few nodes per host and a few hosts; WAN.
 - Multi-tenant performance isolation.
 - Production-scale throughput and object counts. The

@@ -154,6 +154,11 @@ it where one does. A is the smaller change; B is a schema step.
 
 ## 6. Measurements before a decision
 
+*Correction (2026-11-22): the three test hosts are dedicated to arca-lake
+and the system FoundationDB is not shared with other users; a
+single-process system cluster runs on each of hosts 1 and 2, host 3 has
+none. The measurements are unchanged.*
+
 On the dedicated test cluster (FoundationDB on one host, storage nodes
 on another, gateways on two hosts), with host monitoring that stops a
 run on resource limits and checks of the shared system FoundationDB:

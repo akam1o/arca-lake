@@ -1,13 +1,34 @@
 # Changelog
 
-arca-lake has no releases yet. This page summarizes the unreleased system
-and recent changes that affect users and operators. Detailed implementation
-history is preserved in the [development archive](docs/archive/README.md).
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
-the project will follow [Semantic Versioning](https://semver.org/) once it
-has releases.
+0.1.0 is the first experimental release (candidate; not yet published).
+This page summarizes what it contains and the changes that affect users
+and operators. Detailed implementation history is preserved in the
+[development archive](docs/archive/README.md). The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
+[Semantic Versioning](https://semver.org/) (0.x: any minor version may
+break compatibility).
 
 ## [Unreleased]
+
+## [0.1.0] - unreleased (candidate)
+
+The date is set at publication. First experimental release, for
+evaluation and development; **not production-ready**.
+
+- Artifacts: a Linux x86_64 (glibc) binary built with
+  `cargo build --release --locked -p arca-lake --features fdb`, and the
+  source. It needs the FoundationDB 7.3 client library (`libfdb_c`) on
+  every host that runs it. No container image, no crates.io package, no
+  macOS, aarch64 or Windows binary
+  ([supported platforms](docs/guide/supported-platforms.md)).
+- Compatibility axes (separate from the software version): wire
+  protocol 4 (accepts 3), metadata schema 4 (reads 3), metadata record
+  version 2, segment format 2 (reads 1–2), storage record version 1. A new
+  store initialises at schema 4 and segment format 2. 0.1.0 has no
+  supported upgrade predecessor: the earlier "releases" named below and
+  in CI are pre-release development commits used by the upgrade tests
+  ([versions and compatibility](docs/guide/operations.md#versions-and-compatibility)).
+- Contents: the Added, Changed, Fixed and Limitations entries below.
 
 ### Added
 
@@ -37,11 +58,12 @@ has releases.
   The transaction checks generation liveness, unknown commit outcomes are
   not retried, and observable losses are counted. The default mode is
   `--access-records on` (the batched path) with a batch of 128 generations;
-  `legacy` retains the earlier path. Recording only where a tiering policy applies
-  (ADR-0034 decision 6) remains unimplemented. In the reported VM A/B,
+  `legacy` retains the earlier path. In the reported VM A/B,
   the FoundationDB commits-per-GET target was met, while GET throughput
   remained 7–14 % below `off` and missed its target. See the
   [ADR-0034 verification report](docs/verification/phase-4.1-adr34.md).
+  Recording only where tiering acts (ADR-0034 decision 6) is implemented
+  as `admin tiering enable | disable` (ADR-0035, below).
 - Metadata schema 4 (ADR-0035): no record layout changes; it gates
   disabling tiering. This build reads schemas 3 and 4, so a store of
   schema 2 is upgraded through a release of schema 3 first, and a

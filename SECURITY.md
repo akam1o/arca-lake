@@ -20,13 +20,20 @@ disclosure timeline, and credit you if you wish.
 
 ## Supported versions
 
-arca-lake has no releases yet. Once released, this section will list the
-versions that receive security fixes.
+0.1.0 is the first experimental release (candidate; not yet published).
+
+| Version | Status |
+| --- | --- |
+| 0.1.x | Experimental: security fixes on a best-effort basis, no guaranteed timeline |
+| `main` | Development; fixes land here first |
+
+No version is production-ready.
 
 ## Scope
 
-In scope: arca-lake source code, container images and deployment examples
-published by this repository, and CI configuration.
+In scope: arca-lake source code, release binaries and deployment examples
+published by this repository (no container image is published), and CI
+configuration.
 
 Out of scope: third-party dependencies (report upstream; we will track and
 update), and issues in deployments that do not follow the documented

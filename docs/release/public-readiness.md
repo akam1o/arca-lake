@@ -7,7 +7,8 @@ repository-publication work; it does not declare a release.
 
 Status: **the repository was made public on 2026-11-19** as an
 experimental project ([publication record](#publication-record-2026-11-19)).
-No tag or release exists.
+0.1.0 is the first experimental release (candidate; not yet published);
+no tag exists yet.
 
 ## Publication record (2026-11-19)
 
@@ -54,7 +55,7 @@ The checklist the publication followed; each item's disposition is in the
 | Item | Required follow-up | Evidence or policy |
 | --- | --- | --- |
 | Candidate tree and history | Recheck the candidate tree, commit messages, identities, and all refs intended to be published for credentials and non-public information. Review benchmark data with the sanitizer and the private identifier list where available. | [Public repository policy](../CONTRIBUTING-POLICY.md), [public artifact policy](../security/public-artifacts.md) |
-| Public CI and runners | Verify the current runner inventory, runner access, fork workflow approval rules, and token permissions; apply the chosen public CI arrangement before exposing runners to public contributions. The checked-in workflow still targets self-hosted runners on pushes to `main`; that alone does not establish the safety of repository settings. | [Workflow](../../.github/workflows/ci.yml), [CI review and proposal](public-ci.md) |
+| Public CI and runners | Verify the current runner inventory, runner access, fork workflow approval rules, and token permissions; apply the chosen public CI arrangement before exposing runners to public contributions. At the time of this checklist the checked-in workflow targeted self-hosted runners on pushes to `main`; since publication it runs on GitHub-hosted runners only ([current arrangement](public-ci.md#current-arrangement-2026-11-19)). | [Workflow](../../.github/workflows/ci.yml), [CI review and proposal](public-ci.md) |
 | Existing workflow logs and artifacts | Inventory what still exists, review what would become visible, and decide whether to retain or remove it. The historical audit identified runner identifiers in logs and a scan artifact; their current presence and disposition have not been rechecked here. | [Historical audit, findings 5 and 9](public-repository-audit.md#findings) |
 | Replaced historical commit | Resolve the recorded possibility that a replaced commit remains retrievable by hash: obtain confirmation of removal where needed, or explicitly accept the residual exposure. Removing a file from the current tree does not resolve this item. | [Public artifact incident record](../security/public-artifacts.md#record), [historical audit, finding 4](public-repository-audit.md#findings) |
 | Reader and contributor entry points | Review the README, quick start, compatibility matrix, limitations, contributing instructions, license, and security reporting route at the candidate commit. Confirm that the private reporting route described in `SECURITY.md` is available. | [Documentation index](../README.md), [CONTRIBUTING](../../CONTRIBUTING.md), [LICENSE](../../LICENSE), [SECURITY](../../SECURITY.md) |
