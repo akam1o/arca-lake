@@ -121,6 +121,19 @@ evaluation and development; **not production-ready**.
 
 ### Fixed
 
+- A replacement member (`replace-member`, automatic repair, drain, the
+  planner) is never placed in a failure domain the group already uses
+  (R-119; found in the 0.1.0 three-host validation, where a 2+1 group on
+  three hosts had two members put on one host). Groups changed by an
+  earlier replacement are not reported: compare each group's members with
+  the nodes' labels in `admin status`. Replacements use the controller's
+  `--failure-domain`: keep it the label the groups were created with.
+- A storage node that has adopted a cluster incarnation refuses shard
+  writes carrying another one (R-117): a gateway or controller of another
+  cluster reaching it at a reused address is refused instead of having
+  its write stored and counted. A node holding another incarnation at
+  the cluster's sequence (R-97) now refuses the cluster's shard writes
+  too, until the next `recovery begin`.
 - PUT, UploadPart, CompleteMultipartUpload and DELETE no longer report a
   later attempt's error as a definite refusal when an earlier commit may
   still apply. The outcome is fenced or reported as unknown; resolved
