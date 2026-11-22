@@ -14,6 +14,10 @@ tiering confirmed disabled, GETs perform as with `off`.
   and gateway 0 on the second; gateway 1 alone on the third. Two of the
   hosts also run a shared system FoundationDB, which was only checked
   (`status minimal`) before every run and by the watchdog.
+  *Correction (2026-11-22): the three test hosts are dedicated to
+  arca-lake; the system FoundationDB is not shared with other users. A
+  single-process system cluster runs on each of hosts 1 and 2, host 3
+  has none. The measurements are unchanged.*
 - The dedicated cluster started from its existing files (no
   initialisation; the same incarnation; the delete fence as recorded).
   Before the runs, every body of the 10⁵-object data set was read through

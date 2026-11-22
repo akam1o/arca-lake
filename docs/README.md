@@ -2,8 +2,10 @@
 
 Start with the guides for current behavior and requirements. Detailed
 design rationale, verification evidence, and historical development plans
-are linked separately below. arca-lake is experimental and unreleased;
-read the [known limitations](guide/known-limitations.md) before evaluating it.
+are linked separately below. arca-lake is experimental and not
+production-ready; 0.1.0 is the first experimental release (candidate; not
+yet published). Read the [known limitations](guide/known-limitations.md)
+before evaluating it.
 
 ## Try and operate arca-lake
 

@@ -10,6 +10,12 @@ by the maintainer's delegation, recorded in each run's approval file
 of this plan would verify the small-allotment step only (§3); it would
 not by itself close R-110.
 
+*Note (2026-11-22): this version was run twice on 2026-11-21 (one run
+interrupted by the operator at stage 3 for a tooling finding, one ended
+in stage 4), both Inconclusive; see the
+[results](phase-4.1-r110-retest-results.md) §5. Version 2 (C1 split into
+C1a and C1b) is being prepared.*
+
 Background: the reclaim-at-capacity run of
 [ADR-0033's report](phase-4.1-adr33.md) §4c is incomplete (the load host
 stopped answering 24 minutes into the pressure phase; cause Unknown,

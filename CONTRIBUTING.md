@@ -1,6 +1,7 @@
 # Contributing to arca-lake
 
-arca-lake is an experimental, unreleased implementation. Useful contributions
+arca-lake is an experimental implementation; 0.1.0 is the first
+experimental release (candidate; not yet published). Useful contributions
 include reproducible bug reports, S3 compatibility fixes, tests of failure
 and recovery behavior, documentation, and design review. Start with the
 [architecture overview](docs/architecture/overview.md),
@@ -69,9 +70,11 @@ AWS CLI v2 and boto3 are needed for the client conformance tests that use
 them; tests that skip absent clients are not evidence that those clients pass.
 
 The [CI workflow](.github/workflows/ci.yml) defines the full feature, backend,
-compatibility, and security checks. It currently runs only on pushes to
-`main`; opening a pull request does not trigger it. Record your local checks
-and any unavailable prerequisites in the pull request.
+compatibility, and security checks. It runs on GitHub-hosted runners on
+pull requests to `main`, pushes to `main` and on demand; the two upgrade
+jobs run on pushes and on demand only. First-time contributors' runs wait
+for a maintainer's approval. Record your local checks and any unavailable
+prerequisites in the pull request.
 
 Dependency changes also require `cargo deny check` (install `cargo-deny`
 separately). For documentation-only changes, check relative links, examples

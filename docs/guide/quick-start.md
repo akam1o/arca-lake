@@ -3,6 +3,31 @@
 arca-lake is **experimental** (see [Known limitations](known-limitations.md)).
 These steps create disposable environments for evaluation and development.
 For deployment requirements, read [Operational requirements](operations.md).
+Every example here uses plaintext on loopback: for local evaluation only.
+
+## From the 0.1.0 binary archive
+
+0.1.0 is the first experimental release (candidate; not yet published).
+Its archive holds a Linux x86_64 (glibc) binary built with the `fdb`
+feature ([Supported platforms](supported-platforms.md)). The binary links
+the FoundationDB 7.3 client library dynamically, so install it first,
+even for the in-memory example:
+
+```sh
+curl -LO https://github.com/apple/foundationdb/releases/download/7.3.77/foundationdb-clients_7.3.77-1_amd64.deb
+sudo dpkg -i foundationdb-clients_7.3.77-1_amd64.deb
+sha256sum -c arca-lake-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf arca-lake-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+cd arca-lake-0.1.0-x86_64-unknown-linux-gnu
+./arca-lake --version
+```
+
+The directory also holds `LICENSE`, `NOTICE`, `THIRD-PARTY-LICENSES.txt`
+and `BUILD-INFO.txt` (source commit, toolchain, features, checksums).
+Use that binary wherever the steps below name
+`./target/release/arca-lake`; step 3's helper scripts come from a clone
+of the repository at the release's tag. Otherwise build from source
+(step 1).
 
 ## 1. Build the CLI
 
@@ -67,6 +92,10 @@ Additional requirements:
 - libclang for the FoundationDB Rust bindings (for example, `libclang-dev`
   on Debian or Ubuntu).
 - Space for three 2 GiB node allotments, FoundationDB data and build artifacts.
+- Memory for three `fdbserver` processes: each defaults to an 8 GiB
+  memory limit. On a small host, lower it before `start`, for example
+  `export FDB_EXTRA_ARGS="--memory 3GiB --cache-memory 1GiB"` (the limit
+  must be above the cache memory).
 - Free loopback ports 4700–4702, 9000, 9510, 9550 and 9600–9602.
 
 Build with the FoundationDB backend:

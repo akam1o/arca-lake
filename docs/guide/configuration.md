@@ -86,3 +86,9 @@ Administrative subcommands include `status`, `check-config`, `register-node`,
 subcommand's `--help` for exact arguments. Procedures are in
 [RFC-013](../rfcs/RFC-013-operations-guide.md); metadata restore also requires
 the conditions in [Backup and restore](backup-restore.md).
+
+## Versions
+
+`arca-lake --version` prints the software version. Protocol, schema and
+format versions, the upgrade order and the one-way finalize are in
+[Versions and compatibility](operations.md#versions-and-compatibility).

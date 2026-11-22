@@ -36,3 +36,27 @@ design, not a tuning hint; violating one voids a guarantee.
 | Leave `--reconcile-pairs-per-pass` at 0 (every pair per pass) unless reconciliation passes are too long; a budget makes a sweep take several passes, and rebalancing's settle time (`--rebalance-settle-secs` defaults from the reconcile interval) must then cover a whole sweep | Moved sources are freed by reconciliation; a plan made before they are freed would move data back | Phase 3.14 review |
 | Alert on `arca_node_reclaim_damaged` = 1 and on `arca_node_reclaim_retained_bytes` against the free space; `arca_controller_reconcile_errors_total` and `_tiering_errors_total` rising mean records passed over (see the controller log) | A damaged retirement state reclaims nothing; passed-over items are retried at the next sweep | ADR-0030, Phase 3.14 |
 | Nodes taken out with `admin node decommission` then `admin node unregister` (or `keep-removed` after a manual restore) | Removal closes the node's fence with a hold on its own disk; a node simply left offline can be named again by restored metadata | ADR-0027, RFC-013 §5.10 |
+
+## Versions and compatibility
+
+The software version (0.1.0) is separate from the compatibility axes
+that decide which builds can run together and which data they read:
+
+| Axis | 0.1.0 writes | 0.1.0 accepts or reads | Source |
+| --- | --- | --- | --- |
+| Wire protocol (node RPCs) | 4 | 3–4 | `crates/protocol/src/lib.rs` |
+| Metadata schema | 4 | 3–4 | `crates/metadata/src/keys.rs` |
+| Metadata record version byte | 2 | 1–2 | `crates/metadata/src/records.rs` |
+| Segment format | 2 | 1–2 | `crates/storage/src/format.rs` |
+| Storage record version | 1 | 1 | `crates/storage/src/format.rs` |
+
+- A new 0.1.0 store initialises at schema 4 and segment format 2.
+- 0.1.0 has no supported upgrade predecessor. The schema 2 and 3 rows
+  above and the earlier "releases" in the changelog and CI are
+  pre-release development commits used by the upgrade tests.
+- Upgrades go one step at a time, in order, within one compatibility
+  window (adjacent versions only): storage nodes first, then controllers
+  (followers, leader last), then gateways (RFC-014 §5.8).
+- `admin upgrade finalize` is one-way: after it, earlier builds refuse
+  to start and no downgrade is possible; restore of a pre-finalize
+  backup is the only way back (RFC-014, RFC-015).
