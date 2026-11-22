@@ -281,6 +281,48 @@ class Evidence:
             return False
 
 
+FINAL_STOP_ROUNDS = 2  # retries of the unconfirmed final stops
+
+
+def stop_confirmed(v):
+    """A stop verdict (``proc.stop_identified`` through remote.STOP, or the
+    watchdog's) that confirms the process is not running: stopped, gone, or
+    not started (STOP answers it only when started.list exists and does not
+    name it)."""
+    return isinstance(v, dict) and v.get("verdict") in ("stopped", "gone", "not-started")
+
+
+def services_problems(svc, setup_started):
+    """name -> problem of a ``stop_services`` result: a failed listing, a
+    missing started.list after setup, a service started and not
+    accounted for, any verdict that is not a confirmed stop. An empty
+    listing is confirmed only when nothing was ever set up."""
+    if not isinstance(svc, dict) or "error" in svc:
+        return {"stop_services": (svc or {}).get("error", "no result") if isinstance(svc, dict) else "no result"}
+    listing = svc.get("listing") or {}
+    if "error" in listing:
+        return {"listing": listing["error"]}
+    out = {}
+    if not listing.get("exists"):
+        if setup_started:
+            out["listing"] = "the services directory is missing after setup"
+        return out
+    started = listing.get("started")
+    if started is None:
+        out["listing"] = "started.list is missing"
+        return out
+    if setup_started and not started:
+        out["listing"] = "started.list is empty after setup"
+    verdicts = svc.get("verdicts") or {}
+    for name in started:
+        if not name.startswith(("guard", "sampler", "sentinel")) and name + ".json" not in verdicts:
+            out[name + ".json"] = "started, no stop verdict"
+    for n, v in verdicts.items():
+        if not stop_confirmed(v):
+            out[n] = v
+    return out
+
+
 # Plan §7: D1's chain (GC grace 600 s, a GC interval, the retention 600 s,
 # a reclaim interval: about 25 min) before the GC and reclaim gauges can
 # mean "done"; before it, 0 pending records is only "not retired yet".
@@ -309,6 +351,7 @@ class Run:
         # The run's time: the approved limit (never above the plan's 7.5 h),
         # counted once from the run's start, never reset by a stage.
         self.run_max = min(RUN_MAX_S, cfg["limits"].get("run_seconds", RUN_MAX_S))
+        self._prot_n, self._prot_seen = 0, None
 
     def remaining(self):
         return max(0.0, self.run_max - (self.clock.monotonic() - self.start))
@@ -356,13 +399,22 @@ class Run:
 
     def protection(self, samples):
         """A protection counter above 0 in any sample (plan §6.2): the run
-        stops at once (an integrity stop: Failed)."""
-        for x in samples[-200:]:
+        stops at once (an integrity stop: Failed). Each new sample is looked
+        at once (the samples only grow); a violation once seen is kept,
+        whatever later samples show. The final judgement checks every
+        sample again."""
+        if len(samples) < self._prot_n:
+            self._prot_n = 0  # a list that shrank: look at it all again
+        for x in samples[self._prot_n:]:
+            if self._prot_seen:
+                break
             for k, t in (("arca_controller_gc_skipped_referenced_total", "controller"),
                          ("arca_node_reclaim_damaged", None)):
                 if (t is None or x.get("target") == t) and x.get("values", {}).get(k, {}).get("value", 0) > 0:
-                    return {"target": x.get("target"), "counter": k}
-        return None
+                    self._prot_seen = {"target": x.get("target"), "counter": k}
+                    break
+        self._prot_n = len(samples)
+        return self._prot_seen
 
     def wait(self, stage, deadline, cond):
         """Poll ``cond(samples)`` until true, a stop, or the deadline."""
@@ -652,6 +704,71 @@ class Run:
             self.clock.sleep(self.poll_s)
         d["end_ms"] = self.host_ms()
 
+    def _call(self, name, *args, **kw):
+        """A final stop of the cluster: its result, or {"error": ...}."""
+        try:
+            return getattr(self.c, name)(*args, **kw)
+        except KeyboardInterrupt:
+            return {"error": "interrupted (SIGINT)"}
+        except Exception as e:  # noqa: BLE001 - evidence first
+            return {"error": f"{type(e).__name__}: {e}"[:300]}
+
+    def final_stops(self):
+        """The load, then the services, each stop confirmed from its verdict;
+        the watching (the sentinel, then the watchdog) ends only when every
+        process of the run is confirmed stopped. Unconfirmed stops are
+        retried ``FINAL_STOP_ROUNDS`` times; if any is left, the sentinel and
+        the watchdog are kept running, the run cannot pass, and the timeline
+        says what needs an operator (``intervention``). Nothing is signalled
+        on a guess: every stop goes through a recorded identity."""
+        fs = self.tl.setdefault("final_stops", {})
+        problems = {}
+        load = fs["stop_load"] = self._call("stop_load")
+        if "error" in load:
+            problems["stop_load"] = load["error"]
+        else:
+            for n, v in load.items():
+                if n == "guard_result":
+                    if v and v.get("group_empty") is False:
+                        problems["guard_result"] = f"the guard did not confirm its load's group empty: {v}"
+                elif not stop_confirmed(v):
+                    problems[n] = v
+        setup = bool(getattr(self.c, "setup_started", True))
+        left = None  # names to stop again; None: all
+        merged = None  # the latest verdict of each service over the rounds
+        for attempt in range(1 + FINAL_STOP_ROUNDS):
+            svc = self._call("stop_services", left) if left is not None else self._call("stop_services")
+            fs.setdefault("stop_services_rounds", []).append(svc)
+            if merged is None or not isinstance(svc, dict) or "error" in svc or "error" in (svc.get("listing") or {}):
+                merged = svc
+            else:
+                # A retry restates only what it stopped again; the listing is
+                # the latest one.
+                merged = dict(svc, verdicts=dict(merged.get("verdicts") or {}, **(svc.get("verdicts") or {})))
+            fs["stop_services"] = merged
+            bad = services_problems(merged, setup)
+            if not bad:
+                break
+            left = {n for n in bad if n.endswith(".json")} or None
+            if left is None:
+                break  # a listing failure: retrying the same read decides nothing
+            self.clock.sleep(5)
+        problems.update(bad)
+        if problems:
+            fs["intervention"] = {
+                "unconfirmed": problems,
+                "watching": "kept: the sentinel and the watchdog were not stopped",
+                "action": "stop the processes named above by their records, confirm, then stop the sentinel "
+                          "(services/sentinel.json) and the watchdog; teardown refuses to remove anything until then",
+            }
+            self.ev.failures.append(f"final stops not confirmed: {sorted(problems)}")
+            return False
+        for name in ("stop_sentinel", "stop_watchdog"):
+            v = fs[name] = self._call(name)
+            if not stop_confirmed(v):
+                self.ev.failures.append(f"{name}: not confirmed: {v}")
+        return True
+
     def finish(self):
         if self.stop is None:
             try:
@@ -669,25 +786,7 @@ class Run:
                 self.ev.failures.append("drain: interrupted (SIGINT): the stops and the evidence follow")
             except Exception as e:  # noqa: BLE001
                 self.ev.failures.append(f"drain: {e}")
-        # The load, then the services (confirmed), then the host-side
-        # sentinel and the watchdog: the services never outlive the watching.
-        for name in ("stop_load", "stop_services", "stop_sentinel", "stop_watchdog"):
-            f = getattr(self.c, name, None)
-            if f is None:
-                continue
-            try:
-                out = f()
-                if out is not None:
-                    self.tl.setdefault("final_stops", {})[name] = out
-                gr = out.get("guard_result") if name == "stop_load" and isinstance(out, dict) else None
-                if gr and gr.get("group_empty") is False:
-                    # The guard could not confirm its load stopped: evidence of
-                    # a process possibly left, never a clean end.
-                    self.ev.failures.append(f"stop_load: the guard did not confirm its load's group empty: {gr}")
-            except KeyboardInterrupt:
-                self.ev.failures.append(f"{name}: interrupted (SIGINT)")
-            except Exception as e:  # noqa: BLE001 - evidence first
-                self.ev.failures.append(f"{name}: {e}")
+        self.final_stops()
         parts = {}
         for name, f in (("samples", self.c.samples), ("ledger", self.c.ledger_records),
                         ("logs", self.c.collect_logs)):

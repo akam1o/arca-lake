@@ -240,6 +240,11 @@ class FakeCluster:
         self.recover_after = None
         self.polls = 0
         self.services_stopped = False
+        self.stop_calls = []
+        self.started = ["fdb", "node0", "node1", "controller", "gateway0", "load"]
+        self.verdicts = {}
+        self.listing_error = None
+        self.setup_started = True
         self._samples = []
 
     def nodes(self):
@@ -260,9 +265,25 @@ class FakeCluster:
     def escalation(self):
         return self.escalated
 
-    def stop_services(self):
+    def stop_services(self, names=None):
+        """The real result's shape (remote.SshCluster.stop_services)."""
         self.services_stopped = True
-        return {"node0.json": "signalled"}
+        self.stop_calls.append(("stop_services", names))
+        if self.listing_error:
+            return {"listing": {"error": self.listing_error}, "verdicts": {}}
+        names = names or {n + ".json" for n in self.started}
+        verdicts = {n: dict(self.verdicts.get(n, {"verdict": "stopped", "confirmed": True}))
+                    for n in sorted(names) if n[:-5] in self.started}
+        return {"listing": {"exists": True, "started": list(self.started),
+                            "records": [n + ".json" for n in self.started]}, "verdicts": verdicts}
+
+    def stop_sentinel(self):
+        self.stop_calls.append(("stop_sentinel", None))
+        return {"verdict": "stopped", "confirmed": True}
+
+    def stop_watchdog(self):
+        self.stop_calls.append(("stop_watchdog", None))
+        return {"verdict": "stopped", "returncode": 0}
 
     def preflight(self):
         return {"space": {"ok": self.preflight_ok}}
@@ -345,7 +366,9 @@ class FakeCluster:
         return ""
 
     def stop_load(self):
-        pass
+        self.stop_calls.append(("stop_load", None))
+        return {"guard": {"verdict": "stopped"}, "load": {"verdict": "gone"},
+                "guard_result": {"reason": "finish", "group_empty": True, "load_reaped": True}}
 
 
 class EngineBase(Base):
@@ -879,8 +902,117 @@ class ReviewFindingsEngine(EngineBase):
         tl = common.read_json(os.path.join(ev.dir, "timeline.json"))
         self.assertEqual(tl["drain"]["escalation"]["reason"], "disk-free")
         # Stopped by the drain when the rule fired, not only at the end.
-        self.assertEqual(tl["drain"]["services"], {"node0.json": "signalled"})
+        self.assertEqual(tl["drain"]["services"]["verdicts"]["node0.json"]["verdict"], "stopped")
         self.assertLess(tl["drain"]["end_ms"] - tl["drain"]["start_ms"], driver.DRAIN_OBSERVE_S * 1000)
+
+    # -- the final stops (finish) ------------------------------------------------
+
+    def passing(self):
+        return mock.patch.object(judge, "judge", lambda *a, **k: {"outcome": judge.PASSED, "criteria": []})
+
+    def ended(self, c, failed=False):
+        root = tempfile.mkdtemp(dir=self.dir)
+        engine = driver.Run(self.cfg, c, driver.Evidence(root, self.cfg["run_id"]), self.clock)
+        if failed:
+            with mock.patch.object(judge, "judge", lambda *a, **k: {"outcome": judge.FAILED, "criteria": []}):
+                engine.finish()
+        else:
+            with self.passing():
+                engine.finish()
+        return engine
+
+    def test_all_stops_confirmed_keep_a_pass_and_end_the_watching(self):
+        c = FakeCluster(self.cfg, self.clock)
+        e = self.ended(c)
+        self.assertEqual(e.result["outcome"], judge.PASSED)
+        self.assertEqual([n for n, _ in c.stop_calls], ["stop_load", "stop_services", "stop_sentinel", "stop_watchdog"])
+        self.assertNotIn("intervention", e.tl["final_stops"])
+
+    def test_a_service_not_stopped_is_retried_then_keeps_the_watching(self):
+        for verdict in ({"verdict": "not-stopped", "state": "alive"}, {"verdict": "unverified", "reason": "x"}):
+            c = FakeCluster(self.cfg, self.clock)
+            c.verdicts = {"node1.json": verdict}
+            e = self.ended(c)
+            self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE, verdict)
+            calls = [n for n, _ in c.stop_calls]
+            self.assertNotIn("stop_sentinel", calls)
+            self.assertNotIn("stop_watchdog", calls)
+            retries = [a for n, a in c.stop_calls if n == "stop_services"]
+            self.assertGreater(len(retries), 1, "an unconfirmed stop is not retried")
+            self.assertEqual(len(retries), 1 + driver.FINAL_STOP_ROUNDS)
+            self.assertEqual(retries[1:], [{"node1.json"}] * driver.FINAL_STOP_ROUNDS)
+            iv = e.tl["final_stops"]["intervention"]
+            self.assertEqual(list(iv["unconfirmed"]), ["node1.json"])
+            self.assertIn("kept", iv["watching"])
+
+    def test_a_failed_listing_or_a_missing_record_is_never_a_clean_end(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.listing_error = "rc 255: ssh"
+        self.assertEqual(self.ended(c).result["outcome"], judge.INCONCLUSIVE)
+        self.assertNotIn("stop_sentinel", [n for n, _ in c.stop_calls])
+        # A service started but without a verdict (its record gone).
+        c = FakeCluster(self.cfg, self.clock)
+        real = c.stop_services
+
+        def missing(names=None):
+            out = real(names)
+            out["verdicts"].pop("node0.json", None)
+            return out
+
+        c.stop_services = missing
+        e = self.ended(c)
+        self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE)
+        self.assertIn("node0.json", e.tl["final_stops"]["intervention"]["unconfirmed"])
+
+    def test_an_empty_listing_after_setup_is_not_all_stopped(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.started = []
+        self.assertEqual(self.ended(c).result["outcome"], judge.INCONCLUSIVE)
+        # Nothing was ever set up (stage 1 failed): an empty listing is the truth.
+        c = FakeCluster(self.cfg, self.clock)
+        c.started, c.setup_started = [], False
+        real = c.stop_services
+        c.stop_services = lambda names=None: dict(real(names), listing={"exists": False})
+        self.assertEqual(self.ended(c).result["outcome"], judge.PASSED)
+
+    def test_not_started_is_accepted_only_as_a_verdict(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.verdicts = {"load.json": {"verdict": "not-started"}}
+        self.assertEqual(self.ended(c).result["outcome"], judge.PASSED)
+
+    def test_a_load_or_guard_not_confirmed_is_never_a_clean_end(self):
+        for change in ({"load": {"verdict": "unverified"}}, {"guard_result": {"group_empty": False}},
+                       {"guard": "signalled"}):
+            c = FakeCluster(self.cfg, self.clock)
+            real = c.stop_load
+            c.stop_load = lambda change=change: dict(real(), **change)
+            e = self.ended(c)
+            self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE, change)
+            self.assertNotIn("stop_watchdog", [n for n, _ in c.stop_calls], change)
+
+    def test_a_failure_stays_failed_with_unconfirmed_stops(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.verdicts = {"node0.json": {"verdict": "not-stopped"}}
+        self.assertEqual(self.ended(c, failed=True).result["outcome"], judge.FAILED)
+
+    def test_an_unconfirmed_sentinel_or_watchdog_stop_is_recorded(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.stop_sentinel = lambda: {"verdict": "not-stopped"}
+        e = self.ended(c)
+        self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE)
+        self.assertTrue(any("stop_sentinel" in f for f in e.result["evidence_failures"]))
+
+    def test_the_protection_scan_sees_every_new_sample_and_keeps_a_violation(self):
+        c = FakeCluster(self.cfg, self.clock)
+        engine = driver.Run(self.cfg, c, driver.Evidence(os.path.join(self.dir, "e"), self.cfg["run_id"]), self.clock)
+        S = [smp("node0", t, arca_node_reclaim_damaged=0) for t in range(500)]
+        self.assertIsNone(engine.protection(S))
+        S.append(smp("node1", 500, arca_node_reclaim_damaged=1))
+        # 1,000 samples more in the same poll: the violation is not in the last 200.
+        S += [smp("node0", 501 + t, arca_node_reclaim_damaged=0) for t in range(1000)]
+        self.assertEqual(engine.protection(S), {"target": "node1", "counter": "arca_node_reclaim_damaged"})
+        S += [smp("node1", 2000, arca_node_reclaim_damaged=0)]  # the gauge back to 0: still a violation
+        self.assertIsNotNone(engine.protection(S))
 
     def test_no_drain_after_a_resource_stop(self):
         c = FakeCluster(self.cfg, self.clock)

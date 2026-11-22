@@ -16,7 +16,7 @@ import time
 import unittest
 from unittest import mock
 
-from r110 import common, driver, guard, judge, ledger, proc, watchdog
+from r110 import common, driver, guard, judge, ledger, proc, remote, watchdog
 from r110.tests import fakes, local
 from r110.tests.test_driver import EXAMPLE
 
@@ -416,6 +416,111 @@ class Watching(unittest.TestCase):
         res = self.result(t)
         self.assertEqual((res["reason"], res["services_confirmed"]), ("monitor-failed", True))
         node.wait(10)
+
+
+# -- the final stops, for real ------------------------------------------------------
+
+
+def local_runner(target, command, stdin=None, timeout=120):
+    """remote.SshCluster's ssh, run here: the same commands and scripts."""
+    r = subprocess.run(["sh", "-c", command], input=stdin, capture_output=True, text=True, timeout=timeout)
+    return r.returncode, r.stdout, r.stderr
+
+
+class FinalStops(unittest.TestCase):
+    """driver.Run.finish over a real SshCluster whose commands run here:
+    remote.START records real processes, remote.STOP and LISTING answer
+    with their real verdicts, a real sentinel watches. The judgement is
+    forced to Passed to see what the stops do to it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.extra = []
+        self.addCleanup(self.kill_extra)
+        with open(EXAMPLE) as f:
+            cfg = json.load(f)
+        cfg["fdb_memory"] = "3GiB"
+        cfg["local_dir"] = os.path.join(self.tmp.name, "operator")
+        self.cfg = driver.validate(cfg)
+        c = remote.SshCluster(self.cfg, runner=local_runner)
+        c.run_dir = os.path.join(self.tmp.name, "run")
+        c.tools, c.load_dir, c.mount = c.run_dir + "/tools", c.run_dir + "/load", self.tmp.name
+        for d in ("services", "logs", "alarms", "load", "tools"):
+            os.makedirs(os.path.join(c.run_dir, d))
+        open(os.path.join(c.run_dir, "services", "started.list"), "w").close()
+        import shutil
+        shutil.copytree(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), c.tools + "/r110",
+                        ignore=shutil.ignore_patterns("tests", "__pycache__"))
+        common.atomic_write_json(os.path.join(c.run_dir, "heartbeat.json"), {"run_id": self.cfg["run_id"], "seq": 1})
+        c.setup_started = True
+        c.ledger_records = lambda: []
+        c.collect_logs = lambda: ""
+        self.c = c
+
+    def kill_extra(self):
+        for rec in self.extra:
+            try:
+                os.killpg(rec["pgid"], 9)
+            except (ProcessLookupError, PermissionError, KeyError):
+                pass
+
+    def record(self, name):
+        rec = common.read_json(os.path.join(self.c.run_dir, "services", name + ".json"))
+        self.extra.append(rec)
+        return rec
+
+    def start_all(self):
+        for n in ("node0", "node1"):
+            self.c.start(n, SLEEPER)
+            self.record(n)
+        self.c.start_sentinel()
+        sentinel = self.record("sentinel")
+        time.sleep(1.0)
+        self.assertEqual(proc.check(sentinel), "same", "the sentinel did not start")
+        return sentinel
+
+    def finish(self):
+        ev = driver.Evidence(os.path.join(self.tmp.name, "evidence"), self.cfg["run_id"])
+        engine = driver.Run(self.cfg, self.c, ev, poll_s=0.1)
+        with mock.patch.object(judge, "judge", lambda *a, **k: {"outcome": judge.PASSED, "criteria": []}), \
+                mock.patch.object(driver, "FINAL_STOP_ROUNDS", 1):
+            engine.finish()
+        return engine
+
+    def test_every_stop_confirmed_ends_the_watching_and_keeps_the_outcome(self):
+        sentinel = self.start_all()
+        e = self.finish()
+        fs = e.tl["final_stops"]
+        self.assertEqual(e.result["outcome"], judge.PASSED, e.result.get("evidence_failures"))
+        self.assertEqual({v["verdict"] for v in fs["stop_services"]["verdicts"].values()}, {"stopped"})
+        self.assertEqual(fs["stop_sentinel"]["verdict"], "stopped")
+        self.assertEqual(fs["stop_load"]["guard"]["verdict"], "not-started")
+        self.assertEqual(proc.check(sentinel), "gone")
+        for n in ("node0", "node1"):
+            self.assertEqual(proc.group_state(self.record(n)["pgid"]), "empty")
+
+    def test_a_service_that_cannot_be_confirmed_keeps_the_sentinel_and_blocks_a_pass(self):
+        sentinel = self.start_all()
+        # A started service whose record no longer names its process (its
+        # pid's start token differs), the process alive in its group: STOP
+        # can neither identify nor confirm it, and must not guess.
+        p = subprocess.Popen(SLEEPER, start_new_session=True)
+        ident = proc.identity(p.pid)
+        self.extra.append(ident)
+        common.atomic_write_json(os.path.join(self.c.run_dir, "services", "node2.json"), dict(ident, start="x"))
+        with open(os.path.join(self.c.run_dir, "services", "started.list"), "a") as f:
+            f.write("node2\n")
+        e = self.finish()
+        fs = e.tl["final_stops"]
+        self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE)
+        self.assertEqual(fs["stop_services"]["verdicts"]["node2.json"]["verdict"], "unverified")
+        self.assertIn("node2.json", fs["intervention"]["unconfirmed"])
+        self.assertNotIn("stop_sentinel", fs)
+        self.assertEqual(proc.check(sentinel), "same", "the sentinel was stopped with a service unconfirmed")
+        self.assertIsNone(p.poll(), "a process not identified was signalled")
+        p.kill()
+        p.wait()
 
 
 # -- F8: the watchdog's own readings -----------------------------------------------
