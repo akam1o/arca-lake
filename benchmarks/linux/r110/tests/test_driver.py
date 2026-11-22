@@ -324,7 +324,8 @@ class FakeCluster:
             return None
         st = step.get("stage")
         if self.stop_at_stage == st:
-            self.stop = {"reason": self.stop_reason, "source": "guard"}
+            # As the real records (watchdog, guard, write_stop): with their time.
+            self.stop = {"reason": self.stop_reason, "source": "guard", "wall_ms": self.clock.wall_ms()}
             return None
         self.clock.advance(5)
         if step["kind"] == "put-until-refused":
@@ -352,7 +353,7 @@ class FakeCluster:
 
     def write_stop(self, reason):
         if self.stop is None:
-            self.stop = {"reason": reason, "source": "driver"}
+            self.stop = {"reason": reason, "source": "driver", "wall_ms": self.clock.wall_ms()}
 
     def stage4_keys(self):
         return []

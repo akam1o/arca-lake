@@ -374,7 +374,7 @@ class Run:
         rec = self.c.stop_record()
         if rec:
             self.stop = dict(rec, stage=stage)
-            self.ev.event(self.clock.wall_ms(), "stop", **self.stop)
+            self._stop_event()
             return True
         if self.clock.monotonic() - self.start >= self.run_max:
             self._stop(stage, "run-deadline")
@@ -389,7 +389,15 @@ class Run:
             self.ev.failures.append(f"write_stop: {e}")
             rec = {"reason": reason}
         self.stop = dict(rec, stage=stage, **detail)
-        self.ev.event(self.clock.wall_ms(), "stop", **self.stop)
+        self._stop_event()
+
+    def _stop_event(self):
+        """The stop in the events, its record's own time kept apart: a stop
+        record carries ``wall_ms`` (run r110-20261122T162239Z: the
+        watchdog's record made the event call fail, and every stop path
+        with it)."""
+        rec = {k: v for k, v in self.stop.items() if k != "wall_ms"}
+        self.ev.event(self.clock.wall_ms(), "stop", record_wall_ms=self.stop.get("wall_ms"), **rec)
 
     def run_step(self, step, deadline):
         """The cluster's run_step, the protection counters checked while it
