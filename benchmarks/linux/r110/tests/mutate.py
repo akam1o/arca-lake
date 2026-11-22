@@ -165,6 +165,12 @@ muts = [
  ("a load record replaced", "r110/guard.py", "        return common.link_new(os.path.join(d, name + \".json\"), json.dumps(ident))", "        common.atomic_write_json(os.path.join(d, name + \".json\"), ident)\n        return True", "test_guard"),
  ("an unconfirmed sentinel ended", "r110/watchdog.py", "            unconfirmed = res.get(\"group_empty\") is False or res.get(\"services_confirmed\") is False", "            unconfirmed = res.get(\"group_empty\") is False", "test_integration"),
  ("an interrupt in the drain loses the evidence", "r110/driver.py", "            except KeyboardInterrupt:\n                self.ev.failures.append(\"drain: interrupted (SIGINT): the stops and the evidence follow\")\n", "", "test_driver"),
+ # The final stops (0.1.0 preparation).
+ ("finish: unconfirmed services pass", "r110/driver.py", "        if not stop_confirmed(v):\n            out[n] = v\n    return out", "    return out", "test_driver"),
+ ("finish: watching ended with stops unconfirmed", "r110/driver.py", "            self.ev.failures.append(f\"final stops not confirmed: {sorted(problems)}\")\n            return False", "            self.ev.failures.append(f\"final stops not confirmed: {sorted(problems)}\")", "test_integration"),
+ ("finish: an empty listing after setup passes", "r110/driver.py", "    if setup_started and not started:\n        out[\"listing\"] = \"started.list is empty after setup\"", "    pass", "test_driver"),
+ ("finish: no retry", "r110/driver.py", "FINAL_STOP_ROUNDS = 2  # retries", "FINAL_STOP_ROUNDS = 0  # retries", "test_driver"),
+ ("protection: only the last 200 samples", "r110/driver.py", "        for x in samples[self._prot_n:]:", "        for x in samples[-200:]:", "test_driver"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]

@@ -103,6 +103,22 @@ if bad:
 print("checked %d" % len(set(started)))
 '''
 
+# The run's services directory: whether it exists, started.list, the
+# record files (one JSON line); exit 1 if it cannot be read.
+LISTING = r'''
+import json, os, sys
+d = sys.argv[1]
+if not os.path.exists(d):
+    print(json.dumps({"exists": False})); sys.exit(0)
+names = sorted(os.listdir(d))
+try:
+    started = open(os.path.join(d, "started.list")).read().split()
+except FileNotFoundError:
+    started = None
+print(json.dumps({"exists": True, "started": started,
+                  "records": [n for n in names if n.endswith(".json")]}))
+'''
+
 # Stop one recorded service and its group (proc.stop_identified): one JSON
 # line with its verdict (stopped, gone, not-stopped, unverified).
 STOP = r'''
@@ -307,6 +323,9 @@ class SshCluster:
 
     def setup(self):
         rid = self.cfg["run_id"]
+        # From here on the run has processes on the host: every final stop
+        # must account for the services it started (started.list).
+        self.setup_started = True
         self.ssh(f"[ ! -e {Q(self.run_dir)} ] && [ ! -e {Q(self.fdb_data)} ] || "
                  f"{{ echo 'run directories exist' >&2; exit 1; }}; "
                  f"mkdir -p {Q(self.run_dir)}/logs {Q(self.run_dir)}/services {Q(self.run_dir)}/alarms "
@@ -593,10 +612,21 @@ class SshCluster:
         return self.cfg["run_id"]
 
     def stop_watchdog(self):
+        """The watchdog (this process's own child): its verdict."""
         w = getattr(self, "watchdog", None)
-        if w and w.poll() is None:
+        if w is None:
+            return {"verdict": "not-started"}
+        if w.poll() is None:
             w.terminate()
-            w.wait(30)
+            try:
+                w.wait(30)
+            except subprocess.TimeoutExpired:
+                w.kill()  # our own child, by its handle: never a guess
+                try:
+                    w.wait(30)
+                except subprocess.TimeoutExpired:
+                    return {"verdict": "not-stopped", "pid": w.pid}
+        return {"verdict": "stopped", "returncode": w.returncode}
 
     def stop_record(self):
         local = os.path.join(self.cfg["local_dir"], "stop.json")
@@ -716,15 +746,40 @@ class SshCluster:
         except (ValueError, IndexError):
             return {"verdict": "unverified", "reason": f"no verdict: {out[-200:]}"}
 
-    def stop_services(self):
+    def services_listing(self):
+        """``{"exists", "started", "records"}`` of the run's services
+        directory (``started``: started.list, every process the run started,
+        listed before it started), or ``{"error": ...}`` when it cannot be
+        read: never an empty listing on a failure."""
+        rc, out, err = self.runner(self.cfg["hosts"][self.host], "python3 -I - " + Q(f"{self.run_dir}/services"),
+                                   LISTING, 120)
+        try:
+            if rc != 0:
+                raise ValueError(f"rc {rc}: {err.strip()[-200:]}")
+            res = json.loads(out.strip().splitlines()[-1])
+            if not isinstance(res, dict) or not isinstance(res.get("exists"), bool):
+                raise ValueError(f"not a listing: {out[-200:]}")
+            return res
+        except (ValueError, IndexError) as e:
+            return {"error": str(e)[:300]}
+
+    def stop_services(self, names=None):
         """The test's gateway, controller, nodes and FoundationDB by
         identity, each with its process group (never the guards, the
-        sentinel or the sampler): name -> verdict."""
-        names = self.ssh(f"ls {Q(self.run_dir)}/services", check=False).split()
-        out = {}
-        for n in sorted(names, key=lambda n: n.startswith("fdb")):
-            if n.endswith(".json") and not n.startswith(("guard", "sampler", "sentinel")):
-                out[n] = self._stop(n, 30)
+        sentinel or the sampler): ``{"verdicts": name -> verdict,
+        "listing": ...}``. Every service started.list names gets a verdict
+        (a missing record is unverified); ``names`` restricts the stop to
+        those (a retry)."""
+        listing = self.services_listing()
+        out = {"listing": listing, "verdicts": {}}
+        if "error" in listing:
+            return out
+        records = set(listing.get("records", []))
+        wanted = {n + ".json" for n in listing.get("started", [])} | records
+        for n in sorted(wanted, key=lambda n: (n.startswith("fdb"), n)):
+            if n.startswith(("guard", "sampler", "sentinel")) or (names is not None and n not in names):
+                continue
+            out["verdicts"][n] = self._stop(n, 30)
         return out
 
     # -- teardown --------------------------------------------------------------
