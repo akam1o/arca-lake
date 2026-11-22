@@ -600,6 +600,18 @@ impl StorageNodeService {
         }
     }
 
+    /// Refuse a write whose incarnation differs from the one this node
+    /// adopted (R-117): the writer belongs to another cluster (it reached
+    /// this node at an address it still maps to one of its own). Unlike a
+    /// delete, an empty incarnation is accepted: a writer may hold none
+    /// (tools, a store before its cluster state).
+    fn check_write_incarnation(&self, incarnation: &[u8]) -> Result<(), tonic::Status> {
+        if incarnation.is_empty() {
+            return Ok(());
+        }
+        self.check_incarnation(incarnation)
+    }
+
     fn check_epoch(&self, group: u64, epoch: u64) -> Result<(), tonic::Status> {
         let known = self
             .epochs
@@ -705,6 +717,7 @@ impl StorageNode for StorageNodeService {
             }
         };
         Self::check_version(header.protocol_version)?;
+        self.check_write_incarnation(&header.incarnation)?;
         let key = Self::key(header.key)?;
         self.check_epoch(key.group_id, header.group_epoch)?;
         let expected = usize::try_from(header.payload_len)

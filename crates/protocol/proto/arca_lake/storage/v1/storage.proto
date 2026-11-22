@@ -27,6 +27,11 @@ message PutShardHeader {
   // reserve that client writes may not use and repair may. Older callers
   // send CLIENT.
   WriteClass write_class = 5;
+  // Cluster incarnation of the writer (R-117): a node that has adopted an
+  // incarnation refuses a write carrying a different one, so a shard sent
+  // to a node of another cluster (an address reused) is never counted
+  // written. Empty is accepted (a writer that holds none, or predates it).
+  bytes incarnation = 6;
 }
 
 enum WriteClass {
