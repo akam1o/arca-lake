@@ -131,7 +131,9 @@ evaluation and development; **not production-ready**.
 - A storage node that has adopted a cluster incarnation refuses shard
   writes carrying another one (R-117): a gateway or controller of another
   cluster reaching it at a reused address is refused instead of having
-  its write stored and counted. A node holding another incarnation at
+  its write stored and counted. A write carrying no incarnation is still
+  accepted (unlike a delete), as is any write to a node that has adopted
+  none. A node holding another incarnation at
   the cluster's sequence (R-97) now refuses the cluster's shard writes
   too, until the next `recovery begin`.
 - PUT, UploadPart, CompleteMultipartUpload and DELETE no longer report a

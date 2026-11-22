@@ -11,7 +11,10 @@ Every example here uses plaintext on loopback: for local evaluation only.
 Its archive holds a Linux x86_64 (glibc) binary built with the `fdb`
 feature ([Supported platforms](supported-platforms.md)). The binary links
 the FoundationDB 7.3 client library dynamically, so install it first,
-even for the in-memory example:
+even for the in-memory example. Download
+`arca-lake-0.1.0-x86_64-unknown-linux-gnu.tar.gz` and its `.sha256` from
+the [0.1.0 release](https://github.com/akam1o/arca-lake/releases/tag/v0.1.0)
+into one directory, then:
 
 ```sh
 curl -LO https://github.com/apple/foundationdb/releases/download/7.3.77/foundationdb-clients_7.3.77-1_amd64.deb
@@ -25,9 +28,12 @@ cd arca-lake-0.1.0-x86_64-unknown-linux-gnu
 The directory also holds `LICENSE`, `NOTICE`, `THIRD-PARTY-LICENSES.txt`
 and `BUILD-INFO.txt` (source commit, toolchain, features, checksums).
 Use that binary wherever the steps below name
-`./target/release/arca-lake`; step 3's helper scripts come from a clone
-of the repository at the release's tag. Otherwise build from source
-(step 1).
+`./target/release/arca-lake`, and skip their build commands. Step 3 also
+needs the repository's helper scripts: clone it and check out the tag
+(`git checkout v0.1.0`), run the steps from the clone, and set
+`ARCA_DEV_BIN` to the extracted binary, for example
+`ARCA_DEV_BIN="$HOME/arca-lake-0.1.0-x86_64-unknown-linux-gnu/arca-lake"`.
+Otherwise build from source (step 1).
 
 ## 1. Build the CLI
 

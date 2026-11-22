@@ -65,15 +65,70 @@ def allowed_terms():
         return set(tomllib.load(f)["licenses"]["allow"])
 
 
+def _tokens(expr):
+    out = expr.replace("(", " ( ").replace(")", " ) ").replace("/", " OR ").split()
+    # Join "A WITH B" into one term (an exception is part of its licence).
+    joined = []
+    k = 0
+    while k < len(out):
+        if k + 2 < len(out) and out[k + 1] == "WITH":
+            joined.append(f"{out[k]} WITH {out[k + 2]}")
+            k += 3
+        else:
+            joined.append(out[k])
+            k += 1
+    return joined
+
+
 def terms_ok(expr, allow):
-    # Each alternative of an OR must be checked only if no other is allowed;
-    # an AND needs every part. Good enough for the expressions crates use.
-    expr = expr.replace("/", " OR ").replace("(", " ").replace(")", " ")
-    for alt in expr.split(" OR "):
-        parts = [p.strip() for p in alt.split(" AND ")]
-        if all(p in allow for p in parts if p):
-            return True
-    return False
+    """Whether the SPDX expression can be satisfied by licences in
+    ``allow`` (AND binds tighter than OR; "/" is the legacy OR). A malformed
+    expression is not satisfied."""
+    toks = _tokens(expr)
+    pos = 0
+
+    def primary():
+        nonlocal pos
+        if pos >= len(toks):
+            raise ValueError(expr)
+        t = toks[pos]
+        pos += 1
+        if t == "(":
+            v = disj()
+            if pos >= len(toks) or toks[pos] != ")":
+                raise ValueError(expr)
+            pos += 1
+            return v
+        if t in ("AND", "OR", ")"):
+            raise ValueError(expr)
+        return t in allow
+
+    def conj():
+        nonlocal pos
+        v = primary()
+        while pos < len(toks) and toks[pos] == "AND":
+            pos += 1
+            v = primary() and v
+        return v
+
+    def disj():
+        nonlocal pos
+        v = conj()
+        while pos < len(toks) and toks[pos] == "OR":
+            pos += 1
+            v = conj() or v
+        return v
+
+    try:
+        v = disj()
+        return v and pos == len(toks)
+    except ValueError:
+        return False
+
+
+# The standard texts this script can append for a crate that ships no
+# licence file.
+BUNDLED_TEXTS = {"Apache-2.0", "MIT"}
 
 
 def main():
@@ -108,12 +163,16 @@ def main():
                 texts.append((f, fh.read().rstrip() + "\n"))
         if not texts:
             missing.append(f"{key[0]} {key[1]} ({expr})")
+            if not terms_ok(expr, BUNDLED_TEXTS):
+                bad.append(f"{key[0]} {key[1]}: no licence file and no bundled standard text for {expr}")
         entries.append((key, expr, p.get("repository") or "", p.get("authors") or [], texts))
     with open(a.out, "w", encoding="utf-8") as o:
         o.write("Third-party software in the arca-lake binary\n")
         o.write("=" * 44 + "\n\n")
         o.write(f"Target {a.target}, features {a.features}; {len(entries)} crates linked "
                 "(cargo tree, normal dependencies).\n")
+        o.write("The Rust standard library (MIT OR Apache-2.0, https://github.com/rust-lang/rust) is "
+                "linked statically; its terms are those standard texts, appended below.\n")
         o.write("The FoundationDB client library (libfdb_c, Apache-2.0) is linked dynamically and is "
                 "not included: install it from FoundationDB's packages.\n\n")
         if missing:
@@ -131,13 +190,14 @@ def main():
                 o.write(f"Copyright: {', '.join(authors) or 'the authors of ' + name}\n"
                         "No licence file in the package: the standard texts below apply.\n")
             o.write("\n")
-        if missing:
-            o.write("=" * 72 + "\nStandard texts for the crates above that ship no licence file\n\n")
+        if entries:
+            o.write("=" * 72 + "\nStandard texts (the Rust standard library, and the crates above that ship no "
+                    "licence file)\n\n")
             o.write("--- Apache License 2.0 ---\n")
             with open(os.path.join(ROOT, "LICENSE"), encoding="utf-8") as fh:
                 o.write(fh.read().rstrip() + "\n\n")
             o.write("--- MIT License ---\n" + MIT)
-    print(f"{len(entries)} crates, {len(missing)} without a licence file, {len(bad)} not allowed", file=sys.stderr)
+    print(f"{len(entries)} crates, {len(missing)} without a licence file, {len(bad)} refused", file=sys.stderr)
     for b in bad:
         print(f"not allowed: {b}", file=sys.stderr)
     return 1 if bad else 0
