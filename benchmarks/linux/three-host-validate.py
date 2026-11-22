@@ -820,7 +820,9 @@ def step7a():
             last_put[r["key"]] = r
     safe = {k for k, r in last_put.items() if r["phase"] in ("s2", "s4") and r["outcome"] == "ack"}
     live = [(k, z) for k, z in live_keys() if k in safe]
-    cands = [(k, z) for k, z in live if z > 65536][:12] + [(k, z) for k, z in live if z <= 65536][:12]
+    # Every safe key is a candidate (run rc3: a cap of 12 per kind left too
+    # few whose chunk lives in one of c1's groups).
+    cands = [(k, z) for k, z in live if z > 65536] + [(k, z) for k, z in live if z <= 65536]
     gens = {}
     for k, z in cands:
         rc, o, e = admin(f"integrity verify-object --bucket v3h --key {shlex.quote(k)}", timeout=120)
