@@ -714,8 +714,9 @@ class Run:
             return {"error": f"{type(e).__name__}: {e}"[:300]}
 
     def final_stops(self):
-        """The load, then the services, each stop confirmed from its verdict;
-        the watching (the sentinel, then the watchdog) ends only when every
+        """The load, then the services, then the sampler, each stop confirmed
+        from its verdict; the watching (the sentinel, then the watchdog) ends
+        only when every
         process of the run is confirmed stopped. Unconfirmed stops are
         retried ``FINAL_STOP_ROUNDS`` times; if any is left, the sentinel and
         the watchdog are kept running, the run cannot pass, and the timeline
@@ -724,7 +725,9 @@ class Run:
         fs = self.tl.setdefault("final_stops", {})
         problems = {}
         load = fs["stop_load"] = self._call("stop_load")
-        if "error" in load:
+        if not isinstance(load, dict):
+            problems["stop_load"] = f"no result: {load!r}"[:300]
+        elif "error" in load:
             problems["stop_load"] = load["error"]
         else:
             for n, v in load.items():
@@ -733,7 +736,7 @@ class Run:
                         problems["guard_result"] = f"the guard did not confirm its load's group empty: {v}"
                 elif not stop_confirmed(v):
                     problems[n] = v
-        setup = bool(getattr(self.c, "setup_started", True))
+        setup = bool(getattr(self.c, "setup_started", False))
         left = None  # names to stop again; None: all
         merged = None  # the latest verdict of each service over the rounds
         for attempt in range(1 + FINAL_STOP_ROUNDS):
@@ -754,6 +757,18 @@ class Run:
                 break  # a listing failure: retrying the same read decides nothing
             self.clock.sleep(5)
         problems.update(bad)
+        # Every guard started.list names has a verdict from stop_load (the
+        # services' stop never stops guards).
+        listing = (merged or {}).get("listing") if isinstance(merged, dict) else None
+        if isinstance(load, dict) and "error" not in load and isinstance(listing, dict):
+            for name in listing.get("started") or []:
+                key = "guard" if name == "guard" else name + ".json"
+                if name.startswith("guard") and key not in load:
+                    problems[name + ".json"] = "started, no stop verdict"
+        # The sampler is the last process of the run watched by the sentinel.
+        sampler = fs["stop_sampler"] = self._call("stop_sampler")
+        if not stop_confirmed(sampler):
+            problems["sampler.json"] = sampler
         if problems:
             fs["intervention"] = {
                 "unconfirmed": problems,

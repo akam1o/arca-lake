@@ -522,6 +522,18 @@ class FinalStops(unittest.TestCase):
         p.kill()
         p.wait()
 
+    def test_a_sample_line_that_does_not_parse_is_read_again_not_skipped(self):
+        """Review of #27: the read offset moves only after the lines parse."""
+        path = os.path.join(self.c.run_dir, "samples.jsonl")
+        good = json.dumps({"target": "controller", "ended_wall_ms": 1, "values": {}})
+        with open(path, "w") as f:
+            f.write(good + "\n" + '{"target": "gateway0", broken\n')
+        with self.assertRaises(ValueError):
+            self.c.samples()
+        with open(path, "w") as f:  # the same bytes, repaired
+            f.write(good + "\n" + json.dumps({"target": "gateway0", "ended_wall_ms": 2, "values": {}}) + "\n")
+        self.assertEqual([s["target"] for s in self.c.samples()], ["controller", "gateway0"])
+
 
 # -- F8: the watchdog's own readings -----------------------------------------------
 

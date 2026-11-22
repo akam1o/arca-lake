@@ -281,6 +281,10 @@ class FakeCluster:
         self.stop_calls.append(("stop_sentinel", None))
         return {"verdict": "stopped", "confirmed": True}
 
+    def stop_sampler(self):
+        self.stop_calls.append(("stop_sampler", None))
+        return dict(self.verdicts.get("sampler.json", {"verdict": "stopped", "confirmed": True}))
+
     def stop_watchdog(self):
         self.stop_calls.append(("stop_watchdog", None))
         return {"verdict": "stopped", "returncode": 0}
@@ -925,7 +929,8 @@ class ReviewFindingsEngine(EngineBase):
         c = FakeCluster(self.cfg, self.clock)
         e = self.ended(c)
         self.assertEqual(e.result["outcome"], judge.PASSED)
-        self.assertEqual([n for n, _ in c.stop_calls], ["stop_load", "stop_services", "stop_sentinel", "stop_watchdog"])
+        self.assertEqual([n for n, _ in c.stop_calls],
+                         ["stop_load", "stop_services", "stop_sampler", "stop_sentinel", "stop_watchdog"])
         self.assertNotIn("intervention", e.tl["final_stops"])
 
     def test_a_service_not_stopped_is_retried_then_keeps_the_watching(self):
@@ -989,6 +994,32 @@ class ReviewFindingsEngine(EngineBase):
             e = self.ended(c)
             self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE, change)
             self.assertNotIn("stop_watchdog", [n for n, _ in c.stop_calls], change)
+
+    def test_a_guard_or_the_sampler_not_accounted_for_keeps_the_watching(self):
+        """Review of #27: a smoke guard started.list names without a verdict
+        from stop_load (its listing failed), the sampler not stopped, or
+        stop_load returning no dict."""
+        cases = []
+        c = FakeCluster(self.cfg, self.clock)
+        c.started = c.started + ["guard-smoke-1"]
+        cases.append(("guard-smoke-1.json", c))
+        c = FakeCluster(self.cfg, self.clock)
+        c.verdicts = {"sampler.json": {"verdict": "not-stopped"}}
+        cases.append(("sampler.json", c))
+        c = FakeCluster(self.cfg, self.clock)
+        c.stop_load = lambda: None
+        cases.append(("stop_load", c))
+        for key, c in cases:
+            e = self.ended(c)
+            self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE, key)
+            self.assertIn(key, e.tl["final_stops"]["intervention"]["unconfirmed"])
+            self.assertNotIn("stop_sentinel", [n for n, _ in c.stop_calls], key)
+        # A smoke guard with its verdict is accounted for.
+        c = FakeCluster(self.cfg, self.clock)
+        c.started = c.started + ["guard-smoke-1"]
+        real = c.stop_load
+        c.stop_load = lambda: dict(real(), **{"guard-smoke-1.json": {"verdict": "stopped"}})
+        self.assertEqual(self.ended(c).result["outcome"], judge.PASSED)
 
     def test_a_failure_stays_failed_with_unconfirmed_stops(self):
         c = FakeCluster(self.cfg, self.clock)
