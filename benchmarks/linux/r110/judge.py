@@ -23,7 +23,7 @@ PASSED, FAILED, INCONCLUSIVE, NOT_RUN = "Passed", "Failed", "Inconclusive", "Not
 
 # The plan version these criteria implement (recorded with every result;
 # runs judged under v1 are never re-judged under it).
-PLAN_VERSION = 2
+PLAN_VERSION = 3
 
 VALUES = {
     "interval_s": 15,
@@ -531,8 +531,19 @@ def c5(tl):
     if vr.get("violations"):
         return verdict("C5", FAILED, [f"{len(vr['violations'])} keys differ from every candidate"],
                        violations=vr["violations"][:20])
-    if mf is not None and mf > 0 or sc is not None and sc > 0:
+    if mf is not None and mf > 0:
         return verdict("C5", FAILED, [f"manifest findings {mf}, scrub findings {sc}"])
+    if sc is not None and sc > 0:
+        by = s7.get("scrub_by_class")
+        # Plan v3: a scrub read before the background passes settled may list
+        # retained records and young orphans as unexpected shards (class 4):
+        # those alone are Inconclusive there; any other class fails. Settled
+        # (or a timeline without the settle step), every finding fails.
+        if "settled_ms" in s7 and s7["settled_ms"] is None and isinstance(by, list) and len(by) == 8 \
+                and sum(by) == sc and sum(by) == by[4]:
+            return verdict("C5", INCONCLUSIVE, [f"{sc} unexpected shards, the scrub read before the background "
+                                                "passes settled"], scrub_by_class=by)
+        return verdict("C5", FAILED, [f"manifest findings {mf}, scrub findings {sc}"], scrub_by_class=by)
     if not vr.get("complete") or mf is None or sc is None:
         return verdict("C5", INCONCLUSIVE, ["the verification, the manifests or the scrub incomplete"])
     return verdict("C5", PASSED, [], keys=vr["keys"], unknown_resolved=vr.get("unknown_resolved"))

@@ -1,7 +1,12 @@
 # R-110: capacity-pressure retest plan
 
-Status: **version 2** (2026-11-22; C1 split into C1a and C1b, §8.3;
-stage 4 goes on after a natural recovery, §7). Version 1 was run twice on
+Status: **version 3** (2026-11-22: stage 7 reads the manifests and the
+scrub only after the background passes settled, §7; the scrub's findings
+are recorded by class, §8 C5). Version 2 (C1 split into C1a and C1b,
+§8.3; stage 4 goes on after a natural recovery, §7) was run once on
+2026-11-22: Failed on C5 only, every other criterion Passed (results
+report); its scrub ran inside the reclaim retention and counted the
+retained records as unexpected shards. Version 1 was run twice on
 2026-11-21, both Inconclusive ([results](phase-4.1-r110-retest-results.md));
 those runs stay judged under version 1. The three test hosts are
 dedicated to arca-lake (corrected 2026-11-22, §4.1); runs are approved
@@ -296,7 +301,7 @@ and the watchdog has not fired; anything else ends the run.
 | 4 Pressure | 3 passed | first DELETE an identified set D1 of 1,000 baseline keys (≤ 20/s), then PUT new keys at ≤ 10/s until the gateway's admission state is write rejected, at most 5,000 new objects; then hold the refusal with one PUT attempt per second (refused attempts count against the limits) while admission refuses; v2: a natural recovery ends the hold (nothing more is written), not the stage; the stage then waits, with no load, until D1's chain is over (GC backlog 0, no pending record on any node, at least D1's chain time ≈ 25 min after D1) or C1b's deadline (50 min after D1) | D1's chain over (fresh samples): C1a and C1b judged; not over by C1b's deadline: the run ends (stage 5 cannot take a clean baseline) | 60 min |
 | 5 Drain and recovery | 4 exit | no new data except a probe PUT every 10 s (running beside the deletes, under the same budget and ledger; its keys deleted once C2's and C3a's holds are over, apart from C2's deletes, so that stage 6 starts at L1); DELETE every key stage 4 added and 1,000 more baseline keys (live set L1 = 2,000) at ≤ 20/s; observe GC, retention, reclaim, compaction, admission | C2 and C3a judged | 60 min (about 24 min of grace, retention and pass intervals, then the 10 min holds) |
 | 6 Steady churn | C3a passed | 1 PUT of a new key and 1 DELETE of the oldest per second for 90 min, the live set within ±5 % of L1 | C3b judged over the whole stage, C4 on its last 60 min | 100 min |
-| 7 Integrity and evidence | 6 ended | verify (§8 C5), `admin integrity verify-manifests`, a scrub of every group; evidence saved; teardown only after review | C5 judged | 60 min |
+| 7 Integrity and evidence | 6 ended | verify (§8 C5); v3: then wait, with no load, until at least the controller's orphan age and two reconcile intervals (900 + 2 × 300 s) after stage 6's end, the GC backlog 0 and no record pending reclaim on any node (fresh samples), at most until 15 min before the stage's end; then `admin integrity verify-manifests` and a scrub of every group (findings recorded by class); evidence saved; teardown only after review | C5 judged | 60 min |
 
 ## 8. Judgement (fixed before the run)
 
@@ -310,7 +315,7 @@ changed after it.
 | C3a | every gateway's admission state 0 and the controller's backpressure state 0, uninterrupted for 10 min; every probe PUT in that window (60) acknowledged | stage 5 |
 | C3b | over stage 6: PUTs ≥ 99 % acknowledged, none refused for capacity, admission never above warning | stage 6 |
 | C4 | over the last 60 min of stage 6, per node: the least-squares slope of retained bytes and of allocated bytes ≤ 1 % of the allotment per hour, their range ≤ 10 % of the allotment, admission never write rejected | stage 6 |
-| C5 | every key acknowledged and not deleted reads back with its exact body; every acknowledged delete (D1, stage 5 and churn, at most 12,400) answers 404; every unknown outcome reads as one of its candidates (recorded which); manifests and scrub 0 findings | stage 7 |
+| C5 | every key acknowledged and not deleted reads back with its exact body; every acknowledged delete (D1, stage 5 and churn, at most 12,400) answers 404; every unknown outcome reads as one of its candidates (recorded which); manifests and scrub 0 findings, every class (v3: when the background passes did not settle in stage 7's time, findings that are all unexpected shards are Inconclusive, any other class Failed) | stage 7 |
 
 Admission states 3 (write rejected) and 4 (recovery only, stricter) both
 refuse client writes: both are the refusal for stage 4 and C1.
