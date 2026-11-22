@@ -323,15 +323,16 @@ class SshCluster:
 
     def setup(self):
         rid = self.cfg["run_id"]
-        # From here on the run has processes on the host: every final stop
-        # must account for the services it started (started.list).
-        self.setup_started = True
         self.ssh(f"[ ! -e {Q(self.run_dir)} ] && [ ! -e {Q(self.fdb_data)} ] || "
                  f"{{ echo 'run directories exist' >&2; exit 1; }}; "
                  f"mkdir -p {Q(self.run_dir)}/logs {Q(self.run_dir)}/services {Q(self.run_dir)}/alarms "
                  f"{Q(self.tools)}/r110 {Q(self.fdb_data)} && "
                  f"echo {Q(rid)} > {Q(self.run_dir)}/{MARK} && echo {Q(rid)} > {Q(self.fdb_data)}/{MARK} && "
                  f": > {Q(self.run_dir)}/services/started.list")
+        # From here on (this run's directories made, no process started yet)
+        # every final stop must account for the services it started
+        # (started.list); a leftover directory of the same id is never taken.
+        self.setup_started = True
         for f in TOOLS_FILES:
             with open(os.path.join(self.tools_src, f)) as fh:
                 self.ssh(f"cat > {Q(self.tools)}/r110/{f}", stdin=fh.read())
@@ -354,6 +355,9 @@ class SshCluster:
 
     def stop_sentinel(self):
         return self._stop("sentinel.json", 120)
+
+    def stop_sampler(self):
+        return self._stop("sampler.json", 30)
 
     def start(self, name, command):
         return self.py(START, self.tools, name, self.run_dir, *command)
@@ -659,8 +663,11 @@ class SshCluster:
         out = self.ssh(f"tail -c +{self._sample_off + 1} {Q(self.run_dir)}/samples.jsonl 2>/dev/null || true",
                        check=False, timeout=600)
         end = out.rfind("\n") + 1
+        # Parsed before the offset moves: a line that does not parse raises
+        # and the same bytes are read again, never skipped.
+        new = [json.loads(x) for x in out[:end].splitlines() if x.startswith("{") and '"target"' in x]
         self._sample_off += len(out[:end].encode())
-        self._samples += [json.loads(x) for x in out[:end].splitlines() if x.startswith("{") and '"target"' in x]
+        self._samples += new
         return list(self._samples)
 
     def ledger_records(self):
@@ -712,9 +719,15 @@ class SshCluster:
         # The guard's worst case after a TERM (its grace, its group's TERM
         # and KILL waits, services' stops) is under this wait.
         out = {"guard": self._stop("guard.json", GUARD_STOP_S), "load": self._stop("load.json", 60)}
-        # Any smoke sub-run left (a stage 2 that failed): its guard and load.
-        for n in self.ssh(f"ls {Q(self.run_dir)}/services 2>/dev/null || true", check=False).split():
-            if n.startswith(("guard-smoke", "load-smoke")) and n.endswith(".json"):
+        # Any smoke sub-run left (a stage 2 that failed): its guard and load,
+        # from a listing whose failure is reported (independent review).
+        listing = self.services_listing()
+        if "error" in listing:
+            out["listing"] = {"verdict": "unverified", "reason": f"services not listed: {listing['error']}"}
+            return out
+        names = set(listing.get("records", [])) | {n + ".json" for n in listing.get("started", [])}
+        for n in sorted(names):
+            if n.startswith(("guard-smoke", "load-smoke")):
                 out[n] = self._stop(n, GUARD_STOP_S if n.startswith("guard") else 60)
         res = self._json(f"{self.load_dir}/guard.json")
         out["guard_result"] = {k: res.get(k) for k in ("reason", "group_empty", "load_reaped")} if res else None

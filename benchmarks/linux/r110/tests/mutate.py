@@ -171,6 +171,11 @@ muts = [
  ("finish: an empty listing after setup passes", "r110/driver.py", "    if setup_started and not started:\n        out[\"listing\"] = \"started.list is empty after setup\"", "    pass", "test_driver"),
  ("finish: no retry", "r110/driver.py", "FINAL_STOP_ROUNDS = 2  # retries", "FINAL_STOP_ROUNDS = 0  # retries", "test_driver"),
  ("protection: only the last 200 samples", "r110/driver.py", "        for x in samples[self._prot_n:]:", "        for x in samples[-200:]:", "test_driver"),
+ # Review of #27.
+ ("finish: guards not accounted for", "r110/driver.py", "                if name.startswith(\"guard\") and key not in load:", "                if False:", "test_driver"),
+ ("finish: the sampler not confirmed", "r110/driver.py", "        if not stop_confirmed(sampler):\n            problems[\"sampler.json\"] = sampler", "        pass", "test_driver"),
+ ("finish: stop_load not a dict", "r110/driver.py", "        if not isinstance(load, dict):\n            problems[\"stop_load\"] = f\"no result: {load!r}\"[:300]\n        elif \"error\" in load:", "        if \"error\" in load:", "test_driver"),
+ ("samples: offset moved before parsing", "r110/remote.py", "        new = [json.loads(x) for x in out[:end].splitlines() if x.startswith(\"{\") and '\"target\"' in x]\n        self._sample_off += len(out[:end].encode())", "        self._sample_off += len(out[:end].encode())\n        new = [json.loads(x) for x in out[:end].splitlines() if x.startswith(\"{\") and '\"target\"' in x]", "test_integration"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]
