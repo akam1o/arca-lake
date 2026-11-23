@@ -68,7 +68,11 @@ the environments described in their reports.
    1) was run twice on 2026-11-21 (one run interrupted by the operator at
    stage 3 for a tooling finding, one ended in stage 4), both Inconclusive
    ([results](../verification/phase-4.1-r110-retest-results.md)); plan
-   version 2 (C1 split into C1a and C1b) is being prepared.* The
+   versions 2 and 3 were run on 2026-11-22
+   ([results](../verification/phase-4.1-r110-retest-results-2.md)): run 1
+   (v2) Failed on C5 only, run 2 (v3) Passed every criterion with an
+   earlier 0.1.0 candidate, run 3 (v3) with the 0.1.0 release binary was
+   Inconclusive (test hosts unreachable in stage 6).* The
    implementation uses batched read-only
    judgments per listing page, bounded parallelism, settle time from the
    measured cycle, and a "pass running since" gauge. The subsequent
