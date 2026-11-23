@@ -4,10 +4,10 @@
 //! capacity rule, without writing metadata or touching a shard. Reads only:
 //! metadata, `Health` and `ListShards`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use arca_lake_metadata::KvStore;
-use arca_lake_metadata::ops::{cluster, compat, membership};
+use arca_lake_metadata::ops::{cluster, compat, group_domain, membership};
 use arca_lake_metadata::records::{ClusterPhase, GroupRecord, GroupState, NodeRecord};
 use arca_lake_protocol::client::NodeClients;
 
@@ -89,6 +89,7 @@ struct World {
     unavailable: BTreeSet<u64>,
     phase: Option<ClusterPhase>,
     requests: Vec<membership::ReplaceRequest>,
+    domains: BTreeMap<u64, group_domain::GroupDomain>,
 }
 
 async fn world<S: KvStore>(meta: &S, clients: &NodeClients) -> Result<World, ControlError> {
@@ -122,6 +123,7 @@ async fn world<S: KvStore>(meta: &S, clients: &NodeClients) -> Result<World, Con
         unavailable,
         phase: compat::cluster_state(meta).await?.map(|s| s.state),
         requests: membership::replace_requests(meta).await?,
+        domains: group_domain::list(meta).await?,
     })
 }
 
@@ -219,10 +221,25 @@ async fn plan_move(
             && to_node.is_none_or(|t| t == id)
             && (!with_capacity || capacity::fits(free_after(id), need))
     };
-    let chosen =
-        crate::process::choose_for(&w.nodes, &w.groups, g, index, failure_domain, &|id| {
-            eligible(id, true)
-        })?;
+    // The group's recorded failure domain, as the leader uses it
+    // (ADR-0038); `failure_domain` only for a one-member group without a
+    // record. A refusal is this move's blocker, not the plan's error.
+    let label = match crate::failure_domain::label_for(&w.domains, g, failure_domain) {
+        Ok(l) => l,
+        Err(why) => {
+            p.blockers.push(why);
+            return Ok(p);
+        }
+    };
+    let chosen = match crate::process::choose_for(&w.nodes, &w.groups, g, index, &label, &|id| {
+        eligible(id, true)
+    }) {
+        Ok(c) => c,
+        Err(why) => {
+            p.blockers.push(why);
+            return Ok(p);
+        }
+    };
     match chosen {
         Some(m) => {
             p.to_node = Some(m.node_id);
@@ -236,9 +253,11 @@ async fn plan_move(
         }
         None => {
             let without =
-                crate::process::choose_for(&w.nodes, &w.groups, g, index, failure_domain, &|id| {
+                crate::process::choose_for(&w.nodes, &w.groups, g, index, &label, &|id| {
                     eligible(id, false)
-                })?;
+                })
+                .ok()
+                .flatten();
             p.blockers.push(match (without, to_node) {
                 (Some(m), _) => format!(
                     "insufficient capacity: node {} has {} bytes free, the move needs {} (paused until a node has room)",

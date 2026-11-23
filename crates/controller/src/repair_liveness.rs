@@ -128,6 +128,9 @@ pub struct Observation {
     pub now_ms: u64,
     /// Retry delays.
     pub pacing: Pacing,
+    /// The group has a recorded failure domain (or needs none: one
+    /// member), ADR-0038.
+    pub domain_recorded: bool,
 }
 
 /// What to do with the group in this pass.
@@ -255,10 +258,13 @@ pub fn second_failure(o: &Observation, outcome: &Outcome) -> Option<Decision> {
 #[must_use]
 pub fn decide(o: &Observation) -> Decision {
     let s = current(o);
+    // Waiting only for the group's failure domain, now recorded: tried
+    // now (ADR-0038).
+    let domain_set = s.reason == RepairReason::AwaitingFailureDomain && o.domain_recorded;
     // No other node could take the slot at the last try: not before the
     // backoff (independent review: every pass would otherwise probe every
     // node's room for every such group).
-    let no_target_yet = s.no_target && s.next_attempt_ms > o.now_ms;
+    let no_target_yet = s.no_target && s.next_attempt_ms > o.now_ms && !domain_set;
     if !o.target_candidate && no_target_yet {
         return Decision::Wait;
     }
@@ -280,7 +286,7 @@ pub fn decide(o: &Observation) -> Decision {
     let nodes_back = s.reason == RepairReason::AwaitingNodes && o.unhealthy_others.is_empty();
     let member_since_failed =
         s.reason == RepairReason::DataUnrecoverable && !o.unhealthy_others.is_empty();
-    if s.next_attempt_ms > o.now_ms && !nodes_back && !member_since_failed {
+    if s.next_attempt_ms > o.now_ms && !nodes_back && !member_since_failed && !domain_set {
         return Decision::Wait;
     }
     Decision::Run
@@ -433,16 +439,25 @@ pub fn after(o: &Observation, outcome: &Outcome) -> Option<RepairStatus> {
     Some(s)
 }
 
-/// The status when the slot is to be rebuilt onto another node and none
-/// can take it (`capacity`: candidates exist, none with room).
+/// Why a repair waits when the move it needs found no target:
+/// `capacity` (candidates exist, none with room), `unrecorded` (refused
+/// only because the group has no recorded failure domain, ADR-0038).
 #[must_use]
-pub fn no_new_target(o: &Observation, capacity: bool, detail: String) -> RepairStatus {
-    let mut s = current(o);
-    let reason = if capacity {
+pub fn no_target_reason(capacity: bool, unrecorded: bool) -> RepairReason {
+    if unrecorded {
+        RepairReason::AwaitingFailureDomain
+    } else if capacity {
         RepairReason::AwaitingCapacity
     } else {
         RepairReason::AwaitingNodes
-    };
+    }
+}
+
+/// The status when the slot is to be rebuilt onto another node and none
+/// can take it, for `reason` ([`no_target_reason`]).
+#[must_use]
+pub fn no_new_target(o: &Observation, reason: RepairReason, detail: String) -> RepairStatus {
+    let mut s = current(o);
     if s.reason != reason {
         s.since_ms = o.now_ms;
     }
@@ -533,6 +548,7 @@ mod tests {
             status,
             now_ms: 1_000_000,
             pacing: Pacing::default(),
+            domain_recorded: true,
         }
     }
 
@@ -558,6 +574,34 @@ mod tests {
             o.status = Some(s);
         }
         assert!(matches!(decide(&o), Decision::Retarget(_)));
+    }
+
+    /// A repair waiting only for its group's failure domain is tried at
+    /// once when the domain is recorded, not after the backoff (ADR-0038):
+    /// a retarget (target gone) and a rebuild alike.
+    #[test]
+    fn a_recorded_failure_domain_ends_the_wait_at_once() {
+        let mut o = obs(None);
+        o.target_candidate = false;
+        o.domain_recorded = false;
+        o.status = Some(no_new_target(
+            &o,
+            RepairReason::AwaitingFailureDomain,
+            "group 7 has no recorded failure domain".into(),
+        ));
+        assert_eq!(decide(&o), Decision::Wait);
+        o.domain_recorded = true;
+        assert!(matches!(decide(&o), Decision::Retarget(_)));
+        o.target_candidate = true;
+        o.domain_recorded = false;
+        assert_eq!(decide(&o), Decision::Wait);
+        o.domain_recorded = true;
+        assert_eq!(decide(&o), Decision::Run);
+        // Another reason keeps its backoff.
+        let mut s = o.status.clone().unwrap();
+        s.reason = RepairReason::AwaitingCapacity;
+        o.status = Some(s);
+        assert_eq!(decide(&o), Decision::Wait);
     }
 
     #[test]
@@ -704,7 +748,11 @@ mod tests {
         let mut o = obs(None);
         o.target_candidate = false;
         assert!(matches!(decide(&o), Decision::Retarget(_)));
-        o.status = Some(no_new_target(&o, false, "none".into()));
+        o.status = Some(no_new_target(
+            &o,
+            RepairReason::AwaitingNodes,
+            "none".into(),
+        ));
         assert_eq!(decide(&o), Decision::Wait);
         o.now_ms += o.pacing.backoff_max_ms;
         assert!(matches!(decide(&o), Decision::Retarget(_)));

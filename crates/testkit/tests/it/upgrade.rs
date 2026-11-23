@@ -577,6 +577,67 @@ async fn finalize_to_schema_5_is_refused_while_a_0_1_0_process_runs() {
     c.shutdown().await;
 }
 
+/// A group of several members as a 0.1.0 `admin create-groups` creates
+/// it: no recorded failure domain (ADR-0038).
+async fn unrecorded_group(c: &TestCluster) -> u64 {
+    let mut g = c.groups().await.remove(0);
+    g.id = 0;
+    arca_lake_metadata::ops::cluster::create_group(c.meta.as_ref(), g)
+        .await
+        .unwrap()
+        .id
+}
+
+/// ADR-0038: the finalize to schema 5 waits until every group's failure
+/// domain is recorded, at step 1 and again at the cut-off (a group a
+/// 0.1.0 `admin create-groups` made after step 1).
+#[tokio::test]
+async fn finalize_waits_for_every_groups_failure_domain() {
+    use arca_lake_metadata::ops::group_domain;
+    let c = cluster().await;
+    let meta = Arc::clone(&c.meta);
+    let own = arca_lake_controller::capabilities();
+    let target = current_target();
+    assert!(target.schema >= keys::SCHEMA_V5);
+    let first = unrecorded_group(&c).await;
+    compat::request_finalize(meta.as_ref(), target, vec![], "admin", now_ms())
+        .await
+        .unwrap();
+    let pass = async || {
+        upgrade_pass(meta.as_ref(), &c.clients, &own, 7, now_ms())
+            .await
+            .unwrap()
+    };
+    let blocked_at = async |step: UpgradeStep, group: u64| {
+        let r = pass().await;
+        assert_eq!((r.before, r.after), (Some(step), Some(step)), "{r:?}");
+        let why = r.blocked.unwrap_or_default();
+        assert!(
+            why.contains(&format!("[{group}]")) && why.contains("set-failure-domain"),
+            "{why}"
+        );
+    };
+    blocked_at(UpgradeStep::Requested, first).await;
+    group_domain::set(meta.as_ref(), first, "host", false, now_ms())
+        .await
+        .unwrap();
+    assert_eq!(pass().await.after, Some(UpgradeStep::Preconditioned));
+    assert_eq!(pass().await.after, Some(UpgradeStep::Migrated));
+    // The cut-off: a group created meanwhile without a record holds it.
+    let write_before = compat::gate(meta.as_ref()).await.unwrap().schema_write;
+    let late = unrecorded_group(&c).await;
+    blocked_at(UpgradeStep::Migrated, late).await;
+    assert_eq!(
+        compat::gate(meta.as_ref()).await.unwrap().schema_write,
+        write_before
+    );
+    group_domain::set(meta.as_ref(), late, "host", false, now_ms())
+        .await
+        .unwrap();
+    assert_eq!(pass().await.after, Some(UpgradeStep::SchemaWriteRaised));
+    c.shutdown().await;
+}
+
 /// A store on which a 0.1.0 gateway heartbeats right after the schema is
 /// raised: one whose gate admitted it before the raise.
 struct RaceAtRaise {
