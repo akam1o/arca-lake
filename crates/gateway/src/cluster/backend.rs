@@ -1871,7 +1871,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             return Err(s3_error!(IncompleteBody));
         };
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref())?;
-        let checksum = request_checksum(
+        let mut checksum = request_checksum(
             input.checksum_algorithm.as_ref(),
             input.checksum_crc32.as_deref(),
             input.checksum_crc32c.as_deref(),
@@ -1885,6 +1885,12 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                 || input.checksum_xxhash128.is_some(),
             trailing,
         )?;
+        // Refused before the body is read: drain it so that the client
+        // sees the answer.
+        checksum.content_md5 = match checksum::content_md5(input.content_md5.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return Err(refuse_after_body(Some(body), e).await),
+        };
         let committed = self
             .write_object(
                 &input.bucket,
@@ -2159,6 +2165,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             algorithm,
             expected: None,
             trailing: None,
+            content_md5: None,
         };
         let map = self.map_up_to_date().await.map_err(meta_err)?;
         self.note_access(src_manifest.pointer.generation);
@@ -2398,7 +2405,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             .ok()
             .filter(|n| (1..=multipart::MAX_PART_NUMBER).contains(n))
             .ok_or_else(|| s3_error!(InvalidArgument, "part number must be between 1 and 10000"))?;
-        let checksum = request_checksum(
+        let mut checksum = request_checksum(
             input.checksum_algorithm.as_ref(),
             input.checksum_crc32.as_deref(),
             input.checksum_crc32c.as_deref(),
@@ -2412,6 +2419,12 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                 || input.checksum_xxhash128.is_some(),
             trailing,
         )?;
+        // Refused before the body is read: drain it so that the client
+        // sees the answer.
+        checksum.content_md5 = match checksum::content_md5(input.content_md5.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return Err(refuse_after_body(Some(body), e).await),
+        };
         let sealed = self
             .write_part(
                 &input.bucket,
@@ -2505,6 +2518,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             algorithm: upload.checksum_algorithm,
             expected: None,
             trailing: None,
+            content_md5: None,
         };
         let map = self.map_up_to_date().await.map_err(meta_err)?;
         let body = self.stream_range(map, &m, start, end);

@@ -69,6 +69,8 @@ pub struct RequestChecksum {
     pub expected: Option<Vec<u8>>,
     /// Trailing headers of an `aws-chunked` body.
     pub trailing: Option<s3s::TrailingHeaders>,
+    /// The `Content-MD5` digest of the (decoded) body, if sent.
+    pub content_md5: Option<[u8; 16]>,
 }
 
 impl RequestChecksum {
@@ -167,12 +169,17 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
-/// Verify the streamed checksum against the client's expectation and build
-/// the stored record. A mismatch is `BadDigest`; nothing is published.
+/// Verify the streamed `Content-MD5` and checksum against the client's
+/// expectation and build the stored record. A mismatch is `BadDigest`;
+/// nothing is published.
 fn verify_checksum(
     streamed: &Streamed,
     req: &RequestChecksum,
 ) -> Result<Option<Checksum>, S3Error> {
+    checksum::verify_content_md5(
+        req.content_md5.as_ref(),
+        &checksum::unhex(&streamed.etag).unwrap_or_default(),
+    )?;
     let Some((algo, value)) = &streamed.checksum else {
         return Ok(None);
     };

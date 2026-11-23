@@ -115,6 +115,13 @@ break compatibility).
 
 ### Fixed
 
+- `Content-MD5` is verified. Before, a body that did not match it was
+  stored and answered `200` (a false success for a client that asked for
+  the check). PutObject and UploadPart (plain and `aws-chunked`, any
+  size) and the XML bodies of DeleteObjects, CompleteMultipartUpload,
+  PutBucketPolicy, PutBucketVersioning and CreateBucket now answer `400
+  BadDigest` on a mismatch and `400 InvalidDigest` for a malformed value;
+  nothing is committed (RFC-007 §5.7).
 - A group's failure domain is recorded and kept by every member move
   (R-119, [ADR-0038](docs/adr/0038-group-failure-domain-record.md)):
   new groups record their label at creation (new metadata key

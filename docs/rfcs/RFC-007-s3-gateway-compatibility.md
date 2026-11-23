@@ -106,6 +106,7 @@ full AWS S3 compatibility: this table is the claim.
 | Ranged GET with `checksum-mode` | no checksum headers (checksums describe whole objects or parts) | same for composite; full-object checksums are omitted for ranges as well |
 | `ListObjectVersions` with a version marker whose key no longer exists | resumes after the key | undefined |
 | Object ACLs | `NotImplemented` | supported |
+| DeleteObjects without `Content-MD5` or `x-amz-checksum-*` | accepted; `x-amz-checksum-*` on XML bodies is not verified (`Content-MD5` is) | `400 InvalidRequest` (one of them is required) |
 | Multipart upload expiry | controller sweep after `--multipart-expiry` (7 days by default) | lifecycle rule only |
 
 ### 5.2 Object model recap (RFC-002) and generation kinds
@@ -464,6 +465,17 @@ beyond the standard CRC combination step below).
   InternalError`, never a published copy).
 - ETag stays MD5 (single) / composite MD5 (multipart) and is never a
   checksum value; clients that need a content hash use checksums.
+- **`Content-MD5`** (RFC 1864): a value that is not base64 of 16 bytes →
+  `400 InvalidDigest`; a value that differs from the MD5 of the body →
+  `400 BadDigest`. PutObject and UploadPart compare it with the MD5 the
+  gateway computes anyway for the ETag, over the decoded body as it is
+  streamed (multi-chunk and `aws-chunked` bodies included, no extra
+  buffering), before commit: the pending generation is aborted, a part is
+  not recorded, nothing is published. The XML bodies that `s3s` reads in
+  full (DeleteObjects, CompleteMultipartUpload, PutBucketPolicy,
+  PutBucketVersioning, CreateBucket) are checked by the server wrapper on
+  the bytes as `s3s` reads them, after authentication; the operation does
+  not run.
 
 ### 5.8 DeleteObjects
 
@@ -553,6 +565,12 @@ measured in Phase 3.1).
 - Should the gateway accept `x-amz-tagging` on PUT and return it
   (proposal: yes, stored in the header, no policy conditions on tags).
 - CRC64NVME combination availability.
+- Follow-up (0.2.0 review of the body error mapping): when a PUT or
+  UploadPart fails before its end (a refused body, an I/O error), shards
+  already placed for chunks not yet recorded in the generation are
+  reclaimed by node reconciliation (RFC-004 §5.10), not by the abort.
+  Deleting them at abort time would free the space sooner; no change
+  for now.
 
 ## 11. Acceptance criteria
 
@@ -582,3 +600,4 @@ phase report.
 | A15 | Property-based and model-based tests of the versioned key state machine | Implemented, Verified (`version_model.rs`: random PUT / DELETE / DELETE-version / Enable / Suspend sequences against a reference model, 400 cases; it found and fixed a duplicated `null` version record after a version delete restored the null version). The generation model (`model.rs`) and the policy monotonicity property (`policy.rs`) also exist |
 | A16 | The compatibility matrix is generated from the conformance suite's list of exercised operations | Not Implemented (maintained by hand; §5.1) |
 | A17 | Performance regression with multipart PUT added | see the Phase 3.1 report (`benchmarks/linux/results`) |
+| A19 | `Content-MD5`: malformed → `400 InvalidDigest`, mismatch → `400 BadDigest`, nothing committed, on PutObject (single and multi-chunk, plain and `aws-chunked`) and UploadPart, and on the DeleteObjects and PutBucketPolicy bodies | Verified (`s3_content_md5.rs`, cluster and memory backends, AWS SDK for Rust; `gateway/src/content_md5.rs` unit tests) |

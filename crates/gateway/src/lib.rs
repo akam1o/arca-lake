@@ -8,6 +8,7 @@
 //! `arca-lake-ec`, and storage nodes (RFC-003, RFC-004).
 
 pub mod cluster;
+mod content_md5;
 pub mod memory;
 pub mod requests;
 mod server;

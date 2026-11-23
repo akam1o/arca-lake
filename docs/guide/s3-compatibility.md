@@ -19,3 +19,6 @@ for clients:
 - `409 ConditionalRequestConflict` is never returned; conditional writes
   are serialized by FoundationDB.
 - The minimum part size is 5 MiB by default (`--multipart-min-part-bytes`).
+- `Content-MD5` is verified (`400 BadDigest` on a mismatch, `400
+  InvalidDigest` if malformed; nothing is stored). DeleteObjects does not
+  require it.
