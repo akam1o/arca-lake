@@ -286,7 +286,7 @@ impl Audit {
             "failure-domain enforcement: complete (metadata schema 5 or later: no 0.1.0 process can run)".into()
         } else {
             format!(
-                "failure-domain enforcement: degraded (metadata schema {} < 5: a 0.1.0 controller may lead and moves members by its --failure-domain flag; every 0.2.0 leader re-checks the groups)",
+                "failure-domain enforcement: degraded (metadata schema {} < 5: a 0.1.0 controller may lead and moves members by its --failure-domain flag; a 0.2.0 controller re-checks the groups on every repair pass it leads)",
                 self.schema_write
                     .map_or_else(|| "unset".to_string(), |s| s.to_string())
             )
@@ -510,6 +510,44 @@ mod tests {
             label_for(&BTreeMap::new(), &group(2, &[1]), "host").unwrap(),
             "host"
         );
+    }
+
+    /// `admin status` prints these lines, and scripts take the word after
+    /// `leader` as the leader's id: they never contain it.
+    #[test]
+    fn status_lines_do_not_name_a_leader() {
+        let a = Audit {
+            at_risk: vec![1],
+            ..Audit::default()
+        };
+        let enforced = Audit {
+            enforced: true,
+            ..Audit::default()
+        };
+        for line in [a.enforcement(), enforced.enforcement(), a.at_risk_line()]
+            .into_iter()
+            .chain(
+                [
+                    Finding::Unrecorded { group: 1 },
+                    Finding::SharedDomain {
+                        group: 1,
+                        label: "host".into(),
+                        value: "a".into(),
+                        nodes: vec![1, 2],
+                    },
+                    Finding::MemberUnlabeled {
+                        group: 1,
+                        label: "host".into(),
+                        node: 3,
+                        no_record: false,
+                    },
+                ]
+                .iter()
+                .map(ToString::to_string),
+            )
+        {
+            assert!(!line.split_whitespace().any(|w| w == "leader"), "{line}");
+        }
     }
 
     /// A group with several findings counts once, wherever they are.
