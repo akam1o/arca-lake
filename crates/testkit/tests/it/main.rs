@@ -46,6 +46,7 @@ mod fdb_failover;
 mod fdb_restore;
 mod gc_bench;
 mod gc_safety;
+mod hot_key;
 mod identity_hardening;
 mod integrity;
 mod managed_restore;

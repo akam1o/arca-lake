@@ -4,6 +4,7 @@
 pub mod access;
 pub mod admission;
 mod backend;
+pub mod commit_queue;
 #[cfg(feature = "fault-injection")]
 mod fault_control;
 mod map;

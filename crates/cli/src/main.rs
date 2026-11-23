@@ -536,6 +536,19 @@ struct GatewayArgs {
     /// chunks plus their shards per PUT).
     #[arg(long = "write-pipeline", default_value_t = 2)]
     write_pipeline: usize,
+    /// Per-key commit queue (ADR-0041): `on` (commits to one key through
+    /// this gateway take turns; conflicts with other gateways back off)
+    /// or `off` (every commit at once, immediate retries, as 0.1.0).
+    #[arg(long, default_value = "on", value_parser = ["on", "off"])]
+    commit_queue: String,
+    /// Longest wait for a commit's turn on its key, ms; a longer wait is
+    /// answered `SlowDown` before any commit attempt (nothing applied).
+    #[arg(long, default_value_t = 2000)]
+    commit_queue_wait_ms: u64,
+    /// Commits waiting for one key at most; one more is answered
+    /// `SlowDown`.
+    #[arg(long, default_value_t = 256)]
+    commit_queue_max_waiters: usize,
     /// Minimum size of every multipart part but the last. AWS requires
     /// 5 MiB; smaller values are a non-AWS extension for small labs.
     #[arg(long, default_value_t = 5 << 20)]
@@ -1712,6 +1725,12 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                     lease_skew_ms: args.tiering_lease_skew_ms,
                     ..Default::default()
                 },
+                commit_queue: arca_lake_gateway::cluster::commit_queue::CommitQueueConfig {
+                    enabled: args.commit_queue == "on",
+                    wait_bound: Duration::from_millis(args.commit_queue_wait_ms),
+                    max_waiters: args.commit_queue_max_waiters,
+                    ..Default::default()
+                },
             },
         )
         .await
@@ -1733,6 +1752,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 );
                 render_put_stats(&mut out, &stats_backend.put_stats());
                 render_queue_and_txn_stats(&mut out, &stats_backend.population_queue_stats());
+                render_commit_queue_stats(&mut out, &stats_backend.commit_queue_stats());
                 render_integrity_stats(&mut out, &stats_backend.integrity_stats());
                 render_admission_stats(&mut out, &stats_backend.cluster().admission.snapshot());
                 render_access_stats(&mut out, &stats_backend.access_stats());
@@ -5719,6 +5739,36 @@ fn render_put_stats(out: &mut String, p: &arca_lake_gateway::cluster::PutStatsSn
             &format!("phase=\"{phase}\""),
         );
     }
+}
+
+fn render_commit_queue_stats(
+    out: &mut String,
+    q: &arca_lake_gateway::cluster::commit_queue::CommitQueueStatsSnapshot,
+) {
+    use std::fmt::Write as _;
+    for (name, value) in [
+        ("arca_gateway_commit_queue_turns_total", q.turns),
+        ("arca_gateway_commit_queue_waited_total", q.waited),
+        ("arca_gateway_commit_queue_wait_us_total", q.wait_us),
+        (
+            "arca_gateway_commit_queue_refused_full_total",
+            q.refused_full,
+        ),
+        (
+            "arca_gateway_commit_queue_refused_wait_total",
+            q.refused_wait,
+        ),
+        ("arca_gateway_commit_queue_bypassed_total", q.bypassed),
+        ("arca_gateway_commit_queue_conflicts_total", q.conflicts),
+        ("arca_gateway_commit_queue_backoff_us_total", q.backoff_us),
+    ] {
+        let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
+    }
+    let _ = writeln!(
+        out,
+        "# TYPE arca_gateway_commit_queue_keys gauge\narca_gateway_commit_queue_keys {}",
+        q.keys
+    );
 }
 
 fn render_queue_and_txn_stats(

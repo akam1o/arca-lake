@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use arca_lake_common::EcProfile;
 use arca_lake_common::timing::{Histogram, HistogramSnapshot};
 use arca_lake_metadata::guard::{GuardedKv, OpClass};
+use arca_lake_metadata::kv::ConflictBackoff;
 use arca_lake_metadata::ops::compat;
 use arca_lake_metadata::ops::object::Precondition;
 use arca_lake_metadata::ops::{bucket, list, multipart, object};
@@ -104,6 +105,8 @@ pub struct ClusterConfig {
     pub record_access: bool,
     /// How reads are recorded when `record_access` is on (ADR-0034).
     pub access: super::access::AccessConfig,
+    /// Per-key commit queue and conflict backoff (ADR-0041).
+    pub commit_queue: super::commit_queue::CommitQueueConfig,
 }
 
 /// Fault-injection points in the write path (tests only).
@@ -146,6 +149,8 @@ pub struct ClusterBackend<S> {
     pub(super) put_stats: Arc<PutStats>,
     pub(super) pop_queue: Arc<PopulationQueue>,
     pub(super) integrity: Arc<IntegrityState>,
+    /// Turns of commits to one key (ADR-0041).
+    pub(super) commit_queue: Arc<super::commit_queue::CommitQueue>,
 }
 
 /// Tell the node clients which node serves each address: over TLS a node
@@ -815,6 +820,7 @@ impl<S> Clone for ClusterBackend<S> {
         Self {
             put_stats: Arc::clone(&self.put_stats),
             pop_queue: Arc::clone(&self.pop_queue),
+            commit_queue: Arc::clone(&self.commit_queue),
             integrity: Arc::clone(&self.integrity),
             meta: Arc::clone(&self.meta),
             meta_repair: Arc::clone(&self.meta_repair),
@@ -982,6 +988,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 Arc::downgrade(&cluster),
             );
         }
+        let cfg_commit_queue = cfg.commit_queue.clone();
         Ok(Self {
             meta,
             meta_repair,
@@ -997,6 +1004,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             put_stats: Arc::new(PutStats::default()),
             cache_state: Arc::new(CacheState::with_population_permits(permits)),
             access: access_table,
+            commit_queue: Arc::new(super::commit_queue::CommitQueue::new(cfg_commit_queue)),
         })
     }
 
@@ -1214,6 +1222,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         self.integrity.snapshot()
     }
 
+    /// Counters of the per-key commit queue (ADR-0041).
+    #[must_use]
+    pub fn commit_queue_stats(&self) -> super::commit_queue::CommitQueueStatsSnapshot {
+        self.commit_queue.stats()
+    }
+
     /// Counters of the population queue.
     #[must_use]
     pub fn population_queue_stats(&self) -> PopQueueStatsSnapshot {
@@ -1240,6 +1254,28 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
 }
 
 impl<S: KvStore + 'static> ClusterBackend<S> {
+    /// The turn to commit to `key` (ADR-0041). A refusal is `SlowDown`:
+    /// no commit attempt was made, so nothing is applied.
+    pub(super) async fn commit_turn(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<super::commit_queue::Turn, S3Error> {
+        use super::commit_queue::Refused;
+        self.commit_queue
+            .turn(bucket, key)
+            .await
+            .map_err(|r| match r {
+                Refused::Full => {
+                    s3_error!(SlowDown, "too many writes to this key are waiting; retry")
+                }
+                Refused::WaitBound => s3_error!(
+                    SlowDown,
+                    "the writes to this key ahead of this one took too long; retry"
+                ),
+            })
+    }
+
     /// DeleteObject without a client precondition. Every attempt is pinned
     /// to the version it was decided on (the pointer moved since the pin:
     /// pin again), and the delete marker's version id is chosen once, so
@@ -1254,6 +1290,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         &self,
         bucket: &str,
         key: &str,
+        backoff: Option<&dyn ConflictBackoff>,
     ) -> Result<object::Deleted, MetaError> {
         let meta = self.meta.as_ref();
         let marker = arca_lake_metadata::records::new_version_id();
@@ -1264,16 +1301,27 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 if_current: Some(pin),
                 ..object::Precondition::default()
             };
-            match object::delete_object_as(meta, bucket, key, &pinned, &marker, now_ms()).await {
+            match object::delete_object_as_with(
+                meta,
+                bucket,
+                key,
+                &pinned,
+                &marker,
+                now_ms(),
+                backoff,
+            )
+            .await
+            {
                 Err(MetaError::PreconditionFailed) if moved < 4 => moved += 1,
                 Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r))) => {
-                    return match object::delete_object_as(
+                    return match object::delete_object_as_with(
                         meta,
                         bucket,
                         key,
                         &pinned,
                         &marker,
                         now_ms(),
+                        backoff,
                     )
                     .await
                     {
@@ -1598,10 +1646,20 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         upload_id: &UploadId,
         req: &multipart::CompleteRequest<'_>,
     ) -> S3Result<multipart::Completed> {
+        let _turn = self.commit_turn(bucket, key).await?;
+        let backoff = self.commit_queue.backoff();
         let mut last = None;
         for _ in 0..4 {
-            match multipart::complete(self.meta.as_ref(), bucket, key, upload_id, req, now_ms())
-                .await
+            match multipart::complete_with(
+                self.meta.as_ref(),
+                bucket,
+                key,
+                upload_id,
+                req,
+                now_ms(),
+                backoff.as_ref().map(|b| b as &dyn ConflictBackoff),
+            )
+            .await
             {
                 Ok(c) => return Ok(c),
                 Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r))) => last = Some(r),
@@ -1875,11 +1933,21 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
     ) -> S3Result<S3Response<DeleteObjectOutput>> {
         self.admit_write()?;
         let input = req.input;
+        let turn = self.commit_turn(&input.bucket, &input.key).await?;
+        let backoff = self.commit_queue.backoff();
+        let backoff = backoff.as_ref().map(|b| b as &dyn ConflictBackoff);
         if let Some(v) = &input.version_id {
-            let d =
-                object::delete_version(self.meta.as_ref(), &input.bucket, &input.key, v, now_ms())
-                    .await
-                    .map_err(meta_err)?;
+            let d = object::delete_version_with(
+                self.meta.as_ref(),
+                &input.bucket,
+                &input.key,
+                v,
+                now_ms(),
+                backoff,
+            )
+            .await
+            .map_err(meta_err)?;
+            drop(turn);
             return Ok(S3Response::new(DeleteObjectOutput {
                 delete_marker: d.was_delete_marker.then_some(true),
                 version_id: Some(v.clone()),
@@ -1888,21 +1956,25 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         }
         let pre = precondition(input.if_match.as_ref(), None)?;
         let result = if pre.is_empty() {
-            self.delete_unconditional(&input.bucket, &input.key).await
+            self.delete_unconditional(&input.bucket, &input.key, backoff)
+                .await
         } else {
             // With a client precondition an unknown outcome is not re-run:
             // after an applied delete the re-run would answer 412 or 404
             // for a delete that succeeded; it is reported instead (503,
             // R-72).
-            object::delete_object_if(
+            object::delete_object_as_with(
                 self.meta.as_ref(),
                 &input.bucket,
                 &input.key,
                 &pre,
+                &arca_lake_metadata::records::new_version_id(),
                 now_ms(),
+                backoff,
             )
             .await
         };
+        drop(turn);
         let d = result.map_err(meta_err)?;
         Ok(S3Response::new(DeleteObjectOutput {
             delete_marker: d.delete_marker_version.is_some().then_some(true),
@@ -1936,13 +2008,17 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                 {
                     return Err(s3_error!(AccessDenied));
                 }
+                let _turn = self.commit_turn(&input.bucket, &o.key).await?;
+                let backoff = self.commit_queue.backoff();
+                let backoff = backoff.as_ref().map(|b| b as &dyn ConflictBackoff);
                 if let Some(v) = &o.version_id {
-                    let d = object::delete_version(
+                    let d = object::delete_version_with(
                         self.meta.as_ref(),
                         &input.bucket,
                         &o.key,
                         v,
                         now_ms(),
+                        backoff,
                     )
                     .await
                     .map_err(meta_err)?;
@@ -1953,10 +2029,17 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                         delete_marker_version_id: None,
                     })
                 } else {
-                    let d =
-                        object::delete_object(self.meta.as_ref(), &input.bucket, &o.key, now_ms())
-                            .await
-                            .map_err(meta_err)?;
+                    let d = object::delete_object_as_with(
+                        self.meta.as_ref(),
+                        &input.bucket,
+                        &o.key,
+                        &Precondition::default(),
+                        &arca_lake_metadata::records::new_version_id(),
+                        now_ms(),
+                        backoff,
+                    )
+                    .await
+                    .map_err(meta_err)?;
                     Ok(DeletedObject {
                         key: Some(o.key.clone()),
                         version_id: None,

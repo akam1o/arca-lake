@@ -1,0 +1,60 @@
+01:19:46 building tag (5601018a92b2) on host B
+01:21:09 building tag (5601018a92b2) on host B
+01:24:06 building candidate (b4a6a406e3f8) on host B
+01:28:49 build done: tag 5601018a92b2 0aecd8cc19c2787b, candidate b4a6a406e3f8 a6f8f7383a85caf1
+01:37:05 run hk20261124-01-unv-tag (round 1)
+01:41:46 run hk20261124-01-unv-tag: valid; correct True; ack/s 69.61830616590605; SlowDown 0.5456707382985623
+01:41:47 run hk20261124-02-unv-candidate (round 1)
+01:46:32 run hk20261124-02-unv-candidate: valid; correct True; ack/s 108.09288191305305; SlowDown 0.01011778918755663
+01:46:33 run hk20261124-03-ver-tag (round 1)
+01:52:05 run hk20261124-03-ver-tag: valid; correct True; ack/s 66.62867868741601; SlowDown 0.5490108416228904
+01:52:06 run hk20261124-04-ver-candidate (round 1)
+01:58:23 run hk20261124-04-ver-candidate: valid; correct True; ack/s 120.02329832786569; SlowDown 0.006047278724573941
+01:58:24 run hk20261124-05-retry-tag (round 1)
+02:03:28 run hk20261124-05-retry-tag: valid; correct True; ack/s 77.85309162819316; SlowDown 0.052937637858431925
+02:03:29 run hk20261124-06-retry-candidate (round 1)
+02:08:14 run hk20261124-06-retry-candidate: valid; correct True; ack/s 113.87699333680229; SlowDown 0.0
+02:08:15 run hk20261124-07-unv16-tag (round 1)
+02:14:26 run hk20261124-07-unv16-tag: valid; correct True; ack/s 504.7943915649424; SlowDown 0.00032915308910174123
+02:14:27 run hk20261124-08-unv16-candidate (round 1)
+02:19:33 run hk20261124-08-unv16-candidate: valid; correct True; ack/s 503.02956722227106; SlowDown 0.0
+02:19:35 run hk20261124-09-fdbstall-candidate (round 1)
+02:29:57 run hk20261124-09-fdbstall-candidate: valid; correct True; ack/s 68.77721357406402; SlowDown 0.026952315134761574
+02:29:58 run hk20261124-10-gwkill-candidate (round 1)
+02:40:20 run hk20261124-10-gwkill-candidate: valid; correct True; ack/s 112.67948225892819; SlowDown 7.205995388162951e-05
+02:40:21 run hk20261124-11-ver-candidate (round 2)
+02:46:52 run hk20261124-11-ver-candidate: valid; correct True; ack/s 126.17540163650541; SlowDown 0.004322766570605188
+02:46:53 run hk20261124-12-ver-tag (round 2)
+02:52:32 run hk20261124-12-ver-tag: valid; correct True; ack/s 73.78337999614224; SlowDown 0.5465718638902997
+02:52:33 run hk20261124-13-retry-candidate (round 2)
+02:57:16 run hk20261124-13-retry-candidate: valid; correct True; ack/s 84.14659372378563; SlowDown 0.0
+02:57:17 run hk20261124-14-retry-tag (round 2)
+03:02:21 run hk20261124-14-retry-tag: valid; correct True; ack/s 70.66203660211578; SlowDown 0.052712497254557435
+03:02:23 run hk20261124-15-unv16-candidate (round 2)
+03:07:27 run hk20261124-15-unv16-candidate: valid; correct True; ack/s 464.368640223697; SlowDown 0.0
+03:07:29 run hk20261124-16-unv16-tag (round 2)
+03:12:33 run hk20261124-16-unv16-tag: valid; correct True; ack/s 500.1118157122787; SlowDown 0.0004651626407947636
+03:12:35 run hk20261124-17-unv-candidate (round 2)
+03:17:19 run hk20261124-17-unv-candidate: valid; correct True; ack/s 113.92594614503288; SlowDown 0.003192106790481718
+03:17:20 run hk20261124-18-unv-tag (round 2)
+03:22:28 run hk20261124-18-unv-tag: valid; correct True; ack/s 67.12722162954005; SlowDown 0.5444607235433337
+03:22:30 run hk20261124-19-gwkill-candidate (round 2)
+03:32:53 run hk20261124-19-gwkill-candidate: valid; correct True; ack/s 107.98349689561137; SlowDown 0.00043442664037828536
+03:32:54 run hk20261124-20-fdbstall-candidate (round 2)
+03:43:14 run hk20261124-20-fdbstall-candidate: valid; correct True; ack/s 68.68779410945464; SlowDown 0.028951669390614054
+03:43:15 run hk20261124-21-retry-tag (round 3)
+03:48:20 run hk20261124-21-retry-tag: valid; correct True; ack/s 75.97830013600775; SlowDown 0.052804602424491476
+03:48:21 run hk20261124-22-retry-candidate (round 3)
+03:53:05 run hk20261124-22-retry-candidate: valid; correct True; ack/s 113.62725170382345; SlowDown 0.0
+03:53:07 run hk20261124-23-unv16-tag (round 3)
+03:59:59 run hk20261124-23-unv16-tag: valid; correct True; ack/s 521.6726655393435; SlowDown 0.0003822751744130483
+04:00:00 run hk20261124-24-unv16-candidate (round 3)
+04:05:48 run hk20261124-24-unv16-candidate: valid; correct True; ack/s 508.7407263645653; SlowDown 0.0
+04:05:49 run hk20261124-25-unv-tag (round 3)
+04:10:53 run hk20261124-25-unv-tag: valid; correct True; ack/s 70.70081954808555; SlowDown 0.5461718916613351
+04:10:55 run hk20261124-26-unv-candidate (round 3)
+04:15:40 run hk20261124-26-unv-candidate: valid; correct True; ack/s 112.3908274486436; SlowDown 0.0008848252470137148
+04:15:41 run hk20261124-27-ver-tag (round 3)
+04:21:27 run hk20261124-27-ver-tag: valid; correct True; ack/s 61.48327973065516; SlowDown 0.5536165603562402
+04:21:28 run hk20261124-28-ver-candidate (round 3)
+04:27:51 run hk20261124-28-ver-candidate: valid; correct True; ack/s 105.75019713889924; SlowDown 0.01372186247301881

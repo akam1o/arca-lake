@@ -1,0 +1,26 @@
+{
+ "arms": {
+  "candidate": {
+   "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+   "commit": "b4a6a406e3f8a8cfa9a08e8a1b0e3b9574394677",
+   "features": "fdb",
+   "label": "candidate (PR head)",
+   "locked": true,
+   "profile": "release",
+   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+   "sha256": "a6f8f7383a85caf11f63d9c6eff0c0ee5c5a1066d9582e38e835f8a8c7f6a9bc"
+  },
+  "tag": {
+   "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+   "commit": "5601018a92b2eb9eb4c9106b43a637545056963c",
+   "features": "fdb",
+   "label": "tag rebuild (v0.1.0 tag commit rebuilt on the test host; not the published artefact)",
+   "locked": true,
+   "profile": "release",
+   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+   "sha256": "0aecd8cc19c2787bb162a1251b230cf8d17fc767720f2b9a033f36d7a72f9a0b"
+  }
+ },
+ "built": "2026-11-24T01:20:47+0900",
+ "contend_sha256": "abd26799f5c4be513890a262f468de101a4b9cf5b3bb8cfcc78d56cda7846789"
+}

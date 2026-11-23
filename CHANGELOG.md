@@ -11,6 +11,24 @@ break compatibility).
 
 ## [Unreleased]
 
+### Changed
+
+- Concurrent writes to one key through a gateway take turns (R-112,
+  [ADR-0041](docs/adr/0041-hot-key-commit-queue.md)): PUT, DELETE and
+  CompleteMultipartUpload on a key wait for the commit ahead of them
+  instead of conflicting until refused, and conflicts with other gateways
+  back off with jitter. A wait beyond `--commit-queue-wait-ms` (2 s) or
+  more than `--commit-queue-max-waiters` (256) waiting writes is answered
+  `503 SlowDown` before any commit attempt (nothing applied).
+  `--commit-queue off` restores the previous behaviour. Measured with 64
+  writers on one key through four gateways: SlowDown 55 % → under 1 %,
+  acknowledged PUT/s 1.6–1.7 ×, acknowledged PUT latency higher (p50
+  about 200 → 450 ms, p99 about 0.8 → 1.7 s); 16 keys within 3–6 %
+  ([results](docs/verification/0.2.0-hot-key-results.md); measured
+  against the 0.1.0 tag, so the gain is of all 0.2.0 changes, the queue
+  being its cause by mechanism; an on/off control is pending). Every
+  DELETE form (single, version-specific, DeleteObjects entries) takes
+  the same turn and backoff. No format change.
 - Gateway deletes of its own partial cache copies (a population that
   could not write every member) now carry the identity token each node
   acknowledged, read with the cluster state every 2 s, so nodes holding
