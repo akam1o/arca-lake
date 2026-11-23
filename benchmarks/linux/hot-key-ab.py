@@ -19,8 +19,8 @@ test, as in Phase 4.1); host C the generator and checker (`contend`).
 
 Hosts come only from the environment and are replaced by <host-a|b|c> in
 every output; the output directory is passed through sanitize.py at the
-end. Work areas: /mnt/arca-fdb/v020-perf/ on host A, ~/r110-dev/v020-perf/
-on hosts B and C, each with the marker file `.owner`; a run lives in
+end. Work areas: /mnt/arca-fdb/v020-perf/ on hosts A and B,
+~/r110-dev/v020-perf/ on host C, each with the marker file `.owner`; a run lives in
 <area>/runs/<run id>/ (its own `.owner`). Only processes whose pid file is
 in the run directory and whose command line names it are signalled. Time
 is bounded per step, per run (RUN_BOUND_S) and for the campaign
@@ -45,7 +45,9 @@ HERE = Path(__file__).resolve().parent
 HOSTS = {h: os.environ.get(f"HOST_{h.upper()}", "") for h in "abc"}
 CAMPAIGN = os.environ.get("CAMPAIGN") or time.strftime("hk%Y%m%d-%H%M%S")
 OUT = Path(os.environ.get("OUT", str(HERE / "results" / f"v020-hot-key-{CAMPAIGN}")))
-AREA = {"a": "/mnt/arca-fdb/v020-perf", "b": "$HOME/r110-dev/v020-perf", "c": "$HOME/r110-dev/v020-perf"}
+# Hosts A and B on their data disks (A's root is nearly full; the builds
+# need more than B's root should give); host C in the home directory.
+AREA = {"a": "/mnt/arca-fdb/v020-perf", "b": "/mnt/arca-fdb/v020-perf", "c": "$HOME/r110-dev/v020-perf"}
 MARKER = "0.2.0 perf (agent)"
 ENV = "ARCA_INSECURE_PLAINTEXT=1 ARCA_FDB_INSECURE_PLAINTEXT=1"
 TAG_COMMIT = "5601018"
@@ -70,7 +72,8 @@ GW_PORT, GW_METRICS = 9701, 9731
 BUCKET = "hot"
 SETTLE_MIN_S = {"perf": 0, "correctness": 420}
 SETTLE_STABLE_S, SETTLE_MAX_S = 60, 900
-BUILD_FREE_MIN = 16 << 30
+BUILD_FREE_MIN = 12 << 30
+FS_FREE_MIN = 5 << 30  # every filesystem a run touches, checked before each run
 GUARD = {"mem_avail_min": 1 << 30, "root_free_min": 3 << 30}
 GEN_CPU_BUSY, GEN_CPU_SECS = 0.90, 10
 FOREIGN_CORES, FOREIGN_SECS = 0.5, 10
@@ -592,6 +595,9 @@ def build():
         ssh("b", f"cp {b}/target-{arm}/release/arca-lake {binpath('b', arm)}", check=True)
         if arm == "candidate":
             ssh("b", f"cp {b}/target-{arm}/release/contend {b}/bin/contend", check=True)
+        if not os.environ.get("KEEP_TARGETS"):
+            # One target directory at a time on the host's disk.
+            ssh("b", f"rm -rf {b}/target-{arm}", timeout=600)
         _, sha, _ = ssh("b", f"sha256sum {binpath('b', arm)} | cut -c1-64", check=True)
         lines = out.strip().splitlines()
         record["arms"][arm] = {"commit": commit, "label": ARM_LABEL[arm], "sha256": sha.strip(),
@@ -613,9 +619,6 @@ def build():
         _, got, _ = ssh(h, f"sha256sum {dst} | cut -c1-64", check=True)
         if got.strip() != sha:
             raise RuntimeError(f"SHA-256 mismatch after copy to host {h}")
-    if not os.environ.get("KEEP_TARGETS"):
-        # The runs need free root space (plan §7); the binaries are kept.
-        ssh("b", f"rm -rf {b}/target-tag {b}/target-candidate", timeout=600)
     text = json.dumps(record, indent=1, sort_keys=True)
     for h in "abc":
         ssh(h, f"cat > {AREA[h]}/build-record.json", stdin=text, check=True)
@@ -628,6 +631,18 @@ def build():
 def build_record():
     _, out, _ = ssh("b", f"cat {AREA['b']}/build-record.json", check=True)
     return json.loads(out)
+
+
+def low_filesystems():
+    """Filesystems (root and the work area) below FS_FREE_MIN on any host."""
+    low = []
+    for h in "abc":
+        _, out, _ = ssh(h, f"df -B1 --output=avail,target / {AREA[h]} | tail -n +2")
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) < FS_FREE_MIN:
+                low.append(f"{h}:{parts[1]} {int(parts[0]) >> 20} MiB")
+    return low
 
 
 def binaries_match(rec):
@@ -1059,6 +1074,11 @@ def campaign():
         item = queue.pop(0)
         if time.time() + EST_RUN_S[kind(item["scenario"])] > deadline:
             stopped = "campaign time budget reached"
+            log(stopped)
+            break
+        low = low_filesystems()
+        if low:
+            stopped = f"filesystems below 5 GiB: {low}"
             log(stopped)
             break
         idx += 1
