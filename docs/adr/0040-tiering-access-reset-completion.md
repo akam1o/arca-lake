@@ -42,39 +42,46 @@ decided a move once the move is done; a pass that did not do it consumes
 nothing (Phase 3.12 liveness audit finding 15: a generation whose every
 move failed keeps its record). The rule is made precise:
 
-1. **Completion condition.** After the chunk loop, the pass reads the
-   generation's chunk records back and resets the access record only when
-   every chunk is in the target tier, or past it in the move's direction
+1. **Completion condition.** After the chunk loop, the pass resets the
+   access record only when every chunk is in the target tier, or past it in the move's direction
    (a promotion: the target tier or a higher one; a demotion: the target
    tier or a lower one), whoever put it there (this pass, an earlier one,
    another mover). The outcomes of the loop do not decide it: a refused
    switch whose chunk another mover put in the target tier counts as done
    (the Phase 3.12 audit's "found there or changed"); one whose chunk is
-   still in its source does not. A chunk whose group is unknown to the
-   pass's group snapshot, or whose generation is gone, counts as not done.
+   still in its source does not. The chunk records are read in the
+   reset's own transaction, against the groups of the pass's snapshot in
+   the accepted tiers: a switch between that check and the reset
+   conflicts with it (review). A chunk whose group is unknown to the
+   snapshot, or whose generation is gone, counts as not done.
 2. **Unfinished chunks.** A generation with a chunk left behind keeps its
    whole access record and is examined again by the next pass. The pass
    judges a generation by the tiers of all its chunks: promotion from its
    lowest chunk (target: one tier above it), demotion from its highest
-   (target: one tier below it); a chunk already in the target tier, or
+   (target: one tier below it), each the first chunk at that tier in
+   chunk order; a chunk already in the target tier, or
    past it, is not moved again. A generation whose chunks share one tier
-   is judged exactly as before. So a partly moved generation is finished
+   is judged exactly as before, by its first chunk's group. So a partly moved generation is finished
    by a later pass while its record still qualifies (a promotion within
    `promote_window` of its last read), or demoted as a whole once it is
    cold.
 3. **Accesses recorded during the pass.** The reset consumes only the
-   count the pass read (`seen`): in one transaction, still fenced by the
+   count the pass decided on (`seen`: the effective count, 0 for a record
+   last read before the promotion cutoff, ADR-0035 §10.4): in one
+   transaction, still fenced by the
    tiering record's generation and writing nothing for a generation that
    is gone, it writes `count = current − seen` (saturating) and
    `last_ms = max(now, current.last_ms)`
-   (`object::reset_access_seen`). Reads flushed between the pass's read
-   and its reset therefore survive, with their time. The subtraction
-   assumes the count only grew meanwhile. The one way it can shrink
-   under a fenced pass is the flush's promotion-cutoff rule (ADR-0035
-   §10.4) after a cutoff moved within the same record generation (an
-   acknowledgement by a new cluster incarnation, after a restore). The
-   count then holds only new reads, and up to `seen` of them are
-   consumed: never more than the previous reset, which consumed all.
+   (`object::reset_access_seen`), where `current` counts as 0 when its
+   `last_ms` is before the tiering record's cutoff (as the flush treats
+   it). Reads flushed between the pass's read and its reset therefore
+   survive, with their time, and an old count is not carried over. The
+   subtraction assumes the count only grew meanwhile, apart from the
+   cutoff rule. One case remains: the cutoff moves within the same
+   record generation (an acknowledgement by a new cluster incarnation,
+   after a restore), and the pass's fence holds the older one. Up to
+   `seen` new reads are then consumed, never more than the previous
+   reset, which consumed all.
 
 The rest is unchanged: `PolicyChanged` ends the pass with nothing reset;
 a target at its reserve ends the pass before the reset; the in-flight
@@ -92,8 +99,9 @@ behaviour for their other callers.
 
 ## 4. Costs and residual
 
-- One extra read-only transaction (the chunk records read back) per
-  generation a pass chose for a move; moves themselves copy whole chunks.
+- The reset's transaction reads the generation's chunk records (one
+  range read per generation a pass chose for a move; moves themselves
+  copy whole chunks).
 - A generation with a chunk that can never move (unreadable, a group
   without a record) keeps its record: each pass in which it qualifies
   tries that chunk again, and skips its other chunks. Before this
@@ -118,8 +126,15 @@ tests): `a_switch_refused_by_a_target_epoch_change_resets_no_access_record`,
 `a_generation_with_a_failed_chunk_keeps_its_access_record`,
 `reads_recorded_during_a_pass_survive_its_reset`: all five fail on the
 previous pass (each at its access-record assertion) and pass with this
-change; the earlier tiering tests are unchanged and pass. Unit test of
-the reset: `ops::tiering::tests::a_reset_by_a_pass_keeps_the_reads_recorded_since`.
+change; the earlier tiering tests are unchanged and pass. From the
+review: `a_read_after_the_cutoff_during_a_demotion_survives_its_reset`
+(fails when the raw count is subtracted) and
+`a_demotion_of_a_record_before_the_cutoff_leaves_no_old_count` (fails
+when the reset does not apply the cutoff to the current count); unit
+tests `ops::tiering::tests::a_reset_by_a_pass_keeps_the_reads_recorded_since`
+(the reset, its placement check, fence and finished generation) and
+`tiering::tests::a_generation_is_judged_by_the_first_chunk_at_each_end`
+(fails with the last chunk at the highest tier).
 Not covered: the target at its reserve after one chunk (the pass ends
 before the reset, as before), and FoundationDB-backed variants of the
 five tests.

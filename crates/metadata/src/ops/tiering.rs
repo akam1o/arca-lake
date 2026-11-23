@@ -594,26 +594,49 @@ mod tests {
     }
 
     /// A pass's reset consumes only the reads it decided on (R-118,
-    /// ADR-0040): reads recorded since are kept with their time; the
-    /// policy fence and a finished generation are handled as by
-    /// `reset_access_fenced`.
+    /// ADR-0040): reads recorded since are kept with their time; nothing is
+    /// written while a chunk is outside the accepted groups, for a
+    /// generation that is gone, or after the policy moved on.
     #[test]
     fn a_reset_by_a_pass_keeps_the_reads_recorded_since() {
         futures::executor::block_on(async {
-            use crate::ops::object::{self, AccessRecord};
+            use crate::ops::object::{self, AccessRecord, AccessReset};
+            use crate::records::{ChunkRecord, DurablePlacement};
             let kv = MemKv::default();
             let g = [6u8; 16];
+            let chunk = |group_id| ChunkRecord {
+                chunk_id: [1; 16],
+                offset: 0,
+                len: 1,
+                scheme: "s".into(),
+                data_shards: 1,
+                parity_shards: 1,
+                crc32c: 0,
+                placement: DurablePlacement { group_id, epoch: 1 },
+            };
             let mut tx = kv.begin().await.unwrap();
             tx.set(&keys::gen_header(&g), b"h");
+            tx.set(
+                &keys::gen_chunk(&g, 0),
+                &crate::records::encode(&chunk(1)).unwrap(),
+            );
+            tx.set(
+                &keys::gen_chunk(&g, 1),
+                &crate::records::encode(&chunk(2)).unwrap(),
+            );
             tx.commit().await.unwrap();
             seed_if_absent(&kv, &policy(1800), 1).await.unwrap();
             object::record_access(&kv, &g, 10, 7).await.unwrap();
-            // Nothing recorded since: the record is reset.
-            assert!(
-                object::reset_access_seen(&kv, &g, 20, Some(1), 7)
+            let reset = async |now, fence, seen, arrived: &[u64]| {
+                object::reset_access_seen(&kv, &g, now, fence, seen, arrived)
                     .await
                     .unwrap()
-            );
+            };
+            // Chunk 1 is not in an accepted group: nothing written.
+            assert_eq!(reset(20, Some(1), 7, &[1]).await, AccessReset::Unfinished);
+            assert_eq!(object::access_of(&kv, &g).await.unwrap().unwrap().count, 7);
+            // Nothing recorded since: the record is reset.
+            assert_eq!(reset(20, Some(1), 7, &[1, 2]).await, AccessReset::Reset);
             assert_eq!(
                 object::access_of(&kv, &g).await.unwrap(),
                 Some(AccessRecord {
@@ -623,11 +646,7 @@ mod tests {
             );
             // 4 reads during the next pass, which saw none.
             object::record_access(&kv, &g, 35, 4).await.unwrap();
-            assert!(
-                object::reset_access_seen(&kv, &g, 30, Some(1), 0)
-                    .await
-                    .unwrap()
-            );
+            assert_eq!(reset(30, Some(1), 0, &[1, 2]).await, AccessReset::Reset);
             assert_eq!(
                 object::access_of(&kv, &g).await.unwrap(),
                 Some(AccessRecord {
@@ -636,29 +655,25 @@ mod tests {
                 })
             );
             // A pass that saw more than is left consumes what is left.
-            assert!(
-                object::reset_access_seen(&kv, &g, 40, Some(1), 9)
-                    .await
-                    .unwrap()
-            );
+            assert_eq!(reset(40, Some(1), 9, &[1, 2]).await, AccessReset::Reset);
             assert_eq!(object::access_of(&kv, &g).await.unwrap().unwrap().count, 0);
             // A pass of an earlier policy writes nothing.
             object::record_access(&kv, &g, 45, 2).await.unwrap();
             admin_change(&kv, &AdminChange::SetPolicy(policy(600)), 50)
                 .await
                 .unwrap();
-            assert!(
-                !object::reset_access_seen(&kv, &g, 60, Some(1), 2)
-                    .await
-                    .unwrap()
+            assert_eq!(
+                reset(60, Some(1), 2, &[1, 2]).await,
+                AccessReset::PolicyChanged
             );
             assert_eq!(object::access_of(&kv, &g).await.unwrap().unwrap().count, 2);
             // A generation that is gone gets no record.
             let gone = [7u8; 16];
-            assert!(
-                object::reset_access_seen(&kv, &gone, 60, None, 0)
+            assert_eq!(
+                object::reset_access_seen(&kv, &gone, 60, None, 0, &[1, 2])
                     .await
-                    .unwrap()
+                    .unwrap(),
+                AccessReset::Unfinished
             );
             assert_eq!(object::access_of(&kv, &gone).await.unwrap(), None);
         });

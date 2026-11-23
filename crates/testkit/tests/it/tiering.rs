@@ -1655,3 +1655,97 @@ async fn reads_recorded_during_a_pass_survive_its_reset() {
     );
     c.shutdown().await;
 }
+
+/// R-118 review: a record last read before the promotion cutoff counts no
+/// reads; a demotion pass consumes none of the reads recorded after the
+/// cutoff while it ran (the flush replaced the old count), and leaves no
+/// old count behind when there are none.
+async fn a_demotion_of_a_record_before_the_cutoff(read_during_the_pass: bool) {
+    let (c, fast) = cluster().await;
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "o",
+        payload(usize::try_from(MIB / 2).unwrap(), 119),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let m = c.manifest(BUCKET, "o").await;
+    let generation = m.pointer.generation;
+    let (index, record) = m.chunks[0].clone();
+    let groups = cluster::list_groups(c.meta.as_ref()).await.unwrap();
+    let source = groups
+        .iter()
+        .find(|g| g.id == record.placement.group_id)
+        .unwrap()
+        .clone();
+    let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(c.meta.as_ref())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.id, n))
+        .collect();
+    let o = migrate_chunk(
+        c.meta.as_ref(),
+        &c.clients,
+        &Coders::default(),
+        &addr_of(&nodes),
+        &source,
+        &fast,
+        &generation,
+        index,
+        &record,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(o, MigrateOutcome::Switched { .. }), "{o:?}");
+    let t0 = now_ms();
+    object::record_access(c.meta.as_ref(), &generation, t0 - 20_000, 9)
+        .await
+        .unwrap();
+    let fence = enabled_record(&c, t0 - 10_000, 0).await;
+    assert_eq!(fence.promotion_from_ms, t0 - 10_000);
+    let hook = read_during_the_pass.then(|| {
+        once_before_switch(c.meta.clone(), move |meta| {
+            Box::pin(async move {
+                let update = object::AccessUpdate {
+                    generation,
+                    last_ms: t0,
+                    reads: 1,
+                    oldest_ms: t0,
+                };
+                assert_eq!(
+                    object::record_accesses(meta.as_ref(), &[update], 0, now_ms)
+                        .await
+                        .unwrap(),
+                    vec![object::AccessWrite::Written]
+                );
+            })
+        })
+    });
+    let at = t0 + 1_800_000;
+    let report = pass_with(&c, fence, at, hook).await;
+    assert_eq!(report.demoted_chunks, 1, "{report:?}");
+    assert_eq!(placements(&c, "o").await, vec![source.id]);
+    assert_eq!(
+        access(&c, &m).await,
+        Some(object::AccessRecord {
+            last_ms: at,
+            count: u64::from(read_during_the_pass)
+        }),
+        "the reset kept an old count or consumed a new read"
+    );
+    c.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_read_after_the_cutoff_during_a_demotion_survives_its_reset() {
+    a_demotion_of_a_record_before_the_cutoff(true).await;
+}
+
+#[tokio::test]
+async fn a_demotion_of_a_record_before_the_cutoff_leaves_no_old_count() {
+    a_demotion_of_a_record_before_the_cutoff(false).await;
+}

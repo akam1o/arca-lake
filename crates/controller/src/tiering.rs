@@ -316,10 +316,8 @@ async fn sweep<S: KvStore>(
             };
             let placed: Vec<(usize, &GroupRecord)> =
                 manifest.iter().filter_map(|(_, r)| tier_of(r)).collect();
-            let (Some(&(lowest, lowest_group)), Some(&(highest, highest_group))) = (
-                placed.iter().min_by_key(|(t, _)| *t),
-                placed.iter().max_by_key(|(t, _)| *t),
-            ) else {
+            let Some(((lowest, lowest_group), (highest, highest_group))) = tier_span(&placed)
+            else {
                 continue;
             };
             // ADR-0035 §10.4: counts from before the promotion cutoff do not
@@ -360,14 +358,15 @@ async fn sweep<S: KvStore>(
             };
             // A chunk in the target tier, or past it in the move's
             // direction, has nothing left to do.
+            let reached = |t: usize| {
+                if promote {
+                    t >= target_index
+                } else {
+                    t <= target_index
+                }
+            };
             let arrived = |r: &arca_lake_metadata::records::ChunkRecord| {
-                tier_of(r).is_some_and(|(t, _)| {
-                    if promote {
-                        t >= target_index
-                    } else {
-                        t <= target_index
-                    }
-                })
+                tier_of(r).is_some_and(|(t, _)| reached(t))
             };
             for (index, record) in &manifest {
                 let Some(source) = groups.get(&record.placement.group_id) else {
@@ -490,44 +489,47 @@ async fn sweep<S: KvStore>(
             }
             // R-118, ADR-0040: the record is reset only once every chunk of
             // the generation is in the target tier (moved by this pass or
-            // found there, by whichever mover), read back after the moves.
-            // A generation with a chunk left behind (failed, refused, held
-            // by another move) keeps its record and is tried again; a
-            // generation whose every move failed keeps it too (Phase 3.12
-            // liveness audit).
-            let complete = match object::read_manifest_of(meta, generation).await {
-                Ok(Some(back)) => !back.is_empty() && back.iter().all(|(_, r)| arrived(r)),
-                Ok(None) => false,
-                Err(e) => {
-                    report.last = before;
-                    return Err(e.into());
-                }
-            };
-            if !complete {
-                tracing::debug!(
-                    generation = %arca_lake_metadata::ops::compat::hex(generation),
-                    "tiering: a chunk is not in the target tier yet; access record kept"
-                );
-            }
-            // Only the reads this pass decided on are consumed: those
-            // recorded since it read the record are kept.
-            if complete
-                && !object::reset_access_seen(
-                    meta,
-                    generation,
-                    now_ms,
-                    fence.map(|f| f.generation),
-                    access.count,
-                )
-                .await?
+            // found there, by whichever mover), checked in the reset's
+            // transaction. A generation with a chunk left behind (failed,
+            // refused, held by another move) keeps its record and is tried
+            // again; a generation whose every move failed keeps it too
+            // (Phase 3.12 liveness audit). Only the reads this pass decided
+            // on are consumed: those recorded since it read the record are
+            // kept.
+            let accepted: Vec<u64> = groups
+                .values()
+                .filter(|g| tier_index(&g.tier).is_some_and(reached))
+                .map(|g| g.id)
+                .collect();
+            match object::reset_access_seen(
+                meta,
+                generation,
+                now_ms,
+                fence.map(|f| f.generation),
+                count,
+                &accepted,
+            )
+            .await?
             {
-                // ADR-0035 §10.1: the policy changed after the last switch;
-                // the reads recorded since are kept and the pass ends.
-                tracing::info!("tiering: the tiering record changed, pass stopped before a reset");
-                report.policy_changed = true;
-                // Examined again under the new policy.
-                report.last = before;
-                return Ok(());
+                object::AccessReset::Reset => {}
+                object::AccessReset::Unfinished => {
+                    tracing::debug!(
+                        generation = %arca_lake_metadata::ops::compat::hex(generation),
+                        "tiering: a chunk is not in the target tier yet; access record kept"
+                    );
+                }
+                object::AccessReset::PolicyChanged => {
+                    // ADR-0035 §10.1: the policy changed after the last
+                    // switch; the reads recorded since are kept and the pass
+                    // ends.
+                    tracing::info!(
+                        "tiering: the tiering record changed, pass stopped before a reset"
+                    );
+                    report.policy_changed = true;
+                    // Examined again under the new policy.
+                    report.last = before;
+                    return Ok(());
+                }
             }
         }
         if page.len() < 256 {
@@ -536,6 +538,17 @@ async fn sweep<S: KvStore>(
         }
     }
     Ok(())
+}
+
+/// The lowest and the highest of a generation's chunks (`(tier, group)` in
+/// chunk order), each the first chunk at its tier: a generation in one
+/// tier is judged by its first chunk's group.
+fn tier_span<T: Copy>(placed: &[(usize, T)]) -> Option<((usize, T), (usize, T))> {
+    Some((
+        *placed.iter().min_by_key(|(t, _)| *t)?,
+        // `max_by_key` keeps the last of equal keys.
+        *placed.iter().rev().max_by_key(|(t, _)| *t)?,
+    ))
 }
 
 /// The group of `tier` a generation moves to: the Active durable groups of
@@ -570,4 +583,24 @@ fn target_group<'a>(
     let salt = u64::from_le_bytes(generation[8..].try_into().unwrap_or_default());
     let i = usize::try_from(salt % pool.len() as u64).unwrap_or(0);
     Some(pool[i])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tier_span;
+
+    /// The chunk a generation is judged by is the first at its tier, as the
+    /// first chunk was before ADR-0040 for a generation in one tier (review).
+    #[test]
+    fn a_generation_is_judged_by_the_first_chunk_at_each_end() {
+        assert_eq!(tier_span::<u64>(&[]), None);
+        assert_eq!(
+            tier_span(&[(1, 10), (1, 11), (1, 12)]),
+            Some(((1, 10), (1, 10)))
+        );
+        assert_eq!(
+            tier_span(&[(0, 10), (1, 11), (0, 12), (1, 13)]),
+            Some(((0, 10), (1, 11)))
+        );
+    }
 }

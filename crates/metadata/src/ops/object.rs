@@ -1890,11 +1890,28 @@ pub async fn reset_access_fenced<S: KvStore>(
     .await
 }
 
-/// [`reset_access_fenced`] consuming only the `seen` reads a pass decided
-/// on (R-118, ADR-0040): reads recorded since it read the record are kept,
-/// the count becoming `count - seen` and `last_ms` the later of `now_ms`
-/// and the record's. `false`, nothing written, as for
-/// [`reset_access_fenced`].
+/// What [`reset_access_seen`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessReset {
+    /// The record was reset.
+    Reset,
+    /// Nothing written: a chunk of the generation is not placed in one of
+    /// the accepted groups, or the generation is gone.
+    Unfinished,
+    /// Nothing written: the tiering record moved on or tiering was
+    /// disabled (ADR-0035 §10.1).
+    PolicyChanged,
+}
+
+/// Reset a generation's access record after a tiering move, consuming
+/// only the `seen` reads the pass decided on (R-118, ADR-0040), and only
+/// while every chunk of the generation is placed in one of `arrived` (the
+/// groups of the move's target tier, or past it), checked in the same
+/// transaction. Reads recorded since the pass read the record are kept:
+/// the count becomes `count - seen` and `last_ms` the later of `now_ms`
+/// and the record's; a count last read before the tiering record's
+/// promotion cutoff counts as 0, as the flush treats it (ADR-0035 §10.4).
+/// Fenced by `policy_generation` as [`reset_access_fenced`].
 ///
 /// # Errors
 ///
@@ -1905,35 +1922,54 @@ pub async fn reset_access_seen<S: KvStore>(
     now_ms: u64,
     policy_generation: Option<u64>,
     seen: u64,
-) -> Result<bool> {
+    arrived: &[u64],
+) -> Result<AccessReset> {
     transact(
         store,
-        (*generation, now_ms, policy_generation, seen),
+        (*generation, now_ms, policy_generation, seen, arrived),
         |tx, env| {
             Box::pin(async move {
-                let (generation, now_ms, policy_generation, seen) = *env;
-                if let Some(g) = policy_generation {
-                    let t: Option<crate::ops::tiering::TieringRecord> =
-                        read(tx, &keys::tiering()).await?;
-                    if t.is_none_or(|t| !t.enabled || t.generation != g) {
-                        return Ok(false);
-                    }
+                let (generation, now_ms, policy_generation, seen, arrived) = *env;
+                let t: Option<crate::ops::tiering::TieringRecord> =
+                    read(tx, &keys::tiering()).await?;
+                if let Some(g) = policy_generation
+                    && t.as_ref().is_none_or(|t| !t.enabled || t.generation != g)
+                {
+                    return Ok(AccessReset::PolicyChanged);
                 }
+                let cutoff = t.map_or(0, |t| t.promotion_from_ms);
                 if tx.get(&keys::gen_header(&generation)).await?.is_none() {
-                    return Ok(true);
+                    return Ok(AccessReset::Unfinished);
+                }
+                let chunks = tx
+                    .get_range(&keys::gen_chunks_range(&generation), usize::MAX, false)
+                    .await?;
+                if chunks.is_empty() {
+                    return Ok(AccessReset::Unfinished);
+                }
+                for (_, v) in &chunks {
+                    let r: ChunkRecord = crate::records::decode(v)?;
+                    if !arrived.contains(&r.placement.group_id) {
+                        return Ok(AccessReset::Unfinished);
+                    }
                 }
                 let current: AccessRecord = read(tx, &keys::access(&generation))
                     .await?
                     .unwrap_or_default();
+                let count = if current.last_ms < cutoff {
+                    0
+                } else {
+                    current.count
+                };
                 write(
                     tx,
                     &keys::access(&generation),
                     &AccessRecord {
                         last_ms: now_ms.max(current.last_ms),
-                        count: current.count.saturating_sub(seen),
+                        count: count.saturating_sub(seen),
                     },
                 )?;
-                Ok(true)
+                Ok(AccessReset::Reset)
             })
         },
     )
