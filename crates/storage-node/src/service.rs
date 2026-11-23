@@ -99,7 +99,9 @@ pub struct StorageNodeService {
     /// Destructive RPCs hold it shared from their fence checks to the end of
     /// the store mutation; raising an epoch or adopting an incarnation holds
     /// it exclusively. Once such an update is acknowledged, no delete that
-    /// passed the old fence can still run (Phase 3.5 audit SEC-6).
+    /// passed the old fence can still run (Phase 3.5 audit SEC-6). Shard
+    /// writes hold it shared from their re-check after the body to the end
+    /// of the store write (ADR-0037).
     ///
     /// Owned guards (Phase 3.9): the shared guard moves into the blocking
     /// store call, so that a cancelled RPC cannot release it while its
@@ -142,6 +144,12 @@ pub struct StorageNodeService {
     side_bytes: AtomicU64,
     /// Load signals for adaptive background work (ADR-0018).
     load: crate::load::LoadSampler,
+    /// The store held a live record when opened (ADR-0037): only such a
+    /// node may take a write before it adopted an incarnation, and only
+    /// outside strict mode.
+    data_at_open: bool,
+    /// See [`Self::writes_unproven`].
+    writes_unproven: AtomicU64,
 }
 
 /// Decrements a gauge when dropped (`PutShard` streams in flight).
@@ -291,6 +299,8 @@ impl StorageNodeService {
             class_bytes: Default::default(),
             side_bytes: AtomicU64::new(0),
             load: crate::load::LoadSampler::new(&cfg.store.dir),
+            data_at_open: report.live_shards > 0,
+            writes_unproven: AtomicU64::new(0),
         })
     }
 
@@ -600,16 +610,60 @@ impl StorageNodeService {
         }
     }
 
-    /// Refuse a write whose incarnation differs from the one this node
-    /// adopted (R-117): the writer belongs to another cluster (it reached
-    /// this node at an address it still maps to one of its own). Unlike a
-    /// delete, an empty incarnation is accepted: a writer may hold none
-    /// (tools, a store before its cluster state).
-    fn check_write_incarnation(&self, incarnation: &[u8]) -> Result<(), tonic::Status> {
-        if incarnation.is_empty() {
-            return Ok(());
+    /// Refuse a write that is not provably of this node's cluster (R-117,
+    /// ADR-0037): one carrying another incarnation than the node adopted
+    /// (another cluster's writer at an address it still maps to one of its
+    /// own), and every write to a node that held no data at start and has
+    /// adopted none yet (it cannot tell its cluster's writers from
+    /// another's before its controller reached it).
+    ///
+    /// Strict (told [`pb::WRITE_OWNERSHIP_SCHEMA`] or later), it also
+    /// refuses a write carrying none, and any write while it adopted none.
+    /// Before that (a cluster that may still run 0.1.0 processes), those
+    /// two are accepted as 0.1.0 does: the function returns `true` for
+    /// them, and the caller counts them ([`Self::writes_unproven`]).
+    fn check_write_incarnation(&self, incarnation: &[u8]) -> Result<bool, tonic::Status> {
+        let (held, strict) = {
+            let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+            (c.incarnation, c.schema_floor >= pb::WRITE_OWNERSHIP_SCHEMA)
+        };
+        let carried = || {
+            if incarnation.is_empty() {
+                "none".to_string()
+            } else {
+                crate::cluster::hex(incarnation)
+            }
+        };
+        match held {
+            None if strict || !self.data_at_open => {
+                Err(tonic::Status::failed_precondition(format!(
+                    "incarnation rejected: node adopted none yet (its controller has not reached it), request carries {}",
+                    carried()
+                )))
+            }
+            None => Ok(true),
+            Some(_) if incarnation.is_empty() && !strict => Ok(true),
+            Some(_) => self.check_incarnation(incarnation).map(|()| false),
         }
-        self.check_incarnation(incarnation)
+    }
+
+    /// Shard writes accepted since start without proof of this node's
+    /// cluster (no incarnation carried, or none adopted; never in strict
+    /// mode).
+    #[must_use]
+    pub fn writes_unproven(&self) -> u64 {
+        self.writes_unproven.load(Ordering::Relaxed)
+    }
+
+    /// Whether every shard write must carry the adopted incarnation
+    /// (ADR-0037: told [`pb::WRITE_OWNERSHIP_SCHEMA`] or later).
+    #[must_use]
+    pub fn write_ownership_strict(&self) -> bool {
+        self.cluster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .schema_floor
+            >= pb::WRITE_OWNERSHIP_SCHEMA
     }
 
     fn check_epoch(&self, group: u64, epoch: u64) -> Result<(), tonic::Status> {
@@ -775,9 +829,15 @@ impl StorageNode for StorageNodeService {
         }
         // Re-check the epoch and the incarnation after receiving the body: a
         // membership change, or an incarnation adopted, may have landed while
-        // the data was in flight.
+        // the data was in flight. Held shared from these checks to the end
+        // of the store write (ADR-0037): an epoch raise or a new incarnation
+        // is acknowledged only once no write that passed the old one can
+        // still be stored.
+        let fence = Arc::clone(&self.fence).read_owned().await;
         self.check_epoch(key.group_id, header.group_epoch)?;
-        self.check_write_incarnation(&header.incarnation)?;
+        if self.check_write_incarnation(&header.incarnation)? {
+            self.writes_unproven.fetch_add(1, Ordering::Relaxed);
+        }
         self.stats.put_recv.observe(started.elapsed());
         let crc = crc32c_of(&payload);
         // The group's role, noted before the record exists (independent
@@ -816,6 +876,7 @@ impl StorageNode for StorageNodeService {
         let store = Arc::clone(&self.store);
         let queued = Instant::now();
         let (queue_wait, store_time, result) = tokio::task::spawn_blocking(move || {
+            let _fence = fence;
             let queue_wait = queued.elapsed();
             let t = Instant::now();
             let r = store.put_sequenced(key, &payload);
@@ -1771,6 +1832,9 @@ impl StorageNode for StorageNodeService {
                 .map(|i| Bytes::copy_from_slice(&i.token))
                 .unwrap_or_default(),
             identity_mismatch,
+            write_ownership_supported: true,
+            write_ownership_strict: self.write_ownership_strict(),
+            writes_unproven: self.writes_unproven(),
             devices: vec![self.device_capacity_with(&stats)],
         }))
     }

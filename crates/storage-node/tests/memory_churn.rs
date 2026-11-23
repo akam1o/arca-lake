@@ -37,11 +37,44 @@ use arca_lake_storage_node::compactor::CompactionPolicy;
 use arca_lake_storage_node::{NodeConfig, serve};
 use bytes::Bytes;
 
-/// Open delete fence generation 1 on the node at `addr` and take it for
-/// `c` (what a controller leader does, ADR-0023).
+/// Give the node at `addr` an incarnation and open delete fence generation
+/// 1 on it, and take both for `c` (what a controller leader does: a node
+/// takes no shard write before it adopted an incarnation, ADR-0037; no
+/// delete outside its fence, ADR-0023).
 async fn open_fence(c: &NodeClients, addr: &str) {
-    assert_eq!(c.push_delete_fence(addr, 1, true).await.unwrap(), (1, true));
+    adopt_incarnation(c, addr).await;
+    let pushed = c
+        .push_delete_fence_with(
+            addr,
+            1,
+            true,
+            arca_lake_protocol::client::FencePush {
+                incarnation: Some(INCARNATION),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(pushed, (1, true, false));
     c.set_delete_fence(Some(1));
+}
+
+/// The incarnation [`open_fence`] gives a node.
+const INCARNATION: [u8; 16] = [7; 16];
+
+/// Give the node at `addr` [`INCARNATION`] and stamp `c`'s writes with it.
+async fn adopt_incarnation(c: &NodeClients, addr: &str) {
+    c.health_with(
+        addr,
+        arca_lake_protocol::storage::v1::HealthRequest {
+            incarnation: Bytes::from_static(&INCARNATION),
+            incarnation_changed_ms: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    c.set_incarnation(Some(INCARNATION));
 }
 
 /// Open file descriptors and threads of this process (Linux; 0 elsewhere).

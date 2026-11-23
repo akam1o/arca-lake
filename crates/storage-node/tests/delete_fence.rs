@@ -19,8 +19,56 @@ use bytes::Bytes;
 /// Open delete fence generation 1 on the node at `addr` and take it for
 /// `c` (what a controller leader does, ADR-0023).
 async fn open_fence(c: &NodeClients, addr: &str) {
-    assert_eq!(c.push_delete_fence(addr, 1, true).await.unwrap(), (1, true));
+    adopt_incarnation(c, addr, [7; 16]).await;
+    let pushed = c
+        .push_delete_fence_with(
+            addr,
+            1,
+            true,
+            arca_lake_protocol::client::FencePush {
+                incarnation: Some([7; 16]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(pushed, (1, true, false));
     c.set_delete_fence(Some(1));
+}
+
+/// Push delete fence `generation` (`open`) to the node at `addr` as a
+/// caller of `c`'s incarnation (a controller of the node's cluster).
+async fn push_fence(c: &NodeClients, addr: &str, generation: u64, open: bool) -> (u64, bool) {
+    let (g, o, _) = c
+        .push_delete_fence_with(
+            addr,
+            generation,
+            open,
+            arca_lake_protocol::client::FencePush {
+                incarnation: c.incarnation(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    (g, o)
+}
+
+/// Give the node at `addr` `incarnation` (changed at 1 ms) and stamp `c`
+/// with it, as a controller's health pass does: a node takes no shard
+/// write before it adopted an incarnation (ADR-0037).
+async fn adopt_incarnation(c: &NodeClients, addr: &str, incarnation: [u8; 16]) {
+    c.health_with(
+        addr,
+        HealthRequest {
+            incarnation: Bytes::copy_from_slice(&incarnation),
+            incarnation_changed_ms: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    c.set_incarnation(Some(incarnation));
 }
 
 fn shard(i: u8) -> ShardRef {
@@ -40,27 +88,17 @@ async fn deletes_without_the_adopted_incarnation_are_refused() {
         .unwrap();
     let addr = n.local_addr.to_string();
     let c = NodeClients::new(Duration::from_secs(5));
-    open_fence(&c, &addr).await;
+    assert_eq!(push_fence(&c, &addr, 1, true).await, (1, true));
+    c.set_delete_fence(Some(1));
     let data = Bytes::from(vec![1u8; 4096]);
-    c.put_shard(&addr, shard(1), 0, data.clone(), 1024)
-        .await
-        .unwrap();
+    // Before any incarnation is adopted an unstamped delete is accepted
+    // (the node holds nothing it could take a write for: ADR-0037).
+    c.delete_shard(&addr, shard(1), 0).await.unwrap();
+    adopt_incarnation(&c, &addr, [7; 16]).await;
     c.put_shard(&addr, shard(2), 0, data.clone(), 1024)
         .await
         .unwrap();
-    // Before any incarnation is adopted an unstamped delete is accepted.
-    c.delete_shard(&addr, shard(1), 0).await.unwrap();
-    c.health_with(
-        &addr,
-        HealthRequest {
-            format_write: 1,
-            incarnation: Bytes::from_static(&[7; 16]),
-            incarnation_changed_ms: 1,
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    c.set_incarnation(None);
     let e = c.delete_shard(&addr, shard(2), 0).await.unwrap_err();
     assert_eq!(e.code(), tonic::Code::FailedPrecondition, "{e}");
     assert_eq!(c.get_shard(&addr, shard(2), 0, 0).await.unwrap(), data);
@@ -105,7 +143,8 @@ async fn writes_of_another_incarnation_are_refused() {
         c.get_shard(&addr, shard(5), 0, 0).await.is_err(),
         "the shard was stored"
     );
-    // This cluster's writer, and one that holds no incarnation.
+    // This cluster's writer, and one that holds no incarnation: taken
+    // while the node is not strict (ADR-0037, the mixed window), counted.
     c.set_incarnation(Some([7; 16]));
     c.put_shard(&addr, shard(5), 0, data.clone(), 1024)
         .await
@@ -114,6 +153,7 @@ async fn writes_of_another_incarnation_are_refused() {
     c.put_shard(&addr, shard(6), 0, data.clone(), 1024)
         .await
         .unwrap();
+    assert_eq!(n.service().writes_unproven(), 1);
     assert_eq!(c.get_shard(&addr, shard(5), 0, 0).await.unwrap(), data);
     n.shutdown().await;
 }
@@ -322,7 +362,7 @@ async fn tokens_from_before_a_lost_sequence_bound_are_refused() {
         .unwrap();
     let addr = n.local_addr.to_string();
     // A started node rejoins: the leader's push renews its fence.
-    c.push_delete_fence(&addr, 1, true).await.unwrap();
+    push_fence(&c, &addr, 1, true).await;
     let e = c
         .delete_shard_if(&addr, shard(6), 0, old)
         .await
@@ -349,6 +389,7 @@ async fn node_with_shard(
         .unwrap();
     let addr = n.local_addr.to_string();
     let c = NodeClients::new(Duration::from_secs(10));
+    adopt_incarnation(&c, &addr, [1; 16]).await;
     for i in 1..=4 {
         c.put_shard(&addr, shard(i), 0, Bytes::from(vec![i; 4096]), 1024)
             .await
@@ -375,10 +416,7 @@ async fn deletes_need_the_open_fence_generation_the_node_holds() {
     let e = c.delete_shard(&addr, shard(1), 0).await.unwrap_err();
     assert!(NodeClients::is_fenced(&e), "{e}");
     // Generation 3 open: only 3 deletes.
-    assert_eq!(
-        c.push_delete_fence(&addr, 3, true).await.unwrap(),
-        (3, true)
-    );
+    assert_eq!(push_fence(&c, &addr, 3, true).await, (3, true));
     for g in [1, 2, 4] {
         c.set_delete_fence(Some(g));
         let e = c.delete_shard(&addr, shard(1), 0).await.unwrap_err();
@@ -388,24 +426,12 @@ async fn deletes_need_the_open_fence_generation_the_node_holds() {
     c.delete_shard(&addr, shard(1), 0).await.unwrap();
     // Lower generations are ignored; closing 3 stops its deletes; 3 never
     // reopens; only a higher generation opens again.
-    assert_eq!(
-        c.push_delete_fence(&addr, 2, true).await.unwrap(),
-        (3, true)
-    );
-    assert_eq!(
-        c.push_delete_fence(&addr, 3, false).await.unwrap(),
-        (3, false)
-    );
+    assert_eq!(push_fence(&c, &addr, 2, true).await, (3, true));
+    assert_eq!(push_fence(&c, &addr, 3, false).await, (3, false));
     let e = c.delete_shard(&addr, shard(2), 0).await.unwrap_err();
     assert!(NodeClients::is_fenced(&e), "{e}");
-    assert_eq!(
-        c.push_delete_fence(&addr, 3, true).await.unwrap(),
-        (3, false)
-    );
-    assert_eq!(
-        c.push_delete_fence(&addr, 5, true).await.unwrap(),
-        (5, true)
-    );
+    assert_eq!(push_fence(&c, &addr, 3, true).await, (3, false));
+    assert_eq!(push_fence(&c, &addr, 5, true).await, (5, true));
     let e = c.delete_shard(&addr, shard(2), 0).await.unwrap_err();
     assert!(NodeClients::is_fenced(&e), "the old generation 3: {e}");
     c.set_delete_fence(Some(5));
@@ -426,7 +452,7 @@ async fn an_older_protocol_delete_is_refused() {
     let _serial = faults::serial();
     let dir = tempfile::tempdir().unwrap();
     let (n, addr, c) = node_with_shard(dir.path()).await;
-    c.push_delete_fence(&addr, 1, true).await.unwrap();
+    push_fence(&c, &addr, 1, true).await;
     let mut raw = pb::storage_node_client::StorageNodeClient::connect(format!("http://{addr}"))
         .await
         .unwrap();
@@ -440,6 +466,7 @@ async fn an_older_protocol_delete_is_refused() {
                     shard_index: 0,
                 }),
                 delete_fence: fence,
+                incarnation: Bytes::from_static(&[1; 16]),
                 ..Default::default()
             })
             .await
@@ -459,6 +486,7 @@ async fn an_older_protocol_delete_is_refused() {
             shard_index: 0,
         }),
         delete_fence: 1,
+        incarnation: Bytes::from_static(&[1; 16]),
         ..Default::default()
     })
     .await
@@ -478,7 +506,7 @@ async fn after_the_finalize_only_releases_with_the_rejoin_fence_delete() {
     let _serial = faults::serial();
     let dir = tempfile::tempdir().unwrap();
     let (n, addr, c) = node_with_shard(dir.path()).await;
-    c.push_delete_fence(&addr, 1, true).await.unwrap();
+    push_fence(&c, &addr, 1, true).await;
     let delete = async |addr: &str, version: u32, fence: u64, i: u8| {
         let mut raw = pb::storage_node_client::StorageNodeClient::connect(format!("http://{addr}"))
             .await
@@ -491,6 +519,7 @@ async fn after_the_finalize_only_releases_with_the_rejoin_fence_delete() {
                 shard_index: 0,
             }),
             delete_fence: fence,
+            incarnation: Bytes::from_static(&[1; 16]),
             ..Default::default()
         })
         .await
@@ -528,7 +557,7 @@ async fn after_the_finalize_only_releases_with_the_rejoin_fence_delete() {
         c.health(&addr).await.unwrap().schema_floor,
         pb::REJOIN_FENCE_SCHEMA
     );
-    c.push_delete_fence(&addr, 2, true).await.unwrap();
+    push_fence(&c, &addr, 2, true).await;
     if speaks_3 {
         let e = delete(&addr, pb::FENCED_DELETE_VERSION, 2, 3)
             .await
@@ -557,6 +586,7 @@ async fn the_same_generation_from_another_opener_closes_it() {
             open,
             FencePush {
                 opener,
+                incarnation: c.incarnation(),
                 ..FencePush::default()
             },
         )
@@ -589,6 +619,7 @@ async fn the_same_generation_from_another_opener_closes_it() {
             true,
             FencePush {
                 opener: 11,
+                incarnation: c.incarnation(),
                 ..FencePush::default()
             },
         )
@@ -624,12 +655,13 @@ async fn after_a_leader_of_this_release_only_its_deletes_apply() {
                 shard_index: 0,
             }),
             delete_fence: fence,
+            incarnation: Bytes::from_static(&[1; 16]),
             ..Default::default()
         })
         .await
     };
     // An earlier release's leader (no opener): its deletes apply.
-    c.push_delete_fence(&addr, 1, true).await.unwrap();
+    push_fence(&c, &addr, 1, true).await;
     delete(&addr, pb::FENCED_DELETE_VERSION, 1, 1)
         .await
         .unwrap();
@@ -640,6 +672,7 @@ async fn after_a_leader_of_this_release_only_its_deletes_apply() {
         true,
         FencePush {
             opener: 7,
+            incarnation: c.incarnation(),
             ..FencePush::default()
         },
     )
@@ -657,7 +690,7 @@ async fn after_a_leader_of_this_release_only_its_deletes_apply() {
     let addr = n.local_addr.to_string();
     // An earlier release's leader again (opener 0): it opens, but its
     // deletes are refused.
-    c.push_delete_fence(&addr, 3, true).await.unwrap();
+    push_fence(&c, &addr, 3, true).await;
     let e = delete(&addr, pb::FENCED_DELETE_VERSION, 3, 3)
         .await
         .unwrap_err();
@@ -676,7 +709,7 @@ async fn closing_the_fence_waits_for_deletes_in_progress_even_cancelled_ones() {
     let _serial = faults::serial();
     let dir = tempfile::tempdir().unwrap();
     let (n, addr, c) = node_with_shard(dir.path()).await;
-    c.push_delete_fence(&addr, 1, true).await.unwrap();
+    push_fence(&c, &addr, 1, true).await;
     c.set_delete_fence(Some(1));
     let mut held = 1;
     for cancel in [false, true] {
@@ -702,7 +735,7 @@ async fn closing_the_fence_waits_for_deletes_in_progress_even_cancelled_ones() {
             delete.abort();
         }
         let generation = held + 1;
-        let ack = c.push_delete_fence(&addr, generation, false).await.unwrap();
+        let ack = push_fence(&c, &addr, generation, false).await;
         let acked = in_store.elapsed();
         faults::set_io_hook(None);
         assert_eq!(ack, (generation, false));
@@ -722,7 +755,7 @@ async fn closing_the_fence_waits_for_deletes_in_progress_even_cancelled_ones() {
         let e = c.delete_shard(&addr, shard(4), 0).await.unwrap_err();
         assert!(NodeClients::is_fenced(&e), "{e}");
         held = generation + 1;
-        c.push_delete_fence(&addr, held, true).await.unwrap();
+        push_fence(&c, &addr, held, true).await;
         c.set_delete_fence(Some(held));
         c.put_shard(&addr, shard(4), 0, Bytes::from(vec![4; 4096]), 1024)
             .await
@@ -738,8 +771,8 @@ async fn the_fence_survives_a_node_restart() {
     let _serial = faults::serial();
     let dir = tempfile::tempdir().unwrap();
     let (n, addr, c) = node_with_shard(dir.path()).await;
-    c.push_delete_fence(&addr, 7, true).await.unwrap();
-    c.push_delete_fence(&addr, 7, false).await.unwrap();
+    push_fence(&c, &addr, 7, true).await;
+    push_fence(&c, &addr, 7, false).await;
     let listen = n.local_addr;
     n.shutdown().await;
     let n = serve(NodeConfig::new(listen, dir.path())).await.unwrap();
@@ -747,7 +780,7 @@ async fn the_fence_survives_a_node_restart() {
     let e = c.delete_shard(&addr, shard(1), 0).await.unwrap_err();
     assert!(NodeClients::is_fenced(&e), "closed before the restart: {e}");
     assert_eq!(n.service().delete_fence(), (7, false));
-    c.push_delete_fence(&addr, 8, true).await.unwrap();
+    push_fence(&c, &addr, 8, true).await;
     n.shutdown().await;
     let n = serve(NodeConfig::new(listen, dir.path())).await.unwrap();
     c.set_delete_fence(Some(8));
@@ -756,7 +789,7 @@ async fn the_fence_survives_a_node_restart() {
     assert_eq!(n.service().delete_fence(), (8, true));
     let e = c.delete_shard(&addr, shard(1), 0).await.unwrap_err();
     assert!(NodeClients::is_fenced(&e), "before the rejoin push: {e}");
-    c.push_delete_fence(&addr, 8, true).await.unwrap();
+    push_fence(&c, &addr, 8, true).await;
     c.delete_shard(&addr, shard(1), 0).await.unwrap();
     n.shutdown().await;
 }
@@ -777,6 +810,7 @@ async fn the_open_fence_lapses_without_the_leaders_pushes() {
     let n = serve(cfg).await.unwrap();
     let addr = n.local_addr.to_string();
     let c = NodeClients::new(Duration::from_secs(5));
+    adopt_incarnation(&c, &addr, [1; 16]).await;
     for i in 1..=3 {
         c.put_shard(&addr, shard(i), 0, Bytes::from(vec![i; 4096]), 1024)
             .await

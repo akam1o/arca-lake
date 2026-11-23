@@ -51,6 +51,15 @@ pub mod storage {
         /// nothing.
         pub const REJOIN_FENCE_SCHEMA: u64 = 3;
 
+        /// Metadata schema from which nodes refuse every shard write that
+        /// does not carry their adopted incarnation (ADR-0037, R-117): a
+        /// node told this schema takes no write without an incarnation, and
+        /// none while it has adopted none. Below it (a cluster that may
+        /// still run 0.1.0 processes) such writes are accepted and counted.
+        // TODO(upgrade ADR, schema 5): the coordinated schema-5 change
+        // defines this schema; reconcile with its constant when merged.
+        pub const WRITE_OWNERSHIP_SCHEMA: u64 = 5;
+
         /// Oldest protocol version whose nodes enforce the delete fence.
         pub const FENCED_DELETE_VERSION: u32 = 3;
 

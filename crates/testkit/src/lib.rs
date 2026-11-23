@@ -240,6 +240,36 @@ impl ClusterOptions {
     }
 }
 
+/// Give the node at `addr` the cluster's incarnation with its change time,
+/// as a controller's health pass does (without the sequence: tests push
+/// incarnations ordered by change time, which a sequence held would
+/// override), and the schema floor
+/// from the strict schema on (ADR-0037: a cluster initialised there is
+/// strict from its first write). Below it the floor and the format stay
+/// as test clusters always ran them.
+async fn push_cluster_facts<S: KvStore>(meta: &S, clients: &NodeClients, addr: &str) {
+    use arca_lake_protocol::storage::v1 as pb;
+    let gate = arca_lake_metadata::ops::compat::gate(meta).await.unwrap();
+    let Some(state) = gate.cluster else {
+        return;
+    };
+    clients
+        .health_with(
+            addr,
+            pb::HealthRequest {
+                incarnation: bytes::Bytes::copy_from_slice(&state.incarnation),
+                incarnation_changed_ms: state.changed_ms,
+                schema_floor: gate
+                    .schema
+                    .filter(|s| *s >= pb::WRITE_OWNERSHIP_SCHEMA)
+                    .unwrap_or(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
 fn node_store_config(dir: &std::path::Path) -> StoreConfig {
     StoreConfig {
         dir: dir.to_path_buf(),
@@ -429,6 +459,12 @@ impl<S: KvStore + 'static> TestCluster<S> {
         let backend = ClusterBackend::new(Arc::clone(&meta), cluster_cfg.clone())
             .await
             .unwrap();
+        // A test cluster runs no controller: the cluster facts its first
+        // health pass would give every node (a node that has adopted no
+        // incarnation takes no shard write, ADR-0037).
+        for n in &nodes {
+            push_cluster_facts(meta.as_ref(), &clients, &n.addr.to_string()).await;
+        }
         // A test cluster runs no controller: the fence a leader would open
         // (ADR-0023), so that deletes go through (the gateway takes it
         // now rather than at its next refresh).
@@ -447,6 +483,11 @@ impl<S: KvStore + 'static> TestCluster<S> {
                         arca_lake_protocol::storage::v1::HealthRequest {
                             delete_fence_generation: rec.generation,
                             delete_fence_open: true,
+                            // Opening needs a caller of the node's
+                            // incarnation (Phase 3.10), adopted above.
+                            incarnation: bytes::Bytes::copy_from_slice(
+                                &backend.cluster().incarnation,
+                            ),
                             ..Default::default()
                         },
                     )
@@ -728,6 +769,18 @@ impl<S: KvStore + 'static> TestCluster<S> {
         self.backend_clients_forget(i);
     }
 
+    /// Stop node `i` and give its address up (no listener holds it): what
+    /// a deployment does when the address goes to another process, here to
+    /// let a test serve another cluster's node there (R-117).
+    pub async fn stop_node_releasing_address(&mut self, i: usize) -> SocketAddr {
+        self.stop_node(i).await;
+        if let Some(h) = self.nodes[i].held.take() {
+            h.abort();
+            let _ = h.await;
+        }
+        self.nodes[i].addr
+    }
+
     fn backend_clients_forget(&self, i: usize) {
         self.clients.forget(&self.nodes[i].addr.to_string());
     }
@@ -821,6 +874,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             tls,
             capacity: Some(TEST_ALLOTMENT),
         });
+        self.push_cluster_facts(i).await;
         self.sync_delete_fence().await;
         i
     }
@@ -1125,7 +1179,20 @@ impl<S: KvStore + 'static> TestCluster<S> {
             tls,
             capacity: Some(TEST_ALLOTMENT),
         });
+        self.push_cluster_facts(i).await;
         i
+    }
+
+    /// Push the cluster facts to node `i` as a controller's health pass
+    /// does (incarnation with its sequence, schema floor): a node that has
+    /// adopted no incarnation takes no shard write (ADR-0037).
+    pub async fn push_cluster_facts(&self, i: usize) {
+        push_cluster_facts(
+            self.meta.as_ref(),
+            &self.clients,
+            &self.nodes[i].addr.to_string(),
+        )
+        .await;
     }
 
     /// Indexes of the cache nodes.

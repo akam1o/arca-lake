@@ -11,6 +11,24 @@ break compatibility).
 
 ## [Unreleased]
 
+### Security
+
+- Shard write ownership (R-117, ADR-0037): a storage node that has
+  adopted no incarnation yet (a new disk its controller has not reached)
+  refuses every shard write, so another cluster's gateway at a reused
+  address can no longer have its shards stored there and counted
+  written. Once the cluster is finalized to metadata schema 5, nodes
+  also refuse shard writes carrying no incarnation. Before that (during
+  an upgrade from 0.1.0) such writes are still taken, and are counted:
+  new metrics `arca_node_writes_unproven_total`,
+  `arca_node_write_ownership_strict` and
+  `arca_controller_nodes_write_ownership_lenient`, `HealthResponse`
+  fields 47–49 (a capability; no protocol version change), and
+  `admin node show` reports the mode. A new incarnation (a recovery or a
+  restore) is acknowledged by a node only once no write of the previous
+  one can still be stored. `arcabench nodebench` writes with the
+  target node's incarnation.
+
 ## [0.1.0] - 2026-11-23
 
 First experimental release (tag `v0.1.0`; [0.1.0 release](https://github.com/akam1o/arca-lake/releases/tag/v0.1.0)), for

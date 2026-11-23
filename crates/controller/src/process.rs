@@ -1554,6 +1554,7 @@ async fn health_pass<S: KvStore>(
     // as deferring for a reclaim interval).
     let mut in_service = 0u64;
     let mut not_deferring_seen = 0u64;
+    let mut write_ownership_lenient = 0u64;
     for n in &nodes {
         clients.note_node_id(&n.address, n.id);
         let state = states
@@ -1674,6 +1675,19 @@ async fn health_pass<S: KvStore>(
         }
         match clients.health_with(&n.address, node_req).await {
             Ok(h) => {
+                // ADR-0037: a node that still takes writes without the
+                // cluster's incarnation (the mixed window, or an earlier
+                // release) is reported, with the writes it took so.
+                if !(h.write_ownership_supported && h.write_ownership_strict) {
+                    write_ownership_lenient += 1;
+                }
+                if h.writes_unproven > 0 {
+                    tracing::debug!(
+                        node = n.id,
+                        writes = h.writes_unproven,
+                        "storage node accepted shard writes without the cluster's incarnation since its start"
+                    );
+                }
                 // At 0 a node still keeps what it retired before (an
                 // earlier retention): deferring while any is left.
                 if h.reclaim_retention_ms == 0 && !h.reclaim_damaged && h.reclaim_pending == 0 {
@@ -1790,6 +1804,9 @@ async fn health_pass<S: KvStore>(
         .nodes_total
         .store(nodes.len() as u64, Ordering::Relaxed);
     metrics.nodes_unhealthy.store(unhealthy, Ordering::Relaxed);
+    metrics
+        .nodes_write_ownership_lenient
+        .store(write_ownership_lenient, Ordering::Relaxed);
     metrics.delete_fence.finish_round(token);
     // Write admission (Phase 3.6), from what the nodes just reported.
     // The term is the leader's fencing token: a failover (or leading

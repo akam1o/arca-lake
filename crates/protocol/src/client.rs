@@ -398,6 +398,11 @@ pub struct NodeCaps {
     pub incarnation: Option<[u8; 16]>,
     /// The node's delete fence: generation (0 = none) and whether open.
     pub delete_fence: (u64, bool),
+    /// Shard write ownership (ADR-0037): `None` from an earlier release
+    /// (it takes writes without an incarnation, and any write while it
+    /// adopted none); otherwise whether it is strict (refuses every write
+    /// not carrying its incarnation).
+    pub write_ownership: Option<bool>,
 }
 
 impl NodeCaps {
@@ -421,6 +426,9 @@ impl NodeCaps {
             format_write: h.format_write,
             incarnation: <[u8; 16]>::try_from(h.incarnation.as_ref()).ok(),
             delete_fence: (h.delete_fence_generation, h.delete_fence_open),
+            write_ownership: h
+                .write_ownership_supported
+                .then_some(h.write_ownership_strict),
         }
     }
 
@@ -649,7 +657,8 @@ impl NodeClients {
     /// Stamp `DeleteShard` and `PutShard` requests with the cluster
     /// incarnation this process started under (RFC-015 §5.3, R-117). Set once
     /// after the startup gate; a node that adopted a different incarnation
-    /// then rejects the deletes and the shard writes of this process.
+    /// then rejects the deletes and the shard writes of this process, and a
+    /// strict node (ADR-0037) every shard write of a process that set none.
     pub fn set_incarnation(&self, incarnation: Option<[u8; 16]>) {
         *self
             .incarnation
