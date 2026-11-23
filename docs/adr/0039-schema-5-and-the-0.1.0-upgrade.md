@@ -119,10 +119,11 @@ print `protections degraded` or `protections mandatory`.
 
 - **Before step 3** any process can go back to 0.1.0, in any order
   (RFC-014 §5.6): every record is unchanged. The finalize refuses while
-  the 0.1.0 process runs. Whether a 0.2.0 process that comes back after
-  a 0.1.0 period re-checks what 0.1.0 did meanwhile (instead of trusting
-  its own 0.2.0-only keys) is defined by each protection's change
-  (R-117, R-119); this ADR provides only the schema gate it keys on.
+  the 0.1.0 process runs. That a 0.2.0 process coming back after a
+  0.1.0 period re-checks what 0.1.0 did meanwhile (instead of trusting
+  its own 0.2.0-only keys) is provided by the 0.2.0 changes of those
+  protections (R-117: ADR-0037; R-119), each in its own ADR; this ADR
+  provides only the schema gate they key on.
 - **From step 3 on** there is no supported way back to 0.1.0:
   - 0.1.0 controllers and gateways refuse to start once step 5 raised
     `schema`. Between steps 3 and 5 they could start, but step 5 waits

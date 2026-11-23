@@ -66,9 +66,10 @@ that decide which builds can run together and which data they read:
 - Upgrades go one step at a time, in order, within one compatibility
   window (adjacent versions only): storage nodes first, then controllers
   (followers, leader last), then gateways (RFC-014 §5.8).
-- `admin upgrade finalize` is one-way: after it, earlier builds refuse
-  to start and no downgrade is possible; restore of a pre-finalize
-  backup is the only way back (RFC-014, RFC-015).
+- `admin upgrade finalize` is one-way: after it, earlier controllers and
+  gateways refuse to start and no downgrade is possible (RFC-014). From
+  0.1.0 to 0.2.0, restoring a pre-finalize backup does not bring 0.1.0
+  back either (see below).
 
 ### Upgrading from 0.1.0 to 0.2.0
 
@@ -92,17 +93,19 @@ that decide which builds can run together and which data they read:
 Until the finalize raises `schema_write` (the cut-off), you can return
 any process to 0.1.0, in any order: records are unchanged.
 `admin upgrade cancel` withdraws a finalize that has not reached the
-cut-off. Whether 0.2.0 re-checks what 0.1.0 did when it returns is up to
-each 0.2.0 protection (see its ADR).
+cut-off. The re-check, on 0.2.0's return, of what 0.1.0 did meanwhile
+is provided by the 0.2.0 protections themselves (R-117 strict write
+ownership, R-119 recorded failure domains; see their ADRs).
 
 From the cut-off on there is no way back to 0.1.0:
 
 - 0.1.0 controllers and gateways refuse to start once the finalize
   completes. The leader logs an error and counts
   (`arca_controller_procs_below_schema`) any that still runs; stop it.
-- Restoring a pre-finalize backup does not bring 0.1.0 back. The nodes
-  keep schema floor 5, and a restore raises the restored metadata to it,
-  so the restored cluster is at schema 5 too.
+- Once the finalize has completed, restoring a pre-finalize backup does
+  not bring 0.1.0 back. The nodes keep schema floor 5, and a restore
+  raises both `schema` and `schema_write` of the restored metadata to
+  it, so the restored cluster is at schema 5 too.
 - A 0.1.0 storage node still starts (it reads no metadata). The 0.2.0
   leader quarantines it before sending it anything, and gateways and the
   controller do not count any shard write to it: chunks go to another
