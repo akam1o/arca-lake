@@ -354,6 +354,14 @@ pub async fn check_rejoin<S: KvStore>(
             h.software, caps.protocol_max
         ));
     }
+    if let Some(w) = gate.schema_write
+        && crate::upgrade::node_below_schema(&h, w)
+    {
+        out.problems.push(format!(
+            "node {node_id} runs {} and enforces schema at most {}, the cluster writes schema {w} (ADR-0039): upgrade it to this release first",
+            h.software, h.schema_max
+        ));
+    }
     if let Some(f) = gate.format_write
         && caps.format_max < f
     {

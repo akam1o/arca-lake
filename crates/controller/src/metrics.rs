@@ -382,6 +382,10 @@ pub struct Metrics {
     /// Health passes that found a node holding another identity than the
     /// one the cluster gave it (Phase 3.11, R-100; the node is quarantined).
     pub nodes_quarantined_total: AtomicU64,
+    /// Fresh heartbeats of controllers and gateways that read a schema
+    /// below `schema_write` once it is 5 or later (ADR-0039), as of the
+    /// last health pass.
+    pub procs_below_schema: AtomicU64,
     /// Health passes that found a node holding an identity the metadata
     /// does not know (restored from before it; Phase 3.11 review): nothing
     /// pushed to it until confirmed.
@@ -633,6 +637,10 @@ impl Metrics {
         out += &c(
             "arca_controller_nodes_quarantined_total",
             self.nodes_quarantined_total.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_procs_below_schema",
+            self.procs_below_schema.load(Ordering::Relaxed),
         );
         out += &c(
             "arca_controller_identity_unconfirmed_total",

@@ -216,6 +216,15 @@ load, finalizes, verifies every object, and asserts that the old build
 refuses to start. Once real tags exist, the previous tag replaces the
 bumped build.
 
+Note (0.2.0, ADR-0039): satisfied by a real tag. CI downloads the
+published v0.1.0 release archive (pinned by SHA-256, its `BUILD-INFO`
+naming commit `5601018`). It runs that archive's binary against this
+build (`upgrade_v010`): rolling upgrade, rollback before finalize, the
+finalize refused while 0.1.0 runs, resumed after SIGKILLs, and 0.1.0
+refused after it. The version-bump pair stays for the mechanics of the
+next schema step. The pinned development commits before 0.1.0 are
+retired from CI, because 0.2.0 does not read their schemas.
+
 ### 5.8 Upgrade order and procedure
 
 1. Read the release notes: `(P, M, F)` deltas, migration, estimated

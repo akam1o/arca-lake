@@ -57,6 +57,26 @@ pub struct Gate {
     pub incarnation_seq: u64,
 }
 
+impl Gate {
+    /// Whether `schema_write` reached [`keys::SCHEMA_V5`] (ADR-0039): the
+    /// finalize to 0.2.0 passed its cut-off, no 0.1.0 process may run, and
+    /// the protections 0.1.0 would bypass are mandatory. `false` is the
+    /// mixed window with 0.1.0 (degraded protections).
+    #[must_use]
+    pub fn schema_v5_enforced(&self) -> bool {
+        self.schema_write.is_some_and(|w| w >= keys::SCHEMA_V5)
+    }
+}
+
+/// The schema a storage node must enforce for a shard write to it to count
+/// (ADR-0039): `schema_write` once it reached [`keys::SCHEMA_V5`] (no
+/// earlier release may then take writes), 0 below it (the mixed window
+/// with 0.1.0, whose nodes report no schema).
+#[must_use]
+pub fn required_node_schema(schema_write: Option<u64>) -> u64 {
+    schema_write.filter(|w| *w >= keys::SCHEMA_V5).unwrap_or(0)
+}
+
 /// Read the gate.
 ///
 /// # Errors

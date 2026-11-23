@@ -679,14 +679,14 @@ mod tests {
         });
     }
 
-    /// The gate names the schema this build introduced (a later schema
-    /// step must not leave it pointing elsewhere).
+    /// The gate names the schema that introduced the tiering record (4,
+    /// ADR-0035), one below 0.2.0's (ADR-0039): a later schema step must
+    /// not move it, and every schema this build reads admits a disable.
     #[test]
     fn the_gate_is_the_schema_of_the_tiering_record() {
-        assert_eq!(
-            TIERING_RECORD_SCHEMA,
-            crate::keys::SCHEMA_VERSION - arca_lake_common::compat::BUMP
-        );
+        assert_eq!(TIERING_RECORD_SCHEMA, 4);
+        assert_eq!(TIERING_RECORD_SCHEMA + 1, crate::keys::SCHEMA_V5);
+        const { assert!(crate::keys::SCHEMA_VERSION_MIN >= TIERING_RECORD_SCHEMA) };
     }
 
     #[test]

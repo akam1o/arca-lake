@@ -24,6 +24,12 @@
 //! Requires `ARCA_FDB_TESTS=1`, `ARCA_FDB_CLUSTER_FILE`, `ARCA_BIN_PREV`
 //! and `ARCA_BIN_CUR` (both built with `--features fdb`). Skips otherwise.
 //!
+//! Since 0.2.0 (schema 5, ADR-0039) CI no longer runs these: they are the
+//! hops of schemas 2 → 3 → 4 between development commits and 0.1.0, which
+//! 0.2.0 does not serve (it reads schemas 4 and 5). They hold for
+//! `ARCA_BIN_CUR` = the 0.1.0 binary, which CI verified at `v0.1.0`; the
+//! upgrade from 0.1.0 is `upgrade_v010`.
+//!
 //! The matrix, in order, every step checking that committed objects read
 //! back and that deletes are applied only where they are safe:
 //! 1. node-only upgrade, partial then all: the previous controller's deletes
