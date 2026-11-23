@@ -199,6 +199,7 @@ muts = [
  ("evidence: a capped log is complete", "r110/evidence.py", "        if entry[\"capped\"]:", "        if False:", "test_evidence"),
  ("evidence: a failed file is complete", "r110/evidence.py", "    if man[\"errors\"]:\n        man[\"incomplete\"]", "    if False:\n        man[\"incomplete\"]", "test_evidence"),
  ("evidence: a copy not matching the host's sha256 takes its name", "r110/evidence.py", "        if got != want:", "        if False:", "test_evidence"),
+ ("evidence: no deadline", "r110/evidence.py", "            if clock() >= end:", "            if False:", "test_evidence"),
  ("evidence: not resumed", "r110/evidence.py", "    if os.path.isfile(target) and sha256_file(target) == want:\n        return h, \"already saved\"", "    if False:\n        return h, \"already saved\"", "test_evidence"),
  ("finish: collected before the stops", "r110/driver.py", "        self.final_stops()\n        if hasattr(self.c, \"boot_check\"):", "        self._call(\"collect_evidence\", self.ev.dir)\n        self.final_stops()\n        if hasattr(self.c, \"boot_check\"):", "test_driver"),
  ("finish: incomplete evidence passes", "r110/driver.py", "            if not man[\"complete\"]:\n                self.ev.failures.append", "            if False:\n                self.ev.failures.append", "test_driver"),

@@ -263,12 +263,26 @@ class Teardown(Base):
         out = self.c.teardown(self.ev)
         self.assertNotIn("kept", out, out)
 
+    def test_a_collection_past_its_deadline_is_never_complete(self):
+        # The deadline passes between the inventory and the first file.
+        t = iter([0.0, 0.0])
+        out = self.c.teardown(self.ev, deadline_s=100, clock=lambda: next(t, 1e9))
+        self.assertKept(out, "not saved complete")
+        self.assertEqual({out["stopped"][n + ".json"]["verdict"] for n in ("node0", "node1")}, {"stopped"})
+        man = self.manifest()
+        self.assertEqual(man["files"], [])
+        self.assertIn("deadline", {e["path"]: e["error"] for e in man["errors"]}["run/load/ledger.jsonl"])
+        self.assertEqual(self.host.log.count("read"), 0)
+        out = self.c.teardown(self.ev)
+        self.assertNotIn("kept", out, out)
+
     def test_a_file_rewritten_during_its_transfer_is_fetched_again(self):
         """status.json is replaced whole (same length, other bytes) between
         the host's hash and the read: every chunk is intact, the file is
         not what was hashed. It must not be saved under the old sha256."""
-        new = json.dumps({"exit": "XXXXXX"})
-        self.write("run/load/status.json", json.dumps({"exit": "stopped"}))
+        old, new = json.dumps({"exit": "stopped"}), json.dumps({"exit": "XXXXXXX"})
+        self.assertEqual(len(old), len(new))
+        self.write("run/load/status.json", old)
         self.host.before_read = (self.path("run/load/status.json"),
                                  lambda: self.write("run/load/status.json", new))
         man = self.c.collect_evidence(self.ev)
