@@ -699,7 +699,6 @@ impl StorageNodeService {
             Some(h) if token.len() == 16 && h.token[..] != token[..] => {
                 other("this disk holds another identity token of that node".to_string())
             }
-            Some(_) => Ok(false),
             None if damaged || self.certificate_node_id().is_none() => {
                 if strict {
                     other("this disk holds no identity to check it against".to_string())
@@ -707,7 +706,8 @@ impl StorageNodeService {
                     Ok(true)
                 }
             }
-            None => Ok(false),
+            // Its identity, or (none held) its certificate, names the node.
+            Some(_) | None => Ok(false),
         }
     }
 
