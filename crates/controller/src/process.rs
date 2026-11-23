@@ -3635,7 +3635,8 @@ mod tests {
     // `arca_lake_metadata::keys::SCHEMA_V5` once the upgrade change defines it.
     #[test]
     fn nodes_are_strict_from_the_schema_after_0_1_0() {
-        let schema_0_1_0 = arca_lake_metadata::keys::SCHEMA_VERSION - arca_lake_common::compat::BUMP;
+        let schema_0_1_0 =
+            arca_lake_metadata::keys::SCHEMA_VERSION - arca_lake_common::compat::BUMP;
         assert_eq!(schema_0_1_0, 4);
         assert_eq!(
             arca_lake_protocol::storage::v1::WRITE_OWNERSHIP_SCHEMA,
