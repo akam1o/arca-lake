@@ -618,6 +618,24 @@ pub async fn scrub_attribution<S: KvStore>(
     .await
 }
 
+/// Whether a chunk record of any generation with `prefix` places chunk
+/// `index` in `group_id`, read in `tx`.
+pub(crate) async fn recorded_in_group<X: Txn>(
+    tx: &mut X,
+    prefix: &[u8; 12],
+    index: u32,
+    group_id: u64,
+) -> Result<bool> {
+    for (generation, _) in generations_with_prefix(tx, prefix).await? {
+        if let Some(v) = tx.get(&keys::gen_chunk(&generation, index)).await?
+            && decode::<ChunkRecord>(&v)?.placement.group_id == group_id
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Whether a fresh migration intent (younger than
 /// [`crate::ops::object::MIGRATION_INTENT_TTL_MS`] at `now_ms`) copies
 /// chunk `chunk_id` into `group_id`: its target shards are not referenced

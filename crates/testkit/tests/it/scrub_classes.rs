@@ -436,7 +436,9 @@ async fn a_migration_target_damaged_before_the_switch_is_repaired_after_it() {
             );
             let s = scrub(&c, fast.id).await;
             let r = repair(&c, now_ms()).await;
-            let actionable = itasks::any_actionable(c.meta.as_ref()).await.unwrap();
+            let actionable = itasks::any_actionable(c.meta.as_ref(), now_ms())
+                .await
+                .unwrap();
             before = Some((s, r, tasks(&c).await, actionable));
         },
     )
@@ -471,7 +473,9 @@ async fn a_migration_target_damaged_before_the_switch_is_repaired_after_it() {
         "the needed repair was lost after the switch"
     );
     assert!(
-        itasks::any_actionable(c.meta.as_ref()).await.unwrap(),
+        itasks::any_actionable(c.meta.as_ref(), now_ms())
+            .await
+            .unwrap(),
         "after the switch the task is repair work"
     );
     c.backend.refresh_map().await.unwrap();
@@ -595,7 +599,11 @@ async fn a_crashed_migration_holds_the_task_only_while_its_intent_is_fresh() {
     assert_eq!(tasks(&c).await.len(), 1);
     // While it waits, tiering and rebalancing are not held by it (the
     // copy and the switch run in one call: a crashed copy never switches).
-    assert!(!itasks::any_actionable(c.meta.as_ref()).await.unwrap());
+    assert!(
+        !itasks::any_actionable(c.meta.as_ref(), now_ms())
+            .await
+            .unwrap()
+    );
     let rb = arca_lake_controller::rebalance::run_once(
         c.meta.as_ref(),
         &c.clients,
@@ -744,6 +752,76 @@ async fn an_orphan_sharing_a_pending_generations_prefix() {
         (r.in_flight, r.count(Finding::UnexpectedShard)),
         (0, 1),
         "{r:?}"
+    );
+    c.shutdown().await;
+}
+
+/// Only a fresh intent into a group the record does not place the chunk
+/// in yet excuses a task from the tiering and rebalancing gates: an intent
+/// naming the group the record already places it in (a migration started
+/// from a stale read) or a stale intent leaves the task actionable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_a_fresh_intent_into_an_unplaced_group_excuses_a_task() {
+    let c = cluster(Duration::ZERO).await;
+    put(&c, "o", 9).await;
+    let (group, chunk) = chunk_of(&c, "o").await;
+    let meta = c.meta.as_ref();
+    let now = now_ms();
+    let attempt = arca_lake_metadata::records::new_gen_id();
+    // Placed in the group already, intent into the same group.
+    assert!(
+        itasks::enqueue(
+            meta,
+            group.id,
+            chunk.chunk_id,
+            Finding::ChecksumMismatch,
+            &[0],
+            now
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        object::begin_migration(meta, &chunk.chunk_id, group.id, &attempt, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        itasks::any_actionable(meta, now).await.unwrap(),
+        "a task of a placed chunk was excused by an intent into its own group"
+    );
+    itasks::remove_task(meta, group.id, &chunk.chunk_id)
+        .await
+        .unwrap();
+    object::end_migration(meta, &chunk.chunk_id, &attempt)
+        .await
+        .unwrap();
+    // A group the record does not place it in: excused while the intent is
+    // fresh, not once it is stale.
+    let other = group.id + 1000;
+    assert!(
+        itasks::enqueue(
+            meta,
+            other,
+            chunk.chunk_id,
+            Finding::ChecksumMismatch,
+            &[0],
+            now
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        object::begin_migration(meta, &chunk.chunk_id, other, &attempt, now)
+            .await
+            .unwrap()
+    );
+    assert!(!itasks::any_actionable(meta, now).await.unwrap());
+    assert!(
+        itasks::any_actionable(meta, now + object::MIGRATION_INTENT_TTL_MS)
+            .await
+            .unwrap(),
+        "a stale intent excused the task"
     );
     c.shutdown().await;
 }

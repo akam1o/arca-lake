@@ -67,10 +67,11 @@ target's next scrub pass.
    (younger than its one-hour TTL) targets the group; after the switch
    it repairs, after a cancel (intent ended) or once the intent is stale
    it drops the task. Such a task is not actionable work for the gates
-   of tiering and rebalancing (`integrity::any_actionable` skips a task
-   whose chunk's migration intent targets its group; the switch removes
-   the intent in its transaction, so a present intent means nothing is
-   placed there yet). Without that, a migration that crashed before its
+   of tiering and rebalancing: `integrity::any_actionable` skips a task
+   only while its chunk's migration intent is younger than its TTL,
+   targets the task's group, and no chunk record under the chunk's
+   prefix places it in that group yet (an intent taken from a stale
+   read of the record, or a stale intent, excuses nothing). Without that, a migration that crashed before its
    switch (copy and switch run in one call, so its intent can never
    switch) held both for the intent's TTL.
 6. **0.1.0 nodes.** Their `ListShards` reports `retired_any` per key and

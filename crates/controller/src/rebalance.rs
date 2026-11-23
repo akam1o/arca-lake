@@ -388,7 +388,7 @@ pub async fn run_once_with<S: KvStore>(
         finish(meta, &mut state, &report).await?;
         return Ok(report);
     }
-    if integrity::any_actionable(meta).await? {
+    if integrity::any_actionable(meta, now_ms).await? {
         report.reason = "repair tasks open: repair first".to_string();
         finish(meta, &mut state, &report).await?;
         return Ok(report);
