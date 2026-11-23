@@ -571,7 +571,11 @@ def build():
     for arm, commit in (("tag", tag), ("candidate", head)):
         src = f"{b}/src-{arm}"
         ssh("b", f"rm -rf {src} && mkdir -p {src}", check=True)
-        arch = subprocess.run(["git", "archive", "--format=tar", commit], cwd=HERE, capture_output=True,
+        # From the repository's root: run in a subdirectory, `git archive`
+        # would pack only that subdirectory.
+        root = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=HERE, capture_output=True, text=True,
+                              check=True).stdout.strip()
+        arch = subprocess.run(["git", "archive", "--format=tar", commit], cwd=root, capture_output=True,
                               check=True).stdout
         p = subprocess.run(["ssh", "-o", "BatchMode=yes", HOSTS["b"], f"tar -xf - -C {src}"], input=arch,
                            capture_output=True, timeout=600)
