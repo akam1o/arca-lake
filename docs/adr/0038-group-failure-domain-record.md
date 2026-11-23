@@ -191,6 +191,11 @@ result as a member without the label.
 
 ### 2.7 Mixed versions and schema 5
 
+A store created by 0.2.0 starts at metadata schema 5 (ADR-0039): no
+0.1.0 process ever runs on it, every group it creates is recorded, and
+the rule is enforced from the start ("failure-domain enforcement:
+complete"). The window below concerns only a store upgraded from 0.1.0.
+
 Until the store reaches metadata schema 5 a 0.1.0 controller may lead,
 and it moves members by its flag only, ignoring the records and the
 commit check; a 0.1.0 `admin create-groups` creates unrecorded groups.
@@ -204,12 +209,15 @@ commit check; a 0.1.0 `admin create-groups` creates unrecorded groups.
   leader pass (§2.5), so a group changed under a 0.1.0 leadership is
   reported by the next 0.2.0 leader.
 
-From schema 5 (`keys::SCHEMA_V5`; the schema change itself belongs to
-the upgrade work, ADR-0039) no 0.1.0 process can start, so every
-protection above holds without exception; `admin upgrade finalize` to
+From schema 5 (`keys::SCHEMA_V5`, ADR-0039;
+`Gate::schema_v5_enforced`) no 0.1.0 process can start, so every
+protection above holds without exception. `admin upgrade finalize` to
 schema 5 or later is refused while a group of several members has no
-recorded domain (a precondition of the finalize). This ADR does not
-raise `SCHEMA_VERSION`.
+recorded domain: a blocker of the finalize's precondition
+(`upgrade::precondition`), checked at step 1 and again at the downgrade
+cut-off, so a group a 0.1.0 `admin create-groups` made after step 1
+holds the cut-off back too. This ADR does not raise `SCHEMA_VERSION`
+(ADR-0039 does).
 
 ## 3. Format and compatibility
 
@@ -255,7 +263,10 @@ previous main):
 
 CLI tests (`crates/cli`): `--all-unrecorded` (listing, dry run, write),
 `--change`, the refusal of a label no member carries and `--force`, the
-exit codes. Finalize: `finalize_blocker` below and at schema 5.
+exit codes. Finalize: `finalize_blocker` below and at schema 5;
+`it/upgrade.rs` `finalize_waits_for_every_groups_failure_domain` (at
+step 1 and at the cut-off); a new store starts enforcing
+(`a_new_group_records_its_failure_domain`).
 
 Unit tests: the rule and the setter (`metadata/src/ops/group_domain.rs`;
 with compatibility tests: the record's pinned body, the key outside the

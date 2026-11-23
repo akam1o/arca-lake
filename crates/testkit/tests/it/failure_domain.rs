@@ -159,6 +159,13 @@ async fn a_new_group_records_its_failure_domain() {
         recorded(c.meta.as_ref(), g.id).await.as_deref(),
         Some("host")
     );
+    // A new store starts at schema 5 (ADR-0039): enforcing from the start,
+    // nothing to report.
+    let a = arca_lake_controller::failure_domain::audit(c.meta.as_ref(), None, now_ms())
+        .await
+        .unwrap();
+    assert!(a.enforced, "{}", a.enforcement());
+    assert!(a.findings.is_empty(), "{:?}", a.findings);
 }
 
 /// A group created by 0.1.0 has no record: the leader moves none of its

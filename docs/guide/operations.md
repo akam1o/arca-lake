@@ -144,7 +144,11 @@ on groups ...` line for unrecorded groups with a member down or a
 repair under way, `arca_controller_groups_failure_domain_unrecorded_at_risk`
 counts them, and their repair status shows `awaiting-failure-domain`:
 a failure there is not repaired until the domain is recorded. The
-finalize to metadata schema 5 is refused while a group is unrecorded.
+finalize to metadata schema 5 is refused while a group is unrecorded,
+at its first step and again at the downgrade cut-off (a group a 0.1.0
+`admin create-groups` made meanwhile is caught too). A cluster created
+by 0.2.0 starts at schema 5 with every group recorded: none of this
+applies to it.
 
 ## Reading a scrub
 

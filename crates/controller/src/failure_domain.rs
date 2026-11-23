@@ -243,19 +243,15 @@ pub struct Audit {
     pub flag_differs: Vec<(u64, String)>,
     /// The store's `schema_write`.
     pub schema_write: Option<u64>,
+    /// [`compat::Gate::schema_v5_enforced`]: no process that ignores the
+    /// recorded domains (0.1.0) can run on the store (ADR-0039).
+    pub enforced: bool,
     /// [`unrecorded_at_risk`]: unrecorded groups with a member down or a
     /// repair under way.
     pub at_risk: Vec<u64>,
 }
 
 impl Audit {
-    /// Whether no process that ignores the recorded domains (0.1.0) can
-    /// run on the store: from metadata schema 5 (ADR-0038).
-    #[must_use]
-    pub fn enforced(&self) -> bool {
-        self.schema_write.is_some_and(|s| s >= SCHEMA_V5)
-    }
-
     /// Groups whose members break their recorded domain.
     #[must_use]
     pub fn violating_groups(&self) -> usize {
@@ -286,7 +282,7 @@ impl Audit {
     /// One line on how far the rule is enforced.
     #[must_use]
     pub fn enforcement(&self) -> String {
-        if self.enforced() {
+        if self.enforced {
             "failure-domain enforcement: complete (metadata schema 5 or later: no 0.1.0 process can run)".into()
         } else {
             format!(
@@ -319,7 +315,7 @@ pub async fn audit<S: KvStore>(
         .collect();
     let groups = cluster::list_groups(meta).await?;
     let domains = group_domain::list(meta).await?;
-    let schema_write = compat::gate(meta).await?.schema_write;
+    let gate = compat::gate(meta).await?;
     let retired: BTreeSet<u64> = node_lifecycle::retirements(meta)
         .await?
         .into_iter()
@@ -343,7 +339,8 @@ pub async fn audit<S: KvStore>(
                     .collect()
             })
             .unwrap_or_default(),
-        schema_write,
+        schema_write: gate.schema_write,
+        enforced: gate.schema_v5_enforced(),
     })
 }
 

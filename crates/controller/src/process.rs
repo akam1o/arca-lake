@@ -2374,6 +2374,7 @@ fn note_failure_domains(
             .map(|d| (d.group, d.label.clone()))
             .collect(),
         schema_write: None,
+        enforced: false,
     };
     let violating = audit.violating_groups() as u64;
     let unrecorded = audit.unrecorded_groups() as u64;
