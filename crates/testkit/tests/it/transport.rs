@@ -431,6 +431,10 @@ async fn too_slow_shard_stream_hits_the_absolute_deadline() {
         chunk_id: [7; 16],
         shard_index: 0,
     };
+    // A writer of the cluster, for that member (a strict node refuses any
+    // other before the stream, ADR-0037).
+    clients.set_incarnation(Some(c.incarnation()));
+    clients.note_node_id(&addr, group.members[0].node_id);
     let err = clients
         .put_shard(&addr, shard, group.epoch, payload(256 << 10, 32), 64 << 10)
         .await

@@ -888,7 +888,14 @@ class Run:
                 res[g] = {"rc": rc, "error": redact((o + e)[-300:])}
                 continue
             res[g] = dict(zip(DAMAGE, [int(x) for x in m.group(1).split(",") if x.strip()]))
-        clean = complete and all(not any(v for k, v in r.items() if k != "UnexpectedShard") for r in res.values())
+            # 0.2.0 binaries also print the shards held legitimately or not
+            # classified (ADR-0036; unclassified ones count as errors).
+            held = re.search(r"retained (\d+) retained_damaged (\d+) in_flight (\d+) unclassified (\d+)", o)
+            if held:
+                res[g]["held"] = dict(zip(("retained", "retained_damaged", "in_flight", "unclassified"),
+                                          (int(x) for x in held.groups())))
+        clean = complete and all(not any(v for k, v in r.items() if k not in ("UnexpectedShard", "held"))
+                                 for r in res.values())
         return complete, clean, res
 
     def exited(self):

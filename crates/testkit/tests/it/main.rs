@@ -36,6 +36,7 @@ mod e2e;
 mod e2e_fdb;
 mod e2e_tls;
 mod epoch_intent;
+mod failure_domain;
 mod faults;
 #[cfg(feature = "fdb")]
 mod faults_fdb;
@@ -79,6 +80,7 @@ mod request_metrics;
 #[cfg(feature = "fdb")]
 mod retirement_crash;
 mod s3_compat;
+mod scrub_classes;
 mod system_model;
 mod tiering;
 #[cfg(feature = "fdb")]
@@ -86,4 +88,7 @@ mod tiering_fdb;
 mod tls_cluster;
 mod transport;
 mod upgrade;
+#[cfg(feature = "fdb")]
+mod upgrade_v010;
 mod verify_object;
+mod write_ownership;

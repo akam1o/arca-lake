@@ -9,7 +9,7 @@
 //! (RFC-004 §5.4): a late delete or shard write carries the epoch under
 //! which it was decided and is rejected by any member fenced since.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -23,7 +23,9 @@ use arca_lake_metadata::ops::cluster;
 use arca_lake_metadata::ops::leader;
 use arca_lake_metadata::ops::repair_status::{self, RepairReason, RepairStatus};
 use arca_lake_metadata::ops::reservation::{self, CapacityReservation, ReservationKind};
-use arca_lake_metadata::ops::{bg_cursor, compat, epoch_intent, membership, node_lifecycle};
+use arca_lake_metadata::ops::{
+    bg_cursor, compat, epoch_intent, group_domain, membership, node_lifecycle,
+};
 use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord};
 use arca_lake_metadata::{KvError, KvStore, MetaError};
 use arca_lake_placement::{GroupSpec, choose_replacement};
@@ -259,7 +261,7 @@ impl ControllerHandle {
     }
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
@@ -342,6 +344,7 @@ pub async fn spawn<S: KvStore + 'static>(
 
 /// Election loop: follower until the lease can be taken, leader until a
 /// renewal fails or shutdown is requested.
+#[allow(clippy::too_many_lines)]
 async fn run<S: KvStore + 'static>(
     meta: Arc<S>,
     cfg: ControllerConfig,
@@ -429,7 +432,14 @@ async fn run<S: KvStore + 'static>(
         // Leader: fenced store, scheduler tasks, renewal loop.
         let fenced = Arc::new(FencedKv::new(Arc::clone(&meta), leadership.clone()));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let (tasks, trip) = start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx, incarnation);
+        // The node schema shard writes need (ADR-0039) until the first
+        // health pass or repair pass reads it again; unknown (the read
+        // failed) refuses every write until then.
+        let node_schema = compat::gate(meta.as_ref())
+            .await
+            .map_or(u64::MAX, |g| compat::required_node_schema(g.schema_write));
+        let (tasks, trip) =
+            start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx, incarnation, node_schema);
         let lost = hold_term(
             meta.as_ref(),
             &cfg,
@@ -574,6 +584,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
     metrics: &Arc<Metrics>,
     stop: &watch::Receiver<bool>,
     incarnation: [u8; 16],
+    node_schema: u64,
 ) -> (Vec<JoinHandle<()>>, Arc<crate::trip::Trip>) {
     let clients =
         NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
@@ -581,6 +592,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
         }))
         .with_tls(cfg.tls.clone());
     clients.set_incarnation(Some(incarnation));
+    clients.set_required_node_schema(node_schema);
     clients.set_fault_hook(cfg.rpc_fault_hook.as_ref().map(|h| h.0.clone()));
     // Every task's store trips the term's deletes off on a failure that
     // means the metadata is no longer the one they were decided on.
@@ -1412,6 +1424,29 @@ async fn health_pass<S: KvStore>(
     // Cluster facts for the nodes (RFC-014 §5.3, RFC-015 §5.3): the format
     // they may write and the incarnation, with its change time.
     let gate = compat::gate(meta).await?;
+    // Repair and integrity writes count only on nodes of schema_write's
+    // release once it is 5 or later (ADR-0039).
+    let node_schema = compat::required_node_schema(gate.schema_write);
+    clients.set_required_node_schema(node_schema);
+    // Controllers and gateways of an earlier release that still heartbeat
+    // after the finalize (ADR-0039: one started between the cut-off and
+    // the schema raise, or one the operator named absent): flagged on
+    // every pass until stopped.
+    let mut procs_below = 0u64;
+    if node_schema > 0 {
+        let at = now_ms();
+        for p in compat::procs(meta).await? {
+            if at.saturating_sub(p.last_ms) <= crate::upgrade::PROC_STALE_MS
+                && p.caps.schema_max < node_schema
+            {
+                procs_below += 1;
+                tracing::error!(process = %p.id, kind = ?p.kind, software = %p.software, schema_max = p.caps.schema_max, schema_write = node_schema, "a process of an earlier release runs after the finalize: stop it");
+            }
+        }
+    }
+    metrics
+        .procs_below_schema
+        .store(procs_below, Ordering::Relaxed);
     // The delete fence (ADR-0023): open for this term while Active, closed
     // otherwise; pushed to every node with the other facts. Deletes of
     // this process carry the generation only while it is open.
@@ -1554,6 +1589,7 @@ async fn health_pass<S: KvStore>(
     // as deferring for a reclaim interval).
     let mut in_service = 0u64;
     let mut not_deferring_seen = 0u64;
+    let mut write_ownership_lenient = 0u64;
     for n in &nodes {
         clients.note_node_id(&n.address, n.id);
         let state = states
@@ -1666,6 +1702,34 @@ async fn health_pass<S: KvStore>(
                 .filter(|i| i.acknowledged)
                 .map(|i| (n.id, i.token)),
         );
+        // A node of an earlier release once schema 5 is written (ADR-0039):
+        // asked facts-free first, so that it receives nothing (no fence, no
+        // schema floor, no incarnation) before it is quarantined below.
+        if node_schema > 0 {
+            match clients.health(&n.address).await {
+                Ok(p) if crate::upgrade::node_below_schema(&p, node_schema) => {
+                    let reason = format!(
+                        "the node runs {} and enforces schema at most {}; the cluster writes schema {node_schema}: an earlier release after the finalize",
+                        p.software, p.schema_max
+                    );
+                    if quarantine_unless_held(meta, n.id, &reason, now).await? {
+                        tracing::error!(node = n.id, address = %n.address, %reason, "storage node quarantined");
+                    }
+                    metrics
+                        .nodes_quarantined_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    unhealthy += 1;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    if now.saturating_sub(n.last_seen_ms) > ms(cfg.unhealthy_after) {
+                        unhealthy += 1;
+                    }
+                    continue;
+                }
+            }
+        }
         let mut node_req = req.clone();
         if let Some(i) = &ident {
             node_req.node_id = n.id;
@@ -1674,6 +1738,19 @@ async fn health_pass<S: KvStore>(
         }
         match clients.health_with(&n.address, node_req).await {
             Ok(h) => {
+                // ADR-0037: a node that still takes writes without the
+                // cluster's incarnation (the mixed window, or an earlier
+                // release) is reported, with the writes it took so.
+                if !(h.write_ownership_supported && h.write_ownership_strict) {
+                    write_ownership_lenient += 1;
+                }
+                if h.writes_unproven > 0 {
+                    tracing::debug!(
+                        node = n.id,
+                        writes = h.writes_unproven,
+                        "storage node accepted shard writes without the cluster's incarnation since its start"
+                    );
+                }
                 // At 0 a node still keeps what it retired before (an
                 // earlier retention): deferring while any is left.
                 if h.reclaim_retention_ms == 0 && !h.reclaim_damaged && h.reclaim_pending == 0 {
@@ -1731,6 +1808,25 @@ async fn health_pass<S: KvStore>(
                         unhealthy += 1;
                         continue;
                     }
+                }
+                // Replaced by an earlier release between the probe above and
+                // this push (ADR-0039): quarantined at once.
+                if crate::upgrade::node_below_schema(&h, node_schema) {
+                    if quarantine_unless_held(
+                        meta,
+                        n.id,
+                        "the node answered the push as an earlier release after the finalize",
+                        now,
+                    )
+                    .await?
+                    {
+                        tracing::error!(node = n.id, address = %n.address, "storage node quarantined: an earlier release after the finalize");
+                    }
+                    metrics
+                        .nodes_quarantined_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    unhealthy += 1;
+                    continue;
                 }
                 // A node at this incarnation's sequence with another
                 // incarnation, or above it, refuses this cluster's opens
@@ -1790,6 +1886,9 @@ async fn health_pass<S: KvStore>(
         .nodes_total
         .store(nodes.len() as u64, Ordering::Relaxed);
     metrics.nodes_unhealthy.store(unhealthy, Ordering::Relaxed);
+    metrics
+        .nodes_write_ownership_lenient
+        .store(write_ownership_lenient, Ordering::Relaxed);
     metrics.delete_fence.finish_round(token);
     // Write admission (Phase 3.6), from what the nodes just reported.
     // The term is the leader's fencing token: a failover (or leading
@@ -1850,6 +1949,7 @@ async fn repair_pass<S: KvStore>(
     if token == 0 || metrics.health_seen_term.load(Ordering::Relaxed) != token {
         return Ok(());
     }
+    crate::integrity::refresh_required_node_schema(meta, clients).await?;
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
         .into_iter()
@@ -1894,6 +1994,15 @@ async fn repair_pass<S: KvStore>(
     // while the cluster is Active (RFC-015 §5.6); repairs of unhealthy
     // members and resumed repairs run in every state that admits repair.
     let intents = Intents::load(meta, &all_groups).await?;
+    note_failure_domains(
+        cfg,
+        metrics,
+        &nodes,
+        &all_groups,
+        &intents.domains,
+        token,
+        &healthy,
+    );
     // Repair statuses (Phase 3.13, R-104): those of groups gone or Active
     // again are done.
     let mut statuses = repair_liveness::statuses(meta).await?;
@@ -1933,18 +2042,19 @@ async fn repair_pass<S: KvStore>(
         .collect();
     // Why each rebuilding group is where it is, and the longest stalled
     // one (Phase 3.14): by reason, never summed into one figure.
-    let mut by_reason = [0u64; 7];
+    let mut by_reason = [0u64; crate::metrics::REPAIR_REASONS.len()];
+    let none = by_reason.len() - 1;
     let mut stall: Option<(u64, u64)> = None;
     for g in all_groups
         .iter()
         .filter(|g| g.state == GroupState::Repairing)
     {
         let s = statuses.get(&g.id);
-        let i = s.map_or(6, |s| {
+        let i = s.map_or(none, |s| {
             crate::metrics::REPAIR_REASONS
                 .iter()
                 .position(|r| *r == s.reason.as_str())
-                .unwrap_or(6)
+                .unwrap_or(none)
         });
         by_reason[i] += 1;
         let since = s.map_or(now, |s| s.last_progress_ms.max(s.since_ms));
@@ -2018,7 +2128,29 @@ async fn repair_pass<S: KvStore>(
             && g.members
                 .get(usize::from(intent.index))
                 .is_some_and(|m| *m != intent.replacement && leaving(m));
-        if wanted {
+        // Whichever release chose the target (one that took the domains
+        // from the candidates, or from its flag only: R-119), the move is
+        // resumed only if it keeps the group's recorded failure domain;
+        // otherwise it is settled with the membership unchanged.
+        let domain = crate::failure_domain::check_move(
+            &intents.domains,
+            &nodes,
+            g,
+            usize::from(intent.index),
+            intent.replacement,
+        );
+        if wanted && let Err(why) = &domain {
+            warn!(
+                group = g.id,
+                index = intent.index,
+                node = target,
+                "interrupted epoch change refused: {why}; settled with the membership unchanged"
+            );
+            metrics
+                .failure_domain_refusals_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if wanted && domain.is_ok() {
             info!(
                 group = g.id,
                 index = intent.index,
@@ -2236,6 +2368,67 @@ async fn repair_pass<S: KvStore>(
     Ok(())
 }
 
+/// Check every group's members against its recorded failure domain
+/// (ADR-0038, R-119) on every pass, so that a group changed meanwhile by
+/// a process that ignores the records (a 0.1.0 leader) is found by the
+/// next 0.2.0 one: gauges each pass, the findings logged once per term and
+/// whenever their number changes. Nothing is moved or deleted here.
+fn note_failure_domains(
+    cfg: &ControllerConfig,
+    metrics: &Metrics,
+    nodes: &HashMap<u64, NodeRecord>,
+    groups: &[GroupRecord],
+    domains: &BTreeMap<u64, group_domain::GroupDomain>,
+    token: u64,
+    healthy: &dyn Fn(u64) -> bool,
+) {
+    let audit = crate::failure_domain::Audit {
+        at_risk: crate::failure_domain::unrecorded_at_risk(groups, domains, healthy),
+        findings: crate::failure_domain::audit_groups(groups, nodes, domains),
+        flag_differs: domains
+            .values()
+            .filter(|d| d.label != cfg.failure_domain)
+            .map(|d| (d.group, d.label.clone()))
+            .collect(),
+        schema_write: None,
+        enforced: false,
+    };
+    let violating = audit.violating_groups() as u64;
+    let unrecorded = audit.unrecorded_groups() as u64;
+    let before_v = metrics
+        .groups_failure_domain_violations
+        .swap(violating, Ordering::Relaxed);
+    let before_u = metrics
+        .groups_failure_domain_unrecorded
+        .swap(unrecorded, Ordering::Relaxed);
+    let at_risk = audit.at_risk.len() as u64;
+    let before_r = metrics
+        .groups_failure_domain_unrecorded_at_risk
+        .swap(at_risk, Ordering::Relaxed);
+    let new_term = metrics
+        .failure_domain_audit_term
+        .swap(token, Ordering::Relaxed)
+        != token;
+    if new_term || before_v != violating || before_u != unrecorded {
+        for f in &audit.findings {
+            warn!(group = f.group(), "failure domain: {f}");
+        }
+    }
+    if at_risk > 0 && (new_term || before_r != at_risk) {
+        warn!(
+            groups = ?audit.at_risk,
+            "groups without a recorded failure domain have a member down or a repair under way: no member of theirs is moved until `admin group set-failure-domain` records it"
+        );
+    }
+    if new_term && !audit.flag_differs.is_empty() {
+        warn!(
+            flag = %cfg.failure_domain,
+            groups = ?audit.flag_differs,
+            "groups whose recorded failure domain differs from --failure-domain: their recorded one is used"
+        );
+    }
+}
+
 /// Draining nodes and open replacement requests, as read at the start of
 /// a repair pass.
 struct Intents {
@@ -2243,9 +2436,18 @@ struct Intents {
     draining: BTreeSet<u64>,
     retired: BTreeSet<u64>,
     requests: HashMap<u64, membership::ReplaceRequest>,
+    /// The groups' recorded failure domains (ADR-0038): every member move
+    /// keeps them.
+    domains: BTreeMap<u64, group_domain::GroupDomain>,
 }
 
 impl Intents {
+    /// Whether `g` has several members and no recorded failure domain:
+    /// no member of it moves until one is set (ADR-0038).
+    fn unrecorded(&self, g: &GroupRecord) -> bool {
+        g.members.len() > 1 && !self.domains.contains_key(&g.id)
+    }
+
     async fn load<S: KvStore>(meta: &S, groups: &[GroupRecord]) -> Result<Self, ControlError> {
         let active = compat::cluster_state(meta)
             .await?
@@ -2287,6 +2489,7 @@ impl Intents {
             draining,
             retired,
             requests,
+            domains: group_domain::list(meta).await?,
         })
     }
 
@@ -2426,6 +2629,7 @@ async fn repair_one<S: KvStore>(
                 status: prior.cloned(),
                 now_ms: now,
                 pacing: cfg.repair_pacing,
+                domain_recorded: !intents.unrecorded(g),
             };
             let current = repair_liveness::current(&obs);
             // The node the member left, when an intent names it, and the
@@ -2507,11 +2711,18 @@ async fn repair_one<S: KvStore>(
                                 .fetch_add(1, Ordering::Relaxed);
                             Ok(busy)
                         }
-                        Started::NoTarget { capacity, msg } => {
+                        Started::NoTarget {
+                            capacity,
+                            refused,
+                            msg,
+                        } => {
                             warn!(group = g.id, index, "{why}; no other target: {msg}");
                             let mut s = repair_liveness::no_new_target(
                                 &obs,
-                                capacity,
+                                repair_liveness::no_target_reason(
+                                    capacity,
+                                    refused && intents.unrecorded(g),
+                                ),
                                 format!("{why}; no other target: {msg}"),
                             );
                             // A target that still answers is tried again
@@ -2658,13 +2869,16 @@ async fn repair_one<S: KvStore>(
                             .await?
                             {
                                 Started::Ran(busy) => Ok(busy),
-                                Started::NoTarget { capacity, msg } => {
+                                Started::NoTarget {
+                                    capacity,
+                                    refused,
+                                    msg,
+                                } => {
                                     let mut s = fresh.get(&g.id).cloned().unwrap_or(current);
-                                    s.reason = if capacity {
-                                        RepairReason::AwaitingCapacity
-                                    } else {
-                                        RepairReason::AwaitingNodes
-                                    };
+                                    s.reason = repair_liveness::no_target_reason(
+                                        capacity,
+                                        refused && intents.unrecorded(g),
+                                    );
                                     s.detail = format!("member {j} does not answer; {msg}");
                                     // Not walked again before the backoff
                                     // (re-review).
@@ -2755,15 +2969,17 @@ async fn repair_one<S: KvStore>(
             .await?
             {
                 Started::Ran(busy) => Ok(busy),
-                Started::NoTarget { msg, .. } => {
+                Started::NoTarget { msg, refused, .. } => {
                     warn!(group = g.id, index, why, "{msg}");
                     if why == "replace request" {
                         membership::note_replace_error(meta, g.id, Some(msg)).await?;
                     } else if why == "drain" {
                         membership::update_drain(meta, leaving, None, Some(msg)).await?;
                     }
-                    // Only an unhealthy member keeps cache repair waiting.
-                    Ok(why == "auto repair")
+                    // Only an unhealthy member keeps cache repair waiting,
+                    // and not when its group's failure domain refuses the
+                    // move: that holds back this group alone (R-119).
+                    Ok(why == "auto repair" && !refused)
                 }
             }
         }
@@ -2776,8 +2992,13 @@ enum Started {
     /// The move started (or resumed); whether it holds cache repair.
     Ran(bool),
     /// No node can take the member (`capacity`: candidates exist, none
-    /// with room).
-    NoTarget { capacity: bool, msg: String },
+    /// with room; `refused`: the group's failure domain refuses any move,
+    /// ADR-0038, which holds back nothing but this group).
+    NoTarget {
+        capacity: bool,
+        refused: bool,
+        msg: String,
+    },
 }
 
 /// Rebuild slot `index` of `g` onto a node chosen now (capacity checked,
@@ -2852,13 +3073,34 @@ async fn start_move<S: KvStore>(
             need,
         )
     };
+    // The group's recorded failure domain (ADR-0038), not the flag; a
+    // group without one, or a member whose domain is unknown, moves no
+    // member, and says why (to the replacement request or the drain).
+    let refuse = |msg: String| {
+        metrics
+            .failure_domain_refusals_total
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(Started::NoTarget {
+            capacity: false,
+            refused: true,
+            msg,
+        })
+    };
+    let label = match crate::failure_domain::label_for(&intents.domains, g, &cfg.failure_domain) {
+        Ok(l) => l,
+        Err(msg) => return refuse(msg),
+    };
     let pick = |with_room: bool| {
-        choose_for(nodes, all_groups, g, index, &cfg.failure_domain, &|id| {
+        choose_for(nodes, all_groups, g, index, &label, &|id| {
             to_node.is_none_or(|n| n == id) && candidate(id) && (!with_room || roomy(id))
         })
     };
-    let Some(replacement) = pick(true)? else {
-        let without_room = pick(false)?;
+    let chosen = match pick(true) {
+        Ok(c) => c,
+        Err(msg) => return refuse(msg),
+    };
+    let Some(replacement) = chosen else {
+        let without_room = pick(false).ok().flatten();
         let msg = match (without_room, to_node) {
             (Some(m), _) => format!(
                 "insufficient capacity: node {} has {} bytes free ({} reserved by other moves), the member needs {}; paused until a node has room",
@@ -2874,6 +3116,7 @@ async fn start_move<S: KvStore>(
         };
         return Ok(Started::NoTarget {
             capacity: without_room.is_some(),
+            refused: false,
             msg,
         });
     };
@@ -2905,6 +3148,7 @@ async fn start_move<S: KvStore>(
                 .fetch_add(1, Ordering::Relaxed);
             return Ok(Started::NoTarget {
                 capacity: true,
+                refused: false,
                 msg: format!(
                     "insufficient capacity: node {} has {room} bytes of room, {held} reserved by other moves, the member needs {need}; paused until a node has room",
                     replacement.node_id
@@ -3074,6 +3318,9 @@ async fn attempt<S: KvStore>(
         status: prior.cloned(),
         now_ms: now_ms(),
         pacing: cfg.repair_pacing,
+        // Only `decide` reads it, never on this observation (a status
+        // after an attempt).
+        domain_recorded: true,
     };
     let second = repair_liveness::second_failure(&obs, &outcome);
     if let Some(s) = repair_liveness::after(&obs, &outcome) {
@@ -3171,6 +3418,15 @@ async fn put_status<S: KvStore>(
     Ok(())
 }
 
+/// A replacement for slot `index` of `g` among the nodes `healthy` admits,
+/// in a domain of `failure_domain` (the group's recorded label) that no
+/// other member uses; `None` when no candidate qualifies.
+///
+/// # Errors
+///
+/// Why no replacement may be chosen for this group at all: a remaining
+/// member's domain is unknown (its node record is gone, or it lacks the
+/// label). The caller reports it for this group only.
 pub(crate) fn choose_for(
     nodes: &HashMap<u64, NodeRecord>,
     all_groups: &[GroupRecord],
@@ -3178,7 +3434,7 @@ pub(crate) fn choose_for(
     index: usize,
     failure_domain: &str,
     healthy: &impl Fn(u64) -> bool,
-) -> Result<Option<GroupMember>, ControlError> {
+) -> Result<Option<GroupMember>, String> {
     let node_list: Vec<NodeRecord> = nodes.values().filter(|n| healthy(n.id)).cloned().collect();
     let devices = groups::devices_of(&node_list, all_groups);
     // The remaining members' domains come from their node records' labels,
@@ -3190,12 +3446,10 @@ pub(crate) fn choose_for(
     let mut remaining = Vec::new();
     for (_, m) in g.members.iter().enumerate().filter(|(i, _)| *i != index) {
         let Some(n) = nodes.get(&m.node_id) else {
-            warn!(
-                group = g.id,
-                node = m.node_id,
-                "no replacement chosen: a remaining member's node record is gone, so its failure domain is unknown"
-            );
-            return Ok(None);
+            return Err(format!(
+                "no replacement chosen for group {}: member node {} has no node record, so its '{failure_domain}' domain is unknown",
+                g.id, m.node_id
+            ));
         };
         remaining.push(arca_lake_placement::Device {
             node_id: m.node_id,
@@ -3235,7 +3489,7 @@ pub(crate) fn choose_for(
             device_id: m.device_id,
         })),
         Err(arca_lake_placement::PlacementError::InsufficientDomains { .. }) => Ok(None),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(format!("no replacement chosen for group {}: {e}", g.id)),
     }
 }
 
@@ -3578,7 +3832,7 @@ async fn tiering_pass<S: KvStore>(
     if crate::repair_liveness::holding_group(&groups, &statuses).is_some() {
         return Ok(());
     }
-    if arca_lake_metadata::ops::integrity::any_actionable(meta).await? {
+    if arca_lake_metadata::ops::integrity::any_actionable(meta, now).await? {
         return Ok(());
     }
     metrics.tiering_active.store(true, Ordering::Relaxed);
@@ -3610,6 +3864,17 @@ async fn tiering_pass<S: KvStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The schema from which nodes refuse unproven shard writes (ADR-0037)
+    /// is the schema 0.2.0 initialises at and finalizes to (ADR-0039): the
+    /// first one no 0.1.0 process starts on.
+    #[test]
+    fn nodes_are_strict_from_schema_5() {
+        assert_eq!(
+            arca_lake_protocol::storage::v1::WRITE_OWNERSHIP_SCHEMA,
+            arca_lake_metadata::keys::SCHEMA_V5
+        );
+    }
 
     /// Three-host validation of 0.1.0: the replacement of a failed member
     /// keeps every member on its own host, the unhealthy members' hosts
@@ -3674,11 +3939,12 @@ mod tests {
         n.get_mut(&6).unwrap().devices.clear();
         let r = choose_for(&n, &groups, &groups[1], 1, "host", &|id| id != 5).unwrap();
         assert_eq!(r.map(|m| m.node_id), Some(2));
-        // A remaining member's node record gone: its domain is unknown.
+        // A remaining member's node record gone: its domain is unknown, no
+        // replacement is chosen, and the reason names it (R-119).
         let mut n = nodes.clone();
         n.remove(&6);
-        let r = choose_for(&n, &groups, &groups[1], 1, "host", &|id| id != 5).unwrap();
-        assert_eq!(r, None);
+        let r = choose_for(&n, &groups, &groups[1], 1, "host", &|id| id != 5);
+        assert!(r.as_ref().is_err_and(|e| e.contains("node 6")), "{r:?}");
     }
 
     /// ADR-0035 §10.1: the controller's flags only seed an absent record;

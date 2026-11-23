@@ -288,6 +288,105 @@ process-name kill, a shared service, a host restart, a change to the
 system FoundationDB, a network or mount change. No test data are removed
 automatically; teardown is a separate, reviewed step.
 
+**Evidence before teardown** (added for 0.2.0, after run
+`r110-20261122T162239Z`: the hosts were lost to a reboot, the run's end
+could neither confirm the stops nor collect the logs, and the later
+teardown, finding every process gone, removed the run directory with the
+guard's and the sentinel's logs and the ledger in it, so whether the
+guard stopped the load before the reboot can never be known):
+
+- Safe stops never wait for evidence. The run's end stops the load, the
+  services, the sampler, the sentinel and the watchdog first, and only
+  then collects. The teardown does the same: stop, then collect, then
+  decide. A size cap or a failed collection never delays or blocks a
+  stop.
+- A host directory of the run is removed only when **both** of these
+  hold:
+  1. every process the run started is confirmed stopped (its verdict,
+     and the liveness check of every record);
+  2. every file of the run that exists only on the host is saved on the
+     operator's machine and verified, and the host's files are unchanged
+     since. These are the ledgers, the logs, the services' records and
+     `started.list`, the stop, guard and sentinel results, the alarms,
+     the samples, the status and control files, the markers, the boot
+     record and the test FoundationDB's trace logs. The node stores and
+     the test FoundationDB's data are excluded and listed as such.
+
+  Anything else keeps everything and records why; the teardown can be
+  run again.
+- Verification: the host computes each file's sha256. The bytes are
+  transferred in chunks, each with its own sha256, written under a
+  temporary name, synced and read back. They take the file's name only
+  when they match the host's sha256. Before the removal the saved copies
+  are read again and the host's files listed again.
+- The manifest (`private/manifest.json` in the run's evidence) records:
+  the run ID, the tools' and the binary's sha256, every file saved (size,
+  sha256, the range saved), the errors, the expected records not found,
+  the excluded directories and the host's boot record. It also says
+  whether the collection is complete.
+- Partial is never complete. A transfer cut short, an unreadable file
+  (a permission error on either side), a checksum that does not match, a
+  deadline reached or a log over its cap (saved as its tail) all leave
+  the collection incomplete, and the run stays on the host.
+- After a lost connection the teardown first reaches the host (3 tries,
+  bounded). While it cannot, nothing is stopped, collected or removed.
+  Once reached, it collects before any removal and resumes: files
+  already saved with the host's current sha256 are not read again, and
+  an earlier copy that differs is kept apart.
+- A manifest never loses a file. A later collection keeps every file an
+  earlier one saved, including the files no longer on the host because a
+  teardown removed them, and reads each saved copy again: a copy that is
+  missing or differs is an error, and the collection is incomplete. The
+  teardown removes the test FoundationDB's directory first and the run
+  directory last, because the run directory holds the services' records
+  and the tools the liveness check needs. A teardown cut short between
+  the two removals can therefore be run again to the end. A directory
+  already gone is reported as absent. The teardown fails (exit status 1)
+  whenever a directory is left on the host.
+- Removing a directory left without its marker. If a removal is cut
+  partway through `rm -rf`, the marker (`.r110-run`) can go before the
+  rest. The tool then never removes that directory and reports it in
+  `kept_dirs`. The operator removes it by hand, and only when all of
+  these hold:
+  1. An earlier teardown record of this run
+     (`private/teardown/NNN.json`) shows `"removing": true`: every stop
+     was confirmed and the evidence was complete and verified before the
+     removal began.
+  2. A `driver.py collect` now reports `complete`, so the files still
+     on the host match the saved copies.
+  3. The path is exactly the one the record names, under the run's own
+     parent directory.
+  4. No process runs from it: `pgrep -af <the directory>` finds none.
+
+  Then `rm -rf -- <the directory>`, `rmdir` of the run's parent if it is
+  empty, and a note in the run's record of what was removed by hand.
+- A reboot is not a stop. Setup records the host's boot ID
+  (`host-boot.json`). A process found gone after the boot ID changed is
+  recorded as ended by the reboot (`cause: host-reboot`), never as
+  stopped by the guard or the teardown. When the boot ID cannot be
+  compared, the cause is "unknown" and the run cannot pass. At the run's
+  end the collection is recorded as complete only if every writer was
+  confirmed stopped; otherwise it is "complete, writers not confirmed
+  stopped". Whether the guard stopped the
+  load before the reboot is only what its own saved result says, or "not
+  known" when none was saved.
+- Bounds: every call has a timeout; the collection has a deadline
+  (30 min) and a few retries per file; logs are capped per file (64 MiB)
+  and in total (512 MiB). A log over its cap keeps the run on the host
+  until it is collected again with a larger cap: `--log-cap`,
+  `--log-total-cap`, `--collect-deadline`, `--inventory-timeout` and
+  `--call-timeout` (for `run`, `collect` and `teardown`) set these
+  limits, and the manifest records the values used. Links to directories
+  are not followed; they are listed as skipped. Nothing is ever killed or
+  removed on a guess.
+- Public and private are kept apart. `private/` holds the raw files,
+  the manifest and the teardown records (host paths, logs).
+  `public/evidence-summary.json` holds only counts, relative paths,
+  sizes, sha256 and whether the host rebooted.
+
+Commands: `driver.py collect` (scope `collect`) collects again;
+`driver.py teardown` needs `--evidence` (the evidence root the run used).
+
 ## 7. Stages
 
 Each stage starts only when the previous one ended by its exit condition
@@ -302,6 +401,22 @@ and the watchdog has not fired; anything else ends the run.
 | 5 Drain and recovery | 4 exit | no new data except a probe PUT every 10 s (running beside the deletes, under the same budget and ledger; its keys deleted once C2's and C3a's holds are over, apart from C2's deletes, so that stage 6 starts at L1); DELETE every key stage 4 added and 1,000 more baseline keys (live set L1 = 2,000) at ≤ 20/s; observe GC, retention, reclaim, compaction, admission | C2 and C3a judged | 60 min (about 24 min of grace, retention and pass intervals, then the 10 min holds) |
 | 6 Steady churn | C3a passed | 1 PUT of a new key and 1 DELETE of the oldest per second for 90 min, the live set within ±5 % of L1 | C3b judged over the whole stage, C4 on its last 60 min | 100 min |
 | 7 Integrity and evidence | 6 ended | verify (§8 C5); v3: then wait, with no load, until at least the controller's orphan age and two reconcile intervals (900 + 2 × 300 s) after stage 6's end, the GC backlog 0 and no record pending reclaim on any node (fresh samples), at most until 15 min before the stage's end; then `admin integrity verify-manifests` and a scrub of every group (findings recorded by class); evidence saved; teardown only after review | C5 judged | 60 min |
+
+Stage 7 with a 0.2.0 binary (ADR-0036; the criteria above unchanged):
+the scrub classifies records kept for reclaim as `retained`, not as
+unexpected shards, so the C5 count rule of v3 no longer applies to it
+(`judge.py` applies it only to timelines without `scrub_held`).
+Unexpected shards are then orphans only, and some orphans are
+legitimate for a while: shards of a write diverted to another group, and
+shards of a `begin_put` that is still being retried (no generation yet),
+which reconciliation removes only once they are older than the
+controller's minimum orphan age (`controller/src/gc.rs`,
+`reconcile_node`). The scrub does not excuse them. What removes them
+before the C5 scrub is stage 7's settle wait: the orphan age and two
+reconcile intervals after stage 6's last write. A scrub read before the
+settle (`settled_ms` null) can therefore fail C5 on such orphans; that
+is the intended reading (the run's evidence shows whether the settle was
+reached).
 
 ## 8. Judgement (fixed before the run)
 
@@ -460,7 +575,7 @@ of this plan.
 Implemented in `benchmarks/linux/r110/` (P1 `budget.py`, `ledger.py`,
 `load.py`; P2 `guard.py` (the guard and the sentinel), `watchdog.py`,
 `proc.py`; P3 `sampler.py`; P4
-`driver.py`, `judge.py`, `remote.py`), tested locally without any host.
+`driver.py`, `judge.py`, `remote.py`, `evidence.py`), tested locally without any host.
 `driver.py check` is the default and contacts nothing; every other command
 needs `--execute` and an approval file naming the sha256 of the run's
 configuration, the scope and the time window (§10). The example

@@ -930,6 +930,9 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }))
         .with_tls(cfg.tls.clone());
         clients.set_incarnation(Some(state.incarnation));
+        // Shard writes count only on nodes of schema_write's release once
+        // it is 5 or later (ADR-0039); refreshed with the cluster state.
+        clients.set_required_node_schema(compat::required_node_schema(gate.schema_write));
         // The delete fence (ADR-0023): a gateway deletes (its own partial
         // copies) only under the generation open now; refreshed with the
         // cluster state.
@@ -1054,6 +1057,8 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                         if let Some(sw) = g.schema_write {
                             arca_lake_metadata::records::set_schema_write(sw);
                         }
+                        clients
+                            .set_required_node_schema(compat::required_node_schema(g.schema_write));
                         w.set(g.cluster);
                         // A failed read keeps the last record, which then
                         // ages into a stricter state (fail closed).

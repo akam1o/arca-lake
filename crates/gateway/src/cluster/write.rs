@@ -1039,7 +1039,20 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                     )));
                 };
                 let expected_crc = arca_lake_storage::format::crc32c(&data);
-                match clients.put_shard(&addr, shard, epoch, data, frame).await {
+                // Named for the member: another node at its address
+                // refuses it (ADR-0037).
+                match clients
+                    .put_shard_to(
+                        &addr,
+                        member.node_id,
+                        shard,
+                        epoch,
+                        data,
+                        frame,
+                        arca_lake_protocol::storage::v1::WriteClass::Client,
+                    )
+                    .await
+                {
                     Ok(resp) if resp.crc32c == expected_crc => Ok(()),
                     Ok(resp) => Err(WriteError::Failed(format!(
                         "node {addr} stored different bytes (crc {:08x} vs {expected_crc:08x})",

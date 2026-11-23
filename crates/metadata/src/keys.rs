@@ -25,6 +25,7 @@
 //! | `("al","mpp",upload_id,part_number)` | `PartRecord` | sealed part of an upload |
 //! | `("al","scrub",group_id)` | `ScrubCursor` | scrub progress of a group (RFC-008 §8.3) |
 //! | `("al","repair",group_id,chunk_id)` | `RepairTask` | stripe repair task (RFC-008 §8.5) |
+//! | `("al","gdomain",group_id)` | `GroupDomain` | a group's required failure domain (ADR-0038) |
 //! | `("al","pend",lease_until_ms,gen)` | empty | pending generations by lease expiry |
 //! | `("al","gc",since_ms,gen)` | empty | retired generations awaiting GC |
 //!
@@ -50,11 +51,22 @@ const ROOT: &str = "al";
 /// record layout changes, but once `upgrade finalize` raised it, every
 /// controller reads the tiering record (no release that would run tiering
 /// from its flags alone starts), so tiering may be disabled and gateways
-/// stop recording reads. 5 exists only in a `version-bump` build.
-pub const SCHEMA_VERSION: u64 = 4 + arca_lake_common::compat::BUMP;
+/// stop recording reads. 5 = 0.2.0 ([`SCHEMA_V5`], ADR-0039): no record
+/// layout changes either; it is the cut-off for 0.1.0 (schema 4), after
+/// which the 0.2.0 protections are mandatory. 6 exists only in a
+/// `version-bump` build.
+pub const SCHEMA_VERSION: u64 = 5 + arca_lake_common::compat::BUMP;
 
-/// Oldest schema version this build serves (`M_cur − 1`, RFC-014 §5.4).
+/// Oldest schema version this build serves (`M_cur − 1`, RFC-014 §5.4):
+/// 4, the schema of 0.1.0 stores.
 pub const SCHEMA_VERSION_MIN: u64 = SCHEMA_VERSION - 1;
+
+/// The schema of 0.2.0 (ADR-0039), also in a `version-bump` build. Once
+/// `schema_write` reaches it (`admin upgrade finalize`), no 0.1.0 process
+/// runs on the cluster and the protections 0.1.0 would bypass are
+/// mandatory ([`crate::ops::compat::Gate::schema_v5_enforced`]); below it
+/// the cluster is in the mixed window with 0.1.0 and they are degraded.
+pub const SCHEMA_V5: u64 = 5;
 
 /// Key holding the schema writers may encode (RFC-014 §5.4).
 #[must_use]
@@ -830,6 +842,20 @@ pub fn group(group_id: u64) -> Key {
 #[must_use]
 pub fn groups_prefix() -> Key {
     pack(&(ROOT, "grp"))
+}
+
+/// Required failure domain of a group (ADR-0038, R-119): a key of its
+/// own, which earlier releases never read or rewrite (a field appended to
+/// `GroupRecord` would be dropped by a 0.1.0 process rewriting the group).
+#[must_use]
+pub fn group_domain(group_id: u64) -> Key {
+    pack(&(ROOT, "gdomain", group_id))
+}
+
+/// Prefix of every group's failure domain record.
+#[must_use]
+pub fn group_domains_prefix() -> Key {
+    pack(&(ROOT, "gdomain"))
 }
 
 /// Group ID allocator.

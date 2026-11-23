@@ -8,7 +8,7 @@ design, not a tuning hint; violating one voids a guarantee.
 | FoundationDB on its own storage, with a supervisor restarting `fdbserver` | A transaction log commit stalled for more than 10 s stops FoundationDB (`io_timeout`); on shared virtual storage this happened under load in Phase 3.5 and 3.6 | R-79 |
 | One file system (device) per storage node, or `--capacity-bytes` allotments that sum to at most its size | Capacity admission is per node; nodes sharing free space can together cross their reserves. The controller detects shared file systems and keeps their groups out of placement | R-80, `admin check-config` |
 | Free space above each node's reserve in normal operation | Writes are throttled near it and refused at it; the reserve is for compaction, rollover, quarantine and repair | RFC-008 §6.8 |
-| Distinct failure domains (`--failure-domain` label values) per group member | A group tolerates `m` member losses only if they fail independently. Replacements use the controller's `--failure-domain`: keep it the label the groups were created with (a group's own label is not recorded; R-119) | RFC-004 §5.3 |
+| Distinct failure domains (values of the group's label) per group member, and every group's failure domain recorded | A group tolerates `m` member losses only if they fail independently. Groups created by 0.2.0 record their label; a group created by 0.1.0 moves no member (no repair onto a new node, replacement or drain) until `admin group set-failure-domain --group G --label L` (or `--all-unrecorded`) records the label it was created with — it is never inferred. `admin group check` (and `admin status`) lists groups with two members in one domain, groups without a record and members whose node lacks the label; move a member with `admin replace-member`. Every member move keeps the recorded label, whatever the controller's `--failure-domain`; registering a node without a label its groups need is refused. Until `admin upgrade finalize` reaches schema 5 a 0.1.0 leader ignores the records (reported as degraded; the next 0.2.0 leader re-checks), and that finalize waits until every group is recorded | ADR-0038, R-119 |
 | Mutual TLS for node RPCs and TLS to FoundationDB | Plaintext is refused unless explicitly enabled | ADR-0017 |
 | A TLS terminator in front of the gateways | The S3 listener speaks plain HTTP | RFC-012 |
 | At least two controllers | Leadership fails over by lease; a single controller stops GC, repair and write admission while down (gateways then refuse new data after 5 minutes) | RFC-011, RFC-008 §6.8 |
@@ -22,6 +22,7 @@ design, not a tuning hint; violating one voids a guarantee.
 | The delete fence closed (`admin delete-fence close`) before a metadata restore | Without it a delete decided before the restore can still remove shards the restored metadata needs | ADR-0023, RFC-013 §5.9 |
 | `--fence-lease-secs` (storage nodes) well above the controllers' `--health-interval-secs` (default 30 s against 5 s) | A node admits deletes only within the lease after the leader's last push; a lease shorter than a pass stops deletes | ADR-0024, RFC-013 §10.12 |
 | Every storage node reachable (or decommissioned) for `admin upgrade finalize`, and reachable or declared absent for `admin recovery begin` | Both collect the nodes' schema floor and incarnation sequence; a node that missed them could take a previous release's deletes | ADR-0024 |
+| Before `admin upgrade finalize` to schema 5: no tool or process left that writes shards without the cluster incarnation (0.1.0 CLI tools, `nodebench`, processes that do not heartbeat or start after the finalize's check) | The finalize pushes schema 5 to the nodes before it raises the schema, and from then on nodes refuse every shard write that does not carry the incarnation and name its node: such writers get failed writes (503 through a gateway); availability, not safety (strict mode takes effect only with the schema-5 change) | ADR-0037 |
 | After `upgrade finalize`, no controller or gateway of an earlier release; restored metadata only through `admin recovery begin` | The earlier release refuses to start on the finalized schema; `recovery begin` brings restored metadata back up to it | RFC-013 §5.8 |
 | Every controller upgraded before a leader of Phase 3.11 or later runs | Once nodes hold identities they refuse deletes that carry none, which earlier controllers send: GC and reconciliation would stall under an earlier leader | ADR-0027 |
 | Metadata restores through `admin restore`, of backups younger than the nodes' retention less twice the skew allowance; `admin recovery begin` after any other restore | Deferred reclamation protects every restore of such a backup whatever its path; `admin restore` adds its checks; older backups lose what was reclaimed since (R-94(b), bounded) | ADR-0026, ADR-0028, [Backup and restore](backup-restore.md) |
@@ -39,24 +40,160 @@ design, not a tuning hint; violating one voids a guarantee.
 
 ## Versions and compatibility
 
-The software version (0.1.0) is separate from the compatibility axes
+The software version (0.2.0) is separate from the compatibility axes
 that decide which builds can run together and which data they read:
 
-| Axis | 0.1.0 writes | 0.1.0 accepts or reads | Source |
-| --- | --- | --- | --- |
-| Wire protocol (node RPCs) | 4 | 3–4 | `crates/protocol/src/lib.rs` |
-| Metadata schema | 4 | 3–4 | `crates/metadata/src/keys.rs` |
-| Metadata record version byte | 2 | 1–2 | `crates/metadata/src/records.rs` |
-| Segment format | 2 | 1–2 | `crates/storage/src/format.rs` |
-| Storage record version | 1 | 1 | `crates/storage/src/format.rs` |
+| Axis | 0.2.0 writes | 0.2.0 accepts or reads | 0.1.0 writes / reads | Source |
+| --- | --- | --- | --- | --- |
+| Wire protocol (node RPCs) | 4 | 3–4 | 4 / 3–4 | `crates/protocol/src/lib.rs` |
+| Metadata schema | 5 (4 until finalized) | 4–5 | 4 / 3–4 | `crates/metadata/src/keys.rs` |
+| Metadata record version byte | 2 | 1–2 | 2 / 1–2 | `crates/metadata/src/records.rs` |
+| Segment format | 2 | 1–2 | 2 / 1–2 | `crates/storage/src/format.rs` |
+| Storage record version | 1 | 1 | 1 / 1 | `crates/storage/src/format.rs` |
 
-- A new 0.1.0 store initialises at schema 4 and segment format 2.
-- 0.1.0 has no supported upgrade predecessor. The schema 2 and 3 rows
-  above and the earlier "releases" in the changelog and CI are
-  pre-release development commits used by the upgrade tests.
+- A new 0.2.0 store initialises at schema 5 and segment format 2.
+- Schema 5 ([ADR-0039](../adr/0039-schema-5-and-the-0.1.0-upgrade.md))
+  changes no record layout. It marks the point after which no 0.1.0
+  process runs, so the 0.2.0 protections that 0.1.0 would bypass
+  (strict write ownership, the failure domain recorded on each group)
+  are mandatory. Below it they are degraded: `admin status --versions`
+  prints `protections degraded` or `protections mandatory`, and flags
+  each 0.1.0 (or unknown) process and node with `below-schema-5`.
+- 0.1.0 is the supported upgrade predecessor of 0.2.0. Stores of schema
+  3 or below (development commits before 0.1.0) are refused by 0.2.0:
+  upgrade them to 0.1.0 and finalize first. 0.1.0 itself has no
+  supported predecessor; the schema 2 and 3 "releases" in the changelog
+  are pre-release development commits.
 - Upgrades go one step at a time, in order, within one compatibility
   window (adjacent versions only): storage nodes first, then controllers
   (followers, leader last), then gateways (RFC-014 §5.8).
-- `admin upgrade finalize` is one-way: after it, earlier builds refuse
-  to start and no downgrade is possible; restore of a pre-finalize
-  backup is the only way back (RFC-014, RFC-015).
+- `admin upgrade finalize` is one-way: after it, earlier controllers and
+  gateways refuse to start and no downgrade is possible (RFC-014). From
+  0.1.0 to 0.2.0, restoring a pre-finalize backup does not bring 0.1.0
+  back either (see below).
+
+### Upgrading from 0.1.0 to 0.2.0
+
+1. Take a backup (RFC-015) and read the 0.2.0 release notes.
+2. Storage nodes, one failure domain at a time: stop, replace the
+   binary, start, and wait until the node answers and is seen
+   (`admin node list`).
+3. Controllers: followers first, the leader last.
+4. Gateways: drain, restart, return.
+5. Check `admin status --versions`. No line may end in `below-schema-5`
+   (a 0.1.0 or unknown process or node). The heartbeat record of a
+   process you stopped stays fresh for 90 s, then shows `(stale)`. Name
+   a stopped process with `--ignore-absent <id>` instead of waiting; it
+   is refused if the process heartbeats after the request.
+6. When satisfied, run `admin upgrade finalize --wait`. It refuses while
+   any 0.1.0 process or node takes part, at the request, again before
+   the cut-off, and at the last step. The reason is shown by
+   `admin upgrade status`; the finalize goes on once the process is
+   stopped. It completes across a controller restart or failover.
+
+Until the finalize raises `schema_write` (the cut-off), you can return
+any process to 0.1.0, in any order: records are unchanged.
+`admin upgrade cancel` withdraws a finalize that has not reached the
+cut-off. The re-check, on 0.2.0's return, of what 0.1.0 did meanwhile
+is provided by the 0.2.0 protections themselves (R-117 strict write
+ownership, R-119 recorded failure domains; see their ADRs).
+
+From the cut-off on there is no way back to 0.1.0:
+
+- 0.1.0 controllers and gateways refuse to start once the finalize
+  completes. The leader logs an error and counts
+  (`arca_controller_procs_below_schema`) any that still runs; stop it.
+- Once the finalize has completed, restoring a pre-finalize backup does
+  not bring 0.1.0 back. The nodes keep schema floor 5, and a restore
+  raises both `schema` and `schema_write` of the restored metadata to
+  it, so the restored cluster is at schema 5 too.
+- A 0.1.0 storage node still starts (it reads no metadata). The 0.2.0
+  leader quarantines it before sending it anything, and gateways and the
+  controller do not count any shard write to it: chunks go to another
+  group. With `--auto-repair` its members are repaired away.
+  `admin node rejoin` refuses it. Run 0.2.0 on it, then
+  `admin node rejoin --node <id> --yes`.
+- Do not run 0.1.0 `admin` commands (`register-node`, `create-groups`,
+  `replace-member`, `recovery`, `restore`, ...) after the cut-off. They
+  do not check the schema gate and know none of the 0.2.0 keys. Use the
+  0.2.0 binary's `admin`.
+
+### Upgrading from 0.1.0: record the groups' failure domains
+
+Groups created by 0.1.0 have no recorded failure domain (ADR-0038), and
+a 0.2.0 leader moves none of their members (no auto repair onto a new
+node, no `replace-member`, no drain) until one is recorded. As soon as
+the controllers run 0.2.0 (after the storage nodes, before the
+gateways), as a step of the upgrade:
+
+1. `arca-lake admin group set-failure-domain --all-unrecorded --label
+   <label> --dry-run` lists the groups without a record and what would
+   be recorded. `<label>` is the label the groups were created with (the
+   0.1.0 controllers' `--failure-domain`, `host` by default); it is never
+   inferred. Groups created with different labels are recorded one at a
+   time with `--group <id>`.
+2. The same command without `--dry-run` records it. It refuses, writing
+   nothing, a label that no member's node of a listed group carries
+   (`--force` overrides). Exit 0: recorded; 2: recorded with warnings
+   (members on one value of the label, or without it); 1: refused.
+3. `arca-lake admin group check` exits 0 once every group is recorded
+   and its members keep their domain; otherwise move the members it
+   names with `admin replace-member`.
+
+Until then `admin status` prints a `WARNING: failure domain unrecorded
+on groups ...` line for unrecorded groups with a member down or a
+repair under way, `arca_controller_groups_failure_domain_unrecorded_at_risk`
+counts them, and their repair status shows `awaiting-failure-domain`:
+a failure there is not repaired until the domain is recorded. The
+finalize to metadata schema 5 is refused while a group is unrecorded,
+at its first step and again at the downgrade cut-off (a group a 0.1.0
+`admin create-groups` made meanwhile is caught too). A cluster created
+by 0.2.0 starts at schema 5 with every group recorded: none of this
+applies to it.
+
+## Reading a scrub
+
+`admin integrity scrub --group <id> --wait` prints one line per group:
+
+```
+scrub group <id> verified <n> bytes <n> findings [<8 counts>] enqueued <n> errors <n> retained <n> retained_damaged <n> in_flight <n> unclassified <n>
+```
+
+- `findings` keeps its eight classes in their order (missing,
+  checksum, truncated, header, unexpected, stale epoch, metadata/data,
+  unrecoverable; RFC-008 §8.4). Since 0.2.0 the scrub classifies each
+  listed shard from that record's own evidence: whether a live chunk
+  record places it in the group, whether the node reports the record
+  retired by a delete and kept for reclaim (ADR-0028), the generation's
+  state, and whether a migration intent targets the group. No count is
+  compared with another.
+- `unexpected` (class 5) counts only orphans now: valid records nothing
+  references and no delete retired (reconciliation removes them),
+  including the short-lived ones of a write diverted to another group
+  or a `begin_put` still being retried (removed once older than the
+  controller's minimum orphan age: scrub after it when you need a clean
+  result). A copy at another member's index is retained if the node
+  reports it retired, else unexpected.
+  Records kept for reclaim are `retained`, not findings; they leave the
+  listing once the retention has passed and a reclaim pass ran.
+- `retained_damaged`: records kept for reclaim that failed verification.
+  Each is also counted under its damage class in `findings` (a restore
+  within the retention may need it, and the device returned bad data),
+  and is not queued for repair (nothing references it). If a restore
+  makes it referenced again, the next scrub queues it like any damaged
+  shard.
+- `in_flight`: shards an operation in progress holds (a migration's
+  copy before its switch while its intent is younger than one hour, a
+  pending generation's write, a generation being collected). Damage to such a shard is a finding and is queued; the
+  task waits for the record (R-120).
+- `unclassified`: shards whose class the pass could not establish: a
+  storage node that does not report retirement (0.1.0 nodes in a mixed
+  cluster report every unreferenced record this way), metadata that did
+  not decode, or a record that changed between the reads. They are
+  never healthy: each one also counts in `errors` (not in `verified`); scrub again (after
+  the node upgrade). `admin integrity status` shows the persisted
+  per-group record, which has no `retained` or `unclassified` count
+  (unchanged format; unclassified shards are in its `errors`).
+- Exit code 0 when the scrub ran, whatever it found; read the line.
+- Metrics: `arca_controller_integrity_findings_total{class}` as before;
+  `arca_controller_scrub_shard_classes_total{class=retained_for_reclaim|retained_damaged|in_flight|unclassified}`.

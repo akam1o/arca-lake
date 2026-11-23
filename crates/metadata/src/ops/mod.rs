@@ -15,6 +15,7 @@ pub mod compat;
 pub mod delete_fence;
 pub mod epoch_intent;
 pub mod gc;
+pub mod group_domain;
 pub mod integrity;
 pub mod leader;
 pub mod list;

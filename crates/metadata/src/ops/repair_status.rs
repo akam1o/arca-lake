@@ -44,7 +44,17 @@ pub enum RepairReason {
     DataUnrecoverable,
     /// Needs an operator (e.g. `Repairing` without a cursor).
     PermanentlyBlocked,
+    /// The move the repair needs (a retarget, a second failed member's
+    /// replacement) is refused only because the group has no recorded
+    /// failure domain (ADR-0038): `admin group set-failure-domain`. Stored
+    /// as [`Self::AwaitingNodes`] with [`AWAITING_FAILURE_DOMAIN`] before
+    /// the detail, which 0.1.0 decodes (it fails on an unknown variant);
+    /// [`get`] and [`list`] report it as this reason.
+    AwaitingFailureDomain,
 }
+
+/// Prefix of a stored detail that marks [`RepairReason::AwaitingFailureDomain`].
+pub const AWAITING_FAILURE_DOMAIN: &str = "awaiting-failure-domain: ";
 
 impl RepairReason {
     /// Whether a group with this status still counts as repair in progress
@@ -65,6 +75,7 @@ impl RepairReason {
             Self::AwaitingNodes => "awaiting-nodes",
             Self::DataUnrecoverable => "data-unrecoverable",
             Self::PermanentlyBlocked => "permanently-blocked",
+            Self::AwaitingFailureDomain => "awaiting-failure-domain",
         }
     }
 }
@@ -121,6 +132,27 @@ pub struct RepairStatus {
 
 impl Record for RepairStatus {}
 
+/// As stored: no reason a 0.1.0 reader cannot decode.
+fn stored(s: &RepairStatus) -> RepairStatus {
+    let mut s = s.clone();
+    if s.reason == RepairReason::AwaitingFailureDomain {
+        s.reason = RepairReason::AwaitingNodes;
+        s.detail = format!("{AWAITING_FAILURE_DOMAIN}{}", s.detail);
+    }
+    s
+}
+
+/// As reported: the reason [`stored`] encoded.
+fn reported(mut s: RepairStatus) -> RepairStatus {
+    if s.reason == RepairReason::AwaitingNodes
+        && let Some(d) = s.detail.strip_prefix(AWAITING_FAILURE_DOMAIN)
+    {
+        s.detail = d.to_string();
+        s.reason = RepairReason::AwaitingFailureDomain;
+    }
+    s
+}
+
 /// The status of `group`, if any.
 ///
 /// # Errors
@@ -131,6 +163,7 @@ pub async fn get<S: KvStore>(store: &S, group: u64) -> Result<Option<RepairStatu
         Box::pin(async move { read(tx, &keys::repair_status(*group)).await })
     })
     .await
+    .map(|s| s.map(reported))
 }
 
 /// Write the status.
@@ -140,7 +173,7 @@ pub async fn get<S: KvStore>(store: &S, group: u64) -> Result<Option<RepairStatu
 /// Backend errors; `Fenced` for a former leader.
 pub async fn put<S: KvStore>(store: &S, status: &RepairStatus) -> Result<()> {
     transact(store, status, |tx, status| {
-        Box::pin(async move { write(tx, &keys::repair_status(status.group), *status) })
+        Box::pin(async move { write(tx, &keys::repair_status(status.group), &stored(status)) })
     })
     .await
 }
@@ -175,9 +208,48 @@ pub async fn list<S: KvStore>(store: &S) -> Result<Vec<RepairStatus>> {
             )
             .await?
             .into_iter()
-            .map(|(_, v)| decode::<RepairStatus>(&v))
+            .map(|(_, v)| decode::<RepairStatus>(&v).map(reported))
             .collect()
         })
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::MemKv;
+
+    /// Stored as a reason 0.1.0 decodes, reported as written (ADR-0038).
+    #[test]
+    fn awaiting_a_failure_domain_is_stored_as_awaiting_nodes() {
+        futures::executor::block_on(async {
+            let kv = MemKv::default();
+            let s = RepairStatus {
+                group: 3,
+                reason: RepairReason::AwaitingFailureDomain,
+                detail: "group 3 has no recorded failure domain".into(),
+                ..RepairStatus::default()
+            };
+            put(&kv, &s).await.unwrap();
+            let raw = transact(&kv, (), |tx, ()| {
+                Box::pin(async move { read::<RepairStatus, _>(tx, &keys::repair_status(3)).await })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(raw.reason, RepairReason::AwaitingNodes);
+            assert!(raw.detail.starts_with(AWAITING_FAILURE_DOMAIN));
+            assert_eq!(get(&kv, 3).await.unwrap(), Some(s.clone()));
+            assert_eq!(list(&kv).await.unwrap(), vec![s]);
+            let plain = RepairStatus {
+                group: 4,
+                reason: RepairReason::AwaitingNodes,
+                detail: "member 1 does not answer".into(),
+                ..RepairStatus::default()
+            };
+            put(&kv, &plain).await.unwrap();
+            assert_eq!(get(&kv, 4).await.unwrap(), Some(plain));
+        });
+    }
 }

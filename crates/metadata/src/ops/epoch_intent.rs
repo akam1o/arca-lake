@@ -114,15 +114,56 @@ where
     S: KvStore,
     F: Fn(&mut GroupRecord) + Send + Sync,
 {
-    transact(store, (group, from_epoch, &change), |tx, env| {
+    commit_inner(store, group, from_epoch, None, change).await
+}
+
+/// [`commit`] of a member move: in the same transaction, the move of slot
+/// `index` to `replacement` must keep the group's recorded failure domain
+/// (ADR-0038; a group without one refuses). A refusal leaves the intent
+/// open: the next leader pass re-validates it and settles it.
+///
+/// # Errors
+///
+/// As [`commit`]; [`MetaError::InvalidArgument`] for a move the failure
+/// domain refuses.
+pub async fn commit_member<S, F>(
+    store: &S,
+    group: u64,
+    from_epoch: u64,
+    index: usize,
+    replacement: GroupMember,
+    change: F,
+) -> Result<GroupRecord>
+where
+    S: KvStore,
+    F: Fn(&mut GroupRecord) + Send + Sync,
+{
+    commit_inner(store, group, from_epoch, Some((index, replacement)), change).await
+}
+
+async fn commit_inner<S, F>(
+    store: &S,
+    group: u64,
+    from_epoch: u64,
+    check: Option<(usize, GroupMember)>,
+    change: F,
+) -> Result<GroupRecord>
+where
+    S: KvStore,
+    F: Fn(&mut GroupRecord) + Send + Sync,
+{
+    transact(store, (group, from_epoch, &check, &change), |tx, env| {
         Box::pin(async move {
-            let (group, from_epoch, change) = *env;
+            let (group, from_epoch, check, change) = *env;
             let mut g: GroupRecord = read(tx, &keys::group(group))
                 .await?
                 .ok_or(MetaError::NoSuchGroup(group))?;
             let cur: Option<EpochIntent> = read(tx, &keys::epoch_intent(group)).await?;
             if g.epoch != from_epoch || cur.as_ref().is_none_or(|c| c.from_epoch != from_epoch) {
                 return Ok(g);
+            }
+            if let Some((index, replacement)) = check {
+                crate::ops::group_domain::check_member_in_tx(tx, &g, *index, *replacement).await?;
             }
             change(&mut g);
             g.epoch = from_epoch + 1;

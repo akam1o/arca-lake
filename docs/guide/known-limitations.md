@@ -51,11 +51,15 @@ entry in the [risk register](../architecture/risks.md).
   carries no incarnation, and a node that has adopted none yet accepts
   any. Use one CA or trust domain per cluster; plaintext is for tests
   only.
-- R-119 (residual): replacements use the controller's
-  `--failure-domain` (a group's own label is not recorded); groups whose
-  members were put in one domain by a replacement made before the fix are
-  not reported; a node without the failure-domain label stalls the
-  replacement of its groups (nothing is placed in a wrong domain).
+- R-119 (residual, fixed in 0.2.0 preparation, ADR-0038): groups
+  created by 0.1.0 have no recorded failure domain and move no member
+  until `admin group set-failure-domain` records it; on a store upgraded
+  from 0.1.0, while the metadata schema is below 5 (a new 0.2.0 store
+  starts at 5 and enforces from the start) a 0.1.0 controller that
+  leads moves members by its
+  `--failure-domain` only (reported as degraded, re-checked by the next
+  0.2.0 leader); groups that already break their domain are reported
+  (`admin group check`), not moved automatically.
 - R-118 (residual, fixed in 0.2.0 preparation): a generation with a
   chunk that cannot move is retried by every pass in which it qualifies;
   a partly promoted generation whose reads age out stays split over two
@@ -98,10 +102,22 @@ entry in the [risk register](../architecture/risks.md).
 ## Known behaviours to plan for
 
 - A scrub reports a record that was deleted and waits out the reclaim
-  retention (`--reclaim-retention-secs`) as an unexpected shard, as it
-  does for shards no object references. Unexpected shards are not damage
-  (missing, checksum, truncated or unrecoverable findings are); expect
-  them after deletes until the retention and a reclaim pass have passed.
+  retention (`--reclaim-retention-secs`) as `retained`, not as an
+  unexpected shard (since 0.2.0; 0.1.0 counted both alike). With 0.1.0
+  storage nodes in the cluster (they do not report retirement) such
+  records are `unclassified` and counted as scrub errors until the nodes
+  are upgraded ([Reading a scrub](operations.md#reading-a-scrub)).
+- A shard of a migration's target damaged before the placement switch
+  (R-120): its repair task waits while the migration intent targets the
+  group (at most the intent's one-hour lifetime) and repairs the shard
+  after the switch. While it waits it does not hold tiering or
+  rebalancing; after a migration that crashed before its switch it stays
+  in the queue (integrity status open) until the intent is stale (one
+  hour), and is then dropped.
+- `unexpected` shards are orphans only, but some are legitimate for a
+  while: a write diverted to another group, or a `begin_put` still
+  being retried. Reconciliation removes them after the controller's
+  minimum orphan age; a scrub before that reports them.
 - `admin integrity verify-manifests` checks multipart uploads' manifests
   only; a store without multipart uploads has nothing for it to check.
 

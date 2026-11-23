@@ -35,6 +35,7 @@ arca_controller_delete_fence_nodes_current	gauge	controller	nodes	-	nodes whose 
 arca_controller_delete_fence_nodes_stale	gauge	controller	nodes	-	nodes whose last report shows another delete fence generation or state (not yet adopted, or unreachable since)
 arca_controller_delete_fence_open	gauge	controller	bool	-	1 while the leader holds the delete fence open (deletes allowed), 0 while closed
 arca_controller_delete_fence_refusals_total	counter	controller	deletes	-	deletes of this process refused for the delete fence (deferred to a later pass)
+arca_controller_failure_domain_refusals_total	counter	controller	events	-	member moves refused by the failure-domain rule: the group has no recorded failure domain, or the incoming node lacks its label or shares its value with another member (ADR-0038)
 arca_controller_gc_backlog	gauge	controller	generations	-	retired generations waiting for GC after the last pass (leader; counted up to 200000)
 arca_controller_gc_backlog_bytes	gauge	controller	bytes	-	logical bytes of the retired generations waiting for GC (entries written before Phase 3.6 carry no size; leader)
 arca_controller_gc_backlog_oldest_age_seconds	gauge	controller	seconds	-	age of the oldest retired generation waiting for GC after the last pass (leader)
@@ -48,6 +49,9 @@ arca_controller_gc_roots_collected_total	counter	controller	generations	-	multip
 arca_controller_gc_skipped_referenced_total	counter	controller	generations	-	retired-queue entries naming a referenced generation (invariant violation when > 0)
 arca_controller_gc_stage_seconds	histogram	controller	seconds	stage=expire|discover|root_step|verify|delete_rpc|delete_generation|finish|collect|batch	time of each GC stage: expiring pending leases, reading the retired queue, one multipart root step, one reference check, one DeleteShard RPC, every delete of one generation, removing one generation's metadata, one generation end to end, one batch
 arca_controller_gc_transactions_total	counter	controller	transactions	kind=verify|finish|root_step	metadata transactions GC ran, by kind
+arca_controller_groups_failure_domain_unrecorded	gauge	controller	groups	-	groups of several members without a recorded failure domain at the last repair pass: none of their members is moved until an operator sets one (ADR-0038)
+arca_controller_groups_failure_domain_unrecorded_at_risk	gauge	controller	groups	-	groups without a recorded failure domain that have a member down or are Repairing, at the last repair pass: a failure there is not repaired until `admin group set-failure-domain` records the label (ADR-0038)
+arca_controller_groups_failure_domain_violations	gauge	controller	groups	-	groups with two members in one recorded failure domain or a member whose node lacks the label, at the last repair pass (ADR-0038)
 arca_controller_groups_reduced_redundancy	gauge	controller	groups	-	durable groups rebuilding a member while the node it left does not answer: one shard of redundancy short until the rebuild completes (a healthy member's move keeps the leaving node as a reader)
 arca_controller_groups_repairing	gauge	controller	groups	-	groups in Repairing at the last repair pass
 arca_controller_guard_refusals_total	counter	controller	transactions	-	metadata writes refused by the cluster-state guard at commit
@@ -61,6 +65,7 @@ arca_controller_manifest_findings	gauge	controller	findings	-	multipart manifest
 arca_controller_manifest_findings_total	counter	controller	findings	-	multipart manifest findings detected
 arca_controller_manifest_roots_verified_total	counter	controller	roots	-	multipart roots verified against their parts
 arca_controller_nodes_registered	gauge	controller	nodes	-	registered storage nodes
+arca_controller_nodes_write_ownership_lenient	gauge	controller	nodes	-	nodes answering the last health pass that do not refuse shard writes without the cluster's incarnation (not told schema 5 yet, or an earlier release; ADR-0037)
 arca_controller_nodes_unhealthy	gauge	controller	nodes	-	storage nodes not seen within the unhealthy threshold
 arca_controller_passes_skipped_by_state_total	counter	controller	passes	-	scheduler passes the cluster phase did not admit
 arca_controller_passes_total	counter	controller	passes	task=gc|reconcile|reclaim|health|evict|rebalance|tiering|repair|scrub|stripe-repair|recovery|upgrade	scheduler passes run, by task (Phase 4.0)
@@ -73,7 +78,8 @@ arca_controller_rebalance_imbalance_permille	gauge	controller	permille	-	imbalan
 arca_controller_rebalance_moved_bytes_total	counter	controller	bytes	-	logical bytes moved by capacity rebalancing (leader)
 arca_controller_rebalance_moved_chunks_total	counter	controller	chunks	-	chunks moved between groups of a tier by capacity rebalancing (leader)
 arca_controller_incarnation_conflicts_total	counter	controller	passes	-	health-pass node reports of another incarnation at or above the cluster's incarnation sequence (such a node refuses the cluster's deletes until a recovery begin)
-arca_controller_nodes_quarantined_total	counter	controller	passes	-	health-pass findings of a node holding another identity than the one the cluster gave it, or none after acknowledging one (an emptied, foreign or swapped disk); the node is quarantined
+arca_controller_nodes_quarantined_total	counter	controller	passes	-	health-pass findings of a node holding another identity than the one the cluster gave it, or none after acknowledging one (an emptied, foreign or swapped disk), or one of an earlier release than schema_write once it is 5 or later (ADR-0039); the node is quarantined
+arca_controller_procs_below_schema	gauge	controller	processes	-	fresh heartbeats of controllers and gateways that read a schema below schema_write once it is 5 or later (an earlier release still running after the finalize, ADR-0039), as of the last health pass
 arca_controller_identity_unconfirmed_total	counter	controller	passes	-	health-pass findings of a node holding an identity the metadata does not know (metadata restored from before it): nothing is pushed to it until an operator confirms it with admin node adopt-identity
 arca_controller_identity_unverifiable_total	counter	controller	passes	-	an earlier release answered where a node acknowledged an identity: no delete fence pushed to it
 arca_controller_reclaimed_total	counter	controller	records	-	retired records reclaimed by the reclaim pass (ADR-0028)
@@ -93,7 +99,7 @@ arca_controller_capacity_reserved_bytes	gauge	controller	bytes	-	bytes the reser
 arca_controller_capacity_reservations_released_total	counter	controller	reservations	-	capacity reservations released because they no longer described their group's move (completed, retargeted, never begun, a former leader's)
 arca_controller_capacity_reservation_refusals_total	counter	controller	moves	-	member moves not started because other moves had reserved the target's room
 arca_controller_groups_repair_waiting	gauge	controller	groups	-	Repairing groups waiting for nodes, capacity, an operator, or with unrecoverable data, rather than progressing (Phase 3.13)
-arca_controller_repair_groups	gauge	controller	groups	reason=progressing|temporarily-blocked|awaiting-capacity|awaiting-nodes|data-unrecoverable|permanently-blocked|none	Repairing groups by the reason of their repair status at the last repair pass; data-unrecoverable means chunks with fewer than k readable shards: possible data loss (Phase 3.14; leader)
+arca_controller_repair_groups	gauge	controller	groups	reason=progressing|temporarily-blocked|awaiting-capacity|awaiting-nodes|data-unrecoverable|permanently-blocked|awaiting-failure-domain|none	Repairing groups by the reason of their repair status at the last repair pass; data-unrecoverable means chunks with fewer than k readable shards: possible data loss; awaiting-failure-domain means the move the repair needs waits only for `admin group set-failure-domain` (Phase 3.14, ADR-0038; leader)
 arca_controller_repair_longest_stall_seconds	gauge	controller	seconds	-	seconds since the Repairing group that waited longest last made progress (leader)
 arca_controller_repair_longest_stall_group	gauge	controller	group	-	the Repairing group that waited longest since its last progress (0: none; leader)
 arca_controller_repair_attempt_max_seconds	gauge	controller	seconds	-	the longest repair attempt of the last repair pass (leader)
@@ -111,6 +117,7 @@ arca_controller_scrub_errors_total	counter	controller	errors	-	scrub requests th
 arca_controller_scrub_groups_overdue	gauge	controller	groups	-	groups past their scrub interval at the last tick
 arca_controller_scrub_passes_total	counter	controller	passes	-	complete scrub passes over a group
 arca_controller_scrub_rate_bytes_per_second	gauge	controller	bytes_per_second	-	current byte budget of an adaptive scrub (0 before the first adaptive sample)
+arca_controller_scrub_shard_classes_total	counter	controller	shards	class=retained_for_reclaim|retained_damaged|in_flight|unclassified	scrubbed shards that are not findings of their own (unclassified ones also count as scrub errors), by class
 arca_controller_scrub_shards_verified_total	counter	controller	shards	-	shards verified by background scrubbing
 arca_controller_scrub_throttles_total	counter	controller	decreases	-	times an adaptive scrub halved its budget under load
 arca_controller_shards_deleted_total	counter	controller	shards	-	shards deleted by GC
@@ -234,6 +241,8 @@ arca_node_delete_fence_generation	gauge	node	generation	-	delete fence generatio
 arca_node_delete_fence_hold	gauge	node	bool	-	1 while the node holds an operator hold on its delete fence (before a restore, maintenance)
 arca_node_delete_fence_open	gauge	node	bool	-	1 while the node admits deletes under its delete fence generation
 arca_node_delete_fence_refusals_total	counter	node	deletes	-	deletes the node refused for its delete fence (stale generation, closed fence, none adopted, older protocol)
+arca_node_write_ownership_strict	gauge	node	bool	-	1 while the node refuses every shard write that does not carry its adopted incarnation (told schema 5 or later; ADR-0037)
+arca_node_writes_unproven_total	counter	node	writes	-	shard writes accepted outside strict mode without proof of the node's cluster (no incarnation carried, or none adopted by a node holding earlier data; ADR-0037)
 arca_node_format_rollover_failures_total	counter	node	rollovers	-	rollovers to a raised segment format that failed (the finalize waits on the node's reported format)
 arca_node_device_free_bytes	gauge	node	bytes	-	bytes free for placement on the device (capped by --capacity-bytes)
 arca_node_device_total_bytes	gauge	node	bytes	-	size of the device for placement (capped by --capacity-bytes)

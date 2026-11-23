@@ -139,8 +139,15 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features
       # No doc tests: the workspace has none, and compiling the empty
       # doctest harness of every crate took one to two and a half minutes.
+      # Test clusters initialise at schema 5 (6 with `version-bump`, which
+      # `--all-features` includes): their storage nodes are strict
+      # (ADR-0037).
       - name: test (all features)
         run: cargo nextest run --workspace --all-features --no-fail-fast
+      # Strict shard write ownership end to end, named so that a change of
+      # the step above cannot drop it silently (same features: no rebuild).
+      - name: strict write ownership
+        run: cargo nextest run --workspace --all-features --no-fail-fast -E 'test(/write_ownership/)'
       - run: cargo doc --workspace --no-deps --all-features
       - name: save compiled dependencies (pushes to main)
         if: success() && github.event_name == 'push'
@@ -465,10 +472,9 @@ jobs:
         run: sudo docker rm -f -v "$FDB_CONTAINER" >/dev/null 2>&1 || true
 
 
-  # Upgrades from and rollbacks to earlier releases, whose binaries are
-  # built once per set of release commits and cached (binaries only, debug
-  # information stripped; the build directories are not kept): pushes to
-  # main and on-demand runs only.
+  # The upgrade from and rollback to the published 0.1.0 release (ADR-0039,
+  # RFC-014 §5.7): its release archive, pinned by SHA-256 and cached by it,
+  # is the old side. Pushes to main and on-demand runs only.
 
   fdb-upgrade:
     name: FoundationDB upgrade and rollback
@@ -480,25 +486,15 @@ jobs:
       FDB_CONTAINER: fdb-${{ github.run_id }}
       # A failing test copies its processes' logs here; uploaded on failure.
       ARCA_TEST_ARTIFACTS: ${{ github.workspace }}/test-artifacts
-      # Earlier releases: Phase 3.9 (protocol 3, schema 2; the upgrade
-      # with a finalize), Phase 3.10 and 3.11 (protocol 4, schema 3, as
-      # this one; mixed versions without a finalize).
-      RELEASE_39: 9674894109ec7fe813e63da5fefc90208483b1d5
-      RELEASE_310: 3f67cb88eba23da6e66039c5a9b26a81cc56321e
-      RELEASE_311: 04e6fe418bd02e52222accc7254d9d719b6f30a5
-      # Phase 3.12 (deferred reclamation on both sides; Phase 3.13).
-      RELEASE_312: cddd078f6c60c9ca826f21b617e4ac30dc781e58
-      # Phase 3.13 (repair status; Phase 3.14 rollback residuals).
-      RELEASE_313: 54c468c64a0d0547b1f1bea807de13ad3667e858
-      # Phase 4.1, the last release of schema 3 (before the tiering
-      # record, ADR-0035): the upgrade to schema 4, and the pivot of the
-      # Phase 3.9 upgrade (schema 4 does not read schema 2).
-      RELEASE_41: 12bff5dad05290e60b103386e6db7aec3882bf37
+      # The published 0.1.0 release archive (tag v0.1.0). The pinned-commit
+      # development "releases" this job built before 0.2.0 (Phase 3.9 to
+      # 4.1, schemas 2 and 3) are retired: 0.2.0 reads schemas 4 and 5 only,
+      # and the hops between them and 0.1.0 were verified at v0.1.0.
+      V010_URL: https://github.com/akam1o/arca-lake/releases/download/v0.1.0/arca-lake-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+      V010_SHA256: 975c036c6fa0a479b2bd0a0e6c313fd0dc5d83bcfb29ed9a2f730f2611c8de83
+      V010_COMMIT: 5601018a92b2eb9eb4c9106b43a637545056963c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # No preinstalled SDK is removed (that took about 2 min): the earlier
-      # releases' build directories are deleted as each binary is copied,
-      # so at most one release and this tree's builds are on the disk.
       - name: free disk space before the builds
         run: df -h /
       - name: prepare the runner (compiler, pkg-config; idempotent)
@@ -540,8 +536,8 @@ jobs:
         with:
           toolchain: "1.99"
       # Dependencies only: the builds' output would take the repository's
-      # whole cache quota and evict the other jobs' entries (the earlier
-      # releases' binaries are cached apart, below).
+      # whole cache quota and evict the other jobs' entries (the 0.1.0
+      # archive is cached apart, below).
       - name: cache cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -565,60 +561,38 @@ jobs:
           [ -f "$deb" ] || curl -sSL -o "$deb" \
             "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
           dpkg -s foundationdb-clients 2>/dev/null | grep -q "Version: ${FDB_VERSION}" || sudo dpkg -i "$deb"
-      # The releases are fixed commits: their binaries are the same for the
-      # same compiler (its exact version, read here), RUSTFLAGS, features and
-      # FoundationDB client, all in the key; bump its v1 for any other
-      # change to how they are built. A manifest of their sha256 is cached
-      # with them and checked after a restore (it detects a damaged entry,
-      # not who wrote it: only pushes to main and on-demand runs can).
-      - name: the compiler's version and flags (for the releases' cache key)
-        id: rustc
-        run: |
-          echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
-          echo "flags=$(printf %s "$RUSTFLAGS" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
-      - name: restore the earlier releases' binaries
-        id: releases
+      # The archive is fetched once per digest; a cached copy is checked
+      # against the same digest before use.
+      - name: restore the 0.1.0 release archive
+        id: v010
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: ~/.cache/arca-lake-releases
-          key: release-bins-v1-${{ runner.os }}-rustc${{ steps.rustc.outputs.version }}-flags${{ steps.rustc.outputs.flags }}-fdb${{ env.FDB_VERSION }}-features-fdb-${{ env.RELEASE_39 }}-${{ env.RELEASE_310 }}-${{ env.RELEASE_311 }}-${{ env.RELEASE_312 }}-${{ env.RELEASE_313 }}-${{ env.RELEASE_41 }}
-      - name: check the restored binaries
-        if: steps.releases.outputs.cache-hit == 'true'
-        run: cd ~/.cache/arca-lake-releases && sha256sum -c manifest.sha256
-      - name: build the earlier releases
-        if: steps.releases.outputs.cache-hit != 'true'
+          path: ~/.cache/arca-lake-v010
+          key: release-archive-v010-${{ env.V010_SHA256 }}
+      - name: download the 0.1.0 release archive
+        if: steps.v010.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          out="$HOME/.cache/arca-lake-releases"
-          rm -rf "$out"
-          mkdir -p "$out"
-          build() {
-            git fetch --no-tags --depth=1 origin "$1"
-            rm -rf "$RUNNER_TEMP/release-$2"
-            mkdir -p "$RUNNER_TEMP/release-$2"
-            git archive "$1" | tar -x -C "$RUNNER_TEMP/release-$2"
-            (cd "$RUNNER_TEMP/release-$2" && cargo build -p arca-lake --features fdb --target-dir "$RUNNER_TEMP/target-$2")
-            cp "$RUNNER_TEMP/target-$2/debug/arca-lake" "$out/arca-lake-$2"
-            strip --strip-debug "$out/arca-lake-$2"
-            # Only one release's build on the disk at a time.
-            rm -rf "$RUNNER_TEMP/target-$2" "$RUNNER_TEMP/release-$2"
-          }
-          build "$RELEASE_39" 39
-          build "$RELEASE_310" 310
-          build "$RELEASE_311" 311
-          build "$RELEASE_312" 312
-          build "$RELEASE_313" 313
-          build "$RELEASE_41" 41
-          (cd "$out" && sha256sum arca-lake-* > manifest.sha256 && ls -l)
-          df -h /
-      # Saved as soon as they are built: a failing test later does not throw
-      # the builds away.
-      - name: save the earlier releases' binaries
-        if: steps.releases.outputs.cache-hit != 'true'
+          mkdir -p ~/.cache/arca-lake-v010
+          curl -sSfL --retry 5 -o ~/.cache/arca-lake-v010/v010.tar.gz "$V010_URL"
+      - name: check and unpack the 0.1.0 release archive
+        run: |
+          set -euo pipefail
+          a="$HOME/.cache/arca-lake-v010/v010.tar.gz"
+          echo "$V010_SHA256  $a" | sha256sum -c -
+          d="$RUNNER_TEMP/v010"
+          rm -rf "$d"
+          mkdir -p "$d"
+          tar -xzf "$a" -C "$d" --strip-components=1
+          grep -q "^source commit: $V010_COMMIT " "$d/BUILD-INFO.txt"
+          grep "^binary sha256: " "$d/BUILD-INFO.txt" | cut -d' ' -f3 | sed "s|\$|  $d/arca-lake|" | sha256sum -c -
+          echo "ARCA_BIN_V010=$d/arca-lake" >> "$GITHUB_ENV"
+      - name: save the 0.1.0 release archive
+        if: steps.v010.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: ~/.cache/arca-lake-releases
-          key: ${{ steps.releases.outputs.cache-primary-key }}
+          path: ~/.cache/arca-lake-v010
+          key: ${{ steps.v010.outputs.cache-primary-key }}
       - name: start FoundationDB server
         run: |
           set -euo pipefail
@@ -646,23 +620,15 @@ jobs:
           done
           docker exec "$FDB_CONTAINER" fdbcli --timeout 30 --exec "status minimal"
           docker exec "$FDB_CONTAINER" cat /var/fdb/fdb.cluster | tee "$RUNNER_TEMP/fdb.cluster"
-      - name: upgrade from and rollback to the previous release (ADR-0024)
+      - name: upgrade from and rollback to 0.1.0 (ADR-0039)
         env:
           ARCA_FDB_TESTS: "1"
           ARCA_FDB_CLUSTER_FILE: ${{ runner.temp }}/fdb.cluster
         run: |
           set -euo pipefail
-          r="$HOME/.cache/arca-lake-releases"
           cargo build -p arca-lake --features fdb
-          ARCA_BIN_PREV="$r/arca-lake-39" \
-          ARCA_BIN_PREV_310="$r/arca-lake-310" \
-          ARCA_BIN_PREV_311="$r/arca-lake-311" \
-          ARCA_BIN_PREV_312="$r/arca-lake-312" \
-          ARCA_BIN_PREV_313="$r/arca-lake-313" \
-          ARCA_BIN_PREV_41="$r/arca-lake-41" \
-          ARCA_BIN_PIVOT="$r/arca-lake-41" \
           ARCA_BIN_CUR="$CARGO_TARGET_DIR/debug/arca-lake" \
-            cargo test -p arca-lake-testkit --features fdb --test it previous_release:: -- --nocapture --test-threads=1
+            cargo test -p arca-lake-testkit --features fdb --test it upgrade_v010:: -- --nocapture --test-threads=1
           df -h /
       - name: keep FoundationDB state (on failure)
         if: failure()

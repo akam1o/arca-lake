@@ -260,7 +260,13 @@ async fn stale_epoch_writer_and_returning_old_member_cannot_affect_reads() {
 
     // The old member returns without ever having learned epoch 2.
     c.start_node(lost).await;
+    // A writer of the cluster (its incarnation, naming the node it writes:
+    // a strict node refuses any other, ADR-0037) at the old epoch.
     let clients = NodeClients::new(std::time::Duration::from_secs(5));
+    clients.set_incarnation(c.clients.incarnation());
+    for n in &c.nodes {
+        clients.note_node_id(&n.addr.to_string(), n.id);
+    }
     let bogus = ShardRef {
         group_id: group.id,
         chunk_id: [0; 16],

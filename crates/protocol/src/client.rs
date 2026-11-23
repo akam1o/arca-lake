@@ -139,6 +139,17 @@ pub struct ShardScrub {
     pub status: ShardStatus,
     /// Node-side reason for a non-OK status.
     pub reason: String,
+    /// Whether the record is retired and kept for reclaim (ADR-0028);
+    /// `None` from a node that does not report it (0.1.0).
+    pub retired: Option<bool>,
+}
+
+/// A scrubbed record's retirement as the controller may use it: `None`
+/// unless the node reports retirement (a 0.1.0 node sends neither field,
+/// which decodes as `false`, `false`).
+#[must_use]
+pub fn retirement(reported: bool, retired: bool) -> Option<bool> {
+    reported.then_some(retired)
 }
 
 /// One page of scrubbed shards.
@@ -398,7 +409,19 @@ pub struct NodeCaps {
     pub incarnation: Option<[u8; 16]>,
     /// The node's delete fence: generation (0 = none) and whether open.
     pub delete_fence: (u64, bool),
+    /// Shard write ownership (ADR-0037): `None` from an earlier release
+    /// (it takes writes without an incarnation, and any write while it
+    /// adopted none); otherwise whether it is strict (refuses every write
+    /// not carrying its incarnation).
+    pub write_ownership: Option<bool>,
+    /// When the `Health` answer was received.
+    pub seen: std::time::Instant,
 }
+
+/// How long the capabilities a node reported are trusted for the write
+/// schema check ([`NodeClients::set_required_node_schema`]) before they are
+/// asked again (ADR-0039; the gateway's cluster-state refresh interval).
+pub const WRITE_CAPS_MAX_AGE: Duration = Duration::from_secs(2);
 
 impl NodeCaps {
     /// Interpret a `Health` response (zero fields = version 1 node).
@@ -408,7 +431,7 @@ impl NodeCaps {
             protocol_min: h.protocol_min.max(1),
             protocol_max: h.protocol_max.max(1),
             schema_min: 0,
-            schema_max: 0,
+            schema_max: h.schema_max,
             format_min: h.format_min.max(1),
             format_max: h.format_max.max(1),
         };
@@ -421,6 +444,10 @@ impl NodeCaps {
             format_write: h.format_write,
             incarnation: <[u8; 16]>::try_from(h.incarnation.as_ref()).ok(),
             delete_fence: (h.delete_fence_generation, h.delete_fence_open),
+            write_ownership: h
+                .write_ownership_supported
+                .then_some(h.write_ownership_strict),
+            seen: std::time::Instant::now(),
         }
     }
 
@@ -519,6 +546,9 @@ pub struct NodeClients {
     /// `GetShard` RPCs in flight per node address (durable-read priority
     /// for cache populations).
     reads_in_flight: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
+    /// The metadata schema a node must enforce for a shard write to it to
+    /// count (ADR-0039; 0: none required).
+    required_node_schema: Arc<AtomicU64>,
 }
 
 /// A node's identity: its id and the token it acknowledged.
@@ -575,6 +605,7 @@ impl NodeClients {
             tls: None,
             node_ids: Arc::default(),
             identities: Arc::default(),
+            required_node_schema: Arc::default(),
         }
     }
 
@@ -649,7 +680,8 @@ impl NodeClients {
     /// Stamp `DeleteShard` and `PutShard` requests with the cluster
     /// incarnation this process started under (RFC-015 §5.3, R-117). Set once
     /// after the startup gate; a node that adopted a different incarnation
-    /// then rejects the deletes and the shard writes of this process.
+    /// then rejects the deletes and the shard writes of this process, and a
+    /// strict node (ADR-0037) every shard write of a process that set none.
     pub fn set_incarnation(&self, incarnation: Option<[u8; 16]>) {
         *self
             .incarnation
@@ -1080,6 +1112,57 @@ impl NodeClients {
         Ok(StorageNodeClient::new(self.channel(addr)?).max_decoding_message_size(64 << 20))
     }
 
+    /// Require nodes to enforce metadata schema `schema` for a shard write
+    /// to count (ADR-0039: the cluster's `schema_write` once it reached
+    /// schema 5; 0 below it). A node that reports less, in `Health` (asked
+    /// again at most [`WRITE_CAPS_MAX_AGE`] after the last answer, and
+    /// after every connection failure) or in the write's acknowledgement,
+    /// is a failed write: [`Self::is_node_schema_refused`].
+    pub fn set_required_node_schema(&self, schema: u64) {
+        self.required_node_schema
+            .store(schema, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// See [`Self::set_required_node_schema`].
+    #[must_use]
+    pub fn required_node_schema(&self) -> u64 {
+        self.required_node_schema
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether a shard write was refused because the node runs a release
+    /// below the required schema ([`Self::set_required_node_schema`]).
+    #[must_use]
+    pub fn is_node_schema_refused(status: &tonic::Status) -> bool {
+        status.code() == tonic::Code::FailedPrecondition
+            && status.message().starts_with("node schema")
+    }
+
+    fn node_schema_refusal(addr: &str, reported: u64, required: u64, what: &str) -> tonic::Status {
+        tonic::Status::failed_precondition(format!(
+            "node schema: {addr} {what} schema {reported}, below the cluster's schema_write {required} (an earlier release, ADR-0039): the shard write does not count"
+        ))
+    }
+
+    /// The write schema check before a shard write: the node's reported
+    /// schema, from a `Health` answer at most [`WRITE_CAPS_MAX_AGE`] old.
+    async fn check_write_schema(&self, addr: &str) -> Result<(), tonic::Status> {
+        let required = self.required_node_schema();
+        if required == 0 {
+            return Ok(());
+        }
+        let reported = match self.node_caps(addr) {
+            Some(c) if c.seen.elapsed() <= WRITE_CAPS_MAX_AGE => c.caps.schema_max,
+            _ => self.health(addr).await?.schema_max,
+        };
+        if reported < required {
+            return Err(Self::node_schema_refusal(
+                addr, reported, required, "reports",
+            ));
+        }
+        Ok(())
+    }
+
     /// Whether a status is the node's epoch fence.
     #[must_use]
     pub fn is_epoch_rejected(status: &tonic::Status) -> bool {
@@ -1130,16 +1213,101 @@ impl NodeClients {
         frame_bytes: usize,
         class: pb::WriteClass,
     ) -> Result<pb::PutShardResponse, tonic::Status> {
+        let node_id = self
+            .node_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(addr)
+            .copied()
+            .unwrap_or(0);
+        self.put_shard_to(addr, node_id, shard, epoch, data, frame_bytes, class)
+            .await
+    }
+
+    /// [`Self::put_shard_as`] for the placement member `node_id` (ADR-0037):
+    /// the write names that node, and the identity token it acknowledged
+    /// if this pool knows it for `addr` ([`Self::note_identity`]), so that
+    /// another node at `addr` (an address reused within the cluster, a
+    /// stale map) refuses it instead of storing it. `node_id` 0 names none
+    /// ([`Self::put_shard_as`] names the node noted for `addr`, if any).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::put_shard`]; a node of another identity answers
+    /// `FAILED_PRECONDITION` (`node rejected`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_shard_to(
+        &self,
+        addr: &str,
+        node_id: u64,
+        shard: ShardRef,
+        epoch: u64,
+        data: Bytes,
+        frame_bytes: usize,
+        class: pb::WriteClass,
+    ) -> Result<pb::PutShardResponse, tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::PutShard,
             shard: Some(shard),
             group_id: Some(shard.group_id),
         };
-        self.with_retry(ctx, |fault| {
-            self.put_shard_raw(addr, shard, epoch, data.clone(), frame_bytes, class, fault)
-        })
-        .await
+        let token = self
+            .identity_of(addr)
+            .filter(|i| node_id != 0 && i.0 == node_id)
+            .map(|i| i.1);
+        let target = (node_id, token);
+        self.check_write_schema(addr).await?;
+        let resp = self
+            .with_retry(ctx, |fault| {
+                self.put_shard_raw(
+                    addr,
+                    target,
+                    shard,
+                    epoch,
+                    data.clone(),
+                    frame_bytes,
+                    class,
+                    fault,
+                )
+            })
+            .await;
+        // The acknowledgement itself shows the node's release (ADR-0039): a
+        // node replaced by an earlier release since its last `Health` stored
+        // the bytes, but the write does not count (they are an unreferenced
+        // record, collected as any failed write's).
+        let required = self.required_node_schema();
+        match resp {
+            Ok(r) if required > 0 && r.schema_max < required => {
+                self.forget_caps(addr);
+                Err(Self::node_schema_refusal(
+                    addr,
+                    r.schema_max,
+                    required,
+                    "acknowledged the write at",
+                ))
+            }
+            Ok(r) => Ok(r),
+            Err(e) => {
+                // A connection failure: the node may come back as another
+                // binary; its capabilities are asked again.
+                if matches!(
+                    e.code(),
+                    tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Cancelled
+                ) {
+                    self.forget_caps(addr);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Drop the capabilities learned from `addr` (asked again on next use).
+    pub fn forget_caps(&self, addr: &str) {
+        self.negotiated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(addr);
     }
 
     /// Whether a node refused a write for lack of capacity.
@@ -1152,6 +1320,7 @@ impl NodeClients {
     async fn put_shard_raw(
         &self,
         addr: &str,
+        target: (u64, Option<[u8; 16]>),
         shard: ShardRef,
         epoch: u64,
         data: Bytes,
@@ -1175,6 +1344,11 @@ impl NodeClients {
                     .map(|i| i.to_vec())
                     .unwrap_or_default()
                     .into(),
+                node_id: target.0,
+                node_identity: target
+                    .1
+                    .map(|t| Bytes::copy_from_slice(&t))
+                    .unwrap_or_default(),
             })),
         };
         let frame = frame_bytes.max(1);
@@ -1856,6 +2030,7 @@ impl NodeClients {
                     max_bytes,
                 };
                 let resp = client.scrub_shards(req).await?.into_inner();
+                let reported = resp.retirement_reported;
                 Ok(ScrubPage {
                     shards: resp
                         .shards
@@ -1868,6 +2043,7 @@ impl NodeClients {
                                 sequence: v.sequence,
                                 status: ShardStatus::from_pb(v.status),
                                 reason: v.reason,
+                                retired: retirement(reported, v.retired),
                             })
                         })
                         .collect(),
@@ -2021,12 +2197,50 @@ impl NodeClients {
         Ok(resp)
     }
 
-    /// Whether a status is a node's protocol or incarnation refusal.
+    /// Whether a status is a node's protocol, incarnation or write target
+    /// refusal.
     #[must_use]
     pub fn is_incompatible(status: &tonic::Status) -> bool {
         status.code() == tonic::Code::FailedPrecondition
             && (status.message().starts_with("incompatible protocol")
                 || status.message().starts_with("protocol version")
-                || status.message().starts_with("incarnation rejected"))
+                || status.message().starts_with("incarnation rejected")
+                || status.message().starts_with("node rejected"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message as _;
+
+    /// A 0.1.0 node's scrub page (fields 1 to 6 of `ShardScrub`, 1 to 4 of
+    /// the response) decodes without retirement: its records are never
+    /// taken as kept for reclaim.
+    #[test]
+    fn a_scrub_page_without_retirement_reports_none() {
+        let old = pb::ScrubShardsResponse {
+            shards: vec![pb::ShardScrub {
+                key: None,
+                payload_len: 1,
+                crc32c: 2,
+                sequence: 3,
+                status: pb::ShardStatus::Ok as i32,
+                reason: String::new(),
+                retired: false,
+            }],
+            next: None,
+            more: false,
+            bytes_read: 1,
+            retirement_reported: false,
+        };
+        let back = pb::ScrubShardsResponse::decode(old.encode_to_vec().as_slice()).unwrap();
+        assert!(!back.retirement_reported);
+        assert_eq!(
+            retirement(back.retirement_reported, back.shards[0].retired),
+            None
+        );
+        assert_eq!(retirement(true, false), Some(false));
+        assert_eq!(retirement(true, true), Some(true));
     }
 }

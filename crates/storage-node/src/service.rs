@@ -57,6 +57,10 @@ pub struct NodeConfig {
     /// Clock skew allowed between a reclaim's observation and this node's
     /// clock (an observation further ahead is refused).
     pub reclaim_skew: Duration,
+    /// The metadata schema reported in `Health` and `PutShard` answers
+    /// (ADR-0039): [`pb::NODE_SCHEMA_MAX`]. Tests set a lower one to stand
+    /// in for an earlier release.
+    pub reported_schema_max: u64,
 }
 
 impl NodeConfig {
@@ -75,6 +79,7 @@ impl NodeConfig {
             fence_lease: Duration::from_secs(30),
             reclaim_retention: Duration::ZERO,
             reclaim_skew: Duration::from_secs(60),
+            reported_schema_max: pb::NODE_SCHEMA_MAX,
         }
     }
 }
@@ -99,7 +104,9 @@ pub struct StorageNodeService {
     /// Destructive RPCs hold it shared from their fence checks to the end of
     /// the store mutation; raising an epoch or adopting an incarnation holds
     /// it exclusively. Once such an update is acknowledged, no delete that
-    /// passed the old fence can still run (Phase 3.5 audit SEC-6).
+    /// passed the old fence can still run (Phase 3.5 audit SEC-6). Shard
+    /// writes hold it shared from their re-check after the body to the end
+    /// of the store write (ADR-0037).
     ///
     /// Owned guards (Phase 3.9): the shared guard moves into the blocking
     /// store call, so that a cancelled RPC cannot release it while its
@@ -142,6 +149,14 @@ pub struct StorageNodeService {
     side_bytes: AtomicU64,
     /// Load signals for adaptive background work (ADR-0018).
     load: crate::load::LoadSampler,
+    /// The store held a live record when opened (ADR-0037): only such a
+    /// node may take a write before it adopted an incarnation, and only
+    /// outside strict mode.
+    data_at_open: bool,
+    /// See [`Self::writes_unproven`].
+    writes_unproven: AtomicU64,
+    /// See [`NodeConfig::reported_schema_max`].
+    reported_schema_max: u64,
 }
 
 /// Decrements a gauge when dropped (`PutShard` streams in flight).
@@ -286,11 +301,14 @@ impl StorageNodeService {
             tls: cfg.tls.clone(),
             compaction: Arc::default(),
             capacity_bytes: cfg.capacity_bytes,
+            reported_schema_max: cfg.reported_schema_max,
             admission: crate::capacity::Admission::new(reserve),
             domain: crate::domain::of(&cfg.store.dir),
             class_bytes: Default::default(),
             side_bytes: AtomicU64::new(0),
             load: crate::load::LoadSampler::new(&cfg.store.dir),
+            data_at_open: report.live_shards > 0,
+            writes_unproven: AtomicU64::new(0),
         })
     }
 
@@ -600,16 +618,128 @@ impl StorageNodeService {
         }
     }
 
-    /// Refuse a write whose incarnation differs from the one this node
-    /// adopted (R-117): the writer belongs to another cluster (it reached
-    /// this node at an address it still maps to one of its own). Unlike a
-    /// delete, an empty incarnation is accepted: a writer may hold none
-    /// (tools, a store before its cluster state).
-    fn check_write_incarnation(&self, incarnation: &[u8]) -> Result<(), tonic::Status> {
-        if incarnation.is_empty() {
-            return Ok(());
+    /// Refuse a write that is not provably of this node's cluster (R-117,
+    /// ADR-0037): one carrying another incarnation than the node adopted
+    /// (another cluster's writer at an address it still maps to one of its
+    /// own), and every write to a node that held no data at start and has
+    /// adopted none yet (it cannot tell its cluster's writers from
+    /// another's before its controller reached it).
+    ///
+    /// Strict (told [`pb::WRITE_OWNERSHIP_SCHEMA`] or later), it also
+    /// refuses a write carrying none, and any write while it adopted none.
+    /// Before that (a cluster that may still run 0.1.0 processes), those
+    /// two are accepted as 0.1.0 does: the function returns `true` for
+    /// them, and the caller counts them ([`Self::writes_unproven`]).
+    fn check_write_incarnation(&self, incarnation: &[u8]) -> Result<bool, tonic::Status> {
+        let (held, strict) = {
+            let c = self.cluster.lock().unwrap_or_else(PoisonError::into_inner);
+            (c.incarnation, c.schema_floor >= pb::WRITE_OWNERSHIP_SCHEMA)
+        };
+        let carried = || {
+            if incarnation.is_empty() {
+                "none".to_string()
+            } else {
+                crate::cluster::hex(incarnation)
+            }
+        };
+        match held {
+            None if strict || !self.data_at_open => {
+                Err(tonic::Status::failed_precondition(format!(
+                    "incarnation rejected: node adopted none yet (its controller has not reached it), request carries {}",
+                    carried()
+                )))
+            }
+            None => Ok(true),
+            Some(_) if incarnation.is_empty() && !strict => Ok(true),
+            Some(_) => self.check_incarnation(incarnation).map(|()| false),
         }
-        self.check_incarnation(incarnation)
+    }
+
+    /// The node id this node's own certificate names (Phase 3.13, R-105),
+    /// if it serves mutual TLS with a node identity.
+    fn certificate_node_id(&self) -> Option<u64> {
+        self.tls.as_ref().and_then(|t| {
+            let own = t.identity();
+            (own.role == arca_lake_protocol::tls::Role::Node)
+                .then(|| own.name.parse::<u64>().ok())
+                .flatten()
+        })
+    }
+
+    /// Refuse a write for another node than this one (ADR-0037): the
+    /// writer named the placement member it writes (`node_id`, and the
+    /// identity token that node acknowledged, if the writer knows it), and
+    /// this disk holds another identity, or its certificate names another
+    /// node: another node of the same cluster answers at the address the
+    /// writer maps to the member (an address reused, a stale map).
+    ///
+    /// Strict ([`pb::WRITE_OWNERSHIP_SCHEMA`]), a write naming no node, and
+    /// one this node cannot check (no identity held, or a damaged one, and
+    /// no node certificate naming a node), are refused too; before it they
+    /// are accepted (`true`: counted by the caller).
+    fn check_write_target(&self, node_id: u64, token: &[u8]) -> Result<bool, tonic::Status> {
+        let strict = self.write_ownership_strict();
+        let (held, damaged) = {
+            let id = self.identity.lock().unwrap_or_else(PoisonError::into_inner);
+            (id.held(), id.damaged())
+        };
+        let other = |what: String| {
+            Err(tonic::Status::failed_precondition(format!(
+                "node rejected: the write is for node {node_id}, {what}"
+            )))
+        };
+        if node_id == 0 {
+            return if strict {
+                Err(tonic::Status::failed_precondition(
+                    "node rejected: the write names no node",
+                ))
+            } else {
+                Ok(true)
+            };
+        }
+        if let Some(c) = self.certificate_node_id()
+            && c != node_id
+        {
+            return other(format!("this node's certificate names node {c}"));
+        }
+        match held {
+            Some(h) if h.node_id != node_id => other(format!("this disk is node {}", h.node_id)),
+            Some(h) if token.len() == 16 && h.token[..] != token[..] => {
+                other("this disk holds another identity token of that node".to_string())
+            }
+            // No identity (none adopted yet, the file removed) or a damaged
+            // one, and no node certificate naming a node: nothing to check
+            // the name against. Refused once strict; before, taken and
+            // counted.
+            None if damaged || self.certificate_node_id().is_none() => {
+                if strict {
+                    other("this disk holds no identity to check it against".to_string())
+                } else {
+                    Ok(true)
+                }
+            }
+            // Its identity, or (none held) its certificate, names the node.
+            Some(_) | None => Ok(false),
+        }
+    }
+
+    /// Shard writes accepted since start without proof of this node's
+    /// cluster (no incarnation carried, or none adopted; never in strict
+    /// mode).
+    #[must_use]
+    pub fn writes_unproven(&self) -> u64 {
+        self.writes_unproven.load(Ordering::Relaxed)
+    }
+
+    /// Whether every shard write must carry the adopted incarnation
+    /// (ADR-0037: told [`pb::WRITE_OWNERSHIP_SCHEMA`] or later).
+    #[must_use]
+    pub fn write_ownership_strict(&self) -> bool {
+        self.cluster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .schema_floor
+            >= pb::WRITE_OWNERSHIP_SCHEMA
     }
 
     fn check_epoch(&self, group: u64, epoch: u64) -> Result<(), tonic::Status> {
@@ -718,6 +848,7 @@ impl StorageNode for StorageNodeService {
         };
         Self::check_version(header.protocol_version)?;
         self.check_write_incarnation(&header.incarnation)?;
+        self.check_write_target(header.node_id, &header.node_identity)?;
         let key = Self::key(header.key)?;
         self.check_epoch(key.group_id, header.group_epoch)?;
         let expected = usize::try_from(header.payload_len)
@@ -775,9 +906,16 @@ impl StorageNode for StorageNodeService {
         }
         // Re-check the epoch and the incarnation after receiving the body: a
         // membership change, or an incarnation adopted, may have landed while
-        // the data was in flight.
+        // the data was in flight. Held shared from these checks to the end
+        // of the store write (ADR-0037): an epoch raise or a new incarnation
+        // is acknowledged only once no write that passed the old one can
+        // still be stored.
+        let fence = Arc::clone(&self.fence).read_owned().await;
         self.check_epoch(key.group_id, header.group_epoch)?;
-        self.check_write_incarnation(&header.incarnation)?;
+        let unproven = self.check_write_incarnation(&header.incarnation)?;
+        if self.check_write_target(header.node_id, &header.node_identity)? || unproven {
+            self.writes_unproven.fetch_add(1, Ordering::Relaxed);
+        }
         self.stats.put_recv.observe(started.elapsed());
         let crc = crc32c_of(&payload);
         // The group's role, noted before the record exists (independent
@@ -816,6 +954,7 @@ impl StorageNode for StorageNodeService {
         let store = Arc::clone(&self.store);
         let queued = Instant::now();
         let (queue_wait, store_time, result) = tokio::task::spawn_blocking(move || {
+            let _fence = fence;
             let queue_wait = queued.elapsed();
             let t = Instant::now();
             let r = store.put_sequenced(key, &payload);
@@ -841,6 +980,7 @@ impl StorageNode for StorageNodeService {
             bytes_received: header.payload_len,
             sequence,
             store_epoch: self.store.store_epoch(),
+            schema_max: self.reported_schema_max,
         }))
     }
 
@@ -1351,6 +1491,21 @@ impl StorageNode for StorageNodeService {
             keys.push((k, e.location.payload_len, Some(e)));
         }
         keys.sort_by_key(|a| a.0);
+        // Retirement of each listed record (ADR-0028), at the sequence the
+        // index holds now (a corrupt record is reported without one): the
+        // controller tells a record kept for reclaim from an orphan.
+        let retired: Vec<bool> = {
+            let d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+            keys.iter()
+                .map(|(k, _, q)| {
+                    let sequence = q
+                        .as_ref()
+                        .map(|q| q.location.sequence)
+                        .or_else(|| self.store.locate(k).map(|l| l.sequence));
+                    d.retired(k).is_some_and(|r| Some(r.sequence) == sequence)
+                })
+                .collect()
+        };
         let store = Arc::clone(&self.store);
         let _slot = self
             .scrub_slot
@@ -1363,7 +1518,7 @@ impl StorageNode for StorageNodeService {
             let mut out = Vec::with_capacity(keys.len());
             let mut stopped_early = false;
             let total = keys.len();
-            for (n, (key, len, q)) in keys.into_iter().enumerate() {
+            for (n, ((key, len, q), retired)) in keys.into_iter().zip(retired).enumerate() {
                 let pb_key = Some(Self::pb_key(&key));
                 if let Some(q) = q {
                     out.push(pb::ShardScrub {
@@ -1373,6 +1528,7 @@ impl StorageNode for StorageNodeService {
                         sequence: q.location.sequence,
                         status: pb::ShardStatus::Quarantined as i32,
                         reason: q.reason.to_string(),
+                        retired,
                     });
                 } else {
                     out.push(match store.verify(&key) {
@@ -1385,6 +1541,7 @@ impl StorageNode for StorageNodeService {
                                 sequence: v.sequence,
                                 status: pb::ShardStatus::Ok as i32,
                                 reason: String::new(),
+                                retired,
                             }
                         }
                         Err(StorageError::Corrupt { reason, .. }) => {
@@ -1401,6 +1558,7 @@ impl StorageNode for StorageNodeService {
                                 sequence: 0,
                                 status: status as i32,
                                 reason: reason.to_string(),
+                                retired,
                             }
                         }
                         Err(StorageError::NotFound) => pb::ShardScrub {
@@ -1410,6 +1568,7 @@ impl StorageNode for StorageNodeService {
                             sequence: 0,
                             status: pb::ShardStatus::Quarantined as i32,
                             reason: "quarantined during scrub".into(),
+                            retired,
                         },
                         Err(e) => pb::ShardScrub {
                             key: pb_key,
@@ -1418,6 +1577,7 @@ impl StorageNode for StorageNodeService {
                             sequence: 0,
                             status: pb::ShardStatus::IoError as i32,
                             reason: e.to_string(),
+                            retired,
                         },
                     });
                 }
@@ -1451,6 +1611,7 @@ impl StorageNode for StorageNodeService {
             next,
             more,
             bytes_read,
+            retirement_reported: true,
         }))
     }
 
@@ -1508,14 +1669,28 @@ impl StorageNode for StorageNodeService {
         // The node's own certificate names its node id (Phase 3.13,
         // R-105): a request for another id is not this node's, whatever
         // its disk holds, and adopts nothing.
-        let cert_node = self.tls.as_ref().and_then(|t| {
-            let own = t.identity();
-            (own.role == arca_lake_protocol::tls::Role::Node)
-                .then(|| own.name.parse::<u64>().ok())
-                .flatten()
-        });
+        let cert_node = self.certificate_node_id();
         let cert_conflict =
             req.node_identity.len() == 16 && cert_node.is_some_and(|c| c != req.node_id);
+        // Adopting an identity (a disk that holds none) changes which
+        // writes the node takes as its own (ADR-0037): taken under the
+        // exclusive guard, so that it is acknowledged only once no write
+        // checked against the disk without one can still be stored. A
+        // request that only compares holds no guard.
+        let adopting = !cert_conflict
+            && req.adopt_identity
+            && req.node_identity.len() == 16
+            && self
+                .identity
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .held()
+                .is_none();
+        let mut adoption_guard = if adopting {
+            Some(Arc::clone(&self.fence).write_owned().await)
+        } else {
+            None
+        };
         let identity = if cert_conflict {
             tracing::warn!(
                 node_id = req.node_id,
@@ -1586,10 +1761,13 @@ impl StorageNode for StorageNodeService {
         let mut exclusive =
             needs_exclusive(&self.cluster.lock().unwrap_or_else(PoisonError::into_inner));
         let _fence = if identity_mismatch {
+            drop(adoption_guard.take());
             None
         } else {
             loop {
-                let guard = if exclusive {
+                let guard = if let Some(g) = adoption_guard.take() {
+                    Some(g)
+                } else if exclusive {
                     Some(Arc::clone(&self.fence).write_owned().await)
                 } else {
                     None
@@ -1736,6 +1914,7 @@ impl StorageNode for StorageNodeService {
             software: arca_lake_common::compat::software_version(),
             group_epochs,
             version_bump: arca_lake_common::compat::BUMP,
+            schema_max: self.reported_schema_max,
             puts_in_flight: self.stats.puts_in_flight.load(Ordering::Relaxed),
             gets_in_flight: self.stats.gets_in_flight.load(Ordering::Relaxed),
             device_free_bytes: space.map_or(0, |s| s.0),
@@ -1771,6 +1950,9 @@ impl StorageNode for StorageNodeService {
                 .map(|i| Bytes::copy_from_slice(&i.token))
                 .unwrap_or_default(),
             identity_mismatch,
+            write_ownership_supported: true,
+            write_ownership_strict: self.write_ownership_strict(),
+            writes_unproven: self.writes_unproven(),
             devices: vec![self.device_capacity_with(&stats)],
         }))
     }

@@ -361,7 +361,16 @@ pub async fn population_with_a_member_down_records_nothing<S: KvStore + 'static>
     start: impl Starter<S>,
     protection: CacheProtection,
 ) {
-    let mut c = cluster(&start, protection).await;
+    // Nodes without identities: the gateway's deletes of its partial copy
+    // carry none, which a node holding one refuses (the copy is then left
+    // to reconciliation). In a strict cluster the harness would give them
+    // identities (ADR-0037).
+    let mut c = start(ClusterOptions {
+        node_identities: false,
+        ..options(protection)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
     let g = cache_group(&c).await;
     let nodes = member_nodes(&c, &g);
     let data = payload(2, 5);

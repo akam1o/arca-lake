@@ -23,8 +23,106 @@ break compatibility).
   `--commit-queue off` restores the previous behaviour. Proposed; its
   measured effect is pending
   ([plan](docs/verification/0.2.0-hot-key-plan.md)). No format change.
+- Scrub: each listed shard is classified from its own evidence (chunk
+  record in the group, the node's retirement flag, generation state,
+  migration intent; ADR-0036). Records deleted and kept for reclaim are
+  reported as `retained`, no longer as unexpected shards; damaged ones
+  are still findings of their damage class (`retained_damaged`), not
+  queued; shards held by an operation in progress are `in_flight`;
+  shards that cannot be classified (0.1.0 storage nodes, which do not
+  report retirement, or records changing during the pass) are
+  `unclassified` and counted as scrub errors. `admin integrity scrub`
+  appends `retained … retained_damaged … in_flight … unclassified …` to
+  its line (the `findings [8]` array keeps its length and order); new
+  metric `arca_controller_scrub_shard_classes_total{class}`. Additive
+  protobuf fields `ShardScrub.retired` and
+  `ScrubShardsResponse.retirement_reported`; protocol and metadata
+  versions unchanged, no metadata record changed.
+- Repair (R-120): a task for a damaged shard of a migration's target
+  found before the placement switch is kept while the migration intent
+  targets the group and repaired after the switch (it was dropped, and
+  the stripe stayed one shard short with an empty queue until a degraded
+  read or the next scrub pass). Such a waiting task does not hold
+  tiering or rebalancing.
+- R-110 harness: the scrub parser reads both line formats; the judge's
+  count rule for unexpected shards applies only to timelines of earlier
+  binaries; unclassified shards make C5 Inconclusive.
+- Metadata schema 5
+  ([ADR-0039](docs/adr/0039-schema-5-and-the-0.1.0-upgrade.md)). 0.2.0
+  reads schemas 4 and 5 and initialises new stores at 5. A cluster
+  upgraded from 0.1.0 stays at schema 4, with the 0.2.0 protections
+  degraded, until `admin upgrade finalize` raises it to 5. After that,
+  0.1.0 controllers and gateways refuse to start. The leader quarantines
+  0.1.0 storage nodes before pushing them anything, and gateways and the
+  controller never count a shard write on them (the node must report
+  schema 5 in `Health` and in the write's acknowledgement). Restoring a
+  pre-finalize backup does not bring 0.1.0 back. The finalize is refused while any
+  0.1.0 (or unknown) process or node takes part.
+  `admin status --versions` shows each process's and node's software
+  and schema, and whether protections are degraded or mandatory.
+  Compatibility impact: no record layout, record version byte, wire
+  protocol version or segment format change. Two additive fields,
+  `HealthResponse.schema_max` (50) and `PutShardResponse.schema_max`
+  (5), are ignored by 0.1.0. Stores of
+  schema 3 or below must be upgraded through 0.1.0 first
+  ([upgrading from 0.1.0](docs/guide/operations.md#upgrading-from-010-to-020)).
+
+### Security
+
+- Shard write ownership (R-117, ADR-0037): a storage node that has
+  adopted no incarnation yet (a new disk its controller has not reached)
+  refuses every shard write, so another cluster's gateway at a reused
+  address can no longer have its shards stored there and counted
+  written. Every shard write now names the node it is for (the
+  placement member; `PutShardHeader` fields 7–8, the node id and, from
+  the controller, the identity token), and a node holding another
+  identity refuses it: a write reaching another node of the same cluster
+  is never stored or counted written. Once the cluster is finalized to
+  metadata schema 5, nodes also refuse shard writes carrying no
+  incarnation or naming no node (a cluster 0.2.0 initialises, at schema 5
+  (ADR-0039), is strict from its first write; one upgraded from 0.1.0
+  accepts such writes and counts them until the finalize). Nodes turn strict when `upgrade finalize`
+  pushes schema 5, before the schema is raised: stop or upgrade tools
+  that write shards without an incarnation (0.1.0 `nodebench`) first,
+  or their writes fail. Accepted unproven writes are counted and
+  reported: new metrics `arca_node_writes_unproven_total`,
+  `arca_node_write_ownership_strict` and
+  `arca_controller_nodes_write_ownership_lenient`, `HealthResponse`
+  fields 47–49 (a capability; no protocol version change), and
+  `admin node show` reports the mode. A new incarnation (a recovery or a
+  restore) is acknowledged by a node only once no write of the previous
+  one can still be stored. `arcabench nodebench` writes with the
+  target node's incarnation.
 
 ### Fixed
+
+- A group's failure domain is recorded and kept by every member move
+  (R-119, [ADR-0038](docs/adr/0038-group-failure-domain-record.md)):
+  new groups record their label at creation (new metadata key
+  `("al","gdomain",group)`; no version change); auto repair,
+  `replace-member`, drains, retargets, the dry-run planner, resumed
+  moves and the membership commit use the recorded label, not the
+  controller's `--failure-domain`. A group created by 0.1.0 moves no
+  member until `admin group set-failure-domain` records its label
+  (never inferred). `admin group check` and `admin status` report groups
+  with two members in one domain, groups without a record and members
+  whose node lacks the label (gauges
+  `arca_controller_groups_failure_domain_violations`,
+  `arca_controller_groups_failure_domain_unrecorded`); a member without
+  the label no longer stops cache-group repair for the whole pass, and
+  the reason is shown on the replacement request or drain;
+  `register-node` refuses a node without a label its groups need.
+  `admin upgrade finalize` to schema 5 waits until every group's domain
+  is recorded. **Upgrading from 0.1.0:** once the controllers run 0.2.0,
+  run `admin group set-failure-domain --all-unrecorded --label <label>`
+  (first with `--dry-run`, which lists the groups) with the label the
+  groups were created with; until then no member of those groups is
+  moved, including the repair of a failed one (repair reason
+  `awaiting-failure-domain`; `admin status` warning and gauge
+  `arca_controller_groups_failure_domain_unrecorded_at_risk` for such
+  groups with a member down). `set-failure-domain` refuses a label no
+  member's node carries (`--force`) and exits 2 when it prints warnings.
+  See [operations](docs/guide/operations.md#upgrading-from-010-record-the-groups-failure-domains).
 
 - Automatic tiering no longer consumes a generation's access record
   after a move that did not happen (R-118,
