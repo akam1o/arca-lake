@@ -751,6 +751,17 @@ impl<S: KvStore + 'static> TestCluster<S> {
     ///
     /// When the node cannot be started.
     pub async fn start_node_quiet(&mut self, i: usize) {
+        self.start_node_reporting(i, arca_lake_protocol::storage::v1::NODE_SCHEMA_MAX)
+            .await;
+    }
+
+    /// [`Self::start_node_quiet`] with the node reporting metadata schema
+    /// `schema` (ADR-0039; below 5 it stands in for 0.1.0).
+    ///
+    /// # Panics
+    ///
+    /// When the node cannot be started.
+    pub async fn start_node_reporting(&mut self, i: usize, schema: u64) {
         let n = &mut self.nodes[i];
         if let Some(h) = n.held.take() {
             h.abort();
@@ -762,6 +773,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         cfg.store = node_store_config(&n.dir);
         cfg.tls = n.tls.clone();
         cfg.capacity_bytes = n.capacity;
+        cfg.reported_schema_max = schema;
         let mut last_err = None;
         for _ in 0..50 {
             match arca_lake_storage_node::serve(cfg.clone()).await {

@@ -68,6 +68,15 @@ impl Gate {
     }
 }
 
+/// The schema a storage node must enforce for a shard write to it to count
+/// (ADR-0039): `schema_write` once it reached [`keys::SCHEMA_V5`] (no
+/// earlier release may then take writes), 0 below it (the mixed window
+/// with 0.1.0, whose nodes report no schema).
+#[must_use]
+pub fn required_node_schema(schema_write: Option<u64>) -> u64 {
+    schema_write.filter(|w| *w >= keys::SCHEMA_V5).unwrap_or(0)
+}
+
 /// Read the gate.
 ///
 /// # Errors

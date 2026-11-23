@@ -97,6 +97,11 @@ message PutShardResponse {
   uint64 sequence = 3;
   // The node store's epoch: with `sequence`, the delete token of this write.
   uint64 store_epoch = 4;
+  // Newest metadata schema whose protections the node enforces, as
+  // HealthResponse.schema_max (ADR-0039; 0 from 0.1.0 and earlier). Once
+  // schema_write is 5 or later, a writer counts the write only if this
+  // reaches schema_write.
+  uint64 schema_max = 5;
 }
 
 message GetShardRequest {

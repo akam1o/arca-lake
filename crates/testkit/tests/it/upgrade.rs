@@ -623,3 +623,188 @@ async fn the_0_2_0_gate_reads_schemas_4_and_5_and_0_1_0_refuses_5() {
         (keys::SCHEMA_VERSION_MIN, keys::SCHEMA_VERSION)
     );
 }
+
+/// ADR-0039 §2.4: once `schema_write` is 5, a node that reports a lower
+/// schema (standing in for 0.1.0 restarted at a member's address) never
+/// has a shard write counted: a stale capability is caught by the
+/// acknowledgement, a fresh one before the write, and the chunks go to
+/// the other group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_schema_5_no_shard_write_counts_on_an_earlier_release_node() {
+    use arca_lake_protocol::client::{NodeClients, ShardRef};
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 2,
+        heartbeat: Some(Duration::from_millis(100)),
+        ..ClusterOptions::rs(6, 2, 1, 1 << 20, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    let g = compat::gate(c.meta.as_ref()).await.unwrap();
+    assert!(g.schema_v5_enforced(), "{g:?}");
+    let groups: Vec<_> = c
+        .groups()
+        .await
+        .into_iter()
+        .filter(|g| !g.is_cache())
+        .collect();
+    assert_eq!(groups.len(), 2, "{groups:?}");
+    let victim_group = groups[0].clone();
+    let i = c.node_index(&victim_group.members[0]).unwrap();
+    let addr = c.nodes[i].addr.to_string();
+    for k in 0..4 {
+        let key = format!("before{k}");
+        s3::put(
+            &c.backend,
+            BUCKET,
+            &key,
+            random_bytes(300 << 10, k),
+            &PutOptions::default(),
+        )
+        .await
+        .unwrap();
+    }
+    c.stop_node(i).await;
+    c.start_node_reporting(i, keys::SCHEMA_V5 - 1).await;
+
+    // A writer that still holds the node's earlier capabilities sends the
+    // write; the acknowledgement shows the release and it does not count.
+    let probe = NodeClients::new(Duration::from_secs(2));
+    probe.set_required_node_schema(compat::required_node_schema(g.schema_write));
+    let other = c.nodes[(i + 1) % c.nodes.len()].addr.to_string();
+    let fresh = c.clients.health(&other).await.unwrap();
+    probe.note_health(&addr, &fresh);
+    let shard = ShardRef {
+        group_id: victim_group.id,
+        chunk_id: [7; 16],
+        shard_index: 0,
+    };
+    let e = probe
+        .put_shard(
+            &addr,
+            shard,
+            victim_group.epoch,
+            Bytes::from_static(b"x"),
+            1 << 16,
+        )
+        .await
+        .unwrap_err();
+    assert!(NodeClients::is_node_schema_refused(&e), "{e}");
+    assert!(e.message().contains("acknowledged"), "{e}");
+    // Now asked again: refused before anything is sent.
+    let e = probe
+        .put_shard(
+            &addr,
+            shard,
+            victim_group.epoch,
+            Bytes::from_static(b"x"),
+            1 << 16,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        NodeClients::is_node_schema_refused(&e) && e.message().contains("reports"),
+        "{e}"
+    );
+
+    // The gateway: every object is placed in the other group.
+    for k in 0..20 {
+        let key = format!("after{k}");
+        let d = random_bytes(300 << 10, 100 + k);
+        s3::put(&c.backend, BUCKET, &key, d.clone(), &PutOptions::default())
+            .await
+            .unwrap_or_else(|e| panic!("{key}: {e:?}"));
+        let m = c.manifest(BUCKET, &key).await;
+        assert!(
+            m.chunks
+                .iter()
+                .all(|(_, ch)| ch.placement.group_id != victim_group.id),
+            "{key} counted a write on the earlier-release node's group"
+        );
+        assert_eq!(
+            s3::get(&c.backend, BUCKET, &key).await.unwrap().0.to_vec(),
+            d
+        );
+    }
+    c.shutdown().await;
+}
+
+/// ADR-0039: below schema 5 (the mixed window with 0.1.0, whose nodes
+/// report no schema) no node schema is required for writes.
+#[test]
+fn no_node_schema_is_required_before_schema_5() {
+    assert_eq!(compat::required_node_schema(None), 0);
+    assert_eq!(compat::required_node_schema(Some(4)), 0);
+    assert_eq!(compat::required_node_schema(Some(5)), 5);
+    assert_eq!(compat::required_node_schema(Some(6)), 6);
+}
+
+/// ADR-0039: after the finalize, the leader asks a node facts-free before
+/// pushing anything; a node of an earlier release (here one reporting
+/// schema 4 restarted at a member's address) is quarantined and never
+/// receives the open delete fence (nor the schema floor) a push carries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_earlier_release_node_is_quarantined_before_any_push() {
+    let mut c = cluster().await;
+    let meta = Arc::clone(&c.meta);
+    let mut cfg = ControllerConfig::new("a");
+    cfg.lease = Duration::from_millis(600);
+    cfg.gc_interval = Duration::from_secs(3600);
+    cfg.reconcile_interval = Duration::from_secs(3600);
+    cfg.repair_interval = Duration::from_secs(3600);
+    cfg.stripe_repair_interval = Duration::from_secs(3600);
+    cfg.scrub.interval_ms = 0;
+    cfg.health_interval = Duration::from_millis(200);
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    let addr = |i: usize| c.nodes[i].addr.to_string();
+    // The leader's pushes open the fence on this release's nodes.
+    wait_until(
+        "the fence open on node 0",
+        Duration::from_secs(10),
+        async || {
+            ctl.is_leader()
+                && c.clients
+                    .health(&addr(0))
+                    .await
+                    .is_ok_and(|h| h.delete_fence_open)
+        },
+    )
+    .await;
+    let id2 = c.nodes[2].id;
+    c.stop_node(2).await;
+    c.start_node_reporting(2, keys::SCHEMA_V5 - 1).await;
+    let state = async || {
+        arca_lake_metadata::ops::node_lifecycle::state(meta.as_ref(), id2)
+            .await
+            .unwrap()
+    };
+    wait_until("node 2 quarantined", Duration::from_secs(10), async || {
+        state().await == arca_lake_metadata::ops::node_lifecycle::State::Quarantined
+    })
+    .await;
+    // Several more passes (node 0 is seen at every one, 200 ms apart): the
+    // quarantined node is asked facts-free only.
+    let seen = async || {
+        arca_lake_metadata::ops::cluster::list_nodes(meta.as_ref())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|n| n.id == c.nodes[0].id)
+            .unwrap()
+            .last_seen_ms
+    };
+    let at = seen().await;
+    wait_until(
+        "five more health passes",
+        Duration::from_secs(10),
+        async || seen().await >= at + 1_000,
+    )
+    .await;
+    let h = c.clients.health(&addr(2)).await.unwrap();
+    // It restarted closed (Phase 3.10) and stays closed.
+    assert!(
+        !h.delete_fence_open,
+        "the earlier-release node got the open fence: {h:?}"
+    );
+    ctl.shutdown().await;
+    c.shutdown().await;
+}

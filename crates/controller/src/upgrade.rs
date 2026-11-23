@@ -249,8 +249,10 @@ pub async fn upgrade_pass<S: KvStore>(
             let v = compat::raise_version(meta, VersionKey::Schema, target.schema).await?;
             // Again after the raise: a node registered while the step ran
             // is waited for too; until then the upgrade stays open and the
-            // step is retried (re-review).
-            let mut missing_after = Vec::new();
+            // step is retried (re-review). So is a process of an earlier
+            // release that started before the raise (ADR-0039): its gate
+            // admitted it, and it runs on until stopped.
+            let mut missing_after = procs_below(meta, &cur, now_ms).await?;
             for n in cluster::list_nodes(meta)
                 .await?
                 .into_iter()
@@ -336,8 +338,10 @@ fn node_below_message(
     }
 }
 
-/// Fresh heartbeats of processes that do not read the target schema (not
-/// named absent).
+/// Fresh heartbeats of processes that do not read the target schema. A
+/// process named absent is passed over only while its heartbeat has not
+/// advanced since the request (ADR-0039): one that heartbeats after it is
+/// not absent.
 async fn procs_below<S: KvStore>(
     meta: &S,
     cur: &UpgradeCursor,
@@ -346,7 +350,17 @@ async fn procs_below<S: KvStore>(
     let target = cur.target;
     let mut blockers = Vec::new();
     for p in compat::procs(meta).await? {
-        if now_ms.saturating_sub(p.last_ms) > PROC_STALE_MS || cur.ignore_absent.contains(&p.id) {
+        if now_ms.saturating_sub(p.last_ms) > PROC_STALE_MS {
+            continue;
+        }
+        let reaches = p.caps.schema_max >= target.schema && p.caps.protocol_max >= target.protocol;
+        if cur.ignore_absent.contains(&p.id) {
+            if !reaches && p.last_ms > cur.started_ms {
+                blockers.push(format!(
+                    "{:?} {} ({}) is named absent but heartbeated after the request (reads schema {}): stop it",
+                    p.kind, p.id, p.software, p.caps.schema_max
+                ));
+            }
             continue;
         }
         if !(p.caps.schema_max >= target.schema && p.caps.protocol_max >= target.protocol) {

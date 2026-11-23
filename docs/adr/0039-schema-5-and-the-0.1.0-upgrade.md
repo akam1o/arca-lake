@@ -94,49 +94,83 @@ any process of unknown version, takes part in the cluster:
 - **When it is checked.** At step 1 as before, and again at step 3
   before `schema_write` is raised: a 0.1.0 process started since step 1
   (a rollback within the window) holds the cut-off back. Process
-  heartbeats are checked again at step 5: a 0.1.0 controller or gateway
-  can start between steps 3 and 5, because its gate checks `schema`,
-  which is still 4. Each blocked step records the reason in the cursor
-  (`admin upgrade status`) and goes on once the process is stopped (its
-  heartbeat removed, gone stale after 90 s, or named with
-  `--ignore-absent`).
+  heartbeats are checked again at step 5, before and after `schema` is
+  raised: a 0.1.0 controller or gateway can start between steps 3 and 5,
+  because its gate checks `schema`, which is still 4, and it runs on
+  after the raise until stopped. Each blocked step records the reason in
+  the cursor (`admin upgrade status`) and goes on once the process is
+  stopped (its heartbeat removed or gone stale after 90 s). A process
+  named with `--ignore-absent` is passed over only while its heartbeat
+  has not advanced since the request; one that heartbeats after it
+  blocks.
+- **After the finalize** the leader keeps flagging, at every health
+  pass, each fresh heartbeat that reads a schema below `schema_write`:
+  an error log naming it and the gauge
+  `arca_controller_procs_below_schema`.
 
 `admin status --versions` prints, for every process and node, the
 software string, the schemas it reads or enforces, and `below-schema-5`
-when it is 0.1.0 or unknown. `admin status --versions` and
-`admin upgrade status` both print `protections degraded` or
-`protections mandatory`.
+when it is 0.1.0 or unknown; a heartbeat record older than the 90 s
+window is marked `(stale)` instead (a process gone, which blocks
+nothing). `admin status --versions` and `admin upgrade status` both
+print `protections degraded` or `protections mandatory`.
 
 ### 2.4 Rollback before finalize, refusal after
 
 - **Before step 3** any process can go back to 0.1.0, in any order
-  (RFC-014 §5.6): every record is unchanged. A 0.2.0 process that comes
-  back after a 0.1.0 period re-checks what 0.1.0 may have done in the
-  meantime rather than trusting its own 0.2.0-only keys. This is
-  defined per protection (R-117, R-119). The finalize refuses while the
-  0.1.0 process runs.
-- **After step 3** (the cut-off) there is no supported way back other
-  than restoring a pre-finalize backup (RFC-015):
+  (RFC-014 §5.6): every record is unchanged. The finalize refuses while
+  the 0.1.0 process runs. Whether a 0.2.0 process that comes back after
+  a 0.1.0 period re-checks what 0.1.0 did meanwhile (instead of trusting
+  its own 0.2.0-only keys) is defined by each protection's change
+  (R-117, R-119); this ADR provides only the schema gate it keys on.
+- **From step 3 on** there is no supported way back to 0.1.0:
   - 0.1.0 controllers and gateways refuse to start once step 5 raised
     `schema`. Between steps 3 and 5 they could start, but step 5 waits
     until they are gone.
-  - 0.1.0 storage nodes cannot refuse by themselves: they read no
-    metadata and record schema floor 5 without understanding it. So the
-    0.2.0 leader quarantines any node that reports a schema below
-    `schema_write` once `schema_write >= 5`, with the reason in the
-    quarantine record. Quarantine is the existing state for a node that
-    must not serve (ADR-0027): the leader sends it no pushes, so it holds
-    no open delete fence and takes no delete. It counts as unhealthy, so
-    with `--auto-repair` its members are repaired away. `admin node
-    rejoin` refuses such a node until it runs a 0.2.0 binary.
-  - **Residual.** Gateways keep the capabilities they negotiated per
-    node address, and this ADR does not change their write path. A 0.1.0
-    binary restarted at a member's address after the finalize can
-    therefore still receive shard writes from a gateway until its members
-    are moved. Refusing unproven writes is R-117's job, done by 0.2.0
-    nodes, and a 0.1.0 node does not do it. Closing the gap needs
-    gateways to re-check a node's reported schema against `schema_write`
-    on every reconnect.
+  - **Restoring a pre-finalize backup does not bring 0.1.0 back.** Step 5
+    gives every node schema floor 5, which survives on its disk. A
+    restore (`admin restore`, or `admin recovery begin` after a manual
+    one) raises both `schema` and `schema_write` of the restored metadata
+    to the highest floor the nodes report (`delete_fence::restore_floors`,
+    so that a restore does not reopen a closed downgrade). The restored
+    cluster is at schema 5 again and 0.1.0 is refused as before. A real
+    way back would need every node's floor lowered (no command does this;
+    it would undo the guarantee strict nodes rely on) or the nodes
+    replaced with empty disks, i.e. a new cluster. It is not provided.
+- **Storage nodes of 0.1.0.** They cannot refuse by themselves: they
+  read no metadata and record schema floor 5 without understanding it.
+  The 0.2.0 side refuses them:
+  - **Leader.** Once `schema_write >= 5`, every health pass first asks a
+    node facts-free (`Health` with no fence, floor or incarnation). A
+    node that reports a schema below `schema_write` is quarantined and is
+    sent nothing: no open delete fence, no schema floor, no incarnation.
+    A node replaced between that probe and the push is quarantined when
+    it answers the push. Quarantine is the existing state for a node that
+    must not serve (ADR-0027). It counts as unhealthy, so with
+    `--auto-repair` its members are repaired away. `admin node rejoin`
+    refuses such a node until it runs a 0.2.0 binary.
+  - **Writers (gateways, and the controller's repair and integrity
+    writes).** `NodeClients::set_required_node_schema` is set to
+    `schema_write` once it is 5 or later, at start and with every
+    cluster-state refresh (gateway: every 2 s; leader: every health
+    pass). Before a shard write the node's reported schema is checked,
+    from a `Health` answer at most 2 s old and asked again after any
+    connection failure. The write's own acknowledgement must also carry
+    it (`PutShardResponse.schema_max`, 0 from 0.1.0). A node below
+    `schema_write` is a failed write: the chunk is never counted written
+    on it and goes to another group. Bytes a 0.1.0 node stored before
+    answering are an unreferenced record, collected like any failed
+    write's.
+- **0.1.0 `admin` commands do not check the gate.** Only `admin init`
+  runs the startup gate in 0.1.0. `register-node`, `create-groups`,
+  `replace-member`, `recovery`, `restore` and the other commands write
+  the metadata whatever its schema, and they know none of the 0.2.0
+  keys. After the cut-off, use only the 0.2.0 `arca-lake admin`. No
+  0.2.0-side guard covers all of them. Where a protection keeps its
+  state in a 0.2.0 key, its own change can make the 0.2.0 leader refuse
+  to act on a record without it. For example, R-119 can refuse to place
+  in or repair a group with no recorded failure domain. That is up to
+  those changes.
 
 ## 3. Consequences
 
@@ -145,9 +179,10 @@ when it is 0.1.0 or unknown. `admin status --versions` and
   - No change to the metadata record version byte (2), the wire
     protocol version (4, accepts 3), the segment format (2) or the
     storage record version (1).
-  - One additive protobuf field, `HealthResponse.schema_max = 50`. prost
-    ignores unknown fields, so a 0.1.0 reader drops it, and a 0.1.0
-    sender leaves it 0. It is chosen above R-117's 47–49.
+  - Two additive protobuf fields: `HealthResponse.schema_max = 50`
+    (chosen above R-117's 47–49) and `PutShardResponse.schema_max = 5`.
+    prost ignores unknown fields, so a 0.1.0 reader drops them, and a
+    0.1.0 sender leaves them 0.
   - `NodeCapRecord` already stores a full `Capabilities`; its schema
     fields are now filled, with no layout change.
 - **Schema-3 stores** (pre-0.1.0 development commits) are no longer
@@ -165,6 +200,9 @@ when it is 0.1.0 or unknown. `admin status --versions` and
   finalize, the finalize refused while 0.1.0 runs, SIGKILL-interrupted
   steps resumed, the finalize, and 0.1.0 refused after it. The
   version-bump pair stays for the N → N+1 mechanics of the next schema.
+- **Cost.** One extra facts-free `Health` per node per leader health
+  pass, and at most one per node every 2 s per writer, once schema 5 is
+  written.
 - **Risk.** Quarantining every node of a cluster wrongly rolled back
   after the finalize stops writes until the nodes are upgraded and
   rejoined. This is accepted: serving writes from nodes that do not

@@ -79,9 +79,10 @@ that decide which builds can run together and which data they read:
 3. Controllers: followers first, the leader last.
 4. Gateways: drain, restart, return.
 5. Check `admin status --versions`. No line may end in `below-schema-5`
-   (a 0.1.0 or unknown process or node). The heartbeat of a process you
-   stopped stays for 90 s; name it with `--ignore-absent <id>` instead
-   of waiting.
+   (a 0.1.0 or unknown process or node). The heartbeat record of a
+   process you stopped stays fresh for 90 s, then shows `(stale)`. Name
+   a stopped process with `--ignore-absent <id>` instead of waiting; it
+   is refused if the process heartbeats after the request.
 6. When satisfied, run `admin upgrade finalize --wait`. It refuses while
    any 0.1.0 process or node takes part, at the request, again before
    the cut-off, and at the last step. The reason is shown by
@@ -89,17 +90,26 @@ that decide which builds can run together and which data they read:
    stopped. It completes across a controller restart or failover.
 
 Until the finalize raises `schema_write` (the cut-off), you can return
-any process to 0.1.0, in any order: records are unchanged. 0.2.0
-re-checks the cluster when it returns. `admin upgrade cancel` withdraws a
-finalize that has not reached the cut-off.
+any process to 0.1.0, in any order: records are unchanged.
+`admin upgrade cancel` withdraws a finalize that has not reached the
+cut-off. Whether 0.2.0 re-checks what 0.1.0 did when it returns is up to
+each 0.2.0 protection (see its ADR).
 
-After the finalize (schema 5) there is no way back to 0.1.0 except
-restoring a pre-finalize backup:
+From the cut-off on there is no way back to 0.1.0:
 
-- 0.1.0 controllers and gateways refuse to start.
-- A 0.1.0 storage node still starts (it reads no metadata), but the
-  0.2.0 leader quarantines it: no deletes, and with `--auto-repair` its
-  members are repaired away. `admin node rejoin` refuses it. Run 0.2.0
-  on it, then `admin node rejoin --node <id> --yes`. Until its members
-  move, gateways may still write shards to it, so never start a 0.1.0
-  node after the finalize.
+- 0.1.0 controllers and gateways refuse to start once the finalize
+  completes. The leader logs an error and counts
+  (`arca_controller_procs_below_schema`) any that still runs; stop it.
+- Restoring a pre-finalize backup does not bring 0.1.0 back. The nodes
+  keep schema floor 5, and a restore raises the restored metadata to it,
+  so the restored cluster is at schema 5 too.
+- A 0.1.0 storage node still starts (it reads no metadata). The 0.2.0
+  leader quarantines it before sending it anything, and gateways and the
+  controller do not count any shard write to it: chunks go to another
+  group. With `--auto-repair` its members are repaired away.
+  `admin node rejoin` refuses it. Run 0.2.0 on it, then
+  `admin node rejoin --node <id> --yes`.
+- Do not run 0.1.0 `admin` commands (`register-node`, `create-groups`,
+  `replace-member`, `recovery`, `restore`, ...) after the cut-off. They
+  do not check the schema gate and know none of the 0.2.0 keys. Use the
+  0.2.0 binary's `admin`.

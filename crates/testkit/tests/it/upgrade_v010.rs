@@ -20,7 +20,9 @@
 //! 6. the finalize held by a 0.1.0 node, its leader SIGKILLed while held:
 //!    the other controller resumes it once the node is upgraded;
 //! 7. after it: schema 5, protections mandatory; a 0.1.0 controller and
-//!    gateway refuse to start, a 0.1.0 node is quarantined (its member
+//!    gateway refuse to start; a 0.1.0 node restarted at a member's
+//!    address takes no acknowledged write (a PUT to its group is refused),
+//!    is quarantined (its member
 //!    moves to the fourth node) and is taken back by `admin node rejoin`
 //!    once it runs this release.
 
@@ -511,6 +513,19 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
         .unwrap()
         .id;
     c.node(0, false).await;
+    // The only group still has its member there: no write counts on the
+    // 0.1.0 node, so the PUT is refused rather than acknowledged.
+    let refused_put = s3
+        .put_object()
+        .bucket(BUCKET)
+        .key("on-the-0.1.0-node")
+        .body(ByteStream::from(body(300 << 10, 77)))
+        .send()
+        .await;
+    assert!(
+        refused_put.is_err(),
+        "a PUT was acknowledged with a member on the 0.1.0 node"
+    );
     wait_until(
         "the 0.1.0 node quarantined",
         Duration::from_secs(60),

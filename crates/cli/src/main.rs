@@ -2419,7 +2419,15 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                                 p.caps.schema_max,
                                 arca_lake_metadata::ops::compat::hex(&p.incarnation),
                                 p.last_ms,
-                                below(p.caps.schema_max)
+                                // A record older than the heartbeat window
+                                // is a process gone (it blocks nothing).
+                                if now.saturating_sub(p.last_ms)
+                                    > arca_lake_controller::upgrade::PROC_STALE_MS
+                                {
+                                    " (stale)"
+                                } else {
+                                    below(p.caps.schema_max)
+                                }
                             );
                         }
                         for c in caps {
