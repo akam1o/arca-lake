@@ -3474,36 +3474,10 @@ async fn set_failure_domain<S: arca_lake_metadata::KvStore>(
     }
     // Refusals the write would make, checked for every group first (and
     // by a dry run): nothing is written when one applies.
-    if let Some(g) = targets.iter().find(|t| !groups.iter().any(|g| g.id == **t)) {
-        return fail(format!("group {g} does not exist: nothing recorded"));
-    }
-    if !change
-        && let Some(d) = targets
-            .iter()
-            .filter_map(|t| domains.get(t))
-            .find(|d| d.label != label)
-    {
-        return fail(format!(
-            "group {} has failure domain '{}' recorded ({}): pass --change to replace it; nothing recorded",
-            d.group,
-            d.label,
-            d.source.as_str()
-        ));
-    }
-    // A label no member's node carries is most likely a typo: refused for
-    // every group before anything is written.
-    let unknown: Vec<u64> = groups
-        .iter()
-        .filter(|g| targets.contains(&g.id))
-        .filter(|g| {
-            !g.members.iter().any(|m| {
-                nodes.iter().any(|n| {
-                    n.id == m.node_id && group_domain::label_value(&n.labels, label).is_some()
-                })
-            })
-        })
-        .map(|g| g.id)
-        .collect();
+    let unknown = match refuse_before_writing(&groups, &nodes, &domains, &targets, label, change) {
+        Ok(u) => u,
+        Err(e) => return fail(e),
+    };
     if !unknown.is_empty() && !force {
         return fail(format!(
             "no member node of groups {unknown:?} carries the label '{label}' (a typo?): nothing recorded; `--force` records it anyway"
@@ -3565,6 +3539,52 @@ async fn set_failure_domain<S: arca_lake_metadata::KvStore>(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// What `set-failure-domain` refuses before writing anything (ADR-0038):
+/// a group that does not exist, a different recorded label without
+/// `--change`. `Ok`: the groups none of whose members' nodes carry
+/// `label` (refused unless `--force`).
+fn refuse_before_writing(
+    groups: &[arca_lake_metadata::records::GroupRecord],
+    nodes: &[arca_lake_metadata::records::NodeRecord],
+    domains: &std::collections::BTreeMap<u64, arca_lake_metadata::ops::group_domain::GroupDomain>,
+    targets: &[u64],
+    label: &str,
+    change: bool,
+) -> Result<Vec<u64>, String> {
+    use arca_lake_metadata::ops::group_domain;
+    if let Some(g) = targets.iter().find(|t| !groups.iter().any(|g| g.id == **t)) {
+        return Err(format!("group {g} does not exist: nothing recorded"));
+    }
+    if !change
+        && let Some(d) = targets
+            .iter()
+            .filter_map(|t| domains.get(t))
+            .find(|d| d.label != label)
+    {
+        return Err(format!(
+            "group {} has failure domain '{}' recorded ({}): pass --change to replace it; nothing recorded",
+            d.group,
+            d.label,
+            d.source.as_str()
+        ));
+    }
+    // A label no member's node carries is most likely a typo: refused for
+    // every group before anything is written.
+    let unknown: Vec<u64> = groups
+        .iter()
+        .filter(|g| targets.contains(&g.id))
+        .filter(|g| {
+            !g.members.iter().any(|m| {
+                nodes.iter().any(|n| {
+                    n.id == m.node_id && group_domain::label_value(&n.labels, label).is_some()
+                })
+            })
+        })
+        .map(|g| g.id)
+        .collect();
+    Ok(unknown)
 }
 
 /// `admin decommission-node` and `admin node decommission`.
