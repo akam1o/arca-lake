@@ -730,6 +730,7 @@ class Run:
             return False
         tl7["scrub_findings"] = self.c.integrity("scrub")
         tl7["scrub_by_class"] = getattr(self.c, "last_scrub_classes", None)
+        tl7["scrub_held"] = getattr(self.c, "last_scrub_held", None)
         if self._stopped("7"):
             return False
         self.run_step({"kind": "finish", "stage": "7"}, deadline)

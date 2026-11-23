@@ -5065,9 +5065,23 @@ async fn run_admin_integrity<S: arca_lake_metadata::KvStore + 'static>(
             {
                 Ok(r) => {
                     println!(
-                        "scrub group {group} verified {} bytes {} findings {:?} enqueued {} errors {}",
-                        r.verified, r.bytes, r.findings, r.enqueued, r.errors
+                        "scrub group {group} verified {} bytes {} findings {:?} enqueued {} errors {} retained {} retained_damaged {} in_flight {} unclassified {}",
+                        r.verified,
+                        r.bytes,
+                        r.findings,
+                        r.enqueued,
+                        r.errors,
+                        r.retained,
+                        r.retained_damaged,
+                        r.in_flight,
+                        r.unclassified
                     );
+                    if r.unclassified > 0 {
+                        eprintln!(
+                            "{} shards not classified (a node that does not report retirement, e.g. 0.1.0, or records that changed during the pass): counted as errors; scrub again",
+                            r.unclassified
+                        );
+                    }
                     if opts.adaptive.is_some() {
                         use std::sync::atomic::Ordering::Relaxed;
                         println!(
