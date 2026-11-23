@@ -3,10 +3,12 @@ evidence, judgement and teardown (plan §7, §8, §10, §11). Nothing here
 connects to a host: ``subprocess``, ``socket`` and the cluster are fakes,
 and a test fails if anything tries to reach out."""
 
+import contextlib
 import copy
 import datetime
 import shlex
 import hashlib
+import io
 import json
 import os
 import socket
@@ -1380,7 +1382,7 @@ class Commands(Base):
             self.assertEqual(c.last_scrub_held, held, line)
 
     def test_teardown_removes_only_marked_run_directories(self):
-        c, rec, cfg = self.cluster(answers=[('print("checked %d"', "checked 0\n")])
+        c, rec, cfg = self.cluster(answers=[('print("checked %d"', "checked 0\n"), ("rm -rf --", "removed\n")])
         out = c.teardown(os.path.join(self.dir, "evidence"))
         rms = [cmd for _, cmd, _ in rec.commands if "rm " in cmd]
         self.assertEqual(len(rms), 2)
@@ -1389,6 +1391,31 @@ class Commands(Base):
             self.assertIn(f"cat {d}/.r110-run", cmd)
             self.assertIn(cfg["run_id"], cmd)
         self.assertNotIn("kept", out)
+
+    def test_teardown_command_fails_when_a_directory_is_left(self):
+        for answer, rc in (("removed\n", 0), ("absent\n", 0), ("kept\n", 1), ("", 1)):
+            c, rec, cfg = self.cluster(answers=[('print("checked %d"', "checked 0\n"), ("rm -rf --", answer)])
+            out = c.teardown(os.path.join(self.dir, "evidence"))
+            self.assertEqual("kept" in out, rc == 1, answer)
+            if rc:
+                self.assertEqual(out["kept_dirs"], [cfg["remote"]["fdb_data"], cfg["remote"]["run_dir"]])
+                self.assertNotIn("parent", out)
+            else:
+                self.assertIn("rmdir -- " + os.path.dirname(cfg["remote"]["run_dir"]),
+                              " ".join(cmd for _, cmd, _ in rec.commands))
+            a = os.path.join(self.dir, "approval.json")
+            p = os.path.join(self.dir, "run.json")
+            with open(p, "w") as f:
+                json.dump(self.cfg, f)
+            with open(a, "w") as f:
+                json.dump({"config_sha256": hashlib.sha256(open(p, "rb").read()).hexdigest(), "scope": ["teardown"],
+                           "window_start": "2027-01-01T00:00:00+00:00", "window_end": "2027-01-02T00:00:00+00:00",
+                           "approved_by": "approver"}, f)
+            made = self.cluster(answers=[('print("checked %d"', "checked 0\n"), ("rm -rf --", answer)])[0]
+            with contextlib.redirect_stdout(io.StringIO()):
+                got = driver.main(["teardown", p, "--execute", "--approval", a, "--evidence",
+                                   os.path.join(self.dir, "ev")], now=NOW, cluster_factory=lambda cfg: made)
+            self.assertEqual(got, rc, answer)
 
     def test_teardown_keeps_everything_while_a_test_process_runs(self):
         c, rec, _ = self.cluster(answers=[("proc.matches(json.load", "node0.json\n")])

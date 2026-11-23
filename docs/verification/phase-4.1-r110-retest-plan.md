@@ -340,7 +340,26 @@ guard stopped the load before the reboot can never be known):
   teardown removes the test FoundationDB's directory first and the run
   directory last, because the run directory holds the services' records
   and the tools the liveness check needs. A teardown cut short between
-  the two removals can therefore be run again to the end.
+  the two removals can therefore be run again to the end. A directory
+  already gone is reported as absent. The teardown fails (exit status 1)
+  whenever a directory is left on the host.
+- Removing a directory left without its marker. If a removal is cut
+  partway through `rm -rf`, the marker (`.r110-run`) can go before the
+  rest. The tool then never removes that directory and reports it in
+  `kept_dirs`. The operator removes it by hand, and only when all of
+  these hold:
+  1. An earlier teardown record of this run
+     (`private/teardown/NNN.json`) shows `"removing": true`: every stop
+     was confirmed and the evidence was complete and verified before the
+     removal began.
+  2. A `driver.py collect` now reports `complete`, so the files still
+     on the host match the saved copies.
+  3. The path is exactly the one the record names, under the run's own
+     parent directory.
+  4. No process runs from it: `pgrep -af <the directory>` finds none.
+
+  Then `rm -rf -- <the directory>`, `rmdir` of the run's parent if it is
+  empty, and a note in the run's record of what was removed by hand.
 - A reboot is not a stop. Setup records the host's boot ID
   (`host-boot.json`). A process found gone after the boot ID changed is
   recorded as ended by the reboot (`cause: host-reboot`), never as

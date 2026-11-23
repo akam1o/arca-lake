@@ -975,14 +975,23 @@ class SshCluster:
         # The run directory last: it holds the tools and the services'
         # records the liveness check reads, so a teardown cut short between
         # the two can be run again to the end.
+        # A directory already gone (an earlier teardown removed it) is
+        # "absent"; one whose marker does not name this run, or whose removal
+        # failed, is kept and fails the teardown.
         for d in (self.fdb_data, self.run_dir):
-            r = self.ssh(f"[ \"$(cat {Q(d)}/{MARK} 2>/dev/null)\" = {Q(rid)} ] && rm -rf -- {Q(d)} && echo removed || "
-                         f"echo kept", check=False).strip()
-            out["removed" if r == "removed" else "kept_dirs"] = out.get("removed" if r == "removed" else "kept_dirs", []) + [d]
+            r = self.ssh(f"if [ ! -e {Q(d)} ] && [ ! -L {Q(d)} ]; then echo absent; "
+                         f"elif [ \"$(cat {Q(d)}/{MARK} 2>/dev/null)\" = {Q(rid)} ] && rm -rf -- {Q(d)}; "
+                         f"then echo removed; else echo kept; fi", check=False).strip()
+            key = {"removed": "removed", "absent": "absent"}.get(r, "kept_dirs")
+            out[key] = out.get(key, []) + [d]
         parent = os.path.dirname(self.run_dir)
         if not out.get("kept_dirs") and parent == os.path.dirname(self.fdb_data) and parent.endswith(rid):
             # Their common parent, named by the run, only if now empty.
-            self.ssh(f"rmdir -- {Q(parent)} 2>/dev/null || true", check=False)
+            out["parent"] = self.ssh(f"rmdir -- {Q(parent)} 2>/dev/null && echo removed || echo kept",
+                                     check=False).strip() or "kept"
+        if out.get("kept_dirs"):
+            out["kept"] = (f"left on the host: {out['kept_dirs']} (a marker not naming this run, or the removal "
+                           "failed; plan §6.2: removing a directory left without its marker)")
         out.pop("removing")
         return self._teardown_record(evidence_dir, out)
 

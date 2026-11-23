@@ -101,7 +101,9 @@ class Base(unittest.TestCase):
         self.cfg = driver.validate(cfg)
         self.host = Host()
         c = remote.SshCluster(self.cfg, runner=self.host)
-        c.run_dir, c.fdb_data, c.mount = os.path.join(t, "run"), os.path.join(t, "fdb"), t
+        # Under a parent named by the run, as on the host.
+        top = os.path.join(t, self.cfg["run_id"])
+        c.run_dir, c.fdb_data, c.mount = os.path.join(top, "run"), os.path.join(top, "fdb"), t
         c.tools, c.load_dir = c.run_dir + "/tools", c.run_dir + "/load"
         c.boot_id_path = os.path.join(t, "boot_id")
         c.sleep = lambda s: None  # the reconnect's waits: the host's state is set by the test, not by time
@@ -184,6 +186,7 @@ class Teardown(Base):
         out = self.c.teardown(self.ev)
         self.assertNotIn("kept", out, out)
         self.assertEqual(out["removed"], [self.c.fdb_data, self.c.run_dir])
+        self.assertEqual(out["parent"], "removed")
         self.assertFalse(os.path.exists(self.c.run_dir))
         self.assertEqual({out["stopped"][n + ".json"]["verdict"] for n in ("node0", "node1")}, {"stopped"})
         # The stops came first; the collection after them; the removal last.
@@ -408,6 +411,8 @@ class Teardown(Base):
         self.host.fail_rm = self.c.run_dir
         out = self.c.teardown(self.ev)
         self.assertEqual((out["removed"], out["kept_dirs"]), ([self.c.fdb_data], [self.c.run_dir]))
+        self.assertIn("left on the host", out["kept"])
+        self.assertNotIn("parent", out)
         self.assertFalse(os.path.isdir(self.c.fdb_data))
         self.host.fail_rm = None
         trace = self.saved("fdb/l/trace.0.xml")
@@ -440,7 +445,11 @@ class Teardown(Base):
             f.write(good)
         out = self.c.teardown(self.ev)
         self.assertNotIn("kept", out, out)
-        self.assertEqual(out["removed"], [self.c.run_dir])
+        self.assertEqual((out["removed"], out["absent"]), ([self.c.run_dir], [self.c.fdb_data]))
+        self.assertNotIn("kept_dirs", out)
+        # The empty parent named by the run goes too.
+        self.assertEqual(out["parent"], "removed")
+        self.assertFalse(os.path.exists(os.path.dirname(self.c.run_dir)))
         man = self.manifest()
         self.assertTrue(man["complete"])
         self.assertEqual({f["path"] for f in man["files"] if f.get("host") == "gone"},
@@ -491,6 +500,15 @@ class Teardown(Base):
         self.assertNotIn("run/loglink/node0.log", [f["path"] for f in man["files"]])
         self.assertEqual(json.load(open(os.path.join(self.ev, "public", "evidence-summary.json")))["skipped"],
                          ["run/loglink"])
+
+    def test_a_directory_without_this_runs_marker_is_left_and_fails_the_teardown(self):
+        """A removal cut mid-way can take the marker with it: such a
+        directory is never removed by the tool and the teardown fails."""
+        os.remove(self.path("run/.r110-run"))
+        out = self.c.teardown(self.ev)
+        self.assertEqual((out["removed"], out["kept_dirs"]), ([self.c.fdb_data], [self.c.run_dir]))
+        self.assertIn("without its marker", out["kept"])
+        self.assertTrue(os.path.isdir(self.c.run_dir))
 
     def test_no_evidence_directory_removes_nothing(self):
         out = self.c.teardown()

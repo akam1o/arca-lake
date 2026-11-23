@@ -183,7 +183,9 @@ Results are written by criterion to `target/criterion/`.
   run until it is collected again with a larger cap (`--log-cap`,
   `--log-total-cap`; the deadline and timeouts with `--collect-deadline`,
   `--inventory-timeout`, `--call-timeout`; the values used are in the
-  manifest). A process found gone after
+  manifest). `teardown` exits 1 while any directory is left on the
+  host; a directory left without its marker after a removal cut mid-way
+  is removed by hand (plan §6.2 lists the checks). A process found gone after
   the host's boot ID changed is recorded as ended by the reboot, never as
   stopped.
   `example-run.json` is an unapproved example with placeholders.
