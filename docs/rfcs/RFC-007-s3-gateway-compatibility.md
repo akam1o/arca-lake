@@ -106,7 +106,7 @@ full AWS S3 compatibility: this table is the claim.
 | Ranged GET with `checksum-mode` | no checksum headers (checksums describe whole objects or parts) | same for composite; full-object checksums are omitted for ranges as well |
 | `ListObjectVersions` with a version marker whose key no longer exists | resumes after the key | undefined |
 | Object ACLs | `NotImplemented` | supported |
-| DeleteObjects without `Content-MD5` or `x-amz-checksum-*` | accepted; `x-amz-checksum-*` on XML bodies is not verified (`Content-MD5` is) | `400 InvalidRequest` (one of them is required) |
+| DeleteObjects without `Content-MD5` or `x-amz-checksum-*` | accepted (either is verified when sent) | `400 InvalidRequest` (one of them is required) |
 | `CreateBucket` of a bucket the requester owns | `409 BucketAlreadyOwnedByYou` in every region (another principal's bucket: `409 BucketAlreadyExists`) | `409 BucketAlreadyOwnedByYou`, except in us-east-1, where it is `200 OK` for legacy compatibility |
 | Multipart upload expiry | controller sweep after `--multipart-expiry` (7 days by default) | lifecycle rule only |
 
@@ -489,6 +489,16 @@ beyond the standard CRC combination step below).
   is answered `BadDigest`, with the right one `200` with every entry
   `AccessDenied`; other operations answer `AccessDenied` before the body
   is read.
+- **`x-amz-checksum-*` of an XML body** (DeleteObjects, PutBucketPolicy,
+  PutBucketVersioning, CreateBucket; current SDKs send CRC32 there instead
+  of `Content-MD5`): the same server wrapper computes the named algorithm
+  (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) over the body as `s3s` reads it
+  and answers as PutObject does: mismatch → `400 BadDigest`, a value that
+  is not base64 of the algorithm's length or more than one checksum header
+  → `400 InvalidRequest`, an algorithm the gateway does not implement →
+  `501 NotImplemented`; the operation does not run. With `Content-MD5` as
+  well, both must match. On CompleteMultipartUpload the header is the
+  object's checksum (above), not the body's, and is left to the backend.
 - **Signed payload and body framing** (PUT and UploadPart): `s3s`
   verifies the body against the signed `x-amz-content-sha256` and the
   declared length while the gateway reads it, and the chunk signatures
@@ -625,4 +635,5 @@ phase report.
 | A16 | The compatibility matrix is generated from the conformance suite's list of exercised operations | Not Implemented (maintained by hand; §5.1) |
 | A17 | Performance regression with multipart PUT added | see the Phase 3.1 report (`benchmarks/linux/results`) |
 | A18 | A signed PUT or UploadPart whose body does not match its `x-amz-content-sha256` is `400 XAmzContentSHA256Mismatch` and changes nothing; re-creating one's own bucket is `409 BucketAlreadyOwnedByYou`, another principal's `409 BucketAlreadyExists` | Verified (`s3_errors.rs`, cluster and memory backends, AWS SDK for Rust; body stream error mapping unit tests in `gateway/src/body.rs`) |
-| A19 | `Content-MD5`: malformed → `400 InvalidDigest`, mismatch → `400 BadDigest`, nothing committed, on PutObject (single and multi-chunk, plain and `aws-chunked`) and UploadPart, and on the DeleteObjects and PutBucketPolicy bodies | Verified (`s3_content_md5.rs`, cluster and memory backends, AWS SDK for Rust; `gateway/src/content_md5.rs` unit tests) |
+| A19 | `Content-MD5`: malformed → `400 InvalidDigest`, mismatch → `400 BadDigest`, nothing committed, on PutObject (single and multi-chunk, plain and `aws-chunked`) and UploadPart, and on the DeleteObjects and PutBucketPolicy bodies | Verified (`s3_content_md5.rs`, cluster and memory backends, AWS SDK for Rust; `gateway/src/xml_digest.rs` unit tests) |
+| A20 | `x-amz-checksum-*` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) of the DeleteObjects, PutBucketPolicy, PutBucketVersioning and CreateBucket bodies: mismatch → `400 BadDigest`, malformed → `400 InvalidRequest`, the operation not applied; the SDK's own checksums accepted; CompleteMultipartUpload's header stays the object's checksum | Verified (`s3_xml_checksums.rs`, AWS SDK for Rust; `gateway/src/xml_digest.rs` unit tests) |

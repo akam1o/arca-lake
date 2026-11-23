@@ -115,6 +115,13 @@ break compatibility).
 
 ### Fixed
 
+- `x-amz-checksum-*` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) of the XML
+  bodies of DeleteObjects, PutBucketPolicy, PutBucketVersioning and
+  CreateBucket is verified. Before, it was ignored: a corrupted body was
+  applied and answered `200` (current SDKs send CRC32 on DeleteObjects
+  instead of `Content-MD5`). A mismatch is now `400 BadDigest`, a
+  malformed value or several checksum headers `400 InvalidRequest`; the
+  operation is not applied (RFC-007 §5.7).
 - `Content-MD5` is verified. Before, a body that did not match it was
   stored and answered `200` (a false success for a client that asked for
   the check). PutObject and UploadPart (plain and `aws-chunked`, any
