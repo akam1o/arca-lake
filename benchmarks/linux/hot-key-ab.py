@@ -14,6 +14,7 @@ test, as in Phase 4.1); host C the generator and checker (`contend`).
   HOST_A=<ssh target> HOST_B=<ssh target> HOST_C=<ssh target> hot-key-ab.py build
   HOST_A=... HOST_B=... HOST_C=... [CAMPAIGN=id] [OUT=dir] hot-key-ab.py run
   HOST_A=... HOST_B=... HOST_C=... hot-key-ab.py teardown <run id>
+  HOST_A=... HOST_B=... HOST_C=... hot-key-ab.py smoke <arm> <scenario>   (one uncounted run)
   hot-key-ab.py schedule                 (the rotated order; no host)
   hot-key-ab.py summarize <out dir>      (summary from the run files; no host)
 
@@ -453,7 +454,7 @@ def tool_sample(tag, out, stop, interval=1.0):
                     with open(f"/proc/{d}/stat") as s:
                         fields = s.read().rsplit(")", 1)[1].split()
                     with open(f"/proc/{d}/cmdline", "rb") as c:
-                        cmd = c.read().replace(b"\0", b" ").decode(errors="replace").strip()[:300]
+                        full = c.read().replace(b"\0", b" ").decode(errors="replace").strip()
                     rss = 0
                     with open(f"/proc/{d}/status") as s:
                         for line in s:
@@ -461,8 +462,11 @@ def tool_sample(tag, out, stop, interval=1.0):
                                 rss = int(line.split()[1]) * 1024
                 except (OSError, IndexError):
                     continue
-                if not cmd:
+                if not full:
                     continue
+                # Ours is decided on the whole command line: the run's
+                # directory may come after a long argument list.
+                cmd = full[:300] + (f" {tag}" if tag in full[300:] else "")
                 procs[d] = {"ticks": int(fields[11]) + int(fields[12]), "start": int(fields[19]), "rss": rss,
                             "cmd": cmd, "self": int(d) == me}
             f.write(json.dumps({"t": t, "hz": hz, "cpu_total": sum(cpu[:8]), "cpu_idle": cpu[3] + cpu[4],
@@ -638,10 +642,12 @@ def build_record():
 
 
 def low_filesystems():
-    """Filesystems (root and the work area) below FS_FREE_MIN on any host."""
+    """Work-area filesystems below FS_FREE_MIN on any host (host A's root,
+    already below it and not written by these runs, is watched by the
+    plan's 3 GiB rule instead)."""
     low = []
     for h in "abc":
-        _, out, _ = ssh(h, f"df -B1 --output=avail,target / {AREA[h]} | tail -n +2")
+        _, out, _ = ssh(h, f"df -B1 --output=avail,target {AREA[h]} | tail -n +2")
         for line in out.splitlines():
             parts = line.split()
             if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) < FS_FREE_MIN:
@@ -875,8 +881,8 @@ class Run:
         Rc = self.R["c"]
         eps = " ".join(f"--endpoint {e}" for e in self.gw_endpoints())
         extra = {"unv16": "--keys 16", "retry": "--retries 3"}.get(self.scenario, "")
-        cmd = (f"{contend_path()} --mode run {eps} --bucket {BUCKET} --key-prefix {self.id}- --writers {WRITERS} "
-               f"--readers {READERS} --duration-secs {DURATION_S} --size {SIZE} --log {Rc}/ops.jsonl {extra}")
+        cmd = (f"{contend_path()} --mode run --log {Rc}/ops.jsonl {eps} --bucket {BUCKET} --key-prefix {self.id}- --writers {WRITERS} "
+               f"--readers {READERS} --duration-secs {DURATION_S} --size {SIZE} {extra}")
         wrapper = (f"sh -c {shlex.quote(f'date +%s.%N > {Rc}/run.start; {cmd} > {Rc}/run.json & echo $! > {Rc}/contend.pid; wait $!; echo $? > {Rc}/run.rc; date +%s.%N > {Rc}/run.end')}")
         self.start("c", "load", wrapper)
         self.started.append(("c", "contend"))
@@ -1128,6 +1134,19 @@ def main():
         build()
     elif cmd == "run":
         campaign()
+    elif cmd == "smoke" and len(sys.argv) > 3:
+        # One run outside the campaign (driver check; never counted): its
+        # record goes to OUT/smoke/.
+        addresses()
+        low = low_filesystems()
+        if low:
+            sys.exit(f"filesystems below 5 GiB: {low}")
+        r = Run(f"{CAMPAIGN}-smoke-{sys.argv[3]}-{sys.argv[2]}", sys.argv[2], sys.argv[3]).execute(build_record())
+        save(f"smoke/{r['run_id']}.json", json.dumps(r, indent=1, sort_keys=True))
+        subprocess.run([sys.executable, "-I", str(HERE / "sanitize.py"), str(OUT)])
+        print(json.dumps({"invalid_reasons": r["invalid_reasons"], "correct": r["correct"],
+                          "aborted": r.get("aborted"), "metrics": {k: v for k, v in r["metrics"].items()
+                                                                  if not isinstance(v, dict)}}, indent=1))
     elif cmd == "teardown" and len(sys.argv) > 2:
         addresses()
         r = Run(sys.argv[2], "candidate", "unv")
