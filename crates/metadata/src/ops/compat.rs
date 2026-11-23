@@ -57,6 +57,17 @@ pub struct Gate {
     pub incarnation_seq: u64,
 }
 
+impl Gate {
+    /// Whether `schema_write` reached [`keys::SCHEMA_V5`] (ADR-0039): the
+    /// finalize to 0.2.0 passed its cut-off, no 0.1.0 process may run, and
+    /// the protections 0.1.0 would bypass are mandatory. `false` is the
+    /// mixed window with 0.1.0 (degraded protections).
+    #[must_use]
+    pub fn schema_v5_enforced(&self) -> bool {
+        self.schema_write.is_some_and(|w| w >= keys::SCHEMA_V5)
+    }
+}
+
 /// Read the gate.
 ///
 /// # Errors

@@ -39,24 +39,67 @@ design, not a tuning hint; violating one voids a guarantee.
 
 ## Versions and compatibility
 
-The software version (0.1.0) is separate from the compatibility axes
+The software version (0.2.0) is separate from the compatibility axes
 that decide which builds can run together and which data they read:
 
-| Axis | 0.1.0 writes | 0.1.0 accepts or reads | Source |
-| --- | --- | --- | --- |
-| Wire protocol (node RPCs) | 4 | 3–4 | `crates/protocol/src/lib.rs` |
-| Metadata schema | 4 | 3–4 | `crates/metadata/src/keys.rs` |
-| Metadata record version byte | 2 | 1–2 | `crates/metadata/src/records.rs` |
-| Segment format | 2 | 1–2 | `crates/storage/src/format.rs` |
-| Storage record version | 1 | 1 | `crates/storage/src/format.rs` |
+| Axis | 0.2.0 writes | 0.2.0 accepts or reads | 0.1.0 writes / reads | Source |
+| --- | --- | --- | --- | --- |
+| Wire protocol (node RPCs) | 4 | 3–4 | 4 / 3–4 | `crates/protocol/src/lib.rs` |
+| Metadata schema | 5 (4 until finalized) | 4–5 | 4 / 3–4 | `crates/metadata/src/keys.rs` |
+| Metadata record version byte | 2 | 1–2 | 2 / 1–2 | `crates/metadata/src/records.rs` |
+| Segment format | 2 | 1–2 | 2 / 1–2 | `crates/storage/src/format.rs` |
+| Storage record version | 1 | 1 | 1 / 1 | `crates/storage/src/format.rs` |
 
-- A new 0.1.0 store initialises at schema 4 and segment format 2.
-- 0.1.0 has no supported upgrade predecessor. The schema 2 and 3 rows
-  above and the earlier "releases" in the changelog and CI are
-  pre-release development commits used by the upgrade tests.
+- A new 0.2.0 store initialises at schema 5 and segment format 2.
+- Schema 5 ([ADR-0039](../adr/0039-schema-5-and-the-0.1.0-upgrade.md))
+  changes no record layout. It marks the point after which no 0.1.0
+  process runs, so the 0.2.0 protections that 0.1.0 would bypass
+  (strict write ownership, the failure domain recorded on each group)
+  are mandatory. Below it they are degraded: `admin status --versions`
+  prints `protections degraded` or `protections mandatory`, and flags
+  each 0.1.0 (or unknown) process and node with `below-schema-5`.
+- 0.1.0 is the supported upgrade predecessor of 0.2.0. Stores of schema
+  3 or below (development commits before 0.1.0) are refused by 0.2.0:
+  upgrade them to 0.1.0 and finalize first. 0.1.0 itself has no
+  supported predecessor; the schema 2 and 3 "releases" in the changelog
+  are pre-release development commits.
 - Upgrades go one step at a time, in order, within one compatibility
   window (adjacent versions only): storage nodes first, then controllers
   (followers, leader last), then gateways (RFC-014 §5.8).
 - `admin upgrade finalize` is one-way: after it, earlier builds refuse
   to start and no downgrade is possible; restore of a pre-finalize
   backup is the only way back (RFC-014, RFC-015).
+
+### Upgrading from 0.1.0 to 0.2.0
+
+1. Take a backup (RFC-015) and read the 0.2.0 release notes.
+2. Storage nodes, one failure domain at a time: stop, replace the
+   binary, start, and wait until the node answers and is seen
+   (`admin node list`).
+3. Controllers: followers first, the leader last.
+4. Gateways: drain, restart, return.
+5. Check `admin status --versions`. No line may end in `below-schema-5`
+   (a 0.1.0 or unknown process or node). The heartbeat of a process you
+   stopped stays for 90 s; name it with `--ignore-absent <id>` instead
+   of waiting.
+6. When satisfied, run `admin upgrade finalize --wait`. It refuses while
+   any 0.1.0 process or node takes part, at the request, again before
+   the cut-off, and at the last step. The reason is shown by
+   `admin upgrade status`; the finalize goes on once the process is
+   stopped. It completes across a controller restart or failover.
+
+Until the finalize raises `schema_write` (the cut-off), you can return
+any process to 0.1.0, in any order: records are unchanged. 0.2.0
+re-checks the cluster when it returns. `admin upgrade cancel` withdraws a
+finalize that has not reached the cut-off.
+
+After the finalize (schema 5) there is no way back to 0.1.0 except
+restoring a pre-finalize backup:
+
+- 0.1.0 controllers and gateways refuse to start.
+- A 0.1.0 storage node still starts (it reads no metadata), but the
+  0.2.0 leader quarantines it: no deletes, and with `--auto-repair` its
+  members are repaired away. `admin node rejoin` refuses it. Run 0.2.0
+  on it, then `admin node rejoin --node <id> --yes`. Until its members
+  move, gateways may still write shards to it, so never start a 0.1.0
+  node after the finalize.

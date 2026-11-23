@@ -490,3 +490,136 @@ async fn finalize_waits_until_every_node_holds_the_schema_floor() {
     }
     c.shutdown().await;
 }
+
+/// A heartbeat of a 0.1.0 process (schema [3, 4], ADR-0039).
+fn v010_proc(id: &str, kind: ProcKind) -> ProcRecord {
+    ProcRecord {
+        id: id.into(),
+        kind,
+        software: "0.1.0".into(),
+        caps: Capabilities {
+            protocol_min: 3,
+            protocol_max: 4,
+            schema_min: 3,
+            schema_max: 4,
+            format_min: 1,
+            format_max: 2,
+        },
+        incarnation: [0; 16],
+        last_ms: now_ms(),
+    }
+}
+
+/// ADR-0039: the finalize to 0.2.0's schema is refused while a 0.1.0
+/// process heartbeats: at step 1, at the cut-off (one started after step
+/// 1, a rollback within the window) and at the last step (one started
+/// after the cut-off, which its gate still admits); each step goes on once
+/// it is gone.
+#[tokio::test]
+async fn finalize_to_schema_5_is_refused_while_a_0_1_0_process_runs() {
+    let c = cluster().await;
+    let meta = Arc::clone(&c.meta);
+    let own = arca_lake_controller::capabilities();
+    let target = current_target();
+    assert!(target.schema >= keys::SCHEMA_V5);
+    compat::request_finalize(meta.as_ref(), target, vec![], "admin", now_ms())
+        .await
+        .unwrap();
+    let pass = async |token: u64| {
+        upgrade_pass(meta.as_ref(), &c.clients, &own, token, now_ms())
+            .await
+            .unwrap()
+    };
+    let blocked_at = async |step: UpgradeStep, id: &str| {
+        let r = pass(7).await;
+        assert_eq!((r.before, r.after), (Some(step), Some(step)), "{r:?}");
+        let why = r.blocked.unwrap_or_default();
+        assert!(why.contains(id) && why.contains("0.1.0"), "{why}");
+    };
+    // Step 1.
+    compat::heartbeat(meta.as_ref(), &v010_proc("gw-0.1.0", ProcKind::Gateway))
+        .await
+        .unwrap();
+    blocked_at(UpgradeStep::Requested, "gw-0.1.0").await;
+    compat::remove_heartbeat(meta.as_ref(), "gw-0.1.0")
+        .await
+        .unwrap();
+    assert_eq!(pass(7).await.after, Some(UpgradeStep::Preconditioned));
+    assert_eq!(pass(7).await.after, Some(UpgradeStep::Migrated));
+    // The cut-off: schema_write is not raised past a 0.1.0 controller.
+    let write_before = compat::gate(meta.as_ref()).await.unwrap().schema_write;
+    compat::heartbeat(meta.as_ref(), &v010_proc("ctl-0.1.0", ProcKind::Controller))
+        .await
+        .unwrap();
+    blocked_at(UpgradeStep::Migrated, "ctl-0.1.0").await;
+    assert_eq!(
+        compat::gate(meta.as_ref()).await.unwrap().schema_write,
+        write_before
+    );
+    compat::remove_heartbeat(meta.as_ref(), "ctl-0.1.0")
+        .await
+        .unwrap();
+    assert_eq!(pass(7).await.after, Some(UpgradeStep::SchemaWriteRaised));
+    assert_eq!(pass(7).await.after, Some(UpgradeStep::FormatWriteRaised));
+    // The last step.
+    compat::heartbeat(meta.as_ref(), &v010_proc("gw-late", ProcKind::Gateway))
+        .await
+        .unwrap();
+    blocked_at(UpgradeStep::FormatWriteRaised, "gw-late").await;
+    compat::remove_heartbeat(meta.as_ref(), "gw-late")
+        .await
+        .unwrap();
+    assert_eq!(pass(7).await.after, None);
+    let g = compat::gate(meta.as_ref()).await.unwrap();
+    assert_eq!(g.schema, Some(target.schema));
+    assert!(g.schema_v5_enforced());
+    c.shutdown().await;
+}
+
+/// ADR-0039: a store is initialised at 0.2.0's schema, protections
+/// mandatory from the start (no 0.1.0 process has ever run on it).
+#[tokio::test]
+async fn a_new_store_starts_at_schema_5() {
+    let c = cluster().await;
+    let g = compat::gate(c.meta.as_ref()).await.unwrap();
+    assert_eq!(g.schema, Some(keys::SCHEMA_VERSION));
+    assert_eq!(g.schema_write, Some(keys::SCHEMA_VERSION));
+    assert!(g.schema_v5_enforced());
+    c.shutdown().await;
+}
+
+/// ADR-0039: 0.2.0 serves stores of schemas 4 (0.1.0) and 5, refuses one
+/// of schema 3 (upgraded through 0.1.0 first) and a later one; 0.1.0's
+/// gate (schema [3, 4]) refuses a store once it is finalized to 5.
+#[tokio::test]
+async fn the_0_2_0_gate_reads_schemas_4_and_5_and_0_1_0_refuses_5() {
+    let v010 = v010_proc("x", ProcKind::Controller).caps;
+    let own = arca_lake_controller::capabilities();
+    // A `version-bump` build reads [5, 6].
+    let bump = arca_lake_common::compat::BUMP == 1;
+    for (stored, caps, ok) in [
+        (3, own, false),
+        (4, own, !bump),
+        (5, own, true),
+        (6, own, bump),
+        (7, own, false),
+        (4, v010, true),
+        (5, v010, false),
+    ] {
+        let s = arca_lake_metadata::mem::MemKv::default();
+        transact(&s, stored, |tx, v: &u64| {
+            Box::pin(async move {
+                tx.set(&keys::schema_version(), &v.to_le_bytes());
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let r = compat::check_startup(&s, &caps, compat::Stamp::Legacy, "ctl", 1).await;
+        assert_eq!(r.is_ok(), ok, "stored {stored} caps {caps:?}: {r:?}");
+    }
+    assert_eq!(
+        (own.schema_min, own.schema_max),
+        (keys::SCHEMA_VERSION_MIN, keys::SCHEMA_VERSION)
+    );
+}

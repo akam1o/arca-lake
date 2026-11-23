@@ -1732,6 +1732,26 @@ async fn health_pass<S: KvStore>(
                         continue;
                     }
                 }
+                // A node of an earlier release (0.1.0) once schema 5 is
+                // written (ADR-0039): it does not enforce the protections
+                // that schema makes mandatory, so it serves nothing until it
+                // runs this release and `admin node rejoin` takes it back.
+                if let Some(w) = gate.schema_write
+                    && crate::upgrade::node_below_schema(&h, w)
+                {
+                    let reason = format!(
+                        "the node runs {} and enforces schema at most {}; the cluster writes schema {w}: an earlier release after the finalize",
+                        h.software, h.schema_max
+                    );
+                    if quarantine_unless_held(meta, n.id, &reason, now).await? {
+                        tracing::error!(node = n.id, address = %n.address, %reason, "storage node quarantined");
+                    }
+                    metrics
+                        .nodes_quarantined_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    unhealthy += 1;
+                    continue;
+                }
                 // A node at this incarnation's sequence with another
                 // incarnation, or above it, refuses this cluster's opens
                 // and deletes until a `recovery begin` marks one above it

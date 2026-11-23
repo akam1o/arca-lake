@@ -1736,6 +1736,7 @@ impl StorageNode for StorageNodeService {
             software: arca_lake_common::compat::software_version(),
             group_epochs,
             version_bump: arca_lake_common::compat::BUMP,
+            schema_max: pb::NODE_SCHEMA_MAX,
             puts_in_flight: self.stats.puts_in_flight.load(Ordering::Relaxed),
             gets_in_flight: self.stats.gets_in_flight.load(Ordering::Relaxed),
             device_free_bytes: space.map_or(0, |s| s.0),

@@ -2398,9 +2398,18 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                             arca_lake_metadata::keys::SCHEMA_VERSION,
                             arca_lake_storage::format::SEGMENT_FORMAT_VERSION
                         );
+                        // A process or node below schema 5 is 0.1.0 or an
+                        // unknown release (ADR-0039): it blocks the finalize.
+                        let below = |schema_max: u64| {
+                            if schema_max < arca_lake_metadata::keys::SCHEMA_V5 {
+                                " below-schema-5"
+                            } else {
+                                ""
+                            }
+                        };
                         for p in procs {
                             println!(
-                                "proc {:?} {} software {} protocol [{}, {}] schema [{}, {}] incarnation {} last_ms {}",
+                                "proc {:?} {} software {} protocol [{}, {}] schema [{}, {}] incarnation {} last_ms {}{}",
                                 p.kind,
                                 p.id,
                                 p.software,
@@ -2409,16 +2418,18 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                                 p.caps.schema_min,
                                 p.caps.schema_max,
                                 arca_lake_metadata::ops::compat::hex(&p.incarnation),
-                                p.last_ms
+                                p.last_ms,
+                                below(p.caps.schema_max)
                             );
                         }
                         for c in caps {
                             println!(
-                                "node {} software {} protocol [{}, {}] format [{}, {}] format_write {} incarnation {} epochs {:?} seen_ms {}",
+                                "node {} software {} protocol [{}, {}] schema_max {} format [{}, {}] format_write {} incarnation {} epochs {:?} seen_ms {}{}",
                                 c.node_id,
                                 c.software,
                                 c.caps.protocol_min,
                                 c.caps.protocol_max,
+                                c.caps.schema_max,
                                 c.caps.format_min,
                                 c.caps.format_max,
                                 c.format_write,
@@ -2427,7 +2438,8 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                                     |i| arca_lake_metadata::ops::compat::hex(&i)
                                 ),
                                 c.group_epochs,
-                                c.seen_ms
+                                c.seen_ms,
+                                below(c.caps.schema_max)
                             );
                         }
                     }
@@ -4163,6 +4175,17 @@ fn print_gate(g: &arca_lake_metadata::ops::compat::Gate) {
         "schema {:?} schema_write {:?} format_write {:?} has_data {}",
         g.schema, g.schema_write, g.format_write, g.has_data
     );
+    if g.schema_v5_enforced() {
+        println!(
+            "protections mandatory (schema_write >= {}, ADR-0039): no 0.1.0 process may run",
+            arca_lake_metadata::keys::SCHEMA_V5
+        );
+    } else {
+        println!(
+            "protections degraded (schema_write below {}, ADR-0039): 0.1.0 processes may still run and bypass the 0.2.0 protections; `admin upgrade finalize` makes them mandatory",
+            arca_lake_metadata::keys::SCHEMA_V5
+        );
+    }
     match &g.cluster {
         Some(c) => println!(
             "cluster {} incarnation {} changed_ms {} by {} restored_at_ms {:?} restored_from {:?}",

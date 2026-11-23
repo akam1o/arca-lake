@@ -408,7 +408,7 @@ impl NodeCaps {
             protocol_min: h.protocol_min.max(1),
             protocol_max: h.protocol_max.max(1),
             schema_min: 0,
-            schema_max: 0,
+            schema_max: h.schema_max,
             format_min: h.format_min.max(1),
             format_max: h.format_max.max(1),
         };
