@@ -325,3 +325,250 @@ async fn a_cluster_initialised_at_the_strict_schema_is_strict_from_its_first_wri
     }
     c.shutdown().await;
 }
+
+/// A writer's cleanup of its own partial copy (a cache population that
+/// could not write every member) is refused by nodes holding an identity
+/// when its deletes carry none (R-100): the shards stay for
+/// reconciliation, and the refusal is counted
+/// (`arca_gateway_cache_cleanup_refused_total`). With the identities the
+/// nodes acknowledged, which the gateway now reads with the cluster state,
+/// the same cleanup goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_partial_copys_cleanup_needs_the_nodes_identities_and_its_refusals_are_counted() {
+    use arca_lake_tiering::durable::write_coded;
+    let mut c = cluster().await;
+    let g = c.groups().await.remove(0);
+    let ids: Vec<u64> = c.nodes.iter().map(|n| n.id).collect();
+    let addrs: Vec<String> = c.nodes.iter().map(|n| n.addr.to_string()).collect();
+    let addr_of = |id: u64| ids.iter().position(|i| *i == id).map(|i| addrs[i].clone());
+    let last = c.node_index(&g.members[2]).unwrap();
+    c.stop_node(last).await;
+    let shards: Vec<Bytes> = (0..3).map(|i| payload(4096, i)).collect();
+    // A writer of the cluster (incarnation, open fence, node names), as a
+    // gateway's pool is.
+    let writer = || {
+        let w = NodeClients::new(Duration::from_secs(2));
+        w.set_incarnation(Some(c.incarnation()));
+        w.set_delete_fence(c.clients.delete_fence());
+        for (id, addr) in ids.iter().zip(&addrs) {
+            w.note_node_id(addr, *id);
+        }
+        w
+    };
+    let left = |chunk: [u8; 16]| {
+        g.members
+            .iter()
+            .filter_map(|m| c.node_index(m))
+            .filter(|i| c.node_running(*i))
+            .map(|i| {
+                c.shard_keys(i, g.id)
+                    .iter()
+                    .filter(|k| k.chunk_id == chunk)
+                    .count()
+            })
+            .sum::<usize>()
+    };
+    // Without the identities: refused, counted, left behind.
+    let bare = writer();
+    assert!(
+        write_coded(&bare, &g, &addr_of, [0xc1; 16], &shards, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(bare.stats().cleanup_refused, 2);
+    assert_eq!(left([0xc1; 16]), 2, "the partial copy is left behind");
+    // With them: deleted, nothing counted.
+    let stamped = writer();
+    let acknowledged = arca_lake_metadata::ops::node_lifecycle::identities(c.meta.as_ref())
+        .await
+        .unwrap()
+        .into_values()
+        .filter(|i| i.acknowledged)
+        .map(|i| (i.node_id, i.token))
+        .collect();
+    stamped.note_acknowledged_identities(&acknowledged);
+    assert!(
+        write_coded(&stamped, &g, &addr_of, [0xc2; 16], &shards, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(stamped.stats().cleanup_refused, 0);
+    assert_eq!(left([0xc2; 16]), 0, "the partial copy was deleted");
+    c.shutdown().await;
+}
+
+/// The gateway's own pool takes the identities the nodes acknowledged at
+/// its start and with its cluster refresh (every 2 s), not from the test:
+/// after `node rejoin --fresh-identity` (a new, not yet acknowledged token)
+/// its cleanup of a partial copy is refused by that node, counted and left
+/// behind; once the new identity is acknowledged, its next refresh stamps
+/// it and the same cleanup goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_gateways_identities_follow_its_start_its_refresh_and_a_rejoin() {
+    use arca_lake_metadata::ops::node_lifecycle;
+    use arca_lake_tiering::durable::write_coded;
+    let mut c = cluster().await;
+    // At start: a new gateway backend reads them before its first refresh.
+    c.restart_backend().await.unwrap();
+    let ids = node_lifecycle::identities(c.meta.as_ref()).await.unwrap();
+    for n in &c.nodes {
+        let rec = &ids[&n.id];
+        assert!(rec.acknowledged);
+        assert_eq!(
+            c.backend.node_clients().noted_identity(&n.addr.to_string()),
+            Some((n.id, rec.token)),
+            "node {}",
+            n.id
+        );
+    }
+    let g = c.groups().await.remove(0);
+    let x = c.node_index(&g.members[0]).unwrap();
+    let (xid, xaddr) = (c.nodes[x].id, c.nodes[x].addr.to_string());
+    // X rejoins with a fresh identity: its disk's file removed, a new token
+    // recorded (not acknowledged yet) and adopted by the disk.
+    c.stop_node(x).await;
+    std::fs::remove_file(c.nodes[x].dir.join("node-identity.txt")).unwrap();
+    // Started and given the open fence (a started node takes no delete
+    // before a push), still without an identity.
+    c.start_node(x).await;
+    arca_lake_metadata::transact(c.meta.as_ref(), xid, |tx, id| {
+        Box::pin(async move {
+            // What `rejoin --fresh-identity` and the next pass record.
+            arca_lake_metadata::Txn::clear(tx, &arca_lake_metadata::keys::node_identity(*id));
+            node_lifecycle::new_identity_in_tx(tx, *id).await
+        })
+    })
+    .await
+    .unwrap();
+    let fresh = node_lifecycle::identity(c.meta.as_ref(), xid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!fresh.acknowledged);
+    c.clients
+        .health_with(
+            &xaddr,
+            HealthRequest {
+                node_id: xid,
+                node_identity: Bytes::copy_from_slice(&fresh.token),
+                adopt_identity: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let pool = c.backend.node_clients().clone();
+    let wait_noted = async |want: Option<(u64, [u8; 16])>| {
+        let t = std::time::Instant::now();
+        while pool.noted_identity(&xaddr) != want {
+            assert!(t.elapsed() < Duration::from_secs(10), "never {want:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    // The refresh drops the old token (no acknowledged identity for X).
+    wait_noted(None).await;
+    let ids: Vec<u64> = c.nodes.iter().map(|n| n.id).collect();
+    let addrs: Vec<String> = c.nodes.iter().map(|n| n.addr.to_string()).collect();
+    let addr_of = |id: u64| ids.iter().position(|i| *i == id).map(|i| addrs[i].clone());
+    let down = c.node_index(&g.members[2]).unwrap();
+    c.stop_node(down).await;
+    let shards: Vec<Bytes> = (0..3).map(|i| payload(4096, i)).collect();
+    let on_x = |chunk: [u8; 16]| {
+        c.shard_keys(x, g.id)
+            .iter()
+            .filter(|k| k.chunk_id == chunk)
+            .count()
+    };
+    let refused = pool.stats().cleanup_refused;
+    assert!(
+        write_coded(&pool, &g, &addr_of, [0xd1; 16], &shards, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(pool.stats().cleanup_refused, refused + 1);
+    assert_eq!(on_x([0xd1; 16]), 1, "left for reconciliation");
+    // Acknowledged: the next refresh stamps it, the cleanup goes through.
+    node_lifecycle::acknowledge_identity(c.meta.as_ref(), xid, fresh.token)
+        .await
+        .unwrap();
+    wait_noted(Some((xid, fresh.token))).await;
+    assert!(
+        write_coded(&pool, &g, &addr_of, [0xd2; 16], &shards, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(pool.stats().cleanup_refused, refused + 1);
+    assert_eq!(on_x([0xd2; 16]), 0);
+    c.shutdown().await;
+}
+
+/// The gateway's invalidations and evictions delete cache copies other
+/// gateways may have populated, after their placement was removed from
+/// metadata; with the identities it reads, nodes holding one take them
+/// (before, they refused every one, and the copies stayed until
+/// reconciliation).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_gateways_invalidations_and_evictions_delete_on_identity_holding_nodes() {
+    use arca_lake_tiering::cache::{CacheTierConfig, evict_tier, invalidate};
+    let c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        cache_nodes: 3,
+        cache_groups: 1,
+        ..ClusterOptions::rs(3, 2, 1, 256 << 10, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    for key in ["a", "b"] {
+        let d = payload(200 << 10, 7);
+        s3::put(&c.backend, BUCKET, key, d.clone(), &PutOptions::default())
+            .await
+            .unwrap();
+        s3::get(&c.backend, BUCKET, key).await.unwrap();
+        c.wait_cached(BUCKET, key, 1, Duration::from_secs(10)).await;
+    }
+    let cache_group = c.cache_placements(BUCKET, "a").await[0].1.group_id;
+    let cached = || {
+        c.cache_node_indexes()
+            .into_iter()
+            .map(|i| c.shard_count(i, cache_group))
+            .sum::<usize>()
+    };
+    assert!(cached() > 0);
+    let pool = c.backend.node_clients().clone();
+    let map = c.backend.map();
+    let addr_of = |id: u64| map.node_addr(id).map(str::to_string);
+    let before = pool.stats().cleanup_refused;
+    // Invalidate `a`.
+    let generation = c.manifest(BUCKET, "a").await.pointer.generation;
+    let group = c.groups().await.into_iter().find(|g| g.id == cache_group);
+    assert!(
+        invalidate(
+            c.meta.as_ref(),
+            &pool,
+            group.as_ref(),
+            &addr_of,
+            &generation,
+            0
+        )
+        .await
+        .unwrap()
+    );
+    // Evict everything else.
+    let usage =
+        arca_lake_metadata::ops::cache::usage(c.meta.as_ref(), arca_lake_testkit::CACHE_TIER)
+            .await
+            .unwrap();
+    let cfg = CacheTierConfig {
+        capacity_bytes: usage,
+        high_watermark: 0.1,
+        low_watermark: 0.0,
+        ..ClusterOptions::default_cache()
+    };
+    let r = evict_tier(c.meta.as_ref(), &pool, &cfg, &map.groups, &addr_of)
+        .await
+        .unwrap();
+    assert!(r.evicted >= 1 && r.delete_failures == 0, "{r:?}");
+    assert_eq!(pool.stats().cleanup_refused, before);
+    assert_eq!(cached(), 0, "a cache copy was left behind");
+    c.shutdown().await;
+}

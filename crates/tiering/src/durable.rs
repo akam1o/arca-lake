@@ -445,8 +445,24 @@ async fn delete_written(
 ) {
     // Only records this call wrote (by token): a shard without one (an
     // older node) is left to reconciliation rather than deleted
-    // unconditionally over a concurrent writer's copy.
+    // unconditionally over a concurrent writer's copy. A refusal (the
+    // node's delete fence or epoch, or an identity the pool does not
+    // stamp, R-100) leaves the shard to reconciliation too: counted and
+    // logged.
     for (addr, shard, token) in written.iter().filter(|(_, _, t)| t.is_some()) {
-        let _ = clients.delete_shard_if(addr, *shard, epoch, *token).await;
+        match clients.delete_shard_if(addr, *shard, epoch, *token).await {
+            Ok(()) => {}
+            Err(s) if s.code() == tonic::Code::NotFound || NodeClients::is_changed(&s) => {}
+            Err(s) => {
+                clients.note_cleanup_refused();
+                tracing::warn!(
+                    node = %addr,
+                    group = shard.group_id,
+                    shard = shard.shard_index,
+                    error = %s,
+                    "partial copy not deleted: left to reconciliation"
+                );
+            }
+        }
     }
 }

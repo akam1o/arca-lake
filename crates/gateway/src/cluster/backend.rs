@@ -156,6 +156,23 @@ fn note_node_ids(clients: &NodeClients, map: &ClusterMap) {
     }
 }
 
+/// Stamp this gateway's deletes (of its own partial cache copies) with the
+/// identities the nodes acknowledged, as a leader's are (R-100): a node
+/// holding one refuses a delete that carries none. Read with the cluster
+/// state; a failed read keeps the last (a stale one is refused by the
+/// node, counted as a cleanup refusal).
+async fn note_identities<S: KvStore>(meta: &S, clients: &NodeClients) {
+    match arca_lake_metadata::ops::node_lifecycle::identities(meta).await {
+        Ok(ids) => clients.note_acknowledged_identities(
+            &ids.into_values()
+                .filter(|i| i.acknowledged)
+                .map(|i| (i.node_id, i.token))
+                .collect(),
+        ),
+        Err(e) => tracing::debug!(error = %e, "node identities not read; the last stay"),
+    }
+}
+
 /// The cluster state as this gateway last saw it (RFC-015 §5.6 admission;
 /// refreshed every [`CLUSTER_REFRESH`]), with the incarnation the process
 /// started under.
@@ -945,6 +962,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             clients.clone(),
         );
         note_node_ids(&clients, &map);
+        note_identities(meta.inner().as_ref(), &clients).await;
         let access_table = Arc::new(super::access::AccessTable::new(cfg.access.clone()));
         if cfg.record_access && !cfg.access.legacy {
             super::access::spawn_flusher(Arc::clone(&meta), &access_table);
@@ -1081,6 +1099,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                                 tracing::warn!(error = %e, "tiering refresh failed; the last observation ages");
                             }
                         }
+                        note_identities(meta.as_ref(), &clients).await;
                         // A failed read closes it here (fail closed).
                         let fence =
                             arca_lake_metadata::ops::delete_fence::current(meta.as_ref()).await;
@@ -1145,6 +1164,13 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     #[must_use]
     pub fn map(&self) -> Arc<ClusterMap> {
         Arc::clone(&self.map.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Read the identities the nodes acknowledged now and stamp this
+    /// gateway's deletes with them, as the cluster state refresh does
+    /// every [`CLUSTER_REFRESH`].
+    pub async fn refresh_node_identities(&self) {
+        note_identities(self.meta.inner().as_ref(), &self.clients).await;
     }
 
     /// Reload the cluster map from metadata.

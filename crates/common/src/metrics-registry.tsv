@@ -165,6 +165,7 @@ arca_gateway_cache_admission_rejected_generation_total	counter	gateway	events	-	
 arca_gateway_cache_admission_rejected_size_total	counter	gateway	events	-	read-through cache: admission rejected size (RFC-006 §5.3)
 arca_gateway_cache_admission_rejected_threshold_total	counter	gateway	events	-	read-through cache: admission rejected threshold (RFC-006 §5.3)
 arca_gateway_cache_admissions_rejected_total	counter	gateway	events	-	read-through cache: admissions rejected (RFC-006 §5.3)
+arca_gateway_cache_cleanup_refused_total	counter	gateway	deletes	-	deletes of cache copies by this gateway (its own partial copies, invalidations, evictions, including of copies other gateways populated) a node refused (fence, epoch, identity): the shards stay until reconciliation removes them
 arca_gateway_cache_degraded_hits_total	counter	gateway	events	-	read-through cache: degraded hits (RFC-006 §5.3)
 arca_gateway_cache_fallback_corrupt_total	counter	gateway	events	-	read-through cache: fallback corrupt (RFC-006 §5.3)
 arca_gateway_cache_fallback_node_total	counter	gateway	events	-	read-through cache: fallback node (RFC-006 §5.3)
