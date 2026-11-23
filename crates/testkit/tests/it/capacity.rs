@@ -905,11 +905,16 @@ async fn new_chunks_prefer_the_group_with_more_room() {
         .map(|m| c.node_index(m).unwrap())
         .collect();
     let others: Vec<usize> = (0..6).filter(|i| !small_members.contains(i)).collect();
+    // The six nodes share the test's file system: the product places on
+    // them only with allotments that fit it (R-80). Kept small so that
+    // they fit a tmpfs too; the rooms (allotment less reserve: 150 and
+    // 320 MiB) are far outside placement's 10 % tie band.
+    let (small, roomy) = (200 * MIB, 400 * MIB);
     for &i in &small_members {
-        c.set_node_capacity(i, Some(300 * MIB)).await;
+        c.set_node_capacity(i, Some(small)).await;
     }
     for &i in &others {
-        c.set_node_capacity(i, Some(1 << 30)).await;
+        c.set_node_capacity(i, Some(roomy)).await;
     }
     let tracker = Tracker::default();
     let policy = Policy {
@@ -917,14 +922,30 @@ async fn new_chunks_prefer_the_group_with_more_room() {
         ..Policy::default()
     };
     let now = now_ms();
+    let mut fs_total = 0;
     for n in &c.nodes {
         let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+        fs_total = fs_total.max(h.devices[0].fs_total_bytes);
         tracker.note_device(device_of(n.id, &h, now));
     }
+    let allotted = small * small_members.len() as u64 + roomy * others.len() as u64;
+    assert!(
+        allotted <= fs_total,
+        "precondition: the allotments ({allotted} bytes) must fit the shared file system ({fs_total} bytes)"
+    );
     pass(c.meta.as_ref(), &tracker, &policy, MIB, 0, now)
         .await
         .unwrap();
     let rec = admission::current(c.meta.as_ref()).await.unwrap();
+    let published = rec
+        .as_ref()
+        .expect("the pass published an admission record");
+    assert!(
+        published.capacity_conflicts.is_empty() && published.capacity_unverified.is_empty(),
+        "fitting allotments: no capacity conflict ({:?}, {:?})",
+        published.capacity_conflicts,
+        published.capacity_unverified
+    );
     c.backend.cluster().admission.observe(rec, Instant::now());
     let mut in_roomy = 0;
     for i in 0..20 {
