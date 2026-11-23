@@ -112,6 +112,7 @@ arca_controller_scrub_errors_total	counter	controller	errors	-	scrub requests th
 arca_controller_scrub_groups_overdue	gauge	controller	groups	-	groups past their scrub interval at the last tick
 arca_controller_scrub_passes_total	counter	controller	passes	-	complete scrub passes over a group
 arca_controller_scrub_rate_bytes_per_second	gauge	controller	bytes_per_second	-	current byte budget of an adaptive scrub (0 before the first adaptive sample)
+arca_controller_scrub_shard_classes_total	counter	controller	shards	class=retained_for_reclaim|retained_damaged|in_flight|unclassified	scrubbed shards that are not findings of their own (unclassified ones also count as scrub errors), by class
 arca_controller_scrub_shards_verified_total	counter	controller	shards	-	shards verified by background scrubbing
 arca_controller_scrub_throttles_total	counter	controller	decreases	-	times an adaptive scrub halved its budget under load
 arca_controller_shards_deleted_total	counter	controller	shards	-	shards deleted by GC

@@ -754,6 +754,24 @@ class Overall(unittest.TestCase):
         self.assertEqual(self.c5(1809, [0, 0, 0, 0, 1809, 0, 0, 0]), judge.FAILED)
         self.assertEqual(self.c5(0, [0] * 8), judge.PASSED)
 
+    def c5_held(self, sc, by, held, settled=None, pending=10):
+        s7 = {"verify": {"violations": [], "complete": True, "keys": 1}, "manifest_findings": 0,
+              "scrub_findings": sc, "scrub_by_class": by, "pending_before_scrub": pending,
+              "settled_ms": settled, "scrub_held": held}
+        return judge.c5({"7": s7})["outcome"]
+
+    def test_c5_with_per_shard_classes_has_no_count_based_excuse(self):
+        """0.2.0: the scrub classifies records kept for reclaim itself; an
+        unexpected shard is an orphan, before the settle too."""
+        held = {"retained": 40, "retained_damaged": 0, "in_flight": 0, "unclassified": 0}
+        self.assertEqual(self.c5_held(5, [0, 0, 0, 0, 5, 0, 0, 0], held), judge.FAILED)
+        self.assertEqual(self.c5_held(0, [0] * 8, held), judge.PASSED)
+        # A damaged record kept for reclaim is counted under its damage class.
+        damaged = dict(held, retained_damaged=1)
+        self.assertEqual(self.c5_held(1, [0, 1, 0, 0, 0, 0, 0, 0], damaged), judge.FAILED)
+        # Shards not classified are never a pass.
+        self.assertEqual(self.c5_held(0, [0] * 8, dict(held, unclassified=2)), judge.INCONCLUSIVE)
+
     def test_c5_incomplete_is_not_a_pass(self):
         tl = {"7": {"verify": {"violations": [], "complete": False, "keys": 1}, "manifest_findings": 0,
                     "scrub_findings": None}}
@@ -1284,6 +1302,21 @@ class Commands(Base):
         cfg = driver.validate(copy.deepcopy(self.cfg))
         rec = Recorder(answers)
         return remote.SshCluster(cfg, runner=rec), rec, cfg
+
+    def test_scrub_lines_of_both_formats_are_parsed(self):
+        old = "scrub group 7 verified 9 bytes 1 findings [0, 0, 0, 0, 3, 0, 0, 0] enqueued 0 errors 0\n"
+        new = ("scrub group 7 verified 9 bytes 1 findings [0, 0, 0, 0, 0, 0, 0, 0] enqueued 0 errors 0 "
+               "retained 3 retained_damaged 0 in_flight 1 unclassified 0\n")
+        bad = ("scrub group 7 verified 9 bytes 1 findings [0, 0, 0, 0, 0, 0, 0, 0] enqueued 0 errors 2 "
+               "retained 1 retained_damaged 0 in_flight 0 unclassified 2\n")
+        for line, total, classes, held in (
+                (old, 3, [0, 0, 0, 0, 3, 0, 0, 0], None),
+                (new, 0, [0] * 8, {"retained": 3, "retained_damaged": 0, "in_flight": 1, "unclassified": 0}),
+                (bad, None, None, {"retained": 1, "retained_damaged": 0, "in_flight": 0, "unclassified": 2})):
+            c, _, _ = self.cluster(answers=[("grep '^group '", "group 7 x\n"), ("integrity scrub", line)])
+            self.assertEqual(c.integrity("scrub"), total, line)
+            self.assertEqual(c.last_scrub_classes, classes, line)
+            self.assertEqual(c.last_scrub_held, held, line)
 
     def test_teardown_removes_only_marked_run_directories(self):
         c, rec, cfg = self.cluster(answers=[('print("checked %d"', "checked 0\n")])

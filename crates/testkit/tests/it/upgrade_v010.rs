@@ -15,7 +15,9 @@
 //! 3. controllers, the follower first, then the leader;
 //! 4. gateways: while a 0.1.0 gateway runs, the finalize is refused;
 //! 5. rollback before finalize: a node, a controller and a gateway back to
-//!    0.1.0 (the finalize refused because of the node), then every process
+//!    0.1.0 (a scrub reports the 0.1.0 node's retired records as
+//!    unclassified, not unexpected; the finalize refused because of the
+//!    node), then every process
 //!    back to 0.1.0, then forward again;
 //! 6. the finalize held by a 0.1.0 node, its leader SIGKILLed while held:
 //!    the other controller resumes it once the node is upgraded;
@@ -57,13 +59,19 @@ struct Cluster<'a> {
     nodes: Vec<Proc>,
     committed: Vec<(String, Vec<u8>)>,
     seed: u64,
+    /// Deferred-reclamation retention of the nodes started next, s.
+    retention: u64,
 }
 
 impl Cluster<'_> {
     fn node_args(&self, i: usize) -> Vec<String> {
         let mut a = Env::node_args(&self.dirs[i], &self.addrs[i]);
-        // Deleted records are removed at once by both releases.
-        a.extend(["--reclaim-retention-secs".into(), "0".into()]);
+        // Deleted records are removed at once by both releases, unless a
+        // step keeps them (the mixed-version scrub).
+        a.extend([
+            "--reclaim-retention-secs".into(),
+            self.retention.to_string(),
+        ]);
         a
     }
 
@@ -258,6 +266,7 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
         nodes: Vec::new(),
         committed: Vec::new(),
         seed: 1000,
+        retention: 0,
     };
     for i in 0..4 {
         let args = c.node_args(i);
@@ -387,8 +396,11 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
     c.exercise(&s3, "0.1.0 gateway stopped").await;
 
     // ---- 5. Rollback before finalize. A node, a controller and a
-    // gateway first: the node holds the finalize back.
+    // gateway first: the node holds the finalize back. The 0.1.0 node
+    // keeps deleted records (for the mixed-version scrub below).
+    c.retention = 3600;
     c.node(2, false).await;
+    c.retention = 0;
     let follower = if leader(&env).await == "ctl-a" {
         "ctl-b"
     } else {
@@ -403,6 +415,54 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
     *p = controller(&env, follower, false);
     let (mut gw_back, s3_back, gw_back_addr) = gateway(&env, "gw-v010-back", false).await;
     c.exercise(&s3_back, "partial rollback").await;
+    // Mixed-version scrub (ADR-0036): a 0.1.0 node does not report which
+    // of its records a delete retired, so what GC retired there is
+    // unclassified (and an error), never an unexpected shard.
+    let (retired, _) = c.committed.remove(0);
+    s3_back
+        .delete_object()
+        .bucket(BUCKET)
+        .key(&retired)
+        .send()
+        .await
+        .unwrap();
+    let gid = arca_lake_metadata::ops::cluster::list_groups(&meta)
+        .await
+        .unwrap()[0]
+        .id
+        .to_string();
+    let count = |out: &str, what: &str| -> Option<u64> {
+        out.split_whitespace()
+            .skip_while(|w| *w != what)
+            .nth(1)
+            .and_then(|v| v.parse().ok())
+    };
+    let mut last = String::new();
+    wait_until(
+        "the 0.1.0 node's retired records unclassified",
+        Duration::from_secs(120),
+        async || {
+            let (ok, out) = env.admin(true, &["integrity", "scrub", "--group", &gid, "--wait"]);
+            last = out.clone();
+            ok && count(&out, "unclassified").is_some_and(|n| n > 0)
+        },
+    )
+    .await;
+    let findings = last
+        .split("findings [")
+        .nth(1)
+        .and_then(|r| r.split(']').next())
+        .map(|f| {
+            f.split(", ")
+                .filter_map(|x| x.parse::<u64>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert_eq!(findings.len(), 8, "{last}");
+    assert_eq!(
+        findings[4], 0,
+        "unexpected shards in a mixed-version scrub: {last}"
+    );
     gw_back.kill();
     gone.push(gw_back_addr);
     p.kill();

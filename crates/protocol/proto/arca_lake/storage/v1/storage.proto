@@ -323,6 +323,11 @@ message ShardScrub {
   uint64 sequence = 4;
   ShardStatus status = 5;
   string reason = 6;
+  // 0.2.0: the record (at the sequence the node held when the page was
+  // listed) is retired by a delete under any incarnation and kept until a
+  // reclaim (ADR-0028). Meaningful only when the response carries
+  // `retirement_reported`; an earlier node sends neither.
+  bool retired = 7;
 }
 
 message ScrubShardsResponse {
@@ -330,6 +335,10 @@ message ScrubShardsResponse {
   ShardKey next = 2;
   bool more = 3;
   uint64 bytes_read = 4;
+  // 0.2.0: every `ShardScrub.retired` of this page is meaningful. False
+  // from an earlier node: the controller then cannot tell a record kept
+  // for reclaim from an orphan and reports such shards as unclassified.
+  bool retirement_reported = 5;
 }
 
 message UpdateGroupEpochRequest {
