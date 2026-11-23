@@ -565,27 +565,50 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
         "a 0.1.0 gateway started after the finalize: {}",
         refused_gw.log()
     );
-    let id0 = arca_lake_metadata::ops::cluster::list_nodes(&meta)
+    // A node that holds a member of the only group (three of the four
+    // nodes do; which ones varies).
+    let group = arca_lake_metadata::ops::cluster::list_groups(&meta)
+        .await
+        .unwrap()
+        .remove(0);
+    let (at, id0) = arca_lake_metadata::ops::cluster::list_nodes(&meta)
         .await
         .unwrap()
         .into_iter()
-        .find(|n| n.address == c.addrs[0])
-        .unwrap()
-        .id;
-    c.node(0, false).await;
-    // The only group still has its member there: no write counts on the
-    // 0.1.0 node, so the PUT is refused rather than acknowledged.
-    let refused_put = s3
+        .filter(|n| group.members.iter().any(|m| m.node_id == n.id))
+        .find_map(|n| {
+            c.addrs
+                .iter()
+                .position(|a| *a == n.address)
+                .map(|i| (i, n.id))
+        })
+        .unwrap();
+    c.node(at, false).await;
+    // No write counts on the 0.1.0 node: the PUT is refused while the group
+    // has its member there. The client's retries may reach the group after
+    // the leader moved that member away (it may take a second); then every
+    // chunk is placed at a later epoch.
+    let key = "on-the-0.1.0-node";
+    let put_result = s3
         .put_object()
         .bucket(BUCKET)
-        .key("on-the-0.1.0-node")
+        .key(key)
         .body(ByteStream::from(body(300 << 10, 77)))
         .send()
         .await;
-    assert!(
-        refused_put.is_err(),
-        "a PUT was acknowledged with a member on the 0.1.0 node"
-    );
+    if put_result.is_ok() {
+        let manifest = arca_lake_metadata::ops::object::read_manifest(&meta, BUCKET, key, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            manifest
+                .chunks
+                .iter()
+                .all(|(_, ch)| ch.placement.epoch > group.epoch),
+            "a PUT was acknowledged with a member on the 0.1.0 node (group {group:?}): {manifest:?}"
+        );
+    }
     wait_until(
         "the 0.1.0 node quarantined",
         Duration::from_secs(60),
@@ -617,13 +640,13 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
         !ok && text.contains("schema"),
         "rejoin of a 0.1.0 node: {text}"
     );
-    c.node(0, true).await;
+    c.node(at, true).await;
     env.admin_ok(
         true,
         &["node", "rejoin", "--node", &id0.to_string(), "--yes"],
     );
     assert_eq!(node_state(&meta, id0).await, "active");
-    c.exercise(&s3, "node 0 rejoined").await;
+    c.exercise(&s3, "the 0.1.0 node rejoined").await;
     gw.kill();
     ctl_a.kill();
     ctl_b.kill();
