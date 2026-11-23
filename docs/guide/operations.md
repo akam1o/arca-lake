@@ -61,6 +61,35 @@ that decide which builds can run together and which data they read:
   to start and no downgrade is possible; restore of a pre-finalize
   backup is the only way back (RFC-014, RFC-015).
 
+### Upgrading from 0.1.0: record the groups' failure domains
+
+Groups created by 0.1.0 have no recorded failure domain (ADR-0038), and
+a 0.2.0 leader moves none of their members (no auto repair onto a new
+node, no `replace-member`, no drain) until one is recorded. As soon as
+the controllers run 0.2.0 (after the storage nodes, before the
+gateways), as a step of the upgrade:
+
+1. `arca-lake admin group set-failure-domain --all-unrecorded --label
+   <label> --dry-run` lists the groups without a record and what would
+   be recorded. `<label>` is the label the groups were created with (the
+   0.1.0 controllers' `--failure-domain`, `host` by default); it is never
+   inferred. Groups created with different labels are recorded one at a
+   time with `--group <id>`.
+2. The same command without `--dry-run` records it. It refuses, writing
+   nothing, a label that no member's node of a listed group carries
+   (`--force` overrides). Exit 0: recorded; 2: recorded with warnings
+   (members on one value of the label, or without it); 1: refused.
+3. `arca-lake admin group check` exits 0 once every group is recorded
+   and its members keep their domain; otherwise move the members it
+   names with `admin replace-member`.
+
+Until then `admin status` prints a `WARNING: failure domain unrecorded
+on groups ...` line for unrecorded groups with a member down or a
+repair under way, `arca_controller_groups_failure_domain_unrecorded_at_risk`
+counts them, and their repair status shows `awaiting-failure-domain`:
+a failure there is not repaired until the domain is recorded. The
+finalize to metadata schema 5 is refused while a group is unrecorded.
+
 ## Reading a scrub
 
 `admin integrity scrub --group <id> --wait` prints one line per group:

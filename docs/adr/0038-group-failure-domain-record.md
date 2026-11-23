@@ -53,11 +53,16 @@ reads, lists or rewrites the new key.
   members' labels: a group that already breaks its domain would be
   inferred into a label it does not keep, and two labels can both fit.
 - `admin group set-failure-domain --group G --label L` (or
-  `--all-unrecorded`) records it; replacing a different recorded label
-  needs `--change`. It moves nothing and checks nothing against the
-  nodes: a group that breaks the label can be recorded and then
-  repaired with `replace-member`; `admin group check` shows what it
-  breaks.
+  `--all-unrecorded`, which lists the groups first; `--dry-run` writes
+  nothing) records it; replacing a different recorded label needs
+  `--change`. It moves nothing. It refuses, writing nothing for any
+  group, a label that no member's node of a group carries (most likely
+  a typo; `--force` records it anyway), with `--change` too. A group
+  that breaks the label can be recorded and then repaired with
+  `replace-member`: the command prints what the members break and exits
+  2 (0: recorded cleanly; 1: refused); `admin group check` shows it
+  too. It is a step of the 0.1.0 → 0.2.0 upgrade, right after the
+  controllers (operations guide).
 
 ### 2.2 One rule for every membership change
 
@@ -91,6 +96,17 @@ reported on the replacement request (`last_error`) or the drain
 pass's cache-group repair waiting, unlike a failed member that simply
 has no free domain yet (unchanged).
 
+A `Repairing` group whose next move (a retarget, a second failed
+member's replacement) is refused only because the group has no record
+shows the repair reason `awaiting-failure-domain`, not
+`awaiting-nodes`: bringing nodes back does not help, recording the
+domain does. The repair status record (`("al","repairstat",group)`) is
+read by 0.1.0, which fails to decode an enum variant it does not know
+(and with it its whole status listing): the reason is stored as
+`AwaitingNodes` with the detail prefixed `awaiting-failure-domain: `,
+and reported as the new reason by this release's reads. 0.1.0 shows it
+as `awaiting-nodes` with that detail.
+
 ### 2.3 Repair that does not change membership
 
 Allowed for a group without a record: stripe repair of damaged shards
@@ -122,14 +138,39 @@ computed by the leader on every repair pass (gauges
 `arca_controller_groups_failure_domain_violations` and
 `arca_controller_groups_failure_domain_unrecorded`; findings logged once
 per term and when their number changes), and printed for the node by
-`admin register-node`. A recorded label that differs from the
+`admin register-node`. The dangerous case, an unrecorded group with a
+member down or a repair under way (a failure that is not repaired
+until the domain is recorded), has its own gauge
+(`arca_controller_groups_failure_domain_unrecorded_at_risk`, from the
+leader's health view) and a `WARNING: failure domain unrecorded on
+groups ...` line in `admin status` and `admin group check` (there a
+member is down when its node is retired, unregistered or unseen for
+60 s, the controllers' default `--unhealthy-after-secs`). A recorded label that differs from the
 controller's flag is logged once per term (the recorded one is used).
 
 ### 2.6 Registration
 
 Refused (not only flagged): `register_node` refuses a node without a
 label that the recorded domain of a group it is a member of, or could
-join (a group whose members have its `device_class`), requires. Such a
+join, requires.
+
+"Could join" is decided by `device_class` alone: a group is joinable
+when one of its members' nodes has the registering node's
+`device_class` value (both absent counts as equal), the one constraint
+every replacement keeps. Consequences:
+
+- a node of a class no recorded group uses registers without the
+  failure-domain labels; if a group of its class is created or
+  recorded later, the node is not refused retroactively, and it is
+  passed over as a candidate (an unlabeled candidate never joins) and
+  reported by the audit only if it is a member;
+- the rule does not look at tiers, capacity, health or draining: a
+  node that could never be chosen for other reasons is still asked for
+  the label of any group of its class;
+- relabeling a node into another `device_class` is checked against the
+  groups of the new class (and every group it is a member of);
+- a node without a `device_class` label is matched with groups whose
+  members have none. Such a
 node could never be compared with the other members, and every move it
 took part in would be refused; refusing at the command the operator is
 running is the clearest place. A changed value is accepted (a topology
@@ -169,7 +210,9 @@ raise `SCHEMA_VERSION`.
 - A later field added to `GroupDomain` would be dropped by this
   release's `set` rewriting the record: extend it under a new key, or
   raise the record's handling with a schema change.
-- No `GroupRecord`, epoch intent, request or node record changes.
+- No `GroupRecord`, epoch intent, request or node record changes. The
+  repair status record gains no variant on disk (§2.2: the new reason
+  is stored as `AwaitingNodes` with a detail prefix).
 - Downgrade to 0.1.0 (before schema 5): the records stay and are
   ignored; moves made meanwhile are reported by the next 0.2.0 leader.
 
@@ -190,7 +233,19 @@ previous main):
 - `a_resumed_pre_fix_move_that_breaks_the_domain_is_settled`;
 - `a_missing_label_is_refused_and_a_changed_one_reported` (registration;
   the audit and the leader's gauge report an existing violation and move
-  nothing).
+  nothing);
+- `the_membership_commit_refuses_a_relabel_after_the_choice` and
+  `the_membership_commit_refuses_a_changed_label_after_the_choice` (a
+  relabel, or `set-failure-domain --change`, lands between the target's
+  choice and the membership commit: the commit refuses in its
+  transaction, membership unchanged);
+- `a_drain_and_the_planner_are_blocked_by_an_unrecorded_group`;
+- `an_unrecorded_repair_awaits_its_failure_domain` (repair reason,
+  at-risk gauge and audit; the repair goes on once recorded).
+
+CLI tests (`crates/cli`): `--all-unrecorded` (listing, dry run, write),
+`--change`, the refusal of a label no member carries and `--force`, the
+exit codes. Finalize: `finalize_blocker` below and at schema 5.
 
 Unit tests: the rule and the setter (`metadata/src/ops/group_domain.rs`;
 with compatibility tests: the record's pinned body, the key outside the

@@ -1896,7 +1896,15 @@ async fn repair_pass<S: KvStore>(
     // while the cluster is Active (RFC-015 §5.6); repairs of unhealthy
     // members and resumed repairs run in every state that admits repair.
     let intents = Intents::load(meta, &all_groups).await?;
-    note_failure_domains(cfg, metrics, &nodes, &all_groups, &intents.domains, token);
+    note_failure_domains(
+        cfg,
+        metrics,
+        &nodes,
+        &all_groups,
+        &intents.domains,
+        token,
+        &healthy,
+    );
     // Repair statuses (Phase 3.13, R-104): those of groups gone or Active
     // again are done.
     let mut statuses = repair_liveness::statuses(meta).await?;
@@ -1936,18 +1944,19 @@ async fn repair_pass<S: KvStore>(
         .collect();
     // Why each rebuilding group is where it is, and the longest stalled
     // one (Phase 3.14): by reason, never summed into one figure.
-    let mut by_reason = [0u64; 7];
+    let mut by_reason = [0u64; crate::metrics::REPAIR_REASONS.len()];
+    let none = by_reason.len() - 1;
     let mut stall: Option<(u64, u64)> = None;
     for g in all_groups
         .iter()
         .filter(|g| g.state == GroupState::Repairing)
     {
         let s = statuses.get(&g.id);
-        let i = s.map_or(6, |s| {
+        let i = s.map_or(none, |s| {
             crate::metrics::REPAIR_REASONS
                 .iter()
                 .position(|r| *r == s.reason.as_str())
-                .unwrap_or(6)
+                .unwrap_or(none)
         });
         by_reason[i] += 1;
         let since = s.map_or(now, |s| s.last_progress_ms.max(s.since_ms));
@@ -2273,8 +2282,10 @@ fn note_failure_domains(
     groups: &[GroupRecord],
     domains: &BTreeMap<u64, group_domain::GroupDomain>,
     token: u64,
+    healthy: &dyn Fn(u64) -> bool,
 ) {
     let audit = crate::failure_domain::Audit {
+        at_risk: crate::failure_domain::unrecorded_at_risk(groups, domains, healthy),
         findings: crate::failure_domain::audit_groups(groups, nodes, domains),
         flag_differs: domains
             .values()
@@ -2291,6 +2302,10 @@ fn note_failure_domains(
     let before_u = metrics
         .groups_failure_domain_unrecorded
         .swap(unrecorded, Ordering::Relaxed);
+    let at_risk = audit.at_risk.len() as u64;
+    let before_r = metrics
+        .groups_failure_domain_unrecorded_at_risk
+        .swap(at_risk, Ordering::Relaxed);
     let new_term = metrics
         .failure_domain_audit_term
         .swap(token, Ordering::Relaxed)
@@ -2299,6 +2314,12 @@ fn note_failure_domains(
         for f in &audit.findings {
             warn!(group = f.group(), "failure domain: {f}");
         }
+    }
+    if at_risk > 0 && (new_term || before_r != at_risk) {
+        warn!(
+            groups = ?audit.at_risk,
+            "groups without a recorded failure domain have a member down or a repair under way: no member of theirs is moved until `admin group set-failure-domain` records it"
+        );
     }
     if new_term && !audit.flag_differs.is_empty() {
         warn!(
@@ -2322,6 +2343,12 @@ struct Intents {
 }
 
 impl Intents {
+    /// Whether `g` has several members and no recorded failure domain:
+    /// no member of it moves until one is set (ADR-0038).
+    fn unrecorded(&self, g: &GroupRecord) -> bool {
+        g.members.len() > 1 && !self.domains.contains_key(&g.id)
+    }
+
     async fn load<S: KvStore>(meta: &S, groups: &[GroupRecord]) -> Result<Self, ControlError> {
         let active = compat::cluster_state(meta)
             .await?
@@ -2584,11 +2611,18 @@ async fn repair_one<S: KvStore>(
                                 .fetch_add(1, Ordering::Relaxed);
                             Ok(busy)
                         }
-                        Started::NoTarget { capacity, msg, .. } => {
+                        Started::NoTarget {
+                            capacity,
+                            refused,
+                            msg,
+                        } => {
                             warn!(group = g.id, index, "{why}; no other target: {msg}");
                             let mut s = repair_liveness::no_new_target(
                                 &obs,
-                                capacity,
+                                repair_liveness::no_target_reason(
+                                    capacity,
+                                    refused && intents.unrecorded(g),
+                                ),
                                 format!("{why}; no other target: {msg}"),
                             );
                             // A target that still answers is tried again
@@ -2735,13 +2769,16 @@ async fn repair_one<S: KvStore>(
                             .await?
                             {
                                 Started::Ran(busy) => Ok(busy),
-                                Started::NoTarget { capacity, msg, .. } => {
+                                Started::NoTarget {
+                                    capacity,
+                                    refused,
+                                    msg,
+                                } => {
                                     let mut s = fresh.get(&g.id).cloned().unwrap_or(current);
-                                    s.reason = if capacity {
-                                        RepairReason::AwaitingCapacity
-                                    } else {
-                                        RepairReason::AwaitingNodes
-                                    };
+                                    s.reason = repair_liveness::no_target_reason(
+                                        capacity,
+                                        refused && intents.unrecorded(g),
+                                    );
                                     s.detail = format!("member {j} does not answer; {msg}");
                                     // Not walked again before the backoff
                                     // (re-review).

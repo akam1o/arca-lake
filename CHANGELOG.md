@@ -55,7 +55,16 @@ break compatibility).
   the reason is shown on the replacement request or drain;
   `register-node` refuses a node without a label its groups need.
   `admin upgrade finalize` to schema 5 waits until every group's domain
-  is recorded.
+  is recorded. **Upgrading from 0.1.0:** once the controllers run 0.2.0,
+  run `admin group set-failure-domain --all-unrecorded --label <label>`
+  (first with `--dry-run`, which lists the groups) with the label the
+  groups were created with; until then no member of those groups is
+  moved, including the repair of a failed one (repair reason
+  `awaiting-failure-domain`; `admin status` warning and gauge
+  `arca_controller_groups_failure_domain_unrecorded_at_risk` for such
+  groups with a member down). `set-failure-domain` refuses a label no
+  member's node carries (`--force`) and exits 2 when it prints warnings.
+  See [operations](docs/guide/operations.md#upgrading-from-010-record-the-groups-failure-domains).
 
 - Automatic tiering no longer consumes a generation's access record
   after a move that did not happen (R-118,

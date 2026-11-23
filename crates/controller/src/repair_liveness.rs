@@ -433,16 +433,25 @@ pub fn after(o: &Observation, outcome: &Outcome) -> Option<RepairStatus> {
     Some(s)
 }
 
-/// The status when the slot is to be rebuilt onto another node and none
-/// can take it (`capacity`: candidates exist, none with room).
+/// Why a repair waits when the move it needs found no target:
+/// `capacity` (candidates exist, none with room), `unrecorded` (refused
+/// only because the group has no recorded failure domain, ADR-0038).
 #[must_use]
-pub fn no_new_target(o: &Observation, capacity: bool, detail: String) -> RepairStatus {
-    let mut s = current(o);
-    let reason = if capacity {
+pub fn no_target_reason(capacity: bool, unrecorded: bool) -> RepairReason {
+    if unrecorded {
+        RepairReason::AwaitingFailureDomain
+    } else if capacity {
         RepairReason::AwaitingCapacity
     } else {
         RepairReason::AwaitingNodes
-    };
+    }
+}
+
+/// The status when the slot is to be rebuilt onto another node and none
+/// can take it, for `reason` ([`no_target_reason`]).
+#[must_use]
+pub fn no_new_target(o: &Observation, reason: RepairReason, detail: String) -> RepairStatus {
+    let mut s = current(o);
     if s.reason != reason {
         s.since_ms = o.now_ms;
     }
@@ -704,7 +713,11 @@ mod tests {
         let mut o = obs(None);
         o.target_candidate = false;
         assert!(matches!(decide(&o), Decision::Retarget(_)));
-        o.status = Some(no_new_target(&o, false, "none".into()));
+        o.status = Some(no_new_target(
+            &o,
+            RepairReason::AwaitingNodes,
+            "none".into(),
+        ));
         assert_eq!(decide(&o), Decision::Wait);
         o.now_ms += o.pacing.backoff_max_ms;
         assert!(matches!(decide(&o), Decision::Retarget(_)));

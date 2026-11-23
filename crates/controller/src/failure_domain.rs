@@ -12,14 +12,14 @@
 //! domain, groups without a record, members whose node lacks the label).
 //! It only reads: it never moves a member or deletes data.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use arca_lake_metadata::KvStore;
 use arca_lake_metadata::keys::SCHEMA_V5;
 use arca_lake_metadata::ops::group_domain::{self, GroupDomain, label_value};
-use arca_lake_metadata::ops::{cluster, compat};
-use arca_lake_metadata::records::{GroupMember, GroupRecord, NodeRecord};
+use arca_lake_metadata::ops::{cluster, compat, node_lifecycle};
+use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord};
 
 use crate::ControlError;
 
@@ -209,6 +209,30 @@ pub fn audit_groups(
     out
 }
 
+/// Groups of several members without a recorded domain that have a
+/// member not `healthy` or are `Repairing`: the dangerous case of an
+/// unrecorded group, whose failed member is not replaced (and whose repair
+/// does not retarget) until an operator records its domain.
+#[must_use]
+pub fn unrecorded_at_risk(
+    groups: &[GroupRecord],
+    domains: &BTreeMap<u64, GroupDomain>,
+    healthy: impl Fn(u64) -> bool,
+) -> Vec<u64> {
+    groups
+        .iter()
+        .filter(|g| g.members.len() > 1 && !domains.contains_key(&g.id))
+        .filter(|g| {
+            g.state == GroupState::Repairing || g.members.iter().any(|m| !healthy(m.node_id))
+        })
+        .map(|g| g.id)
+        .collect()
+}
+
+/// How long a node may go unseen before [`audit`] counts it down (the
+/// controller's default `--unhealthy-after-secs`).
+pub const AUDIT_UNSEEN_MS: u64 = 60_000;
+
 /// What [`audit`] read and found.
 #[derive(Debug, Clone, Default)]
 pub struct Audit {
@@ -219,6 +243,9 @@ pub struct Audit {
     pub flag_differs: Vec<(u64, String)>,
     /// The store's `schema_write`.
     pub schema_write: Option<u64>,
+    /// [`unrecorded_at_risk`]: unrecorded groups with a member down or a
+    /// repair under way.
+    pub at_risk: Vec<u64>,
 }
 
 impl Audit {
@@ -232,20 +259,28 @@ impl Audit {
     /// Groups whose members break their recorded domain.
     #[must_use]
     pub fn violating_groups(&self) -> usize {
-        let mut g: Vec<u64> = self
-            .findings
+        self.findings
             .iter()
             .filter(|f| f.is_violation())
             .map(Finding::group)
-            .collect();
-        g.dedup();
-        g.len()
+            .collect::<BTreeSet<u64>>()
+            .len()
     }
 
     /// Groups without a recorded domain.
     #[must_use]
     pub fn unrecorded_groups(&self) -> usize {
         self.findings.iter().filter(|f| !f.is_violation()).count()
+    }
+
+    /// The `admin status` line on [`Self::at_risk`].
+    #[must_use]
+    pub fn at_risk_line(&self) -> String {
+        format!(
+            "WARNING: failure domain unrecorded on groups {:?} with a member down (unseen for {} s, retired or unregistered) or a repair under way: no member of theirs is moved until `admin group set-failure-domain` records the label they were created with",
+            self.at_risk,
+            AUDIT_UNSEEN_MS / 1000
+        )
     }
 
     /// One line on how far the rule is enforced.
@@ -265,12 +300,18 @@ impl Audit {
 
 /// Read nodes, groups and recorded domains and report every finding
 /// (`flag`: the controller's `--failure-domain`, compared with the
-/// records; `None` skips the comparison).
+/// records; `None` skips the comparison). A member counts as down for
+/// [`Audit::at_risk`] when its node is retired, has no record, or was not
+/// seen for [`AUDIT_UNSEEN_MS`] before `now_ms`.
 ///
 /// # Errors
 ///
 /// Metadata errors.
-pub async fn audit<S: KvStore>(meta: &S, flag: Option<&str>) -> Result<Audit, ControlError> {
+pub async fn audit<S: KvStore>(
+    meta: &S,
+    flag: Option<&str>,
+    now_ms: u64,
+) -> Result<Audit, ControlError> {
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
         .into_iter()
@@ -279,7 +320,19 @@ pub async fn audit<S: KvStore>(meta: &S, flag: Option<&str>) -> Result<Audit, Co
     let groups = cluster::list_groups(meta).await?;
     let domains = group_domain::list(meta).await?;
     let schema_write = compat::gate(meta).await?.schema_write;
+    let retired: BTreeSet<u64> = node_lifecycle::retirements(meta)
+        .await?
+        .into_iter()
+        .map(|r| r.node_id)
+        .collect();
+    let at_risk = unrecorded_at_risk(&groups, &domains, |id| {
+        !retired.contains(&id)
+            && nodes
+                .get(&id)
+                .is_some_and(|n| now_ms.saturating_sub(n.last_seen_ms) <= AUDIT_UNSEEN_MS)
+    });
     Ok(Audit {
+        at_risk,
         findings: audit_groups(&groups, &nodes, &domains),
         flag_differs: flag
             .map(|f| {
@@ -460,5 +513,64 @@ mod tests {
             label_for(&BTreeMap::new(), &group(2, &[1]), "host").unwrap(),
             "host"
         );
+    }
+
+    /// A group with several findings counts once, wherever they are.
+    #[test]
+    fn violating_groups_are_counted_once_in_any_order() {
+        let unlabeled = |group, node| Finding::MemberUnlabeled {
+            group,
+            label: "host".into(),
+            node,
+            no_record: false,
+        };
+        let a = Audit {
+            findings: vec![
+                unlabeled(2, 5),
+                unlabeled(3, 6),
+                Finding::Unrecorded { group: 4 },
+                unlabeled(2, 7),
+            ],
+            ..Audit::default()
+        };
+        assert_eq!((a.violating_groups(), a.unrecorded_groups()), (2, 1));
+    }
+
+    /// Unrecorded groups with a member down or a repair under way are at
+    /// risk; recorded groups, healthy ones and one-member groups are not.
+    #[test]
+    fn unrecorded_groups_with_a_member_down_are_at_risk() {
+        let mut repairing = group(4, &[1, 2, 3]);
+        repairing.state = GroupState::Repairing;
+        let groups = [
+            group(1, &[1, 2, 9]),
+            group(2, &[1, 2, 3]),
+            group(3, &[1, 2, 9]),
+            repairing,
+            group(5, &[9]),
+        ];
+        let at_risk = unrecorded_at_risk(&groups, &recorded(&[1]), |id| id != 9);
+        assert_eq!(at_risk, vec![3, 4]);
+    }
+
+    /// A finalize to schema 5 waits for every group of several members to
+    /// be recorded; earlier schemas do not.
+    #[tokio::test]
+    async fn the_finalize_to_schema_5_waits_for_every_record() {
+        let kv = arca_lake_metadata::mem::MemKv::default();
+        let g = cluster::create_group(&kv, group(0, &[1, 2, 3]))
+            .await
+            .unwrap();
+        cluster::create_group(&kv, group(0, &[4])).await.unwrap();
+        assert_eq!(finalize_blocker(&kv, SCHEMA_V5 - 1).await.unwrap(), None);
+        let b = finalize_blocker(&kv, SCHEMA_V5).await.unwrap().unwrap();
+        assert!(
+            b.contains(&format!("[{}]", g.id)) && b.contains("set-failure-domain"),
+            "{b}"
+        );
+        group_domain::set(&kv, g.id, "host", false, 1)
+            .await
+            .unwrap();
+        assert_eq!(finalize_blocker(&kv, SCHEMA_V5).await.unwrap(), None);
     }
 }

@@ -188,13 +188,14 @@ impl FenceView {
 /// Reason labels of `arca_controller_repair_groups` (Phase 3.14), in the
 /// order of [`Metrics::repair_groups_by_reason`]; "none": a `Repairing`
 /// group with no status yet.
-pub const REPAIR_REASONS: [&str; 7] = [
+pub const REPAIR_REASONS: [&str; 8] = [
     "progressing",
     "temporarily-blocked",
     "awaiting-capacity",
     "awaiting-nodes",
     "data-unrecoverable",
     "permanently-blocked",
+    "awaiting-failure-domain",
     "none",
 ];
 
@@ -315,6 +316,9 @@ pub struct Metrics {
     /// Groups of several members without a recorded failure domain: no
     /// member of theirs is moved until one is set (ADR-0038).
     pub groups_failure_domain_unrecorded: AtomicU64,
+    /// Of those, groups with a member down or a repair under way: a
+    /// failure there is not repaired until a domain is recorded (ADR-0038).
+    pub groups_failure_domain_unrecorded_at_risk: AtomicU64,
     /// Member moves refused by the failure-domain rule (ADR-0038).
     pub failure_domain_refusals_total: AtomicU64,
     /// Leader term of the last failure-domain findings logged. Not
@@ -355,7 +359,7 @@ pub struct Metrics {
     /// `Repairing` groups by the reason of their status at the last repair
     /// pass (Phase 3.14; index: [`REPAIR_REASONS`], the last one "none":
     /// no status yet).
-    pub repair_groups_by_reason: [AtomicU64; 7],
+    pub repair_groups_by_reason: [AtomicU64; 8],
     /// Seconds since the `Repairing` group that waited longest last made
     /// progress (its status's `last_progress_ms`, else `since_ms`), and
     /// that group (0: none).
@@ -911,6 +915,10 @@ impl Metrics {
             (
                 "arca_controller_groups_failure_domain_unrecorded",
                 &self.groups_failure_domain_unrecorded,
+            ),
+            (
+                "arca_controller_groups_failure_domain_unrecorded_at_risk",
+                &self.groups_failure_domain_unrecorded_at_risk,
             ),
             ("arca_controller_gc_backlog", &self.gc_backlog),
             (

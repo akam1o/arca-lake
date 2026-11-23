@@ -57,7 +57,7 @@ async fn recorded<S: KvStore>(meta: &S, group: u64) -> Option<String> {
 }
 
 async fn findings<S: KvStore>(meta: &S) -> Vec<String> {
-    arca_lake_controller::failure_domain::audit(meta, None)
+    arca_lake_controller::failure_domain::audit(meta, None, now_ms())
         .await
         .unwrap()
         .findings
@@ -502,5 +502,315 @@ fn violations(ctl: &arca_lake_controller::process::ControllerHandle) -> u64 {
 fn refusals(ctl: &arca_lake_controller::process::ControllerHandle) -> u64 {
     ctl.metrics
         .failure_domain_refusals_total
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A move whose target was chosen inside the group's domain, then the
+/// target relabeled onto a member's host before the membership commit
+/// (between the fence and the commit): the commit refuses in its own
+/// transaction and the membership stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_membership_commit_refuses_a_relabel_after_the_choice() {
+    let c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(4, 2, 1, MIB, 0)
+    })
+    .await;
+    let g = c.groups().await.remove(0);
+    let spare = c
+        .nodes
+        .iter()
+        .map(|n| n.id)
+        .find(|id| !g.members.iter().any(|m| m.node_id == *id))
+        .unwrap();
+    let all = nodes(c.meta.as_ref()).await;
+    let shared = label(
+        all.iter().find(|n| n.id == g.members[1].node_id).unwrap(),
+        "host",
+    )
+    .unwrap()
+    .to_string();
+    let meta = Arc::clone(&c.meta);
+    let r = replace_member_with(
+        c.meta.as_ref(),
+        &c.clients,
+        g.id,
+        0,
+        GroupMember {
+            node_id: spare,
+            device_id: 0,
+        },
+        &RepairOptions::default(),
+        async |step| {
+            if step == RepairStep::Fenced {
+                relabel(
+                    meta.as_ref(),
+                    spare,
+                    &[("host", &shared), ("device_class", "hdd")],
+                )
+                .await
+                .unwrap();
+            }
+            Ok(())
+        },
+    )
+    .await;
+    let e = r.unwrap_err().to_string();
+    assert!(e.contains(&format!("host={shared}")), "{e}");
+    let after = cluster::get_group(c.meta.as_ref(), g.id).await.unwrap();
+    assert_eq!(after.members, g.members);
+}
+
+/// As above, but the group's label is changed (`set-failure-domain
+/// --change`) to one the chosen target shares with a member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_membership_commit_refuses_a_changed_label_after_the_choice() {
+    let c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(4, 2, 1, MIB, 0)
+    })
+    .await;
+    let g = c.groups().await.remove(0);
+    let spare = c
+        .nodes
+        .iter()
+        .map(|n| n.id)
+        .find(|id| !g.members.iter().any(|m| m.node_id == *id))
+        .unwrap();
+    let all = nodes(c.meta.as_ref()).await;
+    let host_of = |id: u64| {
+        label(all.iter().find(|n| n.id == id).unwrap(), "host")
+            .unwrap()
+            .to_string()
+    };
+    // Racks: r0, r1, r2 for the members; the spare in member 1's rack.
+    for (i, m) in g.members.iter().enumerate() {
+        let rack = format!("r{i}");
+        relabel(
+            c.meta.as_ref(),
+            m.node_id,
+            &[
+                ("host", &host_of(m.node_id)),
+                ("rack", &rack),
+                ("device_class", "hdd"),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+    relabel(
+        c.meta.as_ref(),
+        spare,
+        &[
+            ("host", &host_of(spare)),
+            ("rack", "r1"),
+            ("device_class", "hdd"),
+        ],
+    )
+    .await
+    .unwrap();
+    let meta = Arc::clone(&c.meta);
+    let r = replace_member_with(
+        c.meta.as_ref(),
+        &c.clients,
+        g.id,
+        0,
+        GroupMember {
+            node_id: spare,
+            device_id: 0,
+        },
+        &RepairOptions::default(),
+        async |step| {
+            if step == RepairStep::Fenced {
+                arca_lake_metadata::ops::group_domain::set(
+                    meta.as_ref(),
+                    g.id,
+                    "rack",
+                    true,
+                    now_ms(),
+                )
+                .await
+                .unwrap();
+            }
+            Ok(())
+        },
+    )
+    .await;
+    let e = r.unwrap_err().to_string();
+    assert!(e.contains("rack=r1"), "{e}");
+    let after = cluster::get_group(c.meta.as_ref(), g.id).await.unwrap();
+    assert_eq!(after.members, g.members);
+}
+
+/// A drain of a node that is a member of a group without a recorded
+/// domain is blocked with the reason, and the dry-run planner shows the
+/// same blocker for the drain and for a replacement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_and_the_planner_are_blocked_by_an_unrecorded_group() {
+    let c = TestCluster::start(ClusterOptions {
+        groups: 0,
+        ..ClusterOptions::rs(4, 2, 1, MIB, 0)
+    })
+    .await;
+    let ids: Vec<u64> = c.nodes.iter().map(|n| n.id).collect();
+    let g = legacy_group(c.meta.as_ref(), &ids[..3]).await;
+    let blocker = |b: &[String]| b.iter().any(|b| b.contains("no recorded failure domain"));
+    let p = arca_lake_controller::plan::plan_decommission(
+        c.meta.as_ref(),
+        &c.clients,
+        ids[0],
+        "host",
+        100,
+    )
+    .await
+    .unwrap();
+    let m = p.moves.iter().find(|m| m.group == g.id).unwrap();
+    assert!(m.to_node.is_none() && blocker(&m.blockers), "{p:?}");
+    let p = arca_lake_controller::plan::plan_replace(
+        c.meta.as_ref(),
+        &c.clients,
+        g.id,
+        0,
+        None,
+        "host",
+        100,
+    )
+    .await
+    .unwrap();
+    assert!(
+        p.moves[0].to_node.is_none() && blocker(&p.moves[0].blockers),
+        "{p:?}"
+    );
+    membership::drain_node(c.meta.as_ref(), ids[0], "admin", now_ms())
+        .await
+        .unwrap();
+    let ctl = spawn(Arc::clone(&c.meta), fast("ctl-drain", "host"))
+        .await
+        .unwrap();
+    wait_until(
+        "the drain to show the refusal",
+        Duration::from_secs(30),
+        async || {
+            membership::node_states(c.meta.as_ref())
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| {
+                    r.node_id == ids[0]
+                        && r.blocked
+                            .as_deref()
+                            .is_some_and(|b| b.contains("no recorded failure domain"))
+                })
+        },
+    )
+    .await;
+    let after = cluster::get_group(c.meta.as_ref(), g.id).await.unwrap();
+    assert_eq!((after.epoch, after.members), (g.epoch, g.members));
+    ctl.shutdown().await;
+}
+
+/// A `Repairing` group without a record (a move a 0.1.0 leader
+/// committed) whose target fails: the retarget is refused only for the
+/// missing record, which its repair status says (not "awaiting nodes"),
+/// the at-risk gauge and the audit count; once recorded, it goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unrecorded_repair_awaits_its_failure_domain() {
+    use arca_lake_metadata::ops::repair_status::{self, RepairReason};
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(5, 2, 1, MIB, 0)
+    })
+    .await;
+    let g = c.groups().await.remove(0);
+    let spare = c
+        .nodes
+        .iter()
+        .position(|n| !g.members.iter().any(|m| m.node_id == n.id))
+        .unwrap();
+    let target = GroupMember {
+        node_id: c.nodes[spare].id,
+        device_id: 0,
+    };
+    let r = replace_member_with(
+        c.meta.as_ref(),
+        &c.clients,
+        g.id,
+        0,
+        target,
+        &RepairOptions::default(),
+        async |step| {
+            if step == RepairStep::MembershipCommitted {
+                Err(ControlError::Other(
+                    "injected: stop after the commit".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .await;
+    assert!(r.is_err());
+    // As if 0.1.0 had made the move: no record.
+    arca_lake_metadata::transact(c.meta.as_ref(), g.id, |tx, g| {
+        Box::pin(async move {
+            arca_lake_metadata::Txn::clear(tx, &arca_lake_metadata::keys::group_domain(*g));
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    c.stop_node(spare).await;
+    let mut cfg = fast("ctl-await", "host");
+    cfg.auto_repair = true;
+    cfg.repair_pacing = arca_lake_controller::repair_liveness::Pacing {
+        backoff_base_ms: 100,
+        backoff_max_ms: 400,
+        unrecoverable_retry_ms: 500,
+    };
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    wait_until(
+        "the repair to await the failure domain",
+        Duration::from_secs(30),
+        async || {
+            repair_status::get(c.meta.as_ref(), g.id)
+                .await
+                .unwrap()
+                .is_some_and(|s| s.reason == RepairReason::AwaitingFailureDomain)
+        },
+    )
+    .await;
+    wait_until("the at-risk gauge", Duration::from_secs(30), async || {
+        at_risk(&ctl) == 1
+    })
+    .await;
+    let a = arca_lake_controller::failure_domain::audit(c.meta.as_ref(), None, now_ms())
+        .await
+        .unwrap();
+    assert_eq!(a.at_risk, vec![g.id]);
+    set_domain(c.meta.as_ref(), g.id, "host").await;
+    wait_until(
+        "the repair to finish",
+        Duration::from_secs(30),
+        async || {
+            let now = cluster::get_group(c.meta.as_ref(), g.id).await.unwrap();
+            now.state == GroupState::Active
+        },
+    )
+    .await;
+    let after = cluster::get_group(c.meta.as_ref(), g.id).await.unwrap();
+    assert!(!after.members.contains(&target));
+    assert!(distinct(c.meta.as_ref(), &after, "host").await);
+    wait_until(
+        "the at-risk gauge to clear",
+        Duration::from_secs(30),
+        async || at_risk(&ctl) == 0,
+    )
+    .await;
+    ctl.shutdown().await;
+}
+
+fn at_risk(ctl: &arca_lake_controller::process::ControllerHandle) -> u64 {
+    ctl.metrics
+        .groups_failure_domain_unrecorded_at_risk
         .load(std::sync::atomic::Ordering::Relaxed)
 }
