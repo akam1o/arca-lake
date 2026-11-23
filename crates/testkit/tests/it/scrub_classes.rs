@@ -436,7 +436,8 @@ async fn a_migration_target_damaged_before_the_switch_is_repaired_after_it() {
             );
             let s = scrub(&c, fast.id).await;
             let r = repair(&c, now_ms()).await;
-            before = Some((s, r, tasks(&c).await));
+            let actionable = itasks::any_actionable(c.meta.as_ref()).await.unwrap();
+            before = Some((s, r, tasks(&c).await, actionable));
         },
     )
     .await
@@ -445,7 +446,11 @@ async fn a_migration_target_damaged_before_the_switch_is_repaired_after_it() {
         matches!(outcome, MigrateOutcome::Switched { .. }),
         "{outcome:?}"
     );
-    let (s, r, queued) = before.unwrap();
+    let (s, r, queued, actionable) = before.unwrap();
+    assert!(
+        !actionable,
+        "a task waiting for the switch holds tiering and rebalancing"
+    );
     assert_eq!(s.count(Finding::ChecksumMismatch), 1, "{s:?}");
     assert_eq!(
         (s.enqueued, s.in_flight, s.unclassified),
@@ -464,6 +469,10 @@ async fn a_migration_target_damaged_before_the_switch_is_repaired_after_it() {
         tasks(&c).await.len(),
         1,
         "the needed repair was lost after the switch"
+    );
+    assert!(
+        itasks::any_actionable(c.meta.as_ref()).await.unwrap(),
+        "after the switch the task is repair work"
     );
     c.backend.refresh_map().await.unwrap();
     assert_eq!(s3::get(&c.backend, TBUCKET, "o").await.unwrap().0, data);
@@ -584,9 +593,157 @@ async fn a_crashed_migration_holds_the_task_only_while_its_intent_is_fresh() {
     let r = repair(&c, now).await;
     assert_eq!((r.dropped, r.deferred), (0, 1), "{r:?}");
     assert_eq!(tasks(&c).await.len(), 1);
+    // While it waits, tiering and rebalancing are not held by it (the
+    // copy and the switch run in one call: a crashed copy never switches).
+    assert!(!itasks::any_actionable(c.meta.as_ref()).await.unwrap());
+    let rb = arca_lake_controller::rebalance::run_once(
+        c.meta.as_ref(),
+        &c.clients,
+        &arca_lake_controller::rebalance::RebalancePolicy::default(),
+        now,
+    )
+    .await
+    .unwrap();
+    assert_ne!(rb.reason, "repair tasks open: repair first", "{rb:?}");
+    // A scrub after the intent's TTL: the stale copy is no longer in
+    // flight (an orphan, the damaged one under its damage class).
+    let late = scrub_group_now(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders,
+        fast.id,
+        &unpaced(),
+        now + object::MIGRATION_INTENT_TTL_MS + 1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (
+            late.in_flight,
+            late.count(Finding::UnexpectedShard),
+            late.count(Finding::ChecksumMismatch)
+        ),
+        (0, 2, 1),
+        "{late:?}"
+    );
     // Past the intent's TTL (and the task's retry delay): stale, dropped.
     let r = repair(&c, now + object::MIGRATION_INTENT_TTL_MS + 120_000).await;
     assert_eq!(r.dropped, 1, "{r:?}");
     assert_eq!(tasks(&c).await, Vec::new());
+    c.shutdown().await;
+}
+
+/// A record written again between the scrub's page and its re-read of the
+/// key (another sequence): the pass cannot tell what it saw, so the shard
+/// is unclassified (an error, not counted verified), never an orphan; the
+/// next pass classifies the new record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_rewritten_between_the_reads_is_unclassified() {
+    use arca_lake_protocol::client::{FaultAction, FaultHook, Rpc, RpcContext};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let c = cluster(Duration::from_secs(3600)).await;
+    put(&c, "kept", 7).await;
+    let (group, _) = chunk_of(&c, "kept").await;
+    let n0 = c.node_index(&group.members[0]).unwrap();
+    let addr = c.nodes[n0].addr.to_string();
+    let stray = ShardRef {
+        group_id: group.id,
+        chunk_id: [0xCD; 16],
+        shard_index: 0,
+    };
+    let bytes = Bytes::from(vec![9u8; 4096]);
+    c.clients
+        .put_shard(&addr, stray, group.epoch, bytes.clone(), 256 << 10)
+        .await
+        .unwrap();
+    let clean_pass = scrub(&c, group.id).await;
+    // The first ListShards (the scrub's re-read of the orphan candidate)
+    // waits until the record was written again.
+    let armed = Arc::new(AtomicBool::new(true));
+    let held = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    c.clients.set_fault_hook(Some({
+        let (armed, held, gate) = (Arc::clone(&armed), Arc::clone(&held), Arc::clone(&gate));
+        let hook: FaultHook = Arc::new(move |ctx: &RpcContext<'_>| {
+            if ctx.rpc == Rpc::ListShards && armed.swap(false, Ordering::SeqCst) {
+                held.fetch_add(1, Ordering::SeqCst);
+                FaultAction::Hold(Arc::clone(&gate))
+            } else {
+                FaultAction::None
+            }
+        });
+        hook
+    }));
+    let rewrite = async {
+        let t = std::time::Instant::now();
+        while held.load(Ordering::SeqCst) == 0 {
+            assert!(t.elapsed() < Duration::from_secs(20), "never re-read");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        c.clients
+            .put_shard(&addr, stray, group.epoch, bytes.clone(), 256 << 10)
+            .await
+            .unwrap();
+        gate.add_permits(1);
+    };
+    let (r, ()) = tokio::join!(scrub(&c, group.id), rewrite);
+    c.clients.set_fault_hook(None);
+    assert_eq!(r.count(Finding::UnexpectedShard), 0, "{r:?}");
+    assert_eq!((r.unclassified, r.errors), (1, 1), "{r:?}");
+    assert_eq!(r.verified, clean_pass.verified - 1, "{r:?}");
+    let r = scrub(&c, group.id).await;
+    assert_eq!(r.count(Finding::UnexpectedShard), 1, "{r:?}");
+    assert_eq!(r.unclassified, 0, "{r:?}");
+    c.shutdown().await;
+}
+
+/// A shard whose chunk ID carries the prefix of a pending generation is
+/// held as that write's (the generation may still record it, as
+/// reconciliation keeps it); once the generation is aborted nothing holds
+/// it and it is an orphan. A shard with no generation at all is an orphan
+/// at once (a `begin_put` still being retried included: reconciliation
+/// waits `min_orphan_age` before removing it, the scrub does not excuse
+/// it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_orphan_sharing_a_pending_generations_prefix() {
+    let c = cluster(Duration::from_secs(3600)).await;
+    put(&c, "kept", 8).await;
+    let (group, _) = chunk_of(&c, "kept").await;
+    let n0 = c.node_index(&group.members[0]).unwrap();
+    let addr = c.nodes[n0].addr.to_string();
+    let p = object::begin_put(c.meta.as_ref(), BUCKET, "pending", now_ms(), 600_000)
+        .await
+        .unwrap();
+    let mut chunk_id = [0u8; 16];
+    chunk_id[..12].copy_from_slice(&p.generation[..12]);
+    chunk_id[12..].copy_from_slice(&99u32.to_be_bytes());
+    let stray = ShardRef {
+        group_id: group.id,
+        chunk_id,
+        shard_index: 0,
+    };
+    c.clients
+        .put_shard(
+            &addr,
+            stray,
+            group.epoch,
+            Bytes::from(vec![5u8; 4096]),
+            256 << 10,
+        )
+        .await
+        .unwrap();
+    let r = scrub(&c, group.id).await;
+    assert!(clean(&r), "{r:?}");
+    assert_eq!(r.in_flight, 1, "{r:?}");
+    object::abort_put(c.meta.as_ref(), &p.generation, now_ms())
+        .await
+        .unwrap();
+    let r = scrub(&c, group.id).await;
+    assert_eq!(
+        (r.in_flight, r.count(Finding::UnexpectedShard)),
+        (0, 1),
+        "{r:?}"
+    );
     c.shutdown().await;
 }

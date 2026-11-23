@@ -741,7 +741,7 @@ that record's evidence, never from counts:
 | Class | Condition | Response |
 | --- | --- | --- |
 | Retained for reclaim | unreferenced, and the node reports the record retired by a delete (ADR-0028) | counted (`retained`); a damaged one is also a finding of its damage class (`retained_damaged`), not queued |
-| In flight | no live record here, but a migration intent targets the group, a pending generation may still record it here, or a collected generation still records it here | counted (`in_flight`); damage is a finding and queued (the task waits for the record, §8.5) |
+| In flight | no live record here, but a migration intent younger than its TTL targets the group, a pending generation with the chunk's prefix may still record it here, or a collected generation still records it here (a shard with no generation at all is not in flight) | counted (`in_flight`); damage is a finding and queued (the task waits for the record, §8.5) |
 | Unclassified | the node does not report retirement (0.1.0), the metadata did not decode, or the record changed between the reads | counted (`unclassified`) and as a scrub error; never healthy |
 
 ### 8.5 Stripe repair state machine

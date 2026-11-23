@@ -30,7 +30,8 @@ break compatibility).
   found before the placement switch is kept while the migration intent
   targets the group and repaired after the switch (it was dropped, and
   the stripe stayed one shard short with an empty queue until a degraded
-  read or the next scrub pass).
+  read or the next scrub pass). Such a waiting task does not hold
+  tiering or rebalancing.
 - R-110 harness: the scrub parser reads both line formats; the judge's
   count rule for unexpected shards applies only to timelines of earlier
   binaries; unclassified shards make C5 Inconclusive.

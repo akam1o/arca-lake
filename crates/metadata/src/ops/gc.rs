@@ -546,9 +546,12 @@ pub enum ScrubAttribution {
     /// A live generation's chunk record places the chunk in this group.
     Placed(ChunkRecord),
     /// Held by an operation in progress, with no live record here: a
-    /// migration intent targets this group (a copy before the switch), a
-    /// pending generation may still record it here, or a generation being
-    /// collected still records it here.
+    /// fresh migration intent targets this group (a copy before the
+    /// switch), a pending generation with the prefix may still record it
+    /// here, or a generation being collected still records it here. A
+    /// shard with no generation at all (one whose `begin_put` is still
+    /// being retried, or a write diverted elsewhere) is not in flight: it
+    /// is `Unreferenced`.
     InFlight {
         /// A migration intent targets this group.
         migration: bool,
@@ -558,7 +561,10 @@ pub enum ScrubAttribution {
     Unreferenced,
 }
 
-/// Classify a shard for the scrub, in one transaction.
+/// Classify a shard for the scrub at `now_ms`, in one transaction. A
+/// migration intent older than
+/// [`crate::ops::object::MIGRATION_INTENT_TTL_MS`] can no longer switch:
+/// it does not hold the target's shards.
 ///
 /// # Errors
 ///
@@ -568,10 +574,11 @@ pub async fn scrub_attribution<S: KvStore>(
     prefix: &[u8; 12],
     index: u32,
     group_id: u64,
+    now_ms: u64,
 ) -> Result<ScrubAttribution> {
-    transact(store, (*prefix, index, group_id), |tx, env| {
+    transact(store, (*prefix, index, group_id, now_ms), |tx, env| {
         Box::pin(async move {
-            let (prefix, index, group_id) = *env;
+            let (prefix, index, group_id, now_ms) = *env;
             let gens = generations_with_prefix(tx, &prefix).await?;
             if gens.is_empty() {
                 return Ok(ScrubAttribution::Unreferenced);
@@ -593,7 +600,12 @@ pub async fn scrub_attribution<S: KvStore>(
             }
             let intent: Option<crate::ops::object::MigrationIntent> =
                 crate::ops::read(tx, &keys::migration(&chunk_id_of(&prefix, index))).await?;
-            if intent.is_some_and(|i| i.target_group == group_id) {
+            if intent.is_some_and(|i| {
+                i.target_group == group_id
+                    && now_ms
+                        < i.since_ms
+                            .saturating_add(crate::ops::object::MIGRATION_INTENT_TTL_MS)
+            }) {
                 return Ok(ScrubAttribution::InFlight { migration: true });
             }
             Ok(if in_flight {

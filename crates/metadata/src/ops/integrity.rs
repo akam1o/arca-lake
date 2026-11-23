@@ -501,9 +501,14 @@ pub async fn queue_stats<S: KvStore>(store: &S) -> Result<QueueStats> {
     }
 }
 
-/// Whether any task is actionable (neither unrecoverable nor failed):
-/// what rebalancing and tiering wait for. Stops at the first one, page by
-/// page.
+/// Whether any task is actionable (neither unrecoverable nor failed, nor
+/// waiting for a migration's placement switch): what rebalancing and
+/// tiering wait for. Stops at the first one, page by page.
+///
+/// A task of a chunk whose migration intent targets the task's group has
+/// nothing to repair until that migration switches (the switch removes
+/// the intent; R-120, ADR-0036): holding tiering or rebalancing for it
+/// would hold them until the intent is stale after a crashed migration.
 ///
 /// # Errors
 ///
@@ -512,12 +517,17 @@ pub async fn any_actionable<S: KvStore>(store: &S) -> Result<bool> {
     let mut after: Option<Vec<u8>> = None;
     loop {
         let (page, next) = tasks_page(store, after.as_deref(), TASK_PAGE_MAX).await?;
-        if page.iter().any(|(_, _, t)| {
-            !matches!(
-                t.state,
-                RepairState::Unrecoverable { .. } | RepairState::Failed { .. }
-            )
-        }) {
+        let open: Vec<(u64, [u8; 16])> = page
+            .iter()
+            .filter(|(_, _, t)| {
+                !matches!(
+                    t.state,
+                    RepairState::Unrecoverable { .. } | RepairState::Failed { .. }
+                )
+            })
+            .map(|(g, c, _)| (*g, *c))
+            .collect();
+        if !open.is_empty() && open_beyond_migrations(store, &open).await? {
             return Ok(true);
         }
         match next {
@@ -525,6 +535,35 @@ pub async fn any_actionable<S: KvStore>(store: &S) -> Result<bool> {
             None => return Ok(false),
         }
     }
+}
+
+/// Whether any of `tasks` is not waiting for a migration into its group,
+/// in one transaction.
+async fn open_beyond_migrations<S: KvStore>(store: &S, tasks: &[(u64, [u8; 16])]) -> Result<bool> {
+    transact(store, tasks, |tx, tasks| {
+        Box::pin(async move {
+            let intents = tx
+                .get_many(
+                    &tasks
+                        .iter()
+                        .map(|(_, c)| keys::migration(c))
+                        .collect::<Vec<_>>(),
+                )
+                .await?;
+            for ((g, _), v) in tasks.iter().zip(intents) {
+                let waiting = match v {
+                    Some(v) => decode::<crate::ops::object::MigrationIntent>(&v)
+                        .is_ok_and(|i| i.target_group == *g),
+                    None => false,
+                };
+                if !waiting {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+    })
+    .await
 }
 
 /// Where the repair scheduler's next scan starts (Phase 3.11, M4): kept

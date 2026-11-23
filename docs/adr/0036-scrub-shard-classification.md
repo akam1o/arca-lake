@@ -26,19 +26,29 @@ target's next scrub pass.
    the node's verification (damage class), whether the node holds that
    record retired (a new `ShardScrub.retired` flag, at the sequence the
    index held when the page was listed), and one metadata transaction
-   for that chunk (`gc::scrub_attribution`): a live generation's chunk
-   record placing it in the group (`Placed`); a migration intent
-   targeting the group, a pending generation, or a collected generation
-   still recording it here (`InFlight`); nothing (`Unreferenced`).
+   for that chunk at the pass's time (`gc::scrub_attribution`): a live
+   generation's chunk record placing it in the group (`Placed`); a
+   migration intent younger than its TTL targeting the group, a pending
+   generation with the chunk's prefix, or a collected generation still
+   recording it here (`InFlight`); nothing (`Unreferenced`). A shard
+   whose prefix has no generation at all is `Unreferenced`, including
+   the legitimate, short-lived ones: a write diverted to another group
+   (its generation records the chunk elsewhere) and a `begin_put` still
+   being retried (no header yet), which reconciliation keeps until the
+   controller's minimum orphan age (`reconcile_node`). The scrub counts
+   them as `UnexpectedShard` with no excuse; a check that must be clean
+   (R-110 stage 7) waits for reconciliation first.
 2. **Classes.** `Placed`: the existing checks (damage queued, stale
    epoch, metadata/data mismatch). `InFlight`: not a finding; damage is a
    finding and queued. `Unreferenced` and retired: `retained` (not a
    finding). `Unreferenced`, not retired, confirmed by a listing of that
    key read *after* the metadata: `UnexpectedShard` (an orphan) or, if
-   damaged, its damage class. Anything that cannot be established (a
+   damaged, its damage class. A copy at another member's index is
+   never placed: retired, it is `retained`; otherwise an orphan. Anything
+   that cannot be established (a
    node that does not report retirement, metadata that does not decode,
    a record gone or written again between the reads): `unclassified`,
-   counted as a scrub error, never healthy.
+   counted as a scrub error and not as verified, never healthy.
 3. **Damaged retained records are findings.** Counted under their
    damage class (and in `retained_damaged`), not queued. Justification:
    the record exists so that a restore within the retention finds it
@@ -56,7 +66,19 @@ target's next scrub pass.
    task with no record in its group while a fresh migration intent
    (younger than its one-hour TTL) targets the group; after the switch
    it repairs, after a cancel (intent ended) or once the intent is stale
-   it drops the task.
+   it drops the task. Such a task is not actionable work for the gates
+   of tiering and rebalancing (`integrity::any_actionable` skips a task
+   whose chunk's migration intent targets its group; the switch removes
+   the intent in its transaction, so a present intent means nothing is
+   placed there yet). Without that, a migration that crashed before its
+   switch (copy and switch run in one call, so its intent can never
+   switch) held both for the intent's TTL.
+6. **0.1.0 nodes.** Their `ListShards` reports `retired_any` per key and
+   sequence, which is per-record evidence; the scrub does not use it for
+   them and reports their unreferenced records as `unclassified`
+   (coordinator decision for 0.2.0: a node that does not send the scrub
+   flag is never classified retained). Using it is a possible later
+   change.
 
 ## Formats and compatibility
 
@@ -87,6 +109,5 @@ target's next scrub pass.
   unclassified (scrub errors) until they are upgraded.
 - One extra `ListShards` call (one key) per orphan candidate, none for
   retained or referenced shards.
-- A task waiting on a migration counts as actionable repair work: it
-  holds tiering and rebalancing passes while it waits, at most the
-  intent's TTL after a migration that crashed before its switch.
+- A task waiting on a migration is in the queue (and in the integrity
+  status) but does not hold tiering or rebalancing.

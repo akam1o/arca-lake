@@ -78,7 +78,12 @@ scrub group <id> verified <n> bytes <n> findings [<8 counts>] enqueued <n> error
   state, and whether a migration intent targets the group. No count is
   compared with another.
 - `unexpected` (class 5) counts only orphans now: valid records nothing
-  references and no delete retired (reconciliation removes them).
+  references and no delete retired (reconciliation removes them),
+  including the short-lived ones of a write diverted to another group
+  or a `begin_put` still being retried (removed once older than the
+  controller's minimum orphan age: scrub after it when you need a clean
+  result). A copy at another member's index is retained if the node
+  reports it retired, else unexpected.
   Records kept for reclaim are `retained`, not findings; they leave the
   listing once the retention has passed and a reclaim pass ran.
 - `retained_damaged`: records kept for reclaim that failed verification.
@@ -88,14 +93,14 @@ scrub group <id> verified <n> bytes <n> findings [<8 counts>] enqueued <n> error
   makes it referenced again, the next scrub queues it like any damaged
   shard.
 - `in_flight`: shards an operation in progress holds (a migration's
-  copy before its switch, a pending write, a generation being
-  collected). Damage to such a shard is a finding and is queued; the
+  copy before its switch while its intent is younger than one hour, a
+  pending generation's write, a generation being collected). Damage to such a shard is a finding and is queued; the
   task waits for the record (R-120).
 - `unclassified`: shards whose class the pass could not establish: a
   storage node that does not report retirement (0.1.0 nodes in a mixed
   cluster report every unreferenced record this way), metadata that did
   not decode, or a record that changed between the reads. They are
-  never healthy: each one also counts in `errors`; scrub again (after
+  never healthy: each one also counts in `errors` (not in `verified`); scrub again (after
   the node upgrade). `admin integrity status` shows the persisted
   per-group record, which has no `retained` or `unclassified` count
   (unchanged format; unclassified shards are in its `errors`).

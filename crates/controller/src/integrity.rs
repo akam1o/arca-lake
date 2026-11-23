@@ -767,12 +767,17 @@ async fn scrub_group<S: KvStore>(
                     let (prefix, index) = split_chunk_id(&sh.shard.chunk_id);
                     // Only the member's own shard index is its responsibility:
                     // no chunk record places another index on it.
-                    let attribution = if usize::from(sh.shard.shard_index) == usize::from(member) {
-                        if damage.is_none() {
+                    let own = usize::from(sh.shard.shard_index) == usize::from(member);
+                    // Verified: a good shard at the member's own index that
+                    // ends classified (an unclassified one is not counted).
+                    let verified = |cursor: &mut ScrubCursor, report: &mut ScrubReport| {
+                        if own && damage.is_none() {
                             cursor.verified += 1;
                             report.verified += 1;
                         }
-                        gc::scrub_attribution(meta, &prefix, index, group.id).await
+                    };
+                    let attribution = if own {
+                        gc::scrub_attribution(meta, &prefix, index, group.id, now_ms).await
                     } else {
                         Ok(gc::ScrubAttribution::Unreferenced)
                     };
@@ -786,8 +791,12 @@ async fn scrub_group<S: KvStore>(
                         Err(e) => return Err(e.into()),
                     };
                     let record = match attribution {
-                        gc::ScrubAttribution::Placed(record) => record,
+                        gc::ScrubAttribution::Placed(record) => {
+                            verified(&mut cursor, &mut report);
+                            record
+                        }
                         gc::ScrubAttribution::InFlight { .. } => {
+                            verified(&mut cursor, &mut report);
                             // A damaged copy a migration is about to switch to,
                             // or a pending write's shard: queued (the task
                             // waits for the record, R-120).
@@ -823,8 +832,12 @@ async fn scrub_group<S: KvStore>(
                                 Some(false) => retired_now(clients, &node.address, sh).await,
                                 r => r,
                             };
+                            // A copy at another member's index that the
+                            // node reports retired is retained too (a
+                            // former placement waiting out the retention).
                             match retired {
                                 Some(true) => {
+                                    verified(&mut cursor, &mut report);
                                     report.retained += 1;
                                     if let Some(mm) = metrics {
                                         mm.scrub_shard_classes_total[0]
@@ -843,6 +856,7 @@ async fn scrub_group<S: KvStore>(
                                     }
                                 }
                                 Some(false) => {
+                                    verified(&mut cursor, &mut report);
                                     // An orphan, damaged or not: nothing to
                                     // repair (reconciliation's domain).
                                     finding(
