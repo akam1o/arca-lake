@@ -455,7 +455,8 @@ class FinalStops(unittest.TestCase):
         common.atomic_write_json(os.path.join(c.run_dir, "heartbeat.json"), {"run_id": self.cfg["run_id"], "seq": 1})
         c.setup_started = True
         c.ledger_records = lambda: []
-        c.collect_logs = lambda: ""
+        c.fdb_data = os.path.join(self.tmp.name, "fdb")
+        c.boot_id_path = os.path.join(self.tmp.name, "boot_id")
         self.c = c
 
     def kill_extra(self):
@@ -499,6 +500,12 @@ class FinalStops(unittest.TestCase):
         self.assertEqual(proc.check(sentinel), "gone")
         for n in ("node0", "node1"):
             self.assertEqual(proc.group_state(self.record(n)["pgid"]), "empty")
+        # After the stops, the host's files saved whole and verified.
+        self.assertTrue(e.tl["host_evidence"]["complete"], e.tl["host_evidence"])
+        for rel in ("services/node0.json", "services/started.list", "logs/sentinel.log"):
+            with open(os.path.join(e.ev.dir, "private", "host", "run", rel), "rb") as a, \
+                    open(os.path.join(self.c.run_dir, rel), "rb") as b:
+                self.assertEqual(a.read(), b.read(), rel)
 
     def test_a_service_that_cannot_be_confirmed_keeps_the_sentinel_and_blocks_a_pass(self):
         sentinel = self.start_all()

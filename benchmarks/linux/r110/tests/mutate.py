@@ -191,6 +191,17 @@ muts = [
  ("v3: unexpected shards excused after the settle", "r110/judge.py", "        if \"settled_ms\" in s7 and s7[\"settled_ms\"] is None and isinstance(by, list)", "        if isinstance(by, list)", "test_driver"),
  ("v3: unbounded unexpected shards excused", "r110/judge.py", " and isinstance(pend, (int, float)) and by[4] <= pend:", ":", "test_driver"),
  ("v3: other classes excused", "r110/judge.py", "                and sum(by) == sc and sum(by) == by[4] and isinstance(pend", "                and sum(by) == sc and isinstance(pend", "test_driver"),
+ ("teardown: removed with the evidence incomplete", "r110/remote.py", "        if not man[\"complete\"]:\n            out[\"kept\"]", "        if False:\n            out[\"kept\"]", "test_evidence"),
+ ("teardown: saved copies not read again", "r110/remote.py", "        bad = evidence.verify_local(evidence_dir, man)", "        bad = []", "test_evidence"),
+ ("teardown: the host not listed again", "r110/remote.py", "                bad = evidence.changed_since(man, evidence.inventory(self._evidence_call, self.evidence_roots()))", "                bad = []", "test_evidence"),
+ ("teardown: an unreachable host touched", "r110/remote.py", "        if not out[\"reach\"][\"ok\"]:", "        if False:", "test_evidence"),
+ ("teardown: gone at a reboot taken as stopped", "r110/remote.py", "        if gone and boot.get(\"rebooted\") is not False:", "        if False:", "test_evidence"),
+ ("evidence: a capped log is complete", "r110/evidence.py", "        if entry[\"capped\"]:", "        if False:", "test_evidence"),
+ ("evidence: a failed file is complete", "r110/evidence.py", "    if man[\"errors\"]:\n        man[\"incomplete\"]", "    if False:\n        man[\"incomplete\"]", "test_evidence"),
+ ("evidence: a copy not matching the host's sha256 takes its name", "r110/evidence.py", "        if got != want:", "        if False:", "test_evidence"),
+ ("evidence: not resumed", "r110/evidence.py", "    if os.path.isfile(target) and sha256_file(target) == want:\n        return h, \"already saved\"", "    if False:\n        return h, \"already saved\"", "test_evidence"),
+ ("finish: collected before the stops", "r110/driver.py", "        self.final_stops()\n        if hasattr(self.c, \"boot_check\"):", "        self._call(\"collect_evidence\", self.ev.dir)\n        self.final_stops()\n        if hasattr(self.c, \"boot_check\"):", "test_driver"),
+ ("finish: incomplete evidence passes", "r110/driver.py", "            if not man[\"complete\"]:\n                self.ev.failures.append", "            if False:\n                self.ev.failures.append", "test_driver"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]

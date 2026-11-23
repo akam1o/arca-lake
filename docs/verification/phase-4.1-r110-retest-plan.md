@@ -288,6 +288,68 @@ process-name kill, a shared service, a host restart, a change to the
 system FoundationDB, a network or mount change. No test data are removed
 automatically; teardown is a separate, reviewed step.
 
+**Evidence before teardown** (added for 0.2.0, after run
+`r110-20261122T162239Z`: the hosts were lost to a reboot, the run's end
+could neither confirm the stops nor collect the logs, and the later
+teardown, finding every process gone, removed the run directory with the
+guard's and the sentinel's logs and the ledger in it, so whether the
+guard stopped the load before the reboot can never be known):
+
+- Safe stops never wait for evidence. The run's end stops the load, the
+  services, the sampler, the sentinel and the watchdog first, and only
+  then collects. The teardown does the same: stop, then collect, then
+  decide. A size cap or a failed collection never delays or blocks a
+  stop.
+- A host directory of the run is removed only when **both** of these
+  hold:
+  1. every process the run started is confirmed stopped (its verdict,
+     and the liveness check of every record);
+  2. every file of the run that exists only on the host is saved on the
+     operator's machine and verified, and the host's files are unchanged
+     since. These are the ledgers, the logs, the services' records and
+     `started.list`, the stop, guard and sentinel results, the alarms,
+     the samples, the status and control files, the markers, the boot
+     record and the test FoundationDB's trace logs. The node stores and
+     the test FoundationDB's data are excluded and listed as such.
+
+  Anything else keeps everything and records why; the teardown can be
+  run again.
+- Verification: the host computes each file's sha256. The bytes are
+  transferred in chunks, each with its own sha256, written under a
+  temporary name, synced and read back. They take the file's name only
+  when they match the host's sha256. Before the removal the saved copies
+  are read again and the host's files listed again.
+- The manifest (`private/manifest.json` in the run's evidence) records:
+  the run ID, the tools' and the binary's sha256, every file saved (size,
+  sha256, the range saved), the errors, the expected records not found,
+  the excluded directories and the host's boot record. It also says
+  whether the collection is complete.
+- Partial is never complete. A transfer cut short, an unreadable file
+  (a permission error on either side), a checksum that does not match, a
+  deadline reached or a log over its cap (saved as its tail) all leave
+  the collection incomplete, and the run stays on the host.
+- After a lost connection the teardown first reaches the host (3 tries,
+  bounded). While it cannot, nothing is stopped, collected or removed.
+  Once reached, it collects before any removal and resumes: files
+  already saved with the host's current sha256 are not read again, and
+  an earlier copy that differs is kept apart.
+- A reboot is not a stop. Setup records the host's boot ID
+  (`host-boot.json`). A process found gone after the boot ID changed is
+  recorded as ended by the reboot (`cause: host-reboot`), never as
+  stopped by the guard or the teardown. Whether the guard stopped the
+  load before the reboot is only what its own saved result says, or "not
+  known" when none was saved.
+- Bounds: every call has a timeout; the collection has a deadline
+  (30 min) and a few retries per file; logs are capped per file and in
+  total. Nothing is ever killed or removed on a guess.
+- Public and private are kept apart. `private/` holds the raw files,
+  the manifest and the teardown records (host paths, logs).
+  `public/evidence-summary.json` holds only counts, relative paths,
+  sizes, sha256 and whether the host rebooted.
+
+Commands: `driver.py collect` (scope `collect`) collects again;
+`driver.py teardown` needs `--evidence` (the evidence root the run used).
+
 ## 7. Stages
 
 Each stage starts only when the previous one ended by its exit condition
@@ -460,7 +522,7 @@ of this plan.
 Implemented in `benchmarks/linux/r110/` (P1 `budget.py`, `ledger.py`,
 `load.py`; P2 `guard.py` (the guard and the sentinel), `watchdog.py`,
 `proc.py`; P3 `sampler.py`; P4
-`driver.py`, `judge.py`, `remote.py`), tested locally without any host.
+`driver.py`, `judge.py`, `remote.py`, `evidence.py`), tested locally without any host.
 `driver.py check` is the default and contacts nothing; every other command
 needs `--execute` and an approval file naming the sha256 of the run's
 configuration, the scope and the time window (§10). The example

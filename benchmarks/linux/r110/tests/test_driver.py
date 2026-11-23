@@ -227,6 +227,7 @@ class FakeCluster:
         self.stop_at_stage = None
         self.smoke_result = {"stop_layers_exercised": True, "limits_exercised": True, "errors": 0}
         self.fail_collect = False
+        self.incomplete = False
         self.steps = []
         self.admission = 0
         self.backlog = 0
@@ -365,10 +366,13 @@ class FakeCluster:
     def ledger_records(self):
         return []
 
-    def collect_logs(self):
+    def collect_evidence(self, dest, meta=None, **kw):
+        """The real manifest's shape (evidence.collect)."""
+        self.stop_calls.append(("collect_evidence", None))
         if self.fail_collect:
             raise OSError("collection failed")
-        return ""
+        return {"complete": not self.incomplete, "attempt": 1, "files": [],
+                "incomplete": ["run/logs/node0.log: capped"] if self.incomplete else []}
 
     def stop_load(self):
         self.stop_calls.append(("stop_load", None))
@@ -443,7 +447,7 @@ class Engine(EngineBase):
         c.fail_collect = True
         c.stop_at_stage, c.stop_reason = "4", "memory"
         res, ev = self.go(c)
-        self.assertIn("logs: collection failed", res["evidence_failures"])
+        self.assertIn("host_evidence: OSError: collection failed", res["evidence_failures"])
         self.assertNotEqual(res["outcome"], judge.PASSED)
         self.assertTrue(os.path.exists(os.path.join(ev.dir, "result.json")))
 
@@ -1140,9 +1144,20 @@ class ReviewFindingsEngine(EngineBase):
         c = FakeCluster(self.cfg, self.clock)
         e = self.ended(c)
         self.assertEqual(e.result["outcome"], judge.PASSED)
+        # The host's evidence is read only once every stop has been made.
         self.assertEqual([n for n, _ in c.stop_calls],
-                         ["stop_load", "stop_services", "stop_sampler", "stop_sentinel", "stop_watchdog"])
+                         ["stop_load", "stop_services", "stop_sampler", "stop_sentinel", "stop_watchdog",
+                          "collect_evidence"])
         self.assertNotIn("intervention", e.tl["final_stops"])
+        self.assertTrue(e.tl["host_evidence"]["complete"])
+
+    def test_an_incomplete_host_evidence_is_never_a_pass(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.incomplete = True
+        e = self.ended(c)
+        self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE)
+        self.assertFalse(e.tl["host_evidence"]["complete"])
+        self.assertTrue(any(f.startswith("host_evidence: incomplete") for f in e.result["evidence_failures"]))
 
     def test_a_service_not_stopped_is_retried_then_keeps_the_watching(self):
         for verdict in ({"verdict": "not-stopped", "state": "alive"}, {"verdict": "unverified", "reason": "x"}):
@@ -1280,14 +1295,20 @@ class Recorder:
 
 
 class Commands(Base):
+    # The host's answers to the reach, the boot and the inventory: an
+    # empty run (nothing on the host to save).
+    HOST = [("echo r110-reach", "r110-reach\n"), ("# r110:boot", json.dumps({"boot_id": "b1"}) + "\n"),
+            ("# r110:inventory", json.dumps({"files": [], "errors": [], "excluded": [],
+                                             "roots": {"run": "absent", "fdb": "absent"}}) + "\n")]
+
     def cluster(self, answers=None):
         cfg = driver.validate(copy.deepcopy(self.cfg))
-        rec = Recorder(answers)
+        rec = Recorder(list(answers or []) + self.HOST)
         return remote.SshCluster(cfg, runner=rec), rec, cfg
 
     def test_teardown_removes_only_marked_run_directories(self):
         c, rec, cfg = self.cluster(answers=[('print("checked %d"', "checked 0\n")])
-        out = c.teardown()
+        out = c.teardown(os.path.join(self.dir, "evidence"))
         rms = [cmd for _, cmd, _ in rec.commands if "rm " in cmd]
         self.assertEqual(len(rms), 2)
         for cmd, d in zip(rms, (cfg["remote"]["run_dir"], cfg["remote"]["fdb_data"])):
@@ -1298,7 +1319,7 @@ class Commands(Base):
 
     def test_teardown_keeps_everything_while_a_test_process_runs(self):
         c, rec, _ = self.cluster(answers=[("proc.matches(json.load", "node0.json\n")])
-        out = c.teardown()
+        out = c.teardown(os.path.join(self.dir, "evidence"))
         self.assertIn("still running", out["kept"])
         self.assertFalse(any("rm " in cmd for _, cmd, _ in rec.commands))
 
@@ -1333,7 +1354,7 @@ class Commands(Base):
             c, rec, _ = self.cluster(answers=[("ls ", "node0.json\n"),
                                               ("stop_identified", json.dumps({"verdict": verdict}) + "\n"),
                                               ('print("checked %d"', "checked 1\n")])
-            out = c.teardown()
+            out = c.teardown(os.path.join(self.dir, "evidence"))
             self.assertIn("not confirmed", out["kept"], verdict)
             self.assertFalse(any("rm " in cmd for _, cmd, _ in rec.commands), verdict)
 
@@ -1342,7 +1363,7 @@ class Commands(Base):
             c, rec, _ = self.cluster(answers=answer)
             if answer == []:
                 c.runner = lambda *a: (1, "", "Traceback")
-            out = c.teardown()
+            out = c.teardown(os.path.join(self.dir, "evidence"))
             self.assertIn("kept", out, answer)
             self.assertFalse(any("rm " in cmd for _, cmd, _ in rec.commands), answer)
 

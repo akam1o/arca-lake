@@ -5,7 +5,8 @@ and only with an approval runs the stages, keeps the evidence and judges.
   driver.py check CONFIG                      (the default: local only)
   driver.py preflight CONFIG --approval FILE --execute
   driver.py run CONFIG --approval FILE --execute --evidence DIR
-  driver.py teardown CONFIG --approval FILE --execute
+  driver.py collect CONFIG --approval FILE --execute --evidence DIR
+  driver.py teardown CONFIG --approval FILE --execute --evidence DIR
 
 ``check`` validates CONFIG against the plan (nothing looser than its
 values: limits, stage maxima, settings, stop rules, judgement values;
@@ -17,9 +18,18 @@ Every other command contacts the hosts, so it needs ``--execute`` and an
 approval file (JSON, written by the approver, never by this tool):
 ``config_sha256`` (the sha256 of CONFIG's bytes: any change of the
 configuration voids the approval), ``scope`` (``preflight``, ``run``,
-``teardown``), ``window_start`` and ``window_end`` (ISO 8601 UTC; the
-command is refused outside), ``approved_by``. The example configuration
-in this directory is not approved.
+``collect``, ``teardown``), ``window_start`` and ``window_end`` (ISO 8601
+UTC; the command is refused outside), ``approved_by``. The example
+configuration in this directory is not approved.
+
+Evidence before teardown (``evidence.py``): at a run's end, after the
+safe stops, every file of the run on the host is saved under
+``DIR/<run id>/private/host/`` and verified (sha256), with a manifest;
+``collect`` does it again (a lost connection, a retry), resuming what is
+already saved. ``teardown`` stops, collects, and removes the host's run
+directories only when every process is confirmed stopped and the
+collection is complete and verified; otherwise it keeps everything and
+says why.
 
 Stages (plan §7), each with its start condition, exit condition and
 maximum time; a stage that ends any other way ends the run. The smoke
@@ -63,7 +73,7 @@ SETTINGS = {
 }
 STOP_RULES = {"guard": {"min_free_gib": 3.0, "min_mem_mib": 1024.0, "heartbeat_timeout_s": 120.0},
               "preflight_free_gib": 12.2, "preflight_root_free_gib": 3.0}
-SCOPES = ("preflight", "run", "teardown")
+SCOPES = ("preflight", "run", "collect", "teardown")
 MAX_WINDOW_H = 24
 
 
@@ -334,6 +344,7 @@ SETTLE_S = 180  # three compaction passes after the last reclaim (§8 C2)
 SETTLE7_S = 1500
 SCRUB_RESERVE_S = 900
 DRAIN_OBSERVE_S = 1800  # §6.2: observe the drain after a stop that is not a resource danger
+COLLECT_S = 1800  # the host's evidence at the run's end (after the stops); a teardown collects again
 
 
 class Run:
@@ -868,21 +879,36 @@ class Run:
                 self.ev.failures.append("drain: interrupted (SIGINT): the stops and the evidence follow")
             except Exception as e:  # noqa: BLE001
                 self.ev.failures.append(f"drain: {e}")
+        # The safe stops first: the evidence is read only after them, and a
+        # collection that fails or is cut short never delays a stop.
         self.final_stops()
+        if hasattr(self.c, "boot_check"):
+            boot = self.tl["host_boot"] = self._call("boot_check")
+            if isinstance(boot, dict) and boot.get("rebooted"):
+                self.ev.failures.append("the host booted again during the run: processes found gone ended with it")
         parts = {}
-        for name, f in (("samples", self.c.samples), ("ledger", self.c.ledger_records),
-                        ("logs", self.c.collect_logs)):
+        for name, f in (("samples", self.c.samples), ("ledger", self.c.ledger_records)):
             try:
                 parts[name] = f()
             except Exception as e:  # noqa: BLE001
                 self.ev.failures.append(f"{name}: {e}")
                 parts[name] = None
+        # Every file of the run on the host, saved and verified (bounded):
+        # incomplete keeps the run on the host for a later collection.
+        man = self._call("collect_evidence", self.ev.dir, meta={"host_boot": self.tl.get("host_boot")},
+                         deadline_s=COLLECT_S)
+        if not isinstance(man, dict) or "error" in man:
+            self.ev.failures.append(f"host_evidence: {(man or {}).get('error') if isinstance(man, dict) else man}")
+            self.tl["host_evidence"] = {"complete": False, "error": str(man)[:300]}
+        else:
+            self.tl["host_evidence"] = {"complete": man["complete"], "attempt": man["attempt"],
+                                        "files": len(man["files"]), "incomplete": man["incomplete"]}
+            if not man["complete"]:
+                self.ev.failures.append(f"host_evidence: incomplete: {man['incomplete'][:5]}")
         self.ev.save("timeline.json", self.tl)
         for name in ("samples", "ledger"):
             if parts[name] is not None:
                 self.ev.save(f"{name}.json", parts[name])
-        if parts["logs"] is not None:
-            self.ev.save("logs.json", {"tail": parts["logs"]})
         self.result = judge.judge(parts["samples"] or [], parts["ledger"] or [], self.tl, self.stop,
                                   self.cfg["judgement"], tuple(self.c.nodes()), tuple(self.c.gateways()))
         if self.ev.failures:
@@ -894,7 +920,7 @@ class Run:
 
 def main(argv=None, now=None, cluster_factory=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("command", nargs="?", default="check", choices=["check", "preflight", "run", "teardown"])
+    p.add_argument("command", nargs="?", default="check", choices=["check", "preflight", "run", "collect", "teardown"])
     p.add_argument("config")
     p.add_argument("--approval")
     p.add_argument("--execute", action="store_true")
@@ -930,12 +956,17 @@ def main(argv=None, now=None, cluster_factory=None):
     if a.command == "preflight":
         print(json.dumps(cluster.preflight(), indent=1))
         return 0
-    if a.command == "teardown":
-        print(json.dumps(cluster.teardown(), indent=1))
-        return 0
     if not a.evidence:
-        print("run needs --evidence", file=sys.stderr)
+        print(f"{a.command} needs --evidence (the evidence root: the host's evidence is saved under "
+              f"<root>/{cfg['run_id']} before anything on the host is removed)", file=sys.stderr)
         return 2
+    if a.command in ("collect", "teardown"):
+        d = os.path.join(a.evidence, cfg["run_id"])
+        os.makedirs(d, exist_ok=True)
+        res = cluster.collect_evidence(d) if a.command == "collect" else cluster.teardown(d)
+        print(json.dumps(res if a.command == "teardown" else
+                         {k: res[k] for k in ("complete", "attempt", "incomplete", "errors")}, indent=1))
+        return 0 if (res.get("complete") if a.command == "collect" else "kept" not in res) else 1
     ev = Evidence(a.evidence, cfg["run_id"])
     ev.save("config.json", {"config": cfg, "config_sha256": sha})
     res = Run(cfg, cluster, ev).execute()
