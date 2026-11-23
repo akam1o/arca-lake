@@ -11,6 +11,30 @@ break compatibility).
 
 ## [Unreleased]
 
+- Scrub: each listed shard is classified from its own evidence (chunk
+  record in the group, the node's retirement flag, generation state,
+  migration intent; ADR-0036). Records deleted and kept for reclaim are
+  reported as `retained`, no longer as unexpected shards; damaged ones
+  are still findings of their damage class (`retained_damaged`), not
+  queued; shards held by an operation in progress are `in_flight`;
+  shards that cannot be classified (0.1.0 storage nodes, which do not
+  report retirement, or records changing during the pass) are
+  `unclassified` and counted as scrub errors. `admin integrity scrub`
+  appends `retained … retained_damaged … in_flight … unclassified …` to
+  its line (the `findings [8]` array keeps its length and order); new
+  metric `arca_controller_scrub_shard_classes_total{class}`. Additive
+  protobuf fields `ShardScrub.retired` and
+  `ScrubShardsResponse.retirement_reported`; protocol and metadata
+  versions unchanged, no metadata record changed.
+- Repair (R-120): a task for a damaged shard of a migration's target
+  found before the placement switch is kept while the migration intent
+  targets the group and repaired after the switch (it was dropped, and
+  the stripe stayed one shard short with an empty queue until a degraded
+  read or the next scrub pass).
+- R-110 harness: the scrub parser reads both line formats; the judge's
+  count rule for unexpected shards applies only to timelines of earlier
+  binaries; unclassified shards make C5 Inconclusive.
+
 ## [0.1.0] - 2026-11-23
 
 First experimental release (tag `v0.1.0`; [0.1.0 release](https://github.com/akam1o/arca-lake/releases/tag/v0.1.0)), for

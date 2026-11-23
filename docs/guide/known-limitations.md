@@ -96,10 +96,18 @@ entry in the [risk register](../architecture/risks.md).
 ## Known behaviours to plan for
 
 - A scrub reports a record that was deleted and waits out the reclaim
-  retention (`--reclaim-retention-secs`) as an unexpected shard, as it
-  does for shards no object references. Unexpected shards are not damage
-  (missing, checksum, truncated or unrecoverable findings are); expect
-  them after deletes until the retention and a reclaim pass have passed.
+  retention (`--reclaim-retention-secs`) as `retained`, not as an
+  unexpected shard (since 0.2.0; 0.1.0 counted both alike). With 0.1.0
+  storage nodes in the cluster (they do not report retirement) such
+  records are `unclassified` and counted as scrub errors until the nodes
+  are upgraded ([Reading a scrub](operations.md#reading-a-scrub)).
+- A shard of a migration's target damaged before the placement switch
+  (R-120): its repair task waits while the migration intent targets the
+  group (at most the intent's one-hour lifetime) and repairs the shard
+  after the switch. While it waits, the task counts as repair work, so
+  tiering and rebalancing passes do not start: a migration that crashed
+  before its switch with such damage holds them until its intent is
+  stale (one hour), and the task is then dropped.
 - `admin integrity verify-manifests` checks multipart uploads' manifests
   only; a store without multipart uploads has nothing for it to check.
 

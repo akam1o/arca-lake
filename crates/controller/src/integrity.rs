@@ -25,7 +25,7 @@ use arca_lake_metadata::ops::integrity::{
 use arca_lake_metadata::ops::{cluster, gc};
 use arca_lake_metadata::records::{ChunkRecord, GroupRecord, GroupRole, NodeRecord};
 use arca_lake_metadata::{KvStore, MetaError};
-use arca_lake_protocol::client::{NodeClients, ShardRef, ShardStatus};
+use arca_lake_protocol::client::{NodeClients, ShardRef, ShardScrub, ShardStatus};
 use arca_lake_tiering::durable::{Coders, encode_chunk};
 use bytes::Bytes;
 use futures::StreamExt as _;
@@ -191,8 +191,23 @@ pub struct ScrubReport {
     pub findings: [u64; 8],
     /// Repair tasks created.
     pub enqueued: u64,
-    /// Node or metadata errors (the pass continues).
+    /// Node or metadata errors (the pass continues), and the shards in
+    /// `unclassified` (a pass with any is not clean).
     pub errors: u64,
+    /// Shards retired by a delete and kept for reclaim (ADR-0028) that
+    /// nothing references: legitimately held, not a finding.
+    pub retained: u64,
+    /// Of those kept for reclaim, the damaged ones: each is also counted
+    /// under its damage class in `findings` (a restore within the
+    /// retention could need it), and not queued (nothing to rebuild).
+    pub retained_damaged: u64,
+    /// Shards held by an operation in progress (a migration's copy before
+    /// its switch, a pending write, a generation being collected).
+    pub in_flight: u64,
+    /// Shards the pass could not classify (the node does not report
+    /// retirement, the metadata did not decode, or the record changed
+    /// between the reads): never healthy, also counted in `errors`.
+    pub unclassified: u64,
     /// Multipart roots verified by the manifest scrub of this pass.
     pub manifest_roots: u64,
     /// Manifest findings of this pass (RFC-008 §8.6).
@@ -410,6 +425,10 @@ pub async fn scrub_pass<S: KvStore>(
                 }
                 report.enqueued += part.enqueued;
                 report.errors += part.errors;
+                report.retained += part.retained;
+                report.retained_damaged += part.retained_damaged;
+                report.in_flight += part.in_flight;
+                report.unclassified += part.unclassified;
                 if done {
                     report.groups_completed += 1;
                 } else {
@@ -587,6 +606,57 @@ impl Pacer {
     }
 }
 
+/// A shard the scrub could not classify: never healthy, counted as an
+/// error of the pass.
+fn unclassified(cursor: &mut ScrubCursor, report: &mut ScrubReport, metrics: Option<&Metrics>) {
+    report.unclassified += 1;
+    report.errors += 1;
+    cursor.errors += 1;
+    if let Some(m) = metrics {
+        m.scrub_shard_classes_total[3].fetch_add(1, Ordering::Relaxed);
+        m.scrub_errors_total.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Whether the node holds the scrubbed record retired now, from a listing
+/// of just that key: `None` when the listing fails or no longer holds the
+/// record the scrub saw (gone, or written again since).
+async fn retired_now(clients: &NodeClients, addr: &str, sh: &ShardScrub) -> Option<bool> {
+    let key = sh.shard;
+    // The key right before it: listings start after a key (exclusive).
+    let after = if key.shard_index > 0 {
+        Some(ShardRef {
+            shard_index: key.shard_index - 1,
+            ..key
+        })
+    } else {
+        u128::from_be_bytes(key.chunk_id)
+            .checked_sub(1)
+            .map(|c| ShardRef {
+                group_id: key.group_id,
+                chunk_id: c.to_be_bytes(),
+                shard_index: u16::MAX,
+            })
+    };
+    let page = clients
+        .list_shards_page_with(addr, key.group_id, after, 1, true)
+        .await
+        .ok()?;
+    if !page
+        .entries
+        .iter()
+        .chain(&page.quarantined)
+        .any(|(k, _)| *k == key)
+    {
+        return None;
+    }
+    // A corrupt record is reported without its sequence.
+    if sh.sequence != 0 && page.sequences.get(&key).map(|t| t.sequence) != Some(sh.sequence) {
+        return None;
+    }
+    Some(page.retired_any.contains(&key))
+}
+
 /// Scrub one group from its cursor until the pass completes or a page
 /// fails. Returns `(done, report)`; the cursor is persisted after every
 /// page.
@@ -669,12 +739,6 @@ async fn scrub_group<S: KvStore>(
                 let mut last = after;
                 for sh in &page.shards {
                     last = Some(sh.shard.chunk_id);
-                    // Only the member's own shard index is its responsibility;
-                    // other indexes on it are unexpected copies.
-                    if usize::from(sh.shard.shard_index) != usize::from(member) {
-                        finding(&mut cursor, &mut report, Finding::UnexpectedShard);
-                        continue;
-                    }
                     let status = match sh.status {
                         // A shard quarantined earlier keeps the class of the
                         // failure that quarantined it.
@@ -687,94 +751,148 @@ async fn scrub_group<S: KvStore>(
                         ShardStatus::Quarantined => ShardStatus::InvalidHeader,
                         other => other,
                     };
-                    match status {
-                        ShardStatus::Ok => {}
+                    let damage = match status {
+                        ShardStatus::Ok => None,
                         ShardStatus::ChecksumMismatch | ShardStatus::Quarantined => {
-                            finding(&mut cursor, &mut report, Finding::ChecksumMismatch);
-                            if integrity::enqueue(
-                                meta,
-                                group.id,
-                                sh.shard.chunk_id,
-                                Finding::ChecksumMismatch,
-                                &[member],
-                                now_ms,
-                            )
-                            .await?
-                            {
-                                report.enqueued += 1;
-                            }
-                            continue;
+                            Some(Finding::ChecksumMismatch)
                         }
-                        ShardStatus::Truncated => {
-                            finding(&mut cursor, &mut report, Finding::TruncatedShard);
-                            if integrity::enqueue(
-                                meta,
-                                group.id,
-                                sh.shard.chunk_id,
-                                Finding::TruncatedShard,
-                                &[member],
-                                now_ms,
-                            )
-                            .await?
-                            {
-                                report.enqueued += 1;
-                            }
-                            continue;
-                        }
-                        ShardStatus::InvalidHeader => {
-                            finding(&mut cursor, &mut report, Finding::InvalidHeader);
-                            if integrity::enqueue(
-                                meta,
-                                group.id,
-                                sh.shard.chunk_id,
-                                Finding::InvalidHeader,
-                                &[member],
-                                now_ms,
-                            )
-                            .await?
-                            {
-                                report.enqueued += 1;
-                            }
-                            continue;
-                        }
+                        ShardStatus::Truncated => Some(Finding::TruncatedShard),
+                        ShardStatus::InvalidHeader => Some(Finding::InvalidHeader),
                         ShardStatus::IoError => {
                             report.errors += 1;
                             cursor.errors += 1;
                             continue;
                         }
-                    }
-                    cursor.verified += 1;
-                    report.verified += 1;
-                    // L3: metadata agreement.
+                    };
                     let (prefix, index) = split_chunk_id(&sh.shard.chunk_id);
-                    match gc::attribute_shard(meta, &prefix, index, group.id).await? {
-                        gc::ShardAttribution::Referenced => {}
-                        gc::ShardAttribution::NoGeneration | gc::ShardAttribution::Unreferenced => {
-                            finding(&mut cursor, &mut report, Finding::UnexpectedShard);
+                    // Only the member's own shard index is its responsibility:
+                    // no chunk record places another index on it.
+                    let attribution = if usize::from(sh.shard.shard_index) == usize::from(member) {
+                        if damage.is_none() {
+                            cursor.verified += 1;
+                            report.verified += 1;
+                        }
+                        gc::scrub_attribution(meta, &prefix, index, group.id).await
+                    } else {
+                        Ok(gc::ScrubAttribution::Unreferenced)
+                    };
+                    let attribution = match attribution {
+                        Ok(a) => a,
+                        Err(MetaError::Codec(e)) => {
+                            warn!(group = group.id, chunk = %hex(&sh.shard.chunk_id), error = %e, "scrub: shard not classified (metadata did not decode)");
+                            unclassified(&mut cursor, &mut report, metrics);
                             continue;
                         }
-                    }
-                    if let Some(record) =
-                        gc::chunk_record_in_group(meta, &prefix, index, group.id).await?
-                    {
-                        if record.placement.epoch > group.epoch {
-                            finding(&mut cursor, &mut report, Finding::StalePlacementEpoch);
-                            continue;
-                        }
-                        if sh.payload_len != expected_shard_len(&record, group, coder.as_ref()) {
-                            finding(&mut cursor, &mut report, Finding::MetadataDataMismatch);
-                            if integrity::enqueue(
-                                meta,
-                                group.id,
-                                sh.shard.chunk_id,
-                                Finding::MetadataDataMismatch,
-                                &[member],
-                                now_ms,
-                            )
-                            .await?
-                            {
-                                report.enqueued += 1;
+                        Err(e) => return Err(e.into()),
+                    };
+                    let record = match attribution {
+                        gc::ScrubAttribution::Placed(record) => record,
+                        gc::ScrubAttribution::InFlight { .. } => {
+                            // A damaged copy a migration is about to switch to,
+                            // or a pending write's shard: queued (the task
+                            // waits for the record, R-120).
+                            if let Some(f) = damage {
+                                finding(&mut cursor, &mut report, f);
+                                if integrity::enqueue(
+                                    meta,
+                                    group.id,
+                                    sh.shard.chunk_id,
+                                    f,
+                                    &[member],
+                                    now_ms,
+                                )
+                                .await?
+                                {
+                                    report.enqueued += 1;
+                                }
+                            } else {
+                                report.in_flight += 1;
+                                if let Some(mm) = metrics {
+                                    mm.scrub_shard_classes_total[2].fetch_add(1, Ordering::Relaxed);
+                                }
                             }
+                            continue;
+                        }
+                        gc::ScrubAttribution::Unreferenced => {
+                            // Kept for reclaim, or an orphan: the node's word,
+                            // from the page, or from a listing read after the
+                            // metadata (GC removes a generation only once the
+                            // nodes acknowledged its deletes, so a record a
+                            // delete of it retired is seen retired there).
+                            let retired = match sh.retired {
+                                Some(false) => retired_now(clients, &node.address, sh).await,
+                                r => r,
+                            };
+                            match retired {
+                                Some(true) => {
+                                    report.retained += 1;
+                                    if let Some(mm) = metrics {
+                                        mm.scrub_shard_classes_total[0]
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    if let Some(f) = damage {
+                                        // The margin a restore within the
+                                        // retention would need: reported,
+                                        // not queued (nothing references it).
+                                        finding(&mut cursor, &mut report, f);
+                                        report.retained_damaged += 1;
+                                        if let Some(mm) = metrics {
+                                            mm.scrub_shard_classes_total[1]
+                                                .fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                                Some(false) => {
+                                    // An orphan, damaged or not: nothing to
+                                    // repair (reconciliation's domain).
+                                    finding(
+                                        &mut cursor,
+                                        &mut report,
+                                        damage.unwrap_or(Finding::UnexpectedShard),
+                                    );
+                                }
+                                None => {
+                                    unclassified(&mut cursor, &mut report, metrics);
+                                }
+                            }
+                            continue;
+                        }
+                    };
+                    // A shard a live chunk record places here.
+                    if let Some(f) = damage {
+                        finding(&mut cursor, &mut report, f);
+                        if integrity::enqueue(
+                            meta,
+                            group.id,
+                            sh.shard.chunk_id,
+                            f,
+                            &[member],
+                            now_ms,
+                        )
+                        .await?
+                        {
+                            report.enqueued += 1;
+                        }
+                        continue;
+                    }
+                    // L3: metadata agreement.
+                    if record.placement.epoch > group.epoch {
+                        finding(&mut cursor, &mut report, Finding::StalePlacementEpoch);
+                        continue;
+                    }
+                    if sh.payload_len != expected_shard_len(&record, group, coder.as_ref()) {
+                        finding(&mut cursor, &mut report, Finding::MetadataDataMismatch);
+                        if integrity::enqueue(
+                            meta,
+                            group.id,
+                            sh.shard.chunk_id,
+                            Finding::MetadataDataMismatch,
+                            &[member],
+                            now_ms,
+                        )
+                        .await?
+                        {
+                            report.enqueued += 1;
                         }
                     }
                 }
@@ -1146,8 +1264,16 @@ async fn repair_one<S: KvStore>(
         // there while this group's shard was written) leaves nothing of
         // this group referenced: the task is dropped, never retried forever
         // (0.1.0 three-host validation).
-        if gc::generation_is_pending(meta, &prefix).await? {
-            // Pending generation: its record may still arrive. Try later.
+        // A migration copying the chunk here (R-120): its target becomes
+        // the placement at the switch, damaged shard included; the task
+        // waits for the switch (repaired then) or the intent's end (a
+        // cancelled or failed copy is removed, an expired intent is stale:
+        // dropped then), never longer than the intent's TTL.
+        if gc::generation_is_pending(meta, &prefix).await?
+            || gc::migrating_into(meta, &chunk_id, group_id, now_ms).await?
+        {
+            // Pending generation or migration target: the record may still
+            // arrive. Try later.
             task.next_attempt_ms = now_ms + 60_000;
             task.updated_ms = now_ms;
             integrity::set_task(meta, group_id, &chunk_id, &task).await?;

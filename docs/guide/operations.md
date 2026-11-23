@@ -60,3 +60,45 @@ that decide which builds can run together and which data they read:
 - `admin upgrade finalize` is one-way: after it, earlier builds refuse
   to start and no downgrade is possible; restore of a pre-finalize
   backup is the only way back (RFC-014, RFC-015).
+
+## Reading a scrub
+
+`admin integrity scrub --group <id> --wait` prints one line per group:
+
+```
+scrub group <id> verified <n> bytes <n> findings [<8 counts>] enqueued <n> errors <n> retained <n> retained_damaged <n> in_flight <n> unclassified <n>
+```
+
+- `findings` keeps its eight classes in their order (missing,
+  checksum, truncated, header, unexpected, stale epoch, metadata/data,
+  unrecoverable; RFC-008 §8.4). Since 0.2.0 the scrub classifies each
+  listed shard from that record's own evidence: whether a live chunk
+  record places it in the group, whether the node reports the record
+  retired by a delete and kept for reclaim (ADR-0028), the generation's
+  state, and whether a migration intent targets the group. No count is
+  compared with another.
+- `unexpected` (class 5) counts only orphans now: valid records nothing
+  references and no delete retired (reconciliation removes them).
+  Records kept for reclaim are `retained`, not findings; they leave the
+  listing once the retention has passed and a reclaim pass ran.
+- `retained_damaged`: records kept for reclaim that failed verification.
+  Each is also counted under its damage class in `findings` (a restore
+  within the retention may need it, and the device returned bad data),
+  and is not queued for repair (nothing references it). If a restore
+  makes it referenced again, the next scrub queues it like any damaged
+  shard.
+- `in_flight`: shards an operation in progress holds (a migration's
+  copy before its switch, a pending write, a generation being
+  collected). Damage to such a shard is a finding and is queued; the
+  task waits for the record (R-120).
+- `unclassified`: shards whose class the pass could not establish: a
+  storage node that does not report retirement (0.1.0 nodes in a mixed
+  cluster report every unreferenced record this way), metadata that did
+  not decode, or a record that changed between the reads. They are
+  never healthy: each one also counts in `errors`; scrub again (after
+  the node upgrade). `admin integrity status` shows the persisted
+  per-group record, which has no `retained` or `unclassified` count
+  (unchanged format; unclassified shards are in its `errors`).
+- Exit code 0 when the scrub ran, whatever it found; read the line.
+- Metrics: `arca_controller_integrity_findings_total{class}` as before;
+  `arca_controller_scrub_shard_classes_total{class=retained_for_reclaim|retained_damaged|in_flight|unclassified}`.
