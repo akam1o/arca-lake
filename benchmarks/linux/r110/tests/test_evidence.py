@@ -446,6 +446,34 @@ class Teardown(Base):
         self.assertEqual({f["path"] for f in man["files"] if f.get("host") == "gone"},
                          {p for p in self.saved_paths() if p.startswith("fdb/")})
 
+    def test_a_partly_removed_fdb_directory_is_checked_against_the_saved_copies(self):
+        """A removal of the test FoundationDB's directory cut mid-way: some
+        of its files gone, the marker left."""
+        man = self.c.collect_evidence(self.ev)
+        self.assertTrue(man["complete"])
+        os.remove(self.path("fdb/l/trace.0.xml"))
+        trace = self.saved("fdb/l/trace.0.xml")
+        with open(trace, "rb") as f:
+            good = f.read()
+        collect = self.c.collect_evidence
+
+        def tampered(dest, **kw):
+            man = collect(dest, **kw)
+            with open(trace, "ab") as f:
+                f.write(b"x")
+            return man
+
+        self.c.collect_evidence = tampered
+        out = self.c.teardown(self.ev)
+        self.assertKept(out, "no longer matches")
+        self.assertIn("fdb/l/trace.0.xml", out["kept"])
+        self.c.collect_evidence = collect
+        with open(trace, "wb") as f:
+            f.write(good)
+        out = self.c.teardown(self.ev)
+        self.assertNotIn("kept", out, out)
+        self.assertEqual({f["path"]: f.get("host") for f in self.manifest()["files"]}["fdb/l/trace.0.xml"], "gone")
+
     def saved_paths(self):
         out = set()
         top = os.path.join(self.ev, "private", "host")
