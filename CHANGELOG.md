@@ -20,9 +20,12 @@ break compatibility).
   back off with jitter. A wait beyond `--commit-queue-wait-ms` (2 s) or
   more than `--commit-queue-max-waiters` (256) waiting writes is answered
   `503 SlowDown` before any commit attempt (nothing applied).
-  `--commit-queue off` restores the previous behaviour. Proposed; its
-  measured effect is pending
-  ([plan](docs/verification/0.2.0-hot-key-plan.md)). No format change.
+  `--commit-queue off` restores the previous behaviour. Measured with 64
+  writers on one key through four gateways: SlowDown 55 % → under 1 %,
+  acknowledged PUT/s 1.6–1.7 ×, acknowledged PUT latency higher (p50
+  about 200 → 450 ms); 16 keys unchanged
+  ([results](docs/verification/0.2.0-hot-key-results.md)). No format
+  change.
 - Scrub: each listed shard is classified from its own evidence (chunk
   record in the group, the node's retirement flag, generation state,
   migration intent; ADR-0036). Records deleted and kept for reclaim are

@@ -1,0 +1,315 @@
+{
+ "cells": {
+  "candidate/fdbstall": {
+   "ack_p50_ms": 455.8175,
+   "ack_p95_ms": 1418.8615,
+   "ack_p99_ms": 1780.6415000000002,
+   "acked_per_s": 68.73250384175932,
+   "all_p99_ms": 12021.025,
+   "attempts_per_ack": 25.137644361618882,
+   "fdb_conflicted_per_ack": 1.067642468201798,
+   "invalid_runs": 0,
+   "slowdown_share": 0.027951992262687814,
+   "unknown": 9.0,
+   "valid_runs": 2
+  },
+  "candidate/gwkill": {
+   "ack_p50_ms": 465.5295,
+   "ack_p95_ms": 1370.51,
+   "ack_p99_ms": 1728.156,
+   "acked_per_s": 110.33148957726978,
+   "all_p99_ms": 927.3235,
+   "attempts_per_ack": 7.596982637751356,
+   "fdb_conflicted_per_ack": 1.039843784624383,
+   "invalid_runs": 0,
+   "slowdown_share": 0.0002532432971299574,
+   "unknown": 115616.5,
+   "valid_runs": 2
+  },
+  "candidate/retry": {
+   "ack_p50_ms": 494.01966666666664,
+   "ack_p95_ms": 1576.7740000000001,
+   "ack_p99_ms": 2321.4366666666665,
+   "acked_per_s": 103.88361292147044,
+   "all_p99_ms": 2321.4366666666665,
+   "attempts_per_ack": 28.2610691869795,
+   "fdb_conflicted_per_ack": 1.1181421409966779,
+   "invalid_runs": 0,
+   "slowdown_share": 0.0,
+   "unknown": 0.0,
+   "valid_runs": 3
+  },
+  "candidate/unv": {
+   "ack_p50_ms": 474.8396666666667,
+   "ack_p95_ms": 1403.5633333333335,
+   "ack_p99_ms": 1730.8556666666666,
+   "acked_per_s": 111.46988516890985,
+   "all_p99_ms": 1810.936,
+   "attempts_per_ack": 25.151174149635835,
+   "fdb_conflicted_per_ack": 1.1039347269932884,
+   "invalid_runs": 0,
+   "slowdown_share": 0.004731573741684021,
+   "unknown": 0.0,
+   "valid_runs": 3
+  },
+  "candidate/unv16": {
+   "ack_p50_ms": 96.73933333333333,
+   "ack_p95_ms": 323.89933333333335,
+   "ack_p99_ms": 548.19,
+   "acked_per_s": 492.0463112701778,
+   "all_p99_ms": 548.19,
+   "attempts_per_ack": 6.918433856231137,
+   "fdb_conflicted_per_ack": 0.8787927386982567,
+   "invalid_runs": 0,
+   "slowdown_share": 0.0,
+   "unknown": 0.0,
+   "valid_runs": 3
+  },
+  "candidate/ver": {
+   "ack_p50_ms": 424.5156666666667,
+   "ack_p95_ms": 1368.887,
+   "ack_p99_ms": 1738.144,
+   "acked_per_s": 117.31629903442344,
+   "all_p99_ms": 1844.3196666666665,
+   "attempts_per_ack": 25.184009333148385,
+   "fdb_conflicted_per_ack": 1.0856004194847062,
+   "invalid_runs": 0,
+   "slowdown_share": 0.008030635922732647,
+   "unknown": 0.0,
+   "valid_runs": 3
+  },
+  "tag/retry": {
+   "ack_p50_ms": 414.0973333333333,
+   "ack_p95_ms": 2267.7656666666667,
+   "ack_p99_ms": 3033.6513333333332,
+   "acked_per_s": 74.83114278877223,
+   "all_p99_ms": 3473.9636666666665,
+   "attempts_per_ack": 66.58131494834309,
+   "fdb_conflicted_per_ack": 40.68468008820352,
+   "invalid_runs": 0,
+   "slowdown_share": 0.05281824584582695,
+   "unknown": 0.0,
+   "valid_runs": 3
+  },
+  "tag/unv": {
+   "ack_p50_ms": 200.5956666666667,
+   "ack_p95_ms": 539.7076666666667,
+   "ack_p99_ms": 808.8243333333334,
+   "acked_per_s": 69.14878244784389,
+   "all_p99_ms": 1176.7166666666667,
+   "attempts_per_ack": 77.2301255100001,
+   "fdb_conflicted_per_ack": 49.77349598227257,
+   "invalid_runs": 0,
+   "slowdown_share": 0.5454344511677437,
+   "unknown": 0.0,
+   "valid_runs": 3
+  },
+  "tag/unv16": {
+   "ack_p50_ms": 93.04199999999999,
+   "ack_p95_ms": 305.627,
+   "ack_p99_ms": 519.5043333333333,
+   "acked_per_s": 508.8596242721882,
+   "all_p99_ms": 525.4186666666666,
+   "attempts_per_ack": 7.816446409448974,
+   "fdb_conflicted_per_ack": 2.249979696954856,
+   "invalid_runs": 0,
+   "slowdown_share": 0.0003921969681031844,
+   "unknown": 0.0,
+   "valid_runs": 3
+  },
+  "tag/ver": {
+   "ack_p50_ms": 193.69299999999998,
+   "ack_p95_ms": 584.6626666666666,
+   "ack_p99_ms": 853.0776666666667,
+   "acked_per_s": 67.29844613807114,
+   "all_p99_ms": 1105.6906666666666,
+   "attempts_per_ack": 80.64007804168017,
+   "fdb_conflicted_per_ack": 50.57225462975581,
+   "invalid_runs": 0,
+   "slowdown_share": 0.5497330886231434,
+   "unknown": 0.0,
+   "valid_runs": 3
+  }
+ },
+ "meta": {
+  "arms": {
+   "candidate": {
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "commit": "b4a6a406e3f8a8cfa9a08e8a1b0e3b9574394677",
+    "features": "fdb",
+    "label": "candidate (PR head)",
+    "locked": true,
+    "profile": "release",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "sha256": "a6f8f7383a85caf11f63d9c6eff0c0ee5c5a1066d9582e38e835f8a8c7f6a9bc"
+   },
+   "tag": {
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "commit": "5601018a92b2eb9eb4c9106b43a637545056963c",
+    "features": "fdb",
+    "label": "tag rebuild (v0.1.0 tag commit rebuilt on the test host; not the published artefact)",
+    "locked": true,
+    "profile": "release",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "sha256": "0aecd8cc19c2787bb162a1251b230cf8d17fc767720f2b9a033f36d7a72f9a0b"
+   }
+  },
+  "budget_s": 18000,
+  "campaign": "hk20261124",
+  "elapsed_s": 10247,
+  "finished": "2026-11-24T04:27:51+0900",
+  "plan": "docs/verification/0.2.0-hot-key-plan.md",
+  "run_bound_s": 1800,
+  "started": "2026-11-24T01:37:04+0900",
+  "stopped": null
+ },
+ "targets": [
+  {
+   "detail": {
+    "candidate": 0.004731573741684021,
+    "tag": 0.5454344511677437
+   },
+   "result": "met",
+   "scenario": "unv",
+   "target": "SlowDown share \u2264 half the tag rebuild's and \u2264 25 %"
+  },
+  {
+   "detail": {
+    "candidate": 25.151174149635835,
+    "tag": 77.2301255100001
+   },
+   "result": "met",
+   "scenario": "unv",
+   "target": "attempts per acknowledged PUT \u2264 half"
+  },
+  {
+   "detail": {
+    "candidate": 111.46988516890985,
+    "tag": 69.14878244784389
+   },
+   "result": "met",
+   "scenario": "unv",
+   "target": "acknowledged PUT/s \u2265 1.3 \u00d7"
+  },
+  {
+   "detail": {
+    "candidate": 0.008030635922732647,
+    "tag": 0.5497330886231434
+   },
+   "result": "met",
+   "scenario": "ver",
+   "target": "SlowDown share \u2264 half the tag rebuild's and \u2264 25 %"
+  },
+  {
+   "detail": {
+    "candidate": 25.184009333148385,
+    "tag": 80.64007804168017
+   },
+   "result": "met",
+   "scenario": "ver",
+   "target": "attempts per acknowledged PUT \u2264 half"
+  },
+  {
+   "detail": {
+    "candidate": 117.31629903442344,
+    "tag": 67.29844613807114
+   },
+   "result": "met",
+   "scenario": "ver",
+   "target": "acknowledged PUT/s \u2265 1.3 \u00d7"
+  },
+  {
+   "detail": {
+    "candidate": 492.0463112701778,
+    "tag": 508.8596242721882
+   },
+   "result": "met",
+   "scenario": "unv16",
+   "target": "acknowledged PUT/s \u2265 0.95 \u00d7"
+  },
+  {
+   "detail": {
+    "candidate": 0.0,
+    "tag": 0.0003921969681031844
+   },
+   "result": "met",
+   "scenario": "unv16",
+   "target": "SlowDown share \u2264 tag rebuild's + 0.5 points"
+  },
+  {
+   "detail": {
+    "candidate": 548.19,
+    "tag": 519.5043333333333
+   },
+   "result": "met",
+   "scenario": "unv16",
+   "target": "acknowledged p99 \u2264 1.5 \u00d7"
+  },
+  {
+   "detail": {
+    "candidate": 0.0,
+    "tag": 0.05281824584582695
+   },
+   "result": "met",
+   "scenario": "retry",
+   "target": "SlowDown after 3 retries \u2264 tag rebuild's"
+  },
+  {
+   "detail": {
+    "candidate_unknown": 0
+   },
+   "result": "met",
+   "scenario": "unv",
+   "target": "unknown outcomes 0"
+  },
+  {
+   "detail": {
+    "candidate_unknown": 0
+   },
+   "result": "met",
+   "scenario": "ver",
+   "target": "unknown outcomes 0"
+  },
+  {
+   "detail": {
+    "candidate_unknown": 0
+   },
+   "result": "met",
+   "scenario": "retry",
+   "target": "unknown outcomes 0"
+  },
+  {
+   "detail": {
+    "candidate_unknown": 0
+   },
+   "result": "met",
+   "scenario": "unv16",
+   "target": "unknown outcomes 0"
+  },
+  {
+   "detail": {
+    "runs": []
+   },
+   "result": "met",
+   "scenario": "all",
+   "target": "violations, definite failures visible, scrub findings: 0 in every valid run"
+  },
+  {
+   "detail": {
+    "valid": 2
+   },
+   "result": "met",
+   "scenario": "fdbstall",
+   "target": "correctness runs"
+  },
+  {
+   "detail": {
+    "valid": 2
+   },
+   "result": "met",
+   "scenario": "gwkill",
+   "target": "correctness runs"
+  }
+ ],
+ "verdict": "adopt"
+}

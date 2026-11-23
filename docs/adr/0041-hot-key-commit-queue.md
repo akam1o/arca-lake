@@ -1,9 +1,11 @@
 # ADR-0041: Per-key commit queue and conflict backoff in the gateway
 
-Status: **proposed** (0.2.0 preparation, R-112). Implemented with tests;
-adoption depends on the pre-registered A/B
-([plan](../verification/0.2.0-hot-key-plan.md)). No record, key, protocol
-or format change.
+Status: **accepted** (0.2.0 preparation, R-112). Adopted by the
+pre-registered A/B ([plan](../verification/0.2.0-hot-key-plan.md),
+[results](../verification/0.2.0-hot-key-results.md)): on one key through
+four gateways SlowDown 55 % → 0.5–0.8 %, acknowledged PUT/s 1.6–1.7 ×,
+16 keys unchanged; acknowledged PUTs on one key wait longer (p50 about
+200 → 450 ms). No record, key, protocol or format change.
 
 ## 1. Problem
 

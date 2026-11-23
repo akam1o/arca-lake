@@ -66,8 +66,11 @@ entry in the [risk register](../architecture/risks.md).
   tiers until it is demoted (readable throughout).
 - R-111: small objects cost far more node capacity than their payload
   (about 24 KiB for a 1 KiB object with three replicas).
-- R-112: concurrent overwrites of one hot key are often answered `503
-  SlowDown` (55 % of PUTs with 64 writers on one key, measured).
+- R-112 (reduced in 0.2.0 preparation, ADR-0041): with 64 writers on
+  one key through four gateways, under 1 % of PUTs are answered `503
+  SlowDown` (55 % in 0.1.0), but each write waits for the ones ahead of
+  it (acknowledged p50 about 450 ms, p99 about 1.7 s, measured); a wait
+  beyond 2 s is refused.
 - R-109: access recording costs GET throughput: 7–14 % below
   `--access-records off`, 12–19 % where tiering acts; with tiering not
   wanted, `admin tiering disable` (after finalizing schema 4) removes it.
