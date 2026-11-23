@@ -80,6 +80,7 @@ mod request_metrics;
 #[cfg(feature = "fdb")]
 mod retirement_crash;
 mod s3_compat;
+mod s3_errors;
 mod scrub_classes;
 mod system_model;
 mod tiering;

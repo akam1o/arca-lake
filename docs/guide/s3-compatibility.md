@@ -19,3 +19,7 @@ for clients:
 - `409 ConditionalRequestConflict` is never returned; conditional writes
   are serialized by FoundationDB.
 - The minimum part size is 5 MiB by default (`--multipart-min-part-bytes`).
+- Re-creating a bucket you own is `409 BucketAlreadyOwnedByYou` in every
+  region, including us-east-1, where AWS answers `200 OK`.
+- A body that does not match its signed `x-amz-content-sha256` is `400
+  XAmzContentSHA256Mismatch`; nothing is stored.
