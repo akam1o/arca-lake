@@ -188,13 +188,14 @@ impl FenceView {
 /// Reason labels of `arca_controller_repair_groups` (Phase 3.14), in the
 /// order of [`Metrics::repair_groups_by_reason`]; "none": a `Repairing`
 /// group with no status yet.
-pub const REPAIR_REASONS: [&str; 7] = [
+pub const REPAIR_REASONS: [&str; 8] = [
     "progressing",
     "temporarily-blocked",
     "awaiting-capacity",
     "awaiting-nodes",
     "data-unrecoverable",
     "permanently-blocked",
+    "awaiting-failure-domain",
     "none",
 ];
 
@@ -308,6 +309,21 @@ pub struct Metrics {
     /// Durable groups rebuilding a member whose former node does not
     /// answer: one shard of redundancy short until the rebuild ends (R-65).
     pub groups_reduced_redundancy: AtomicU64,
+    /// Groups whose members break their recorded failure domain (two in
+    /// one domain, or one whose domain is unknown), per the last repair
+    /// pass (ADR-0038, R-119).
+    pub groups_failure_domain_violations: AtomicU64,
+    /// Groups of several members without a recorded failure domain: no
+    /// member of theirs is moved until one is set (ADR-0038).
+    pub groups_failure_domain_unrecorded: AtomicU64,
+    /// Of those, groups with a member down or a repair under way: a
+    /// failure there is not repaired until a domain is recorded (ADR-0038).
+    pub groups_failure_domain_unrecorded_at_risk: AtomicU64,
+    /// Member moves refused by the failure-domain rule (ADR-0038).
+    pub failure_domain_refusals_total: AtomicU64,
+    /// Leader term of the last failure-domain findings logged. Not
+    /// exported.
+    pub failure_domain_audit_term: AtomicU64,
     /// Retired generations waiting for GC after the last pass (counted up
     /// to a cap) and the age of the oldest (R-64).
     pub gc_backlog: AtomicU64,
@@ -343,7 +359,7 @@ pub struct Metrics {
     /// `Repairing` groups by the reason of their status at the last repair
     /// pass (Phase 3.14; index: [`REPAIR_REASONS`], the last one "none":
     /// no status yet).
-    pub repair_groups_by_reason: [AtomicU64; 7],
+    pub repair_groups_by_reason: [AtomicU64; 8],
     /// Seconds since the `Repairing` group that waited longest last made
     /// progress (its status's `last_progress_ms`, else `since_ms`), and
     /// that group (0: none).
@@ -679,6 +695,10 @@ impl Metrics {
             self.repair_retargets_total.load(Ordering::Relaxed),
         );
         out += &c(
+            "arca_controller_failure_domain_refusals_total",
+            self.failure_domain_refusals_total.load(Ordering::Relaxed),
+        );
+        out += &c(
             "arca_controller_reconcile_errors_total",
             self.reconcile_errors_total.load(Ordering::Relaxed),
         );
@@ -895,6 +915,18 @@ impl Metrics {
             (
                 "arca_controller_groups_reduced_redundancy",
                 &self.groups_reduced_redundancy,
+            ),
+            (
+                "arca_controller_groups_failure_domain_violations",
+                &self.groups_failure_domain_violations,
+            ),
+            (
+                "arca_controller_groups_failure_domain_unrecorded",
+                &self.groups_failure_domain_unrecorded,
+            ),
+            (
+                "arca_controller_groups_failure_domain_unrecorded_at_risk",
+                &self.groups_failure_domain_unrecorded_at_risk,
             ),
             ("arca_controller_gc_backlog", &self.gc_backlog),
             (

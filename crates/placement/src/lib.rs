@@ -133,12 +133,15 @@ pub fn choose_group_members(
 /// whose failure domain differs from every remaining member's. The
 /// remaining members are given as devices, labels included, so that each
 /// one's domain is known (the candidates usually leave them out, and may
-/// leave out members that are unhealthy: their domains still count).
+/// leave out members that are unhealthy: their domains still count). A
+/// candidate without the label is not eligible (its domain cannot be
+/// compared), and does not stop the choice among the others (R-119).
 ///
 /// # Errors
 ///
-/// As [`choose_group_members`]; [`PlacementError::MissingLabel`] for a
-/// remaining member without the failure-domain label.
+/// [`PlacementError::InsufficientDomains`] when no eligible candidate is
+/// in a free domain; [`PlacementError::MissingLabel`] for a remaining
+/// member without the failure-domain label.
 pub fn choose_replacement(
     candidates: &[Device],
     spec: &GroupSpec,
@@ -148,7 +151,12 @@ pub fn choose_replacement(
     for d in remaining {
         excluded.insert(domain_of(d, &spec.failure_domain)?.to_string());
     }
-    let devices = candidates;
+    let devices: Vec<Device> = candidates
+        .iter()
+        .filter(|d| d.labels.contains_key(&spec.failure_domain))
+        .cloned()
+        .collect();
+    let devices = &devices;
     let one = GroupSpec {
         total_shards: 1,
         failure_domain: spec.failure_domain.clone(),
@@ -277,6 +285,26 @@ mod tests {
         assert!(matches!(
             choose_replacement(&[dev(2, "b", "r1", 100, 0)], &spec, &[m]),
             Err(PlacementError::MissingLabel { .. })
+        ));
+    }
+
+    /// R-119: an unlabeled candidate used to fail every replacement with
+    /// `MissingLabel`; it is now passed over.
+    #[test]
+    fn an_unlabeled_candidate_is_passed_over() {
+        let mut bare = dev(7, "x", "r1", 1000, 0);
+        bare.labels.remove("host");
+        let spec = GroupSpec {
+            total_shards: 3,
+            failure_domain: "host".into(),
+        };
+        let remaining = [dev(1, "a", "r1", 100, 1), dev(2, "b", "r1", 100, 1)];
+        let r = choose_replacement(&[bare.clone(), dev(3, "c", "r1", 10, 5)], &spec, &remaining)
+            .unwrap();
+        assert_eq!(r.node_id, 3);
+        assert!(matches!(
+            choose_replacement(&[bare], &spec, &remaining),
+            Err(PlacementError::InsufficientDomains { .. })
         ));
     }
 

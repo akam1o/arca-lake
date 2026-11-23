@@ -8,7 +8,7 @@ design, not a tuning hint; violating one voids a guarantee.
 | FoundationDB on its own storage, with a supervisor restarting `fdbserver` | A transaction log commit stalled for more than 10 s stops FoundationDB (`io_timeout`); on shared virtual storage this happened under load in Phase 3.5 and 3.6 | R-79 |
 | One file system (device) per storage node, or `--capacity-bytes` allotments that sum to at most its size | Capacity admission is per node; nodes sharing free space can together cross their reserves. The controller detects shared file systems and keeps their groups out of placement | R-80, `admin check-config` |
 | Free space above each node's reserve in normal operation | Writes are throttled near it and refused at it; the reserve is for compaction, rollover, quarantine and repair | RFC-008 §6.8 |
-| Distinct failure domains (`--failure-domain` label values) per group member | A group tolerates `m` member losses only if they fail independently. Replacements use the controller's `--failure-domain`: keep it the label the groups were created with (a group's own label is not recorded; R-119) | RFC-004 §5.3 |
+| Distinct failure domains (values of the group's label) per group member, and every group's failure domain recorded | A group tolerates `m` member losses only if they fail independently. Groups created by 0.2.0 record their label; a group created by 0.1.0 moves no member (no repair onto a new node, replacement or drain) until `admin group set-failure-domain --group G --label L` (or `--all-unrecorded`) records the label it was created with — it is never inferred. `admin group check` (and `admin status`) lists groups with two members in one domain, groups without a record and members whose node lacks the label; move a member with `admin replace-member`. Every member move keeps the recorded label, whatever the controller's `--failure-domain`; registering a node without a label its groups need is refused. Until `admin upgrade finalize` reaches schema 5 a 0.1.0 leader ignores the records (reported as degraded; the next 0.2.0 leader re-checks), and that finalize waits until every group is recorded | ADR-0038, R-119 |
 | Mutual TLS for node RPCs and TLS to FoundationDB | Plaintext is refused unless explicitly enabled | ADR-0017 |
 | A TLS terminator in front of the gateways | The S3 listener speaks plain HTTP | RFC-012 |
 | At least two controllers | Leadership fails over by lease; a single controller stops GC, repair and write admission while down (gateways then refuse new data after 5 minutes) | RFC-011, RFC-008 §6.8 |
@@ -116,6 +116,39 @@ From the cut-off on there is no way back to 0.1.0:
   `replace-member`, `recovery`, `restore`, ...) after the cut-off. They
   do not check the schema gate and know none of the 0.2.0 keys. Use the
   0.2.0 binary's `admin`.
+
+### Upgrading from 0.1.0: record the groups' failure domains
+
+Groups created by 0.1.0 have no recorded failure domain (ADR-0038), and
+a 0.2.0 leader moves none of their members (no auto repair onto a new
+node, no `replace-member`, no drain) until one is recorded. As soon as
+the controllers run 0.2.0 (after the storage nodes, before the
+gateways), as a step of the upgrade:
+
+1. `arca-lake admin group set-failure-domain --all-unrecorded --label
+   <label> --dry-run` lists the groups without a record and what would
+   be recorded. `<label>` is the label the groups were created with (the
+   0.1.0 controllers' `--failure-domain`, `host` by default); it is never
+   inferred. Groups created with different labels are recorded one at a
+   time with `--group <id>`.
+2. The same command without `--dry-run` records it. It refuses, writing
+   nothing, a label that no member's node of a listed group carries
+   (`--force` overrides). Exit 0: recorded; 2: recorded with warnings
+   (members on one value of the label, or without it); 1: refused.
+3. `arca-lake admin group check` exits 0 once every group is recorded
+   and its members keep their domain; otherwise move the members it
+   names with `admin replace-member`.
+
+Until then `admin status` prints a `WARNING: failure domain unrecorded
+on groups ...` line for unrecorded groups with a member down or a
+repair under way, `arca_controller_groups_failure_domain_unrecorded_at_risk`
+counts them, and their repair status shows `awaiting-failure-domain`:
+a failure there is not repaired until the domain is recorded. The
+finalize to metadata schema 5 is refused while a group is unrecorded,
+at its first step and again at the downgrade cut-off (a group a 0.1.0
+`admin create-groups` made meanwhile is caught too). A cluster created
+by 0.2.0 starts at schema 5 with every group recorded: none of this
+applies to it.
 
 ## Reading a scrub
 

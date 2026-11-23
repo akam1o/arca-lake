@@ -70,14 +70,13 @@ pub async fn register_node<S: KvStore>(
         Box::pin(async move {
             crate::ops::node_lifecycle::no_restore_in_progress(tx).await?;
             let (address, labels, devices, now_ms) = env;
-            let existing = tx
+            let all = tx
                 .get_range(&KeyRange::prefix(&keys::nodes_prefix()), usize::MAX, false)
                 .await?
                 .into_iter()
                 .map(|(_, v)| decode::<NodeRecord>(&v))
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .find(|n| n.address == *address);
+                .collect::<Result<Vec<_>>>()?;
+            let existing = all.iter().find(|n| n.address == *address).cloned();
             // No new node while a finalize is past its cut-off: its last
             // step waits for every node to hold the new floor and format,
             // and a node added meanwhile could escape it (Phase 3.10
@@ -110,6 +109,8 @@ pub async fn register_node<S: KvStore>(
                     )));
                 }
             }
+            missing_domain_labels(tx, &all, existing.as_ref().map(|n| n.id), address, labels)
+                .await?;
             let id = if let Some(n) = &existing {
                 n.id
             } else {
@@ -131,6 +132,58 @@ pub async fn register_node<S: KvStore>(
         })
     })
     .await
+}
+
+/// Refuse a node registration without a label that the recorded failure
+/// domain of a group it could join requires (ADR-0038): a group whose
+/// members have its `device_class` (a replacement never crosses device
+/// classes), or every group when it is a member already. Such a node
+/// could never be checked against the group's other members' domains.
+async fn missing_domain_labels<X: crate::kv::Txn>(
+    tx: &mut X,
+    all: &[NodeRecord],
+    id: Option<u64>,
+    address: &str,
+    labels: &[(String, String)],
+) -> Result<()> {
+    let domains = crate::ops::group_domain::list_in_tx(tx).await?;
+    if domains.is_empty() {
+        return Ok(());
+    }
+    let class_of = |l: &[(String, String)]| {
+        crate::ops::group_domain::label_value(l, "device_class").map(str::to_string)
+    };
+    let own_class = class_of(labels);
+    let groups = tx
+        .get_range(&KeyRange::prefix(&keys::groups_prefix()), usize::MAX, false)
+        .await?
+        .into_iter()
+        .map(|(_, v)| decode::<GroupRecord>(&v))
+        .collect::<Result<Vec<_>>>()?;
+    let mut needed: std::collections::BTreeMap<&str, Vec<u64>> = std::collections::BTreeMap::new();
+    for g in groups.iter().filter(|g| g.members.len() > 1) {
+        let Some(d) = domains.get(&g.id) else {
+            continue;
+        };
+        if crate::ops::group_domain::label_value(labels, &d.label).is_some() {
+            continue;
+        }
+        let member = id.is_some_and(|id| g.members.iter().any(|m| m.node_id == id));
+        let joinable = g.members.iter().any(|m| {
+            all.iter()
+                .find(|n| n.id == m.node_id)
+                .is_some_and(|n| class_of(&n.labels) == own_class)
+        });
+        if member || joinable {
+            needed.entry(d.label.as_str()).or_default().push(g.id);
+        }
+    }
+    if let Some((label, groups)) = needed.into_iter().next() {
+        return Err(crate::MetaError::InvalidArgument(format!(
+            "node at {address} has no '{label}' label, which the recorded failure domain of groups {groups:?} requires: register it with --label {label}=<value>"
+        )));
+    }
+    Ok(())
 }
 
 /// All registered nodes.
@@ -164,6 +217,41 @@ pub async fn create_group<S: KvStore>(store: &S, group: GroupRecord) -> Result<G
             g.id = next_id(tx, &keys::group_counter()).await?;
             g.epoch = 1;
             write(tx, &keys::group(g.id), &g)?;
+            bump_map_version(tx).await?;
+            Ok(g)
+        })
+    })
+    .await
+}
+
+/// [`create_group`] with its required failure domain `label` recorded in
+/// the same transaction (ADR-0038): a group never exists without it.
+///
+/// # Errors
+///
+/// Backend errors.
+pub async fn create_group_in_domain<S: KvStore>(
+    store: &S,
+    group: GroupRecord,
+    label: &str,
+    now_ms: u64,
+) -> Result<GroupRecord> {
+    transact(store, (group, label, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (group, label, now_ms) = env;
+            let mut g = group.clone();
+            g.id = next_id(tx, &keys::group_counter()).await?;
+            g.epoch = 1;
+            write(tx, &keys::group(g.id), &g)?;
+            crate::ops::group_domain::put_in_tx(
+                tx,
+                &crate::ops::group_domain::GroupDomain {
+                    group: g.id,
+                    label: (*label).to_string(),
+                    source: crate::ops::group_domain::DomainSource::Created,
+                    set_ms: *now_ms,
+                },
+            )?;
             bump_map_version(tx).await?;
             Ok(g)
         })

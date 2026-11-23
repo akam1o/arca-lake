@@ -432,6 +432,10 @@ async fn precondition<S: KvStore>(
         }
     }
     blockers.extend(procs_below(meta, cur, now_ms).await?);
+    // From schema 5 no 0.1.0 process runs: every group's failure domain
+    // must be recorded first (ADR-0038); re-checked at the cut-off, so a
+    // group a 0.1.0 `admin create-groups` made meanwhile blocks it too.
+    blockers.extend(crate::failure_domain::finalize_blocker(meta, target.schema).await?);
     Ok(blockers)
 }
 

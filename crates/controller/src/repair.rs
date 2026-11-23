@@ -397,17 +397,21 @@ pub async fn replace_member_with<S: KvStore>(
         }
         fence(clients, &nodes, &group, replacement, new_epoch).await?;
         hook(RepairStep::Fenced).await?;
-        let updated = epoch_intent::commit(meta, group_id, expected_epoch, |g| {
-            g.members[index] = replacement;
-            g.state = GroupState::Repairing;
-            // The cursor names the member being rebuilt from the start, so
-            // that any controller can resume the repair (RFC-011 §5.5).
-            g.repair_cursor = Some(RepairCursor {
-                member,
-                chunk_id: [0; 16],
-            });
-        })
-        .await?;
+        // The membership commit checks the group's recorded failure
+        // domain in its own transaction (ADR-0038): whoever chose the
+        // replacement, it never commits into a domain the group uses.
+        let updated =
+            epoch_intent::commit_member(meta, group_id, expected_epoch, index, replacement, |g| {
+                g.members[index] = replacement;
+                g.state = GroupState::Repairing;
+                // The cursor names the member being rebuilt from the start, so
+                // that any controller can resume the repair (RFC-011 §5.5).
+                g.repair_cursor = Some(RepairCursor {
+                    member,
+                    chunk_id: [0; 16],
+                });
+            })
+            .await?;
         if updated.epoch != new_epoch || updated.members[index] != replacement {
             return Err(ControlError::EpochChanged {
                 group: group_id,

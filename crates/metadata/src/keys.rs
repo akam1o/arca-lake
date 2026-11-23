@@ -25,6 +25,7 @@
 //! | `("al","mpp",upload_id,part_number)` | `PartRecord` | sealed part of an upload |
 //! | `("al","scrub",group_id)` | `ScrubCursor` | scrub progress of a group (RFC-008 §8.3) |
 //! | `("al","repair",group_id,chunk_id)` | `RepairTask` | stripe repair task (RFC-008 §8.5) |
+//! | `("al","gdomain",group_id)` | `GroupDomain` | a group's required failure domain (ADR-0038) |
 //! | `("al","pend",lease_until_ms,gen)` | empty | pending generations by lease expiry |
 //! | `("al","gc",since_ms,gen)` | empty | retired generations awaiting GC |
 //!
@@ -841,6 +842,20 @@ pub fn group(group_id: u64) -> Key {
 #[must_use]
 pub fn groups_prefix() -> Key {
     pack(&(ROOT, "grp"))
+}
+
+/// Required failure domain of a group (ADR-0038, R-119): a key of its
+/// own, which earlier releases never read or rewrite (a field appended to
+/// `GroupRecord` would be dropped by a 0.1.0 process rewriting the group).
+#[must_use]
+pub fn group_domain(group_id: u64) -> Key {
+    pack(&(ROOT, "gdomain", group_id))
+}
+
+/// Prefix of every group's failure domain record.
+#[must_use]
+pub fn group_domains_prefix() -> Key {
+    pack(&(ROOT, "gdomain"))
 }
 
 /// Group ID allocator.

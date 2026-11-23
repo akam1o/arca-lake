@@ -13,7 +13,10 @@
 //! 2. storage nodes upgraded one at a time (one SIGKILLed right after its
 //!    start and started again);
 //! 3. controllers, the follower first, then the leader;
-//! 4. gateways: while a 0.1.0 gateway runs, the finalize is refused;
+//! 4. gateways: while a 0.1.0 gateway runs, the finalize is refused; it
+//!    is refused too until the group 0.1.0 created has its failure domain
+//!    recorded (`admin group set-failure-domain`, ADR-0038), which
+//!    `admin group check` reports after the controllers' upgrade;
 //! 5. rollback before finalize: a node, a controller and a gateway back to
 //!    0.1.0 (a scrub reports the 0.1.0 node's retired records as
 //!    unclassified, not unexpected; the finalize refused because of the
@@ -357,6 +360,13 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
     *lead_p = controller(&env, &lead, true);
     leader(&env).await;
     c.exercise(&s3_old, "both controllers upgraded").await;
+    // ADR-0038: the group 0.1.0 created has no recorded failure domain
+    // (never inferred), reported while the protections are degraded.
+    let (ok, check) = env.admin(true, &["group", "check"]);
+    assert!(
+        !ok && check.contains("no recorded failure domain") && check.contains("degraded"),
+        "a 0.1.0 group after the upgrade: {check}"
+    );
 
     // ---- 4. Gateways. With a 0.1.0 gateway running, the finalize is
     // refused and cancelled; protections are degraded.
@@ -394,6 +404,26 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
     gw_old.kill();
     gone.push(gw_old_addr.clone());
     c.exercise(&s3, "0.1.0 gateway stopped").await;
+    // ADR-0038: the finalize also waits for the group's failure domain;
+    // the runbook step records it (the label 0.1.0 created it with).
+    let (ok, text) = finalize(&env, &gone, 10);
+    assert!(
+        !ok && text.contains("no recorded failure domain"),
+        "finalize with an unrecorded group: {text}"
+    );
+    env.admin_ok(true, &["upgrade", "cancel"]);
+    let set = env.admin_ok(
+        true,
+        &[
+            "group",
+            "set-failure-domain",
+            "--all-unrecorded",
+            "--label",
+            "node",
+        ],
+    );
+    assert!(set.contains("failure domain 'node' recorded"), "{set}");
+    env.admin_ok(true, &["group", "check"]);
 
     // ---- 5. Rollback before finalize. A node, a controller and a
     // gateway first: the node holds the finalize back. The 0.1.0 node

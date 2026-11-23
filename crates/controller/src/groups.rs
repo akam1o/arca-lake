@@ -56,7 +56,8 @@ pub fn devices_of(nodes: &[NodeRecord], groups: &[GroupRecord]) -> Vec<Device> {
 /// Create `count` groups for `profile` on `tier` (plus, if the profile has a
 /// small-object policy, `count` replication groups), choosing members across
 /// the profile's failure domain from every registered node. Returns the
-/// created groups.
+/// created groups. Each group's failure domain is recorded with it
+/// (ADR-0038).
 ///
 /// # Errors
 ///
@@ -145,7 +146,13 @@ async fn create_groups_from<S: KvStore>(
                 repair_cursor: None,
                 role: GroupRole::Durable,
             };
-            let g = cluster::create_group(meta, group).await?;
+            let g = cluster::create_group_in_domain(
+                meta,
+                group,
+                &profile.failure_domain,
+                crate::process::now_ms(),
+            )
+            .await?;
             existing.push(g.clone());
             created.push(g);
         }
@@ -289,7 +296,13 @@ pub async fn create_cache_groups<S: KvStore>(
                 device_id: m.device_id,
             })
             .collect();
-        let g = cluster::create_group(meta, record(members)).await?;
+        let g = cluster::create_group_in_domain(
+            meta,
+            record(members),
+            failure_domain,
+            crate::process::now_ms(),
+        )
+        .await?;
         existing.push(g.clone());
         created.push(g);
     }

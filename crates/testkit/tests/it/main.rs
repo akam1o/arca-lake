@@ -36,6 +36,7 @@ mod e2e;
 mod e2e_fdb;
 mod e2e_tls;
 mod epoch_intent;
+mod failure_domain;
 mod faults;
 #[cfg(feature = "fdb")]
 mod faults_fdb;
