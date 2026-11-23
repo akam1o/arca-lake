@@ -179,7 +179,11 @@ Results are written by criterion to `target/criterion/`.
   (`<evidence>/<run id>/private/`; a public summary in `public/`).
   `teardown --evidence DIR` removes the host's run directories only when
   every process is confirmed stopped and that collection is complete
-  (plan §6.2, "Evidence before teardown"). A process found gone after
+  (plan §6.2, "Evidence before teardown"). A log over its cap keeps the
+  run until it is collected again with a larger cap (`--log-cap`,
+  `--log-total-cap`; the deadline and timeouts with `--collect-deadline`,
+  `--inventory-timeout`, `--call-timeout`; the values used are in the
+  manifest). A process found gone after
   the host's boot ID changed is recorded as ended by the reboot, never as
   stopped.
   `example-run.json` is an unapproved example with placeholders.

@@ -457,6 +457,10 @@ class FinalStops(unittest.TestCase):
         c.ledger_records = lambda: []
         c.fdb_data = os.path.join(self.tmp.name, "fdb")
         c.boot_id_path = os.path.join(self.tmp.name, "boot_id")
+        # The boot the run started on, as setup records it.
+        with open(c.boot_id_path, "w") as f:
+            f.write("boot-1\n")
+        c.py(remote.BOOT, c.boot_id_path, c.run_dir + "/host-boot.json")
         self.c = c
 
     def kill_extra(self):

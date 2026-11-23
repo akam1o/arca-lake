@@ -369,6 +369,7 @@ class FakeCluster:
     def collect_evidence(self, dest, meta=None, **kw):
         """The real manifest's shape (evidence.collect)."""
         self.stop_calls.append(("collect_evidence", None))
+        self.collect_kw = kw
         if self.fail_collect:
             raise OSError("collection failed")
         return {"complete": not self.incomplete, "attempt": 1, "files": [],
@@ -1177,6 +1178,45 @@ class ReviewFindingsEngine(EngineBase):
         self.assertFalse(e.tl["host_evidence"]["complete"])
         self.assertTrue(any(f.startswith("host_evidence: incomplete") for f in e.result["evidence_failures"]))
 
+    def test_a_boot_not_compared_or_a_reboot_gives_gone_verdicts_their_cause(self):
+        for boot, cause in (({"rebooted": True}, "host-reboot"), ({"rebooted": None}, "unknown"),
+                            (RuntimeError("ssh: lost"), "unknown")):
+            c = FakeCluster(self.cfg, self.clock)
+
+            def check(boot=boot):
+                if isinstance(boot, Exception):
+                    raise boot
+                return boot
+
+            c.boot_check = check
+            e = self.ended(c)
+            self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE, boot)
+            self.assertTrue(e.tl["final_stops"]["stop_load"]["load"]["cause"].startswith(cause), boot)
+            self.assertNotIn("cause", e.tl["final_stops"]["stop_load"]["guard"])  # stopped, not gone
+            self.assertTrue(any(f.startswith(("host_boot: not compared", "the host booted again"))
+                                for f in e.result["evidence_failures"]), boot)
+        c = FakeCluster(self.cfg, self.clock)
+        c.boot_check = lambda: {"rebooted": False}
+        e = self.ended(c)
+        self.assertEqual(e.result["outcome"], judge.PASSED)
+        self.assertNotIn("cause", e.tl["final_stops"]["stop_load"]["load"])
+
+    def test_evidence_with_writers_not_confirmed_stopped_is_not_complete(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.verdicts = {"node1.json": {"verdict": "not-stopped", "state": "alive"}}
+        e = self.ended(c)
+        self.assertFalse(e.tl["host_evidence"]["complete"])
+        self.assertEqual(e.tl["host_evidence"]["state"], "complete, writers not confirmed stopped")
+
+    def test_the_collection_limits_reach_the_collection(self):
+        c = FakeCluster(self.cfg, self.clock)
+        root = tempfile.mkdtemp(dir=self.dir)
+        engine = driver.Run(self.cfg, c, driver.Evidence(root, self.cfg["run_id"]), self.clock,
+                            collect={"log_cap": 5 << 20, "call_s": 30.0})
+        with self.passing():
+            engine.finish()
+        self.assertEqual(c.collect_kw, {"deadline_s": driver.COLLECT_S, "log_cap": 5 << 20, "call_s": 30.0})
+
     def test_a_service_not_stopped_is_retried_then_keeps_the_watching(self):
         for verdict in ({"verdict": "not-stopped", "state": "alive"}, {"verdict": "unverified", "reason": "x"}):
             c = FakeCluster(self.cfg, self.clock)
@@ -1344,7 +1384,7 @@ class Commands(Base):
         out = c.teardown(os.path.join(self.dir, "evidence"))
         rms = [cmd for _, cmd, _ in rec.commands if "rm " in cmd]
         self.assertEqual(len(rms), 2)
-        for cmd, d in zip(rms, (cfg["remote"]["run_dir"], cfg["remote"]["fdb_data"])):
+        for cmd, d in zip(rms, (cfg["remote"]["fdb_data"], cfg["remote"]["run_dir"])):
             self.assertIn(f"rm -rf -- {d}", cmd)
             self.assertIn(f"cat {d}/.r110-run", cmd)
             self.assertIn(cfg["run_id"], cmd)

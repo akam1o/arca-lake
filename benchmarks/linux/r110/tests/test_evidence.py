@@ -6,8 +6,10 @@ checksum mismatch, permission errors, a reboot-like disappearance (the
 processes killed and the boot ID changed), a log over the cap."""
 
 import base64
+import contextlib
 import copy
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -36,6 +38,7 @@ class Host:
         self.drop_after_reads = None
         self.corrupt = 0
         self.before_read = None  # (path, fn): fn called once, before that file's first read
+        self.fail_rm = None  # a path: its removal fails as a lost connection does
         self.reads = 0
         self.log = []  # (kind, command) of every call made
 
@@ -53,7 +56,7 @@ class Host:
     def __call__(self, target, command, stdin=None, timeout=120):
         k = self.kind(command, stdin)
         self.log.append(k)
-        if self.down:
+        if self.down or (k == "rm" and self.fail_rm and self.fail_rm in command):
             return SSH_DOWN
         if k == "read":
             self.reads += 1
@@ -180,7 +183,7 @@ class Teardown(Base):
         want = self.evidence_files()
         out = self.c.teardown(self.ev)
         self.assertNotIn("kept", out, out)
-        self.assertEqual(out["removed"], [self.c.run_dir, self.c.fdb_data])
+        self.assertEqual(out["removed"], [self.c.fdb_data, self.c.run_dir])
         self.assertFalse(os.path.exists(self.c.run_dir))
         self.assertEqual({out["stopped"][n + ".json"]["verdict"] for n in ("node0", "node1")}, {"stopped"})
         # The stops came first; the collection after them; the removal last.
@@ -369,8 +372,97 @@ class Teardown(Base):
         self.assertTrue(f["capped"])
         with open(self.path("run/logs/node0.log"), "rb") as a, open(self.saved("run/logs/node0.log"), "rb") as b:
             self.assertEqual(b.read(), a.read()[-1000:])
-        out = self.c.teardown(self.ev)  # the default cap
+        self.assertEqual(self.manifest()["limits"]["log_cap"], 1000)
+        out = self.c.teardown(self.ev, log_cap=1 << 20)  # the cap raised
         self.assertNotIn("kept", out, out)
+        self.assertEqual(self.manifest()["limits"]["log_cap"], 1 << 20)
+
+    def test_a_collection_after_the_removal_keeps_every_saved_entry(self):
+        out = self.c.teardown(self.ev)
+        self.assertNotIn("kept", out, out)
+        first = self.manifest()
+        public = json.load(open(os.path.join(self.ev, "public", "evidence-summary.json")))
+        # Collected again with nothing left on the host: the manifest and the
+        # summary keep every file saved, each saved copy read again.
+        man = self.c.collect_evidence(self.ev)
+        self.assertEqual((man["attempt"], man["complete"]), (2, True))
+        self.assertEqual(self.manifest(), man)
+        self.assertEqual({f["path"]: f["sha256"] for f in man["files"]},
+                         {f["path"]: f["sha256"] for f in first["files"]})
+        self.assertEqual({f.get("host") for f in man["files"]}, {"gone"})
+        again = json.load(open(os.path.join(self.ev, "public", "evidence-summary.json")))
+        self.assertEqual(len(again["files"]), len(public["files"]))
+        self.assertEqual(again["bytes_saved"], public["bytes_saved"])
+        # A saved copy lost since is an error, never a smaller complete manifest.
+        os.remove(self.saved("run/load/ledger.jsonl"))
+        man = self.c.collect_evidence(self.ev)
+        self.assertFalse(man["complete"])
+        self.assertIn("run/load/ledger.jsonl", [e["path"] for e in man["errors"]])
+
+    def test_a_teardown_cut_between_its_two_removals_resumes_on_the_rest(self):
+        """The test FoundationDB's directory removed, the connection lost
+        before the run directory: the next teardown finds the run directory
+        alone (its records and tools intact: removed last), keeps the files
+        saved from the other in the manifest and checks them again before it
+        removes the rest."""
+        self.host.fail_rm = self.c.run_dir
+        out = self.c.teardown(self.ev)
+        self.assertEqual((out["removed"], out["kept_dirs"]), ([self.c.fdb_data], [self.c.run_dir]))
+        self.assertFalse(os.path.isdir(self.c.fdb_data))
+        self.host.fail_rm = None
+        trace = self.saved("fdb/l/trace.0.xml")
+        with open(trace, "rb") as f:
+            good = f.read()
+        # A saved copy of a file now gone from the host differs: kept.
+        with open(trace, "ab") as f:
+            f.write(b"x")
+        out = self.c.teardown(self.ev)
+        self.assertIn("not saved complete", out["kept"])
+        self.assertTrue(os.path.isdir(self.c.run_dir))
+        self.assertIn("fdb/l/trace.0.xml", [e["path"] for e in self.manifest()["errors"]])
+        with open(trace, "wb") as f:
+            f.write(good)
+        # Changed after this collection, before the removal: kept.
+        collect = self.c.collect_evidence
+
+        def tampered(dest, **kw):
+            man = collect(dest, **kw)
+            with open(trace, "ab") as f:
+                f.write(b"x")
+            return man
+
+        self.c.collect_evidence = tampered
+        out = self.c.teardown(self.ev)
+        self.assertIn("no longer matches", out["kept"])
+        self.assertTrue(os.path.isdir(self.c.run_dir))
+        self.c.collect_evidence = collect
+        with open(trace, "wb") as f:
+            f.write(good)
+        out = self.c.teardown(self.ev)
+        self.assertNotIn("kept", out, out)
+        self.assertEqual(out["removed"], [self.c.run_dir])
+        man = self.manifest()
+        self.assertTrue(man["complete"])
+        self.assertEqual({f["path"] for f in man["files"] if f.get("host") == "gone"},
+                         {p for p in self.saved_paths() if p.startswith("fdb/")})
+
+    def saved_paths(self):
+        out = set()
+        top = os.path.join(self.ev, "private", "host")
+        for d, _, files in os.walk(top):
+            out |= {os.path.relpath(os.path.join(d, n), top) for n in files}
+        return out
+
+    def test_a_link_to_a_directory_is_named_as_skipped(self):
+        os.symlink(os.path.join(self.c.run_dir, "logs"), os.path.join(self.c.run_dir, "loglink"))
+        out = self.c.teardown(self.ev)
+        self.assertNotIn("kept", out, out)
+        man = self.manifest()
+        self.assertEqual([(s["path"], s["why"]) for s in man["skipped"]],
+                         [("run/loglink", "a link to a directory (not followed)")])
+        self.assertNotIn("run/loglink/node0.log", [f["path"] for f in man["files"]])
+        self.assertEqual(json.load(open(os.path.join(self.ev, "public", "evidence-summary.json")))["skipped"],
+                         ["run/loglink"])
 
     def test_no_evidence_directory_removes_nothing(self):
         out = self.c.teardown()
@@ -398,6 +490,42 @@ class Command(unittest.TestCase):
                     rc = driver.main([cmd, p, "--execute", "--approval", a], now=NOW,
                                      cluster_factory=lambda c: made.append(c) or FakeCluster(copy.deepcopy(c)))
                 self.assertEqual(rc, 2, cmd)
+
+    def test_the_collection_limits_are_set_from_the_command_line(self):
+        from r110.tests.test_driver import FakeCluster, NOW
+        with tempfile.TemporaryDirectory() as d, open(EXAMPLE) as f:
+            cfg = json.load(f)
+            cfg["local_dir"] = os.path.join(d, "operator")
+            p = os.path.join(d, "run.json")
+            with open(p, "w") as f2:
+                json.dump(cfg, f2)
+            a = os.path.join(d, "approval.json")
+            with open(a, "w") as f2:
+                json.dump({"config_sha256": sha(p), "scope": ["collect", "teardown"],
+                           "window_start": "2027-01-01T00:00:00+00:00", "window_end": "2027-01-02T00:00:00+00:00",
+                           "approved_by": "approver"}, f2)
+            flags = ["--log-cap", "256M", "--log-total-cap", "2G", "--collect-deadline", "3600",
+                     "--inventory-timeout", "900", "--call-timeout", "300"]
+            want = {"log_cap": 256 << 20, "total_cap": 2 << 30, "deadline_s": 3600.0, "inventory_s": 900.0,
+                    "call_s": 300.0}
+            for cmd in ("collect", "teardown"):
+                got = {}
+
+                class Cluster(FakeCluster):
+                    def collect_evidence(self, dest, meta=None, **kw):
+                        got.update(kw)
+                        return {"complete": True, "attempt": 1, "incomplete": [], "errors": []}
+
+                    def teardown(self, dest, **kw):
+                        got.update(kw)
+                        return {"removed": []}
+
+                rc = driver.main([cmd, p, "--execute", "--approval", a, "--evidence", os.path.join(d, "ev")] + flags,
+                                 now=NOW, cluster_factory=lambda c: Cluster(copy.deepcopy(c)))
+                self.assertEqual((rc, got), (0, want), cmd)
+            for bad in (["--log-cap", "0"], ["--log-cap", "1T"], ["--call-timeout", "-1"], ["--call-timeout", "inf"]):
+                with self.assertRaises(SystemExit, msg=bad), contextlib.redirect_stderr(io.StringIO()):
+                    driver.main(["collect", p] + bad)
 
 
 if __name__ == "__main__":

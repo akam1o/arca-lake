@@ -21,7 +21,9 @@ records not found on the host (``missing``), the host's boot record, and
 verified: a capped log, an error, a deadline reached or an unreadable
 directory is never complete. A later collection resumes: a file already
 saved with the host's current sha256 is not fetched again, one that
-changed is fetched again and the earlier copy kept apart.
+changed is fetched again and the earlier copy kept apart. A manifest never
+loses a file: what an earlier collection saved and the host no longer has
+(a teardown removed it) stays listed, its saved copy read again.
 
 Logs are capped (per file, and in total): a log over the cap is saved as
 its tail and marks the collection incomplete, so that a run is never
@@ -47,6 +49,7 @@ MAX_LOG_TOTAL = 512 << 20
 RETRIES = 2
 COLLECT_S = 1800.0
 CALL_S = 120
+INVENTORY_S = 600
 
 # The records a run with a load is expected to leave (informational: a
 # file absent on the host has nothing to save; it is listed as missing).
@@ -59,7 +62,7 @@ EXPECTED = ("run/.r110-run", "run/host-boot.json", "run/services/started.list", 
 INVENTORY = r'''# r110:inventory
 import hashlib, json, os, re, sys
 roots = json.loads(sys.argv[1])
-out = {"files": [], "errors": [], "excluded": [], "roots": {}}
+out = {"files": [], "errors": [], "excluded": [], "skipped": [], "roots": {}}
 for label, top, exclude in roots:
     if not os.path.isdir(top):
         out["roots"][label] = "absent"
@@ -76,6 +79,11 @@ for label, top, exclude in roots:
                     out["excluded"].append(label + "/" + x)
             dirs[:] = [x for x in dirs if not ex.fullmatch(x)]
         dirs.sort()
+        for x in dirs:
+            p = os.path.join(d, x)
+            if os.path.islink(p):  # never followed: named, not collected
+                out["skipped"].append({"path": label + "/" + os.path.relpath(p, top), "link": os.readlink(p),
+                                       "why": "a link to a directory (not followed)"})
         for n in sorted(files):
             p = os.path.join(d, n)
             rel = label + "/" + os.path.relpath(p, top)
@@ -238,11 +246,15 @@ def _fetch(call, f, target, superseded, cap, chunk, timeout):
 
 
 def collect(call, roots, dest, run_id, meta=None, log_cap=MAX_LOG_FILE, total_cap=MAX_LOG_TOTAL,
-            deadline_s=COLLECT_S, retries=RETRIES, chunk=CHUNK, clock=time.monotonic, wall_ms=None):
+            deadline_s=COLLECT_S, retries=RETRIES, chunk=CHUNK, inventory_s=INVENTORY_S, call_s=CALL_S,
+            clock=time.monotonic, wall_ms=None):
     """Save the host's evidence under ``dest`` (``private/host/<label>/...``)
     and write the manifest and the public summary. Returns the manifest.
     Bounded: ``deadline_s`` for the whole collection, ``retries`` per file,
-    every call with its own timeout."""
+    every call with its own timeout (``inventory_s`` for the listing,
+    ``call_s`` for each hash or read). Files saved by an earlier collection
+    and no longer on the host (a teardown removed them, or was cut short)
+    stay in the manifest, their saved copies read again."""
     wall_ms = wall_ms or (lambda: time.time_ns() // 1_000_000)
     end = clock() + deadline_s
     priv = os.path.join(dest, "private")
@@ -256,20 +268,23 @@ def collect(call, roots, dest, run_id, meta=None, log_cap=MAX_LOG_FILE, total_ca
     attempt = (prev or {}).get("attempt", 0) + 1
     man = {"run_id": run_id, "attempt": attempt, "started_wall_ms": wall_ms(), "complete": False,
            "roots": [[label, d] for label, d, _ in roots], "files": [], "missing": [], "errors": [],
-           "excluded": [], "incomplete": [], "meta": meta or {}, "tools": tools_sha256(),
+           "excluded": [], "skipped": [], "incomplete": [], "meta": meta or {}, "tools": tools_sha256(),
+           "limits": {"log_cap": log_cap, "total_cap": total_cap, "deadline_s": deadline_s, "retries": retries,
+                      "chunk": chunk, "inventory_s": inventory_s, "call_s": call_s},
            "history": list((prev or {}).get("history", []))}
     try:
         os.makedirs(host_dir, exist_ok=True)
     except OSError as e:
         man["errors"].append({"path": None, "error": f"local directory: {type(e).__name__}: {e}"[:300]})
-        return _finish(man, dest, mpath, wall_ms)
+        return _finish(man, dest, mpath, wall_ms, prev, None)
     try:
-        inv = inventory(call, roots, timeout=max(1, min(600, int(end - clock()))))
+        inv = inventory(call, roots, timeout=max(1, min(inventory_s, int(end - clock()))))
     except Failed as e:
         man["errors"].append({"path": None, "error": str(e)})
-        return _finish(man, dest, mpath, wall_ms)
+        return _finish(man, dest, mpath, wall_ms, prev, None)
     man["host_roots"] = inv.get("roots", {})
     man["excluded"] = inv.get("excluded", [])
+    man["skipped"] = inv.get("skipped", [])
     man["errors"] += inv.get("errors", [])
     found = {f["path"] for f in inv["files"]}
     man["missing"] = [{"path": p, "reason": "absent on the host"} for p in EXPECTED
@@ -299,7 +314,7 @@ def collect(call, roots, dest, run_id, meta=None, log_cap=MAX_LOG_FILE, total_ca
             try:
                 h, _how = _fetch(call, f, target, os.path.join(priv, "superseded", f"attempt-{attempt}",
                                                                _safe_rel(rel)),
-                                 cap, chunk, max(1, min(CALL_S, int(end - clock()))))
+                                 cap, chunk, max(1, min(call_s, int(end - clock()))))
                 last = None
                 break
             except Failed as e:
@@ -319,10 +334,41 @@ def collect(call, roots, dest, run_id, meta=None, log_cap=MAX_LOG_FILE, total_ca
         man["files"].append(entry)
         if entry["capped"]:
             man["incomplete"].append(f"{rel}: capped at {cap} bytes (its last bytes saved)")
-    return _finish(man, dest, mpath, wall_ms)
+    return _finish(man, dest, mpath, wall_ms, prev, found)
 
 
-def _finish(man, dest, mpath, wall_ms):
+def _carry(man, prev, listed, host_dir):
+    """The files an earlier collection saved that this one did not save:
+    kept in the manifest (``host``: gone; not listed, when the host's
+    listing failed; not saved again, when this collection failed on it, an
+    error of its own), each saved copy read again. A manifest is never
+    rewritten with fewer files than were saved."""
+    have = {f["path"] for f in man["files"]}
+    for f in (prev or {}).get("files", []):
+        rel = f.get("path")
+        if rel in have:
+            continue
+        entry = dict(f, host="not listed" if listed is None else "not saved again" if rel in listed else "gone")
+        if "link" not in f:
+            try:
+                ok = sha256_file(os.path.join(host_dir, _safe_rel(rel))) == f["saved_sha256"]
+            except (OSError, KeyError, Failed):
+                ok = False
+            if not ok:
+                # Still listed (unverified): a later collection checks it again.
+                entry["verified"] = False
+                man["errors"].append({"path": rel, "error": "saved earlier, not saved again (" + entry["host"] +
+                                                            "), and the saved copy is missing or differs"})
+            else:
+                entry["verified"] = True
+        man["files"].append(entry)
+    kept = {s["path"] for s in man["skipped"]}
+    man["skipped"] += [dict(s, host="gone") for s in (prev or {}).get("skipped", []) if s["path"] not in kept
+                       and (listed is None or s["path"] not in listed)]
+
+
+def _finish(man, dest, mpath, wall_ms, prev, listed):
+    _carry(man, prev, listed, os.path.join(dest, "private", "host"))
     if man["errors"]:
         man["incomplete"].append(f"{len(man['errors'])} file(s) or reads failed")
     man["complete"] = not man["incomplete"] and "host_roots" in man
@@ -342,13 +388,15 @@ def _finish(man, dest, mpath, wall_ms):
 
 def public_summary(man):
     """The manifest without host paths, error texts or host identities."""
-    files = [{k: f[k] for k in ("path", "class", "size", "sha256", "saved_bytes", "saved_sha256", "capped")
+    files = [{k: f[k] for k in ("path", "class", "size", "sha256", "saved_bytes", "saved_sha256", "capped", "host",
+                                "verified")
               if k in f} for f in man["files"] if "link" not in f]
     boot = (man.get("meta") or {}).get("host_boot") or {}
     return {"run_id": man["run_id"], "attempt": man["attempt"], "complete": man["complete"],
             "files": files, "bytes_saved": sum(f.get("saved_bytes", 0) for f in files),
             "errors": [e.get("path") for e in man["errors"]], "missing": [m["path"] for m in man["missing"]],
             "excluded": man["excluded"], "capped": [f["path"] for f in files if f.get("capped")],
+            "skipped": [s["path"] for s in man.get("skipped", [])], "limits": man.get("limits"),
             "host_rebooted": boot.get("rebooted"), "tools_sha256": man["tools"]["tree"],
             "binary_sha256": (man.get("meta") or {}).get("binary_sha256")}
 
@@ -372,7 +420,8 @@ def verify_local(dest, man):
 def changed_since(man, inv):
     """Files of the host that differ from what the manifest saved: new,
     gone or changed since (a writer still running)."""
-    saved = {f["path"]: f for f in man.get("files", [])}
+    # Entries kept from an earlier collection are already gone from the host.
+    saved = {f["path"]: f for f in man.get("files", []) if "host" not in f}
     now = {f["path"]: f for f in inv["files"]}
     out = [f"{p}: new" for p in sorted(set(now) - set(saved))]
     out += [f"{p}: gone from the host" for p in sorted(set(saved) - set(now))]

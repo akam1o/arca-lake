@@ -333,15 +333,33 @@ guard stopped the load before the reboot can never be known):
   Once reached, it collects before any removal and resumes: files
   already saved with the host's current sha256 are not read again, and
   an earlier copy that differs is kept apart.
+- A manifest never loses a file. A later collection keeps every file an
+  earlier one saved, including the files no longer on the host because a
+  teardown removed them, and reads each saved copy again: a copy that is
+  missing or differs is an error, and the collection is incomplete. The
+  teardown removes the test FoundationDB's directory first and the run
+  directory last, because the run directory holds the services' records
+  and the tools the liveness check needs. A teardown cut short between
+  the two removals can therefore be run again to the end.
 - A reboot is not a stop. Setup records the host's boot ID
   (`host-boot.json`). A process found gone after the boot ID changed is
   recorded as ended by the reboot (`cause: host-reboot`), never as
-  stopped by the guard or the teardown. Whether the guard stopped the
+  stopped by the guard or the teardown. When the boot ID cannot be
+  compared, the cause is "unknown" and the run cannot pass. At the run's
+  end the collection is recorded as complete only if every writer was
+  confirmed stopped; otherwise it is "complete, writers not confirmed
+  stopped". Whether the guard stopped the
   load before the reboot is only what its own saved result says, or "not
   known" when none was saved.
 - Bounds: every call has a timeout; the collection has a deadline
-  (30 min) and a few retries per file; logs are capped per file and in
-  total. Nothing is ever killed or removed on a guess.
+  (30 min) and a few retries per file; logs are capped per file (64 MiB)
+  and in total (512 MiB). A log over its cap keeps the run on the host
+  until it is collected again with a larger cap: `--log-cap`,
+  `--log-total-cap`, `--collect-deadline`, `--inventory-timeout` and
+  `--call-timeout` (for `run`, `collect` and `teardown`) set these
+  limits, and the manifest records the values used. Links to directories
+  are not followed; they are listed as skipped. Nothing is ever killed or
+  removed on a guess.
 - Public and private are kept apart. `private/` holds the raw files,
   the manifest and the teardown records (host paths, logs).
   `public/evidence-summary.json` holds only counts, relative paths,

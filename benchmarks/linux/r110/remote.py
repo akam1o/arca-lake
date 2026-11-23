@@ -959,7 +959,9 @@ class SshCluster:
         bad = evidence.verify_local(evidence_dir, man)
         if not bad:
             try:
-                bad = evidence.changed_since(man, evidence.inventory(self._evidence_call, self.evidence_roots()))
+                bad = evidence.changed_since(man, evidence.inventory(
+                    self._evidence_call, self.evidence_roots(),
+                    timeout=collect_kw.get("inventory_s", evidence.INVENTORY_S)))
             except evidence.Failed as e:
                 bad = [str(e)]
         if bad:
@@ -970,7 +972,10 @@ class SshCluster:
             out.pop("removing")
             out["kept"] = f"the teardown's own record could not be saved: {out['record_error']}"
             return out
-        for d in (self.run_dir, self.fdb_data):
+        # The run directory last: it holds the tools and the services'
+        # records the liveness check reads, so a teardown cut short between
+        # the two can be run again to the end.
+        for d in (self.fdb_data, self.run_dir):
             r = self.ssh(f"[ \"$(cat {Q(d)}/{MARK} 2>/dev/null)\" = {Q(rid)} ] && rm -rf -- {Q(d)} && echo removed || "
                          f"echo kept", check=False).strip()
             out["removed" if r == "removed" else "kept_dirs"] = out.get("removed" if r == "removed" else "kept_dirs", []) + [d]
