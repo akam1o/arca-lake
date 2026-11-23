@@ -968,7 +968,8 @@ fn no_node_schema_is_required_before_schema_5() {
 /// ADR-0039: after the finalize, the leader asks a node facts-free before
 /// pushing anything; a node of an earlier release (here one reporting
 /// schema 4 restarted at a member's address) is quarantined and never
-/// receives what a push carries (fence lease, schema floor, incarnation).
+/// receives what a push carries: here the delete fence generation the
+/// leader opened while the node was down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_earlier_release_node_is_quarantined_before_any_push() {
     let mut c = cluster().await;
@@ -984,21 +985,43 @@ async fn an_earlier_release_node_is_quarantined_before_any_push() {
     let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
     let (addr0, addr2) = (c.nodes[0].addr.to_string(), c.nodes[2].addr.to_string());
     let id0 = c.nodes[0].id;
-    // The leader's pushes open the fence on this release's nodes.
+    // The leader pushes this release's nodes the open fence, the schema
+    // floor and the incarnation.
     wait_until(
-        "the fence open on node 0",
+        "node 2 pushed by the leader",
         Duration::from_secs(10),
         async || {
             ctl.is_leader()
-                && c.clients
-                    .health(&addr0)
-                    .await
-                    .is_ok_and(|h| h.delete_fence_open)
+                && c.clients.health(&addr2).await.is_ok_and(|h| {
+                    h.delete_fence_open && h.schema_floor > 0 && !h.incarnation.is_empty()
+                })
         },
     )
     .await;
     let id2 = c.nodes[2].id;
+    let before = c
+        .clients
+        .health(&addr2)
+        .await
+        .unwrap()
+        .delete_fence_generation;
     c.stop_node(2).await;
+    // While it is down the fence moves on: closed, then opened again in a
+    // new generation by the leader's next pass.
+    arca_lake_metadata::ops::delete_fence::close(meta.as_ref(), 0, "test", false, now_ms())
+        .await
+        .unwrap();
+    wait_until(
+        "a new open generation on node 0",
+        Duration::from_secs(10),
+        async || {
+            c.clients
+                .health(&addr0)
+                .await
+                .is_ok_and(|h| h.delete_fence_open && h.delete_fence_generation > before)
+        },
+    )
+    .await;
     c.start_node_reporting(2, keys::SCHEMA_V5 - 1).await;
     let state = async || {
         arca_lake_metadata::ops::node_lifecycle::state(meta.as_ref(), id2)
@@ -1027,18 +1050,10 @@ async fn an_earlier_release_node_is_quarantined_before_any_push() {
         async || seen().await >= at + 1_000,
     )
     .await;
-    // A push of the open fence gives a rejoin lease (node 0 has one); a
-    // start begins with none.
-    let h0 = c.clients.health(&addr0).await.unwrap();
-    assert!(h0.delete_fence_lease_ms > 0, "{h0:?}");
     let h = c.clients.health(&addr2).await.unwrap();
-    // Nothing a push carries reached it: no rejoin lease of an open fence,
-    // no schema floor, no incarnation.
-    assert_eq!(h.delete_fence_lease_ms, 0, "a fence push reached it: {h:?}");
-    assert_eq!(h.schema_floor, 0, "a schema floor reached it: {h:?}");
-    assert!(
-        h.incarnation.is_empty() && h.incarnation_seq == 0,
-        "an incarnation reached it: {h:?}"
+    assert_eq!(
+        h.delete_fence_generation, before,
+        "the leader's new fence generation reached it: {h:?}"
     );
     ctl.shutdown().await;
     c.shutdown().await;

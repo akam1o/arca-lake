@@ -342,6 +342,7 @@ pub async fn spawn<S: KvStore + 'static>(
 
 /// Election loop: follower until the lease can be taken, leader until a
 /// renewal fails or shutdown is requested.
+#[allow(clippy::too_many_lines)]
 async fn run<S: KvStore + 'static>(
     meta: Arc<S>,
     cfg: ControllerConfig,
@@ -429,7 +430,15 @@ async fn run<S: KvStore + 'static>(
         // Leader: fenced store, scheduler tasks, renewal loop.
         let fenced = Arc::new(FencedKv::new(Arc::clone(&meta), leadership.clone()));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let (tasks, trip) = start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx, incarnation);
+        // The node schema shard writes need (ADR-0039) before the first
+        // health pass sets it (a state that admits repair but not the
+        // health pass, such as RecoveryRequired, has only this one);
+        // unknown (the read failed) refuses every write until then.
+        let node_schema = compat::gate(meta.as_ref())
+            .await
+            .map_or(u64::MAX, |g| compat::required_node_schema(g.schema_write));
+        let (tasks, trip) =
+            start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx, incarnation, node_schema);
         let lost = hold_term(
             meta.as_ref(),
             &cfg,
@@ -574,6 +583,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
     metrics: &Arc<Metrics>,
     stop: &watch::Receiver<bool>,
     incarnation: [u8; 16],
+    node_schema: u64,
 ) -> (Vec<JoinHandle<()>>, Arc<crate::trip::Trip>) {
     let clients =
         NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
@@ -581,9 +591,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
         }))
         .with_tls(cfg.tls.clone());
     clients.set_incarnation(Some(incarnation));
-    // The node schema shard writes need (ADR-0039) is unknown until the
-    // first health pass reads `schema_write`: no write counts before it.
-    clients.set_required_node_schema(u64::MAX);
+    clients.set_required_node_schema(node_schema);
     clients.set_fault_hook(cfg.rpc_fault_hook.as_ref().map(|h| h.0.clone()));
     // Every task's store trips the term's deletes off on a failure that
     // means the metadata is no longer the one they were decided on.
