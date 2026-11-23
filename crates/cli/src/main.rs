@@ -2424,15 +2424,15 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                         }
                         for c in caps {
                             println!(
-                                "node {} software {} protocol [{}, {}] schema_max {} format [{}, {}] format_write {} incarnation {} epochs {:?} seen_ms {}{}",
+                                "node {} software {} protocol [{}, {}] format [{}, {}] format_write {} schema_max {} incarnation {} epochs {:?} seen_ms {}{}",
                                 c.node_id,
                                 c.software,
                                 c.caps.protocol_min,
                                 c.caps.protocol_max,
-                                c.caps.schema_max,
                                 c.caps.format_min,
                                 c.caps.format_max,
                                 c.format_write,
+                                c.caps.schema_max,
                                 c.incarnation.map_or_else(
                                     || "-".into(),
                                     |i| arca_lake_metadata::ops::compat::hex(&i)

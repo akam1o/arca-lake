@@ -352,6 +352,20 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
     let (mut gw, mut s3, _) = gateway(&env, "gw-cur", true).await;
     c.exercise(&s3, "this gateway").await;
     c.multipart(&s3, "this gateway").await;
+    // The node records are rewritten by the leader's health passes: the
+    // first ones after the takeover may still be a 0.1.0 leader's (no
+    // schema).
+    wait_until(
+        "every node recorded with its schema",
+        Duration::from_secs(30),
+        async || {
+            env.admin_ok(true, &["status", "--versions"])
+                .lines()
+                .filter(|l| l.starts_with("node ") && l.contains("software"))
+                .all(|l| !l.ends_with("below-schema-5"))
+        },
+    )
+    .await;
     let v = env.admin_ok(true, &["status", "--versions"]);
     assert!(v.contains("protections degraded"), "{v}");
     assert!(
@@ -359,12 +373,6 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
             && l.contains(&gw_old_addr)
             && l.ends_with("below-schema-5")),
         "the 0.1.0 gateway flagged: {v}"
-    );
-    assert!(
-        v.lines()
-            .filter(|l| l.starts_with("node "))
-            .all(|l| !l.contains("below-schema-5")),
-        "every node runs this build: {v}"
     );
     let (ok, text) = finalize(&env, &gone, 10);
     assert!(
