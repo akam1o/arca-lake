@@ -34,6 +34,11 @@ async fn adopt(c: &TestCluster, i: usize, node_id: u64, token: [u8; 16]) {
 /// restored from before it), one holding nothing yet. The close does not
 /// count the first two as acknowledging, and lists the third as
 /// unverified. Phase 3.12 counted all three.
+///
+/// Runs non-strict nodes: with `node_identities` off the harness gives
+/// the nodes neither identities nor the strict schema floor (strict =
+/// identities and schema >= 5), so this is no coverage of strict write
+/// ownership (ADR-0037).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_manual_close_counts_only_the_disk_the_metadata_records() {
     let c = TestCluster::start(ClusterOptions {
@@ -95,6 +100,11 @@ async fn a_manual_close_counts_only_the_disk_the_metadata_records() {
 /// Over mutual TLS: a gateway may ask a node's health, not make it adopt
 /// an identity; a controller may, but not for another node id than the
 /// node's certificate names.
+///
+/// Runs non-strict nodes: with `node_identities` off the harness gives
+/// the nodes neither identities nor the strict schema floor (strict =
+/// identities and schema >= 5), so this is no coverage of strict write
+/// ownership (ADR-0037).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adopting_an_identity_needs_the_facts_role_and_the_certificates_node_id() {
     let c = TestCluster::start(ClusterOptions {

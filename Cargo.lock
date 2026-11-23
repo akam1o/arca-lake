@@ -368,6 +368,7 @@ dependencies = [
  "futures",
  "thiserror",
  "tonic",
+ "tracing",
 ]
 
 [[package]]

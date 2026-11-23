@@ -1124,6 +1124,17 @@ async fn a_repair_pass_applies_a_schema_write_raised_mid_term() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 1, "{tasks:?}");
+    // Refused by the node schema check, not by the node's write ownership
+    // (ADR-0037: incarnation or target node).
+    let error = tasks[0].2.last_error.clone().unwrap_or_default();
+    assert!(
+        error.contains("node schema") && error.contains("schema 0"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("incarnation rejected") && !error.contains("node rejected"),
+        "{error}"
+    );
     assert_eq!(writer.required_node_schema(), keys::SCHEMA_V5);
     // The node back on this release: the task completes.
     c.stop_node(victim).await;

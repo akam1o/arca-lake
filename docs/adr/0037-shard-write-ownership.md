@@ -46,8 +46,10 @@ writer now calls `put_shard_to` with the placement member it writes
 member, the integrity task's target member, the tiering and migration
 target group's member); the pool adds the identity token that node
 acknowledged when it knows it for that address (`note_identity`, which
-the controller's health pass maintains for deletes; the gateway does not
-hold tokens and names the node id only). `put_shard`/`put_shard_as` name
+the controller's health pass maintains for deletes; the gateway reads
+the acknowledged identity records with its cluster state, every
+`CLUSTER_REFRESH` (2 s), for its deletes of its own partial cache copies
+and its writes alike). `put_shard`/`put_shard_as` name
 the node noted for the address (`note_node_id`), if any. The pools:
 
 | Writer | Pool | Incarnation |
@@ -252,11 +254,13 @@ Not guaranteed (still relies on mutual TLS with one CA or trust domain
 per cluster): the incarnation is not a secret (a node reports it in
 `Health` to any authorised caller), so a malicious process holding a
 valid certificate of the same CA and trust domain can learn it and
-write. Gateways name the node id without its token: a write for node N
-reaching another disk that also holds node N's id (a disk replaced
-under the same id, `node rejoin --fresh-identity`, while the old one
-answers somewhere) is taken; controller writes carry the token and are
-refused. Before strict mode, a node without an identity and without a
+write. A gateway's tokens are at most one cluster refresh (2 s) older
+than the identity records: after `node rejoin --fresh-identity`, its
+writes and cleanup deletes to that node are refused until the new
+identity is acknowledged and read (writes go elsewhere; a refused
+cleanup is counted, `arca_gateway_cache_cleanup_refused_total`, and the
+copy left to reconciliation). A node the gateway knows no acknowledged
+identity for gets the node id only. Before strict mode, a node without an identity and without a
 node certificate naming its node (a removed or damaged identity file, a
 plaintext cluster's node before its controller gave one, a non-numeric
 SPIFFE node name) takes writes naming any node, counted.
@@ -299,10 +303,12 @@ Smaller residuals (review):
 - **Bind writes to the node identity token only** (no incarnation
   check): tokens are per node, the incarnation is what separates
   clusters; both are used.
-- **The gateway loading identity tokens**: acknowledging an identity
-  does not move the cluster map version, so a gateway would stamp stale
-  tokens (refusing a rejoined disk's writes) until its next map change;
-  the node id is enough to tell two nodes of one cluster apart.
+- **The gateway loading identity tokens with its cluster map**: an
+  acknowledgement does not move the map version, so the tokens would
+  stay stale until the next map change. They are read with the cluster
+  state instead (one range read per refresh), which bounds the staleness
+  to a refresh; before that follow-up the gateway sent no token, and
+  nodes holding an identity refused its cleanup deletes.
 - **Adopt the first writer's incarnation** (trust on first use): the
   first writer of a new disk at a reused address may be the other
   cluster's.

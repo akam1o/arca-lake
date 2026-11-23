@@ -390,6 +390,10 @@ pub struct RpcStats {
     /// Nodes refused because their protocol window does not intersect ours
     /// (RFC-014 §5.2).
     pub incompatible: AtomicU64,
+    /// Deletes of this process's own partial copies that a node refused
+    /// (identity, fence, epoch): the copies stay until reconciliation
+    /// removes them ([`NodeClients::note_cleanup_refused`]).
+    pub cleanup_refused: AtomicU64,
 }
 
 /// What a node reported in `Health` (RFC-014 §5.1) and the protocol
@@ -479,6 +483,8 @@ pub struct RpcStatsSnapshot {
     pub exhausted: u64,
     /// See [`RpcStats::incompatible`].
     pub incompatible: u64,
+    /// See [`RpcStats::cleanup_refused`].
+    pub cleanup_refused: u64,
 }
 
 /// How a fault hook shapes a shard stream (see [`FaultAction`]).
@@ -640,6 +646,26 @@ impl NodeClients {
             None => {
                 m.remove(addr);
             }
+        }
+    }
+
+    /// Stamp deletes to every address whose node id is known
+    /// ([`Self::note_node_id`]) with the identity that node acknowledged in
+    /// `acknowledged` (node id and token, as recorded in metadata), and
+    /// none to the others: what a leader's health pass notes, for a process
+    /// that reads the records instead (a gateway's deletes of its own
+    /// partial copies). A disk at such an address holding another identity
+    /// still refuses them (R-100).
+    pub fn note_acknowledged_identities(&self, acknowledged: &HashMap<u64, [u8; 16]>) {
+        let addrs: Vec<(String, u64)> = self
+            .node_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(a, id)| (a.clone(), *id))
+            .collect();
+        for (addr, id) in addrs {
+            self.note_identity(&addr, acknowledged.get(&id).map(|t| (id, *t)));
         }
     }
 
@@ -856,7 +882,16 @@ impl NodeClients {
             retries: self.stats.retries.load(Relaxed),
             exhausted: self.stats.exhausted.load(Relaxed),
             incompatible: self.stats.incompatible.load(Relaxed),
+            cleanup_refused: self.stats.cleanup_refused.load(Relaxed),
         }
+    }
+
+    /// Count a delete of this process's own partial copy that a node
+    /// refused (the copy is left to reconciliation).
+    pub fn note_cleanup_refused(&self) {
+        self.stats
+            .cleanup_refused
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Install (or remove) the fault hook. Shared by every clone.

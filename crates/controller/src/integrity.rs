@@ -1486,7 +1486,10 @@ async fn repair_one<S: KvStore>(
                     task,
                     opts,
                     now_ms,
-                    &format!("write failed: {}", s.code()),
+                    // The node's or the client's reason with the code
+                    // (an ownership refusal, ADR-0037, and a node schema
+                    // one, ADR-0039, share FAILED_PRECONDITION).
+                    &format!("write failed: {}: {}", s.code(), s.message()),
                 )
                 .await;
             }

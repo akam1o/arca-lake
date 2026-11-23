@@ -607,6 +607,11 @@ async fn a_delete_decided_for_one_node_is_refused_by_another_disk_at_its_address
 /// holds another cluster's identity for the same node id. Its
 /// registration gave it an identity, which it cannot adopt: it is
 /// quarantined, never imported, and takes none of this cluster's work.
+///
+/// Runs non-strict nodes: with `node_identities` off the harness gives
+/// the nodes neither identities nor the strict schema floor (strict =
+/// identities and schema >= 5), so this is no coverage of strict write
+/// ownership (ADR-0037).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_node_holding_another_clusters_identity_is_quarantined_not_imported() {
     let mut c = cluster_with(false).await;
@@ -1250,6 +1255,11 @@ async fn fence_pushes_carry_the_identity_and_unreachable_covers_an_answering_dis
 /// Re-review (Phase 3.11): a node answering without an acknowledged
 /// identity is not removed (two disks without one cannot be told apart):
 /// nothing is pushed; `--unreachable` is the operator's way.
+///
+/// Runs non-strict nodes: with `node_identities` off the harness gives
+/// the nodes neither identities nor the strict schema floor (strict =
+/// identities and schema >= 5), so this is no coverage of strict write
+/// ownership (ADR-0037).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_without_an_acknowledged_identity_is_not_removed_while_it_answers() {
     let mut c = cluster_with(false).await;
