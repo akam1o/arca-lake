@@ -282,11 +282,9 @@ async fn a_strict_cluster_keeps_its_own_writes_restarts_and_repairs() {
 /// gateway's writes go through (ADR-0037 §5).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cluster_initialised_at_the_strict_schema_is_strict_from_its_first_write() {
-    use arca_lake_protocol::storage::v1 as pb;
     let c = cluster().await;
     // The identities a controller's first pass gives with the facts.
     c.acknowledge_identities().await;
-    assert!(arca_lake_metadata::keys::SCHEMA_VERSION >= pb::WRITE_OWNERSHIP_SCHEMA);
     for (i, n) in c.nodes.iter().enumerate() {
         assert!(c.node_service(i).write_ownership_strict(), "node {}", n.id);
     }

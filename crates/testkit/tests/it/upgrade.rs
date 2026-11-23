@@ -898,6 +898,10 @@ async fn after_schema_5_no_shard_write_counts_on_an_earlier_release_node() {
     // A writer that still holds the node's earlier capabilities sends the
     // write; the acknowledgement shows the release and it does not count.
     let probe = NodeClients::new(Duration::from_secs(2));
+    // A writer of the cluster, for that member (a strict node refuses any
+    // other before the schema is looked at, ADR-0037).
+    probe.set_incarnation(c.clients.incarnation());
+    probe.note_node_id(&addr, c.nodes[i].id);
     probe.set_required_node_schema(compat::required_node_schema(gate.schema_write));
     let other = c.nodes[(i + 1) % c.nodes.len()].addr.to_string();
     let fresh = c.clients.health(&other).await.unwrap();
@@ -1023,6 +1027,9 @@ async fn a_repair_pass_applies_a_schema_write_raised_mid_term() {
     assert_eq!(r.enqueued, 1, "{r:?}");
     // The writer last read schema_write 4: nothing required.
     let writer = NodeClients::new(Duration::from_secs(2));
+    // The leader's incarnation (a strict node refuses a write without it,
+    // ADR-0037).
+    writer.set_incarnation(c.clients.incarnation());
     writer.set_required_node_schema(compat::required_node_schema(Some(keys::SCHEMA_V5 - 1)));
     assert_eq!(writer.required_node_schema(), 0);
     compat::raise_version(
