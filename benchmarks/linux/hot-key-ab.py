@@ -15,7 +15,7 @@ test, as in Phase 4.1); host C the generator and checker (`contend`).
   HOST_A=... HOST_B=... HOST_C=... [CAMPAIGN=id] [OUT=dir] hot-key-ab.py run
   HOST_A=... HOST_B=... HOST_C=... hot-key-ab.py teardown <run id>
   HOST_A=... HOST_B=... HOST_C=... hot-key-ab.py smoke <arm> <scenario>   (one uncounted run)
-  CONTROL=1 ...  build | run          (plan §10: the PR head build only,
+  CONTROL=1 [BUILD_COMMIT=sha] ... build | run   (plan §10: one build,
                                          arms queue-off and queue-on; 2.5 h)
   hot-key-ab.py schedule                 (the rotated order; no host)
   hot-key-ab.py summarize <out dir>      (summary from the run files; no host)
@@ -582,6 +582,13 @@ def build():
     up = subprocess.run(["git", "rev-parse", "@{u}"], cwd=HERE, capture_output=True, text=True).stdout.strip()
     if up != head:
         sys.exit("HEAD is not the pushed PR head: push the branch first")
+    if os.environ.get("BUILD_COMMIT"):
+        # A named commit instead of HEAD (the control builds merged main);
+        # it must be on the remote's main.
+        head = subprocess.run(["git", "rev-parse", os.environ["BUILD_COMMIT"] + "^{commit}"], cwd=HERE,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        if subprocess.run(["git", "merge-base", "--is-ancestor", head, "origin/main"], cwd=HERE).returncode:
+            sys.exit("BUILD_COMMIT is not on origin/main")
     tag = subprocess.run(["git", "rev-parse", TAG_COMMIT + "^{commit}"], cwd=HERE, capture_output=True,
                          text=True, check=True).stdout.strip()
     for h in "abc":
@@ -628,7 +635,8 @@ def build():
             ssh("b", f"rm -rf {b}/target-{arm}", timeout=600)
         _, sha, _ = ssh("b", f"sha256sum {binpath('b', arm)} | cut -c1-64", check=True)
         lines = out.strip().splitlines()
-        record["arms"][arm] = {"commit": commit, "label": ARM_LABEL[arm], "sha256": sha.strip(),
+        label = ARM_LABEL.get(arm, f"build of {commit}")
+        record["arms"][arm] = {"commit": commit, "label": label, "sha256": sha.strip(),
                                "rustc": next((l for l in lines if l.startswith("rustc")), ""),
                                "cargo": next((l for l in lines if l.startswith("cargo")), ""),
                                "profile": "release", "features": "fdb", "locked": True}
