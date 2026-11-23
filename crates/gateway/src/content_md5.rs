@@ -13,6 +13,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use futures::Stream;
 use s3s::crypto::{Checksum as _, Md5};
+use s3s::path::S3Path;
 use s3s::stream::{ByteStream, RemainingLength};
 use s3s::{Body, S3Error, StdError, s3_error};
 
@@ -41,23 +42,47 @@ impl Refusal {
 }
 
 /// Whether `Content-MD5` of this request is checked here: the operations
-/// with an XML body that the gateway implements (path-style addressing).
-pub(crate) fn checked_here(method: &http::Method, uri: &http::Uri) -> bool {
-    let has = |name: &str| {
-        uri.query()
-            .unwrap_or("")
-            .split('&')
-            .any(|kv| kv.split('=').next() == Some(name))
+/// with an XML body that the gateway implements, recognized as `s3s`
+/// routes them (percent-decoded path-style path, decoded query names, so
+/// `?%64elete` is `?delete` and `/b%2Fk` an object). PUT only on a bucket
+/// path (PutBucketPolicy, PutBucketVersioning, CreateBucket): an object
+/// PUT carries object data, which the backend checks over the decoded
+/// body, whatever its query. Never an `aws-chunked` body, whose wire bytes
+/// are not the content. Virtual-hosted-style addressing (not served
+/// today) would need the bucket from the `Host` header here.
+pub(crate) fn checked_here(
+    method: &http::Method,
+    uri: &http::Uri,
+    headers: &http::HeaderMap,
+) -> bool {
+    let chunked = headers
+        .get("x-amz-content-sha256")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("STREAMING-"))
+        || headers
+            .get_all(http::header::CONTENT_ENCODING)
+            .iter()
+            .any(|v| v.to_str().is_ok_and(|v| v.contains("aws-chunked")));
+    if chunked {
+        return false;
+    }
+    let Ok(path) = urlencoding::decode(uri.path()) else {
+        return false;
     };
-    let bucket_only = uri
-        .path()
-        .trim_start_matches('/')
-        .trim_end_matches('/')
-        .find('/')
-        .is_none();
-    match *method {
-        http::Method::POST => has("delete") || has("uploadId"),
-        http::Method::PUT => has("policy") || has("versioning") || bucket_only,
+    let Ok(path) = s3s::path::parse_path_style(&path) else {
+        return false;
+    };
+    let names: Vec<_> = uri
+        .query()
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|kv| urlencoding::decode(kv.split('=').next().unwrap_or("")).ok())
+        .collect();
+    let has = |name: &str| names.iter().any(|n| n == name);
+    match (method, &path) {
+        (&http::Method::POST, S3Path::Bucket { .. }) => has("delete"),
+        (&http::Method::POST, S3Path::Object { .. }) => has("uploadId"),
+        (&http::Method::PUT, S3Path::Bucket { .. }) => true,
         _ => false,
     }
 }
@@ -92,9 +117,6 @@ impl Stream for Md5Checked {
     type Item = Result<Bytes, StdError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.expected.is_none() {
-            return self.refuse(Refusal::Malformed);
-        }
         if self.md5.is_none() {
             return Poll::Ready(None);
         }
@@ -106,6 +128,13 @@ impl Stream for Md5Checked {
                 Poll::Ready(Some(Ok(b)))
             }
             Poll::Ready(None) => {
+                // A malformed value too is answered at the end of the body,
+                // as a mismatch is: the client has sent it all and reads the
+                // answer (the body is bounded by `s3s`'s XML size limit).
+                if self.expected.is_none() {
+                    self.md5 = None;
+                    return self.refuse(Refusal::Malformed);
+                }
                 let digest = self.md5.take().map(Md5::finalize);
                 let matches = matches!((&digest, &self.expected), (Some(d), Some(e)) if d.as_ref() == e.as_slice());
                 if matches {
@@ -170,18 +199,69 @@ mod tests {
 
     #[test]
     fn the_xml_operations_are_checked_here() {
-        let c = |m: &str, u: &str| checked_here(&m.parse().unwrap(), &u.parse().unwrap());
-        assert!(c("POST", "/b?delete"));
-        assert!(c("POST", "/b/k?uploadId=x"));
-        assert!(c("PUT", "/b?policy"));
-        assert!(c("PUT", "/b?versioning"));
-        assert!(c("PUT", "/b"));
-        assert!(c("PUT", "/b/"));
-        // Bodies the backend checks while it streams them.
-        assert!(!c("PUT", "/b/k"));
-        assert!(!c("PUT", "/b/k?x-id=PutObject"));
-        assert!(!c("PUT", "/b/k?partNumber=1&uploadId=x"));
-        assert!(!c("POST", "/b/k?uploads"));
-        assert!(!c("GET", "/b?delete"));
+        let plain = http::HeaderMap::new();
+        let c = |m: &str, u: &str| checked_here(&m.parse().unwrap(), &u.parse().unwrap(), &plain);
+        assert!(c("POST", "/bkt?delete"));
+        assert!(c("POST", "/bkt?delete="));
+        assert!(c("POST", "/bkt?%64elete"));
+        assert!(c("POST", "/bkt/k?uploadId=x"));
+        assert!(c("PUT", "/bkt?policy"));
+        assert!(c("PUT", "/bkt?versioning"));
+        assert!(c("PUT", "/bkt"));
+        assert!(c("PUT", "/bkt/"));
+        // Bodies the backend checks while it streams them, whatever the
+        // query or the encoding of the path.
+        assert!(!c("PUT", "/bkt/k"));
+        assert!(!c("PUT", "/bkt/k?policy"));
+        assert!(!c("PUT", "/bkt%2Fk?policy"));
+        assert!(!c("PUT", "/bkt/k?x-id=PutObject"));
+        assert!(!c("PUT", "/bkt/k?partNumber=1&uploadId=x"));
+        assert!(!c("POST", "/bkt/k?uploads"));
+        assert!(!c("POST", "/bkt"));
+        assert!(!c("GET", "/bkt?delete"));
+        // Not routable by s3s: left to it.
+        assert!(!c("PUT", "/b?policy"));
+        // An aws-chunked body is never hashed here.
+        let mut chunked = http::HeaderMap::new();
+        chunked.insert(
+            "x-amz-content-sha256",
+            "STREAMING-UNSIGNED-PAYLOAD-TRAILER".parse().unwrap(),
+        );
+        assert!(!checked_here(
+            &http::Method::PUT,
+            &"/bkt?policy".parse().unwrap(),
+            &chunked
+        ));
+        let mut encoded = http::HeaderMap::new();
+        encoded.insert(
+            http::header::CONTENT_ENCODING,
+            "aws-chunked".parse().unwrap(),
+        );
+        assert!(!checked_here(
+            &http::Method::POST,
+            &"/bkt?delete".parse().unwrap(),
+            &encoded
+        ));
+    }
+
+    #[test]
+    fn header_values() {
+        let digest = crate::checksum::content_md5(Some(&b64_md5(b"x"))).unwrap();
+        assert!(digest.is_some());
+        // Surrounding whitespace is ignored; unpadded base64 is malformed.
+        let padded = b64_md5(b"x");
+        assert_eq!(
+            crate::checksum::content_md5(Some(&format!(" {padded}\t"))).unwrap(),
+            digest
+        );
+        let unpadded = padded.trim_end_matches('=');
+        assert_eq!(unpadded.len(), 22);
+        assert_eq!(
+            crate::checksum::content_md5(Some(unpadded))
+                .unwrap_err()
+                .code()
+                .as_str(),
+            "InvalidDigest"
+        );
     }
 }

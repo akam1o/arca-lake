@@ -203,7 +203,13 @@ async fn put_checks(s3: &Client, chunked: bool, cluster: Option<&TestCluster>) {
             put(s3, &fresh, &b, md5(&b64_md5(&a))).await,
             Err(bad_digest())
         );
-        for bad in ["not base64!", "AAAA"] {
+        // Surrounding whitespace is ignored; unpadded base64 is malformed.
+        let padded = b64_md5(&a);
+        put(s3, &key, &a, md5(&format!(" {padded} ")))
+            .await
+            .unwrap();
+        let unpadded = padded.trim_end_matches('=').to_string();
+        for bad in ["not base64!", "AAAA", unpadded.as_str()] {
             assert_eq!(
                 put(s3, &fresh, &b, md5(bad)).await,
                 Err(invalid_digest()),
@@ -293,24 +299,48 @@ async fn content_md5_on_put_and_upload_part_cluster() {
         assert!(parts.parts().is_empty(), "{parts:?}");
         assert_eq!(shards().await, baseline, "shards of refused parts remain");
         let ok = part(a.clone(), md5(&b64_md5(&a))).await.unwrap();
-        s3.complete_multipart_upload()
-            .bucket("md5")
-            .key(&key)
-            .upload_id(&id)
-            .multipart_upload(
-                CompletedMultipartUpload::builder()
-                    .parts(
-                        CompletedPart::builder()
-                            .part_number(1)
-                            .e_tag(ok.e_tag().unwrap())
-                            .set_checksum_crc32(ok.checksum_crc32().map(str::to_string))
-                            .build(),
-                    )
-                    .build(),
-            )
-            .send()
-            .await
-            .unwrap();
+        let complete = || {
+            s3.complete_multipart_upload()
+                .bucket("md5")
+                .key(&key)
+                .upload_id(&id)
+                .multipart_upload(
+                    CompletedMultipartUpload::builder()
+                        .parts(
+                            CompletedPart::builder()
+                                .part_number(1)
+                                .e_tag(ok.e_tag().unwrap())
+                                .set_checksum_crc32(ok.checksum_crc32().map(str::to_string))
+                                .build(),
+                        )
+                        .build(),
+                )
+        };
+        // CompleteMultipartUpload's XML body with a wrong or malformed
+        // digest: not completed, the part still listed.
+        for (header, expected) in [
+            (md5(&b64_md5(b"something else")), bad_digest()),
+            (md5("AAAA"), invalid_digest()),
+        ] {
+            let err = complete()
+                .customize()
+                .interceptor(header)
+                .send()
+                .await
+                .unwrap_err();
+            assert_eq!(status_code(&err), expected);
+            assert_eq!(get(&s3, &key).await, None, "completed anyway");
+            let parts = s3
+                .list_parts()
+                .bucket("md5")
+                .key(&key)
+                .upload_id(&id)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(parts.parts().len(), 1);
+        }
+        complete().send().await.unwrap();
         assert_eq!(get(&s3, &key).await, Some(a));
     }
 }
@@ -412,4 +442,164 @@ async fn content_md5_on_put_memory() {
         .await;
     }
     handle.shutdown().await;
+}
+
+/// Appends `?policy` to the request's URI before signing: an object PUT
+/// whose query names a bucket subresource.
+#[derive(Debug)]
+struct PolicyQuery;
+
+impl Intercept for PolicyQuery {
+    fn name(&self) -> &'static str {
+        "PolicyQuery"
+    }
+
+    fn modify_before_signing(
+        &self,
+        context: &mut BeforeTransmitInterceptorContextMut<'_>,
+        _rc: &RuntimeComponents,
+        _cfg: &mut ConfigBag,
+    ) -> Result<(), BoxError> {
+        let req = context.request_mut();
+        let uri = req.uri().to_string();
+        let sep = if uri.contains('?') { '&' } else { '?' };
+        req.set_uri(format!("{uri}{sep}policy"))?;
+        Ok(())
+    }
+}
+
+/// Raw anonymous request with a body; returns the status and the body.
+async fn anonymous(addr: SocketAddr, head: &str, body: &[u8]) -> (u16, String) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(
+        format!(
+            "{head}\r\nHost: {addr}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    s.write_all(body).await.unwrap();
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let status = text.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, text)
+}
+
+#[tokio::test]
+async fn content_md5_routing_and_authentication_cluster() {
+    let c = cluster().await;
+    let endpoint = format!("http://{}", c.gateway_addr);
+    let (ak, sk) = (&c.credentials.0, &c.credentials.1);
+    let s3 = client(&endpoint, ak, sk, false);
+    s3.create_bucket().bucket("md5").send().await.unwrap();
+    put(&s3, "k", b"data", md5(&b64_md5(b"data")))
+        .await
+        .unwrap();
+
+    // An object PUT with a bucket subresource in its query and an
+    // aws-chunked body is an object PUT: checked by the backend over the
+    // decoded body, accepted with its digest.
+    let chunked = client(&endpoint, ak, sk, true);
+    let data = random_bytes(2 * MIB + 3, 9);
+    let header = md5(&b64_md5(&data));
+    let (b, _dir) = body(&data, true).await;
+    chunked
+        .put_object()
+        .bucket("md5")
+        .key("q")
+        .body(b)
+        .customize()
+        .interceptor(PolicyQuery)
+        .interceptor(header.clone())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        header
+            .payload
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|p| p.starts_with("STREAMING-"))
+    );
+    assert_eq!(get(&s3, "q").await, Some(data));
+    let err = s3
+        .get_bucket_policy()
+        .bucket("md5")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(status_code(&err).1, "NoSuchBucketPolicy");
+
+    // Unauthenticated: AccessDenied, not a digest error (the body is not
+    // read before authorization), and no policy stored.
+    let policy = br#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::md5/*"}]}"#;
+    for value in [b64_md5(b"something else"), "AAAA".to_string()] {
+        let (status, text) = anonymous(
+            c.gateway_addr,
+            &format!("PUT /md5?policy HTTP/1.1\r\nContent-MD5: {value}"),
+            policy,
+        )
+        .await;
+        assert_eq!(status, 403, "{text}");
+        assert!(text.contains("AccessDenied"), "{text}");
+    }
+    let err = s3
+        .get_bucket_policy()
+        .bucket("md5")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(status_code(&err).1, "NoSuchBucketPolicy");
+    // DeleteObjects is authorized per entry (RFC-012), after its body is
+    // read: an anonymous one with a wrong digest is refused for the digest
+    // before any entry is considered; nothing is deleted either way.
+    let xml = b"<Delete><Object><Key>k</Key></Object></Delete>";
+    // With the right digest, every entry is AccessDenied (200).
+    for (value, status, code) in [
+        (b64_md5(b"something else"), 400, "<Code>BadDigest</Code>"),
+        (b64_md5(xml), 200, "<Code>AccessDenied</Code><Key>k</Key>"),
+    ] {
+        let (got, text) = anonymous(
+            c.gateway_addr,
+            &format!("POST /md5?delete HTTP/1.1\r\nContent-MD5: {value}"),
+            xml,
+        )
+        .await;
+        assert_eq!(got, status, "{text}");
+        assert!(text.contains(code), "{text}");
+    }
+    assert_eq!(get(&s3, "k").await, Some(b"data".to_vec()));
+
+    // A malformed digest on a large XML body is answered, not cut off:
+    // the client reads the 400 after sending the whole body.
+    let objects: Vec<_> = (0..1000)
+        .map(|i| {
+            ObjectIdentifier::builder()
+                .key(format!("{i:0>200}"))
+                .build()
+                .unwrap()
+        })
+        .collect();
+    let unpadded = b64_md5(b"x").trim_end_matches('=').to_string();
+    let err = s3
+        .delete_objects()
+        .bucket("md5")
+        .delete(
+            Delete::builder()
+                .set_objects(Some(objects))
+                .build()
+                .unwrap(),
+        )
+        .customize()
+        .interceptor(md5(&unpadded))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(status_code(&err), invalid_digest());
+    assert_eq!(get(&s3, "k").await, Some(b"data".to_vec()));
 }

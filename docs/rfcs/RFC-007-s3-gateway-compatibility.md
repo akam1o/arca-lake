@@ -475,8 +475,20 @@ beyond the standard CRC combination step below).
   not recorded, nothing is published. The XML bodies that `s3s` reads in
   full (DeleteObjects, CompleteMultipartUpload, PutBucketPolicy,
   PutBucketVersioning, CreateBucket) are checked by the server wrapper on
-  the bytes as `s3s` reads them, after authentication; the operation does
-  not run.
+  the bytes as `s3s` reads them, after authentication and authorization;
+  the operation does not run. Both a mismatch and a malformed value are
+  answered at the end of the body (bounded by `s3s`'s XML body limit),
+  so the client reads the `400`. The wrapper recognizes those operations
+  as `s3s` routes them: the percent-decoded path-style path (a PUT only on
+  a bucket path; an object PUT is the backend's, whatever its query or
+  path encoding) and decoded query names (`?%64elete`); never an
+  `aws-chunked` body. Virtual-hosted-style addressing, not served today,
+  would need this matching revisited. Surrounding whitespace is ignored;
+  unpadded base64 is malformed. DeleteObjects is authorized per entry
+  (RFC-012), after its body is read: an anonymous one with a wrong digest
+  is answered `BadDigest`, with the right one `200` with every entry
+  `AccessDenied`; other operations answer `AccessDenied` before the body
+  is read.
 - **Signed payload and body framing** (PUT and UploadPart): `s3s`
   verifies the body against the signed `x-amz-content-sha256` and the
   declared length while the gateway reads it, and the chunk signatures

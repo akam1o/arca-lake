@@ -274,7 +274,7 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
         let md5_header = req
             .headers()
             .get("content-md5")
-            .filter(|_| crate::content_md5::checked_here(req.method(), req.uri()))
+            .filter(|_| crate::content_md5::checked_here(req.method(), req.uri(), req.headers()))
             .map(|v| v.to_str().unwrap_or("").to_string());
         let md5_outcome = Arc::new(std::sync::OnceLock::new());
         let fut = if let Some(header) = md5_header {
