@@ -1114,12 +1114,14 @@ def step7a():
     groups_of = {g: x["members"].index(vid) for g, x in st["groups"].items() if vid in x["members"]}
     ec = [g for g in groups_of if st["groups"][g]["scheme"] == "rs-gf8-v1"]
     rep = [g for g in groups_of if st["groups"][g]["scheme"] == "replication-v1"]
-    # Only keys last written while every node was up (steps 2 and 4).
+    # Only keys last written while every storage node was up (steps 2, 2b,
+    # 3b and 4; dbg5: steps 2 and 4 alone left no replicated key in c1's
+    # replication group).
     last_put = {}
     for r in ledger():
         if r["op"] == "PUT":
             last_put[r["key"]] = r
-    safe = {k for k, r in last_put.items() if r["phase"] in ("s2", "s4") and r["outcome"] == "ack"}
+    safe = {k for k, r in last_put.items() if r["phase"] in ("s2", "s2b", "s3b", "s4") and r["outcome"] == "ack"}
     live = [(k, z) for k, z in live_keys() if k in safe]
     cands = [(k, z) for k, z in live if z > 65536] + [(k, z) for k, z in live if z <= 65536]
     gens = {}
