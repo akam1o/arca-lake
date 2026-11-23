@@ -6379,10 +6379,10 @@ mod set_failure_domain_cli {
     use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupRole, GroupState};
 
     async fn run(meta: &MemKv, args: &[&str]) -> ExitCode {
-        let argv = ["arca-lake", "admin", "--cluster-file", "/none", "group"]
+        let line = ["arca-lake", "admin", "--cluster-file", "/none", "group"]
             .into_iter()
             .chain(args.iter().copied());
-        let Command::Admin(a) = Cli::try_parse_from(argv).unwrap().command else {
+        let Command::Admin(a) = Cli::try_parse_from(line).unwrap().command else {
             unreachable!()
         };
         let AdminCommand::Group { command } = a.command else {
