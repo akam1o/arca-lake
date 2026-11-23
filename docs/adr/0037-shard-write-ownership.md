@@ -260,7 +260,18 @@ writes and cleanup deletes to that node are refused until the new
 identity is acknowledged and read (writes go elsewhere; a refused
 cleanup is counted, `arca_gateway_cache_cleanup_refused_total`, and the
 copy left to reconciliation). A node the gateway knows no acknowledged
-identity for gets the node id only. Before strict mode, a node without an identity and without a
+identity for gets the node id only.
+
+The same tokens go on the gateway's other cache deletes: invalidations
+(a copy found corrupt) and evictions remove copies other gateways may
+have populated, after the placement was removed from metadata. Nodes
+holding an identity refused them all before (an unstamped delete,
+R-100), and the copies stayed until reconciliation; they now pass, and a
+refusal of any of them is counted in the same metric. The cost is one
+range read of the identity records per gateway per refresh (one small
+record per node), whether anything changed or not: no version key moves
+when an identity is acknowledged, and adding one is not worth a
+metadata change for this read. Before strict mode, a node without an identity and without a
 node certificate naming its node (a removed or damaged identity file, a
 plaintext cluster's node before its controller gave one, a non-numeric
 SPIFFE node name) takes writes naming any node, counted.

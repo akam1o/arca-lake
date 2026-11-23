@@ -15,11 +15,15 @@ break compatibility).
   could not write every member) now carry the identity token each node
   acknowledged, read with the cluster state every 2 s, so nodes holding
   an identity no longer refuse them (R-100, R-117 follow-up); gateway
-  shard writes carry it too. A cleanup a node still refuses (fence,
+  shard writes carry it too, and so do its invalidations and evictions,
+  which delete copies other gateways may have populated (after their
+  placement was removed). A cache delete a node still refuses (fence,
   epoch, a token not read yet) is logged and counted in the new
   `arca_gateway_cache_cleanup_refused_total`; the copy is left to
-  reconciliation, as before. A repair task's recorded error now includes
-  the node's or client's message, not only the status code.
+  reconciliation, as before. A repair task's recorded error now names
+  the refusal (node schema, incarnation, node, epoch, capacity) after
+  the status code; other messages are recorded without addresses or
+  paths and at most 256 bytes.
 - Scrub: each listed shard is classified from its own evidence (chunk
   record in the group, the node's retirement flag, generation state,
   migration intent; ADR-0036). Records deleted and kept for reclaim are

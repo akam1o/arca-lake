@@ -1486,10 +1486,7 @@ async fn repair_one<S: KvStore>(
                     task,
                     opts,
                     now_ms,
-                    // The node's or the client's reason with the code
-                    // (an ownership refusal, ADR-0037, and a node schema
-                    // one, ADR-0039, share FAILED_PRECONDITION).
-                    &format!("write failed: {}: {}", s.code(), s.message()),
+                    &write_failure(&s),
                 )
                 .await;
             }
@@ -1792,4 +1789,118 @@ async fn moved_away<S: KvStore>(
     Ok(gc::chunk_record_in_group(meta, prefix, index, group_id)
         .await?
         .is_none_or(|r| r.placement != record.placement))
+}
+
+/// Longest free-text reason kept in a task's `last_error`.
+const REASON_MAX: usize = 256;
+
+/// A failed repair write as recorded in the task's `last_error`, which
+/// holds no addresses or paths: the status code and, for the refusals
+/// that share one (`FAILED_PRECONDITION`: the node schema check, ADR-0039;
+/// write ownership, ADR-0037; the group epoch), a fixed reason; any other
+/// message with what looks like an address or a path removed, at most
+/// [`REASON_MAX`] bytes.
+fn write_failure(s: &tonic::Status) -> String {
+    let msg = s.message();
+    let fixed = if NodeClients::is_node_schema_refused(s) {
+        Some("node schema")
+    } else if msg.starts_with("incarnation rejected") {
+        Some("incarnation rejected")
+    } else if msg.starts_with("node rejected") {
+        Some("node rejected")
+    } else if NodeClients::is_epoch_rejected(s) {
+        Some("epoch rejected")
+    } else if NodeClients::is_capacity_refused(s) {
+        Some("capacity")
+    } else {
+        None
+    };
+    match fixed {
+        Some(reason) => format!("write failed: {}: {reason}", s.code()),
+        None => format!("write failed: {}: {}", s.code(), sanitised(msg)),
+    }
+}
+
+/// `msg` without words that look like an address (host:port, an IP, a
+/// URL) or a path, cut to [`REASON_MAX`] bytes at a character boundary.
+fn sanitised(msg: &str) -> String {
+    let looks_located = |w: &str| {
+        w.contains('/')
+            || w.contains('\\')
+            || w.contains("://")
+            || (w.contains(':') && w.chars().any(|c| c.is_ascii_digit()))
+            || w.matches('.').count() >= 3 && w.chars().any(|c| c.is_ascii_digit())
+    };
+    let mut out = String::new();
+    for w in msg.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(if looks_located(w) { "<redacted>" } else { w });
+    }
+    if out.len() > REASON_MAX {
+        let mut end = REASON_MAX;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A repair task's recorded error holds no address or path and stays
+    /// bounded: the refusals that share `FAILED_PRECONDITION` map to fixed
+    /// reasons; other messages are sanitised and cut.
+    #[test]
+    fn write_failures_are_recorded_without_addresses_or_paths() {
+        let fp = |m: &str| tonic::Status::failed_precondition(m.to_string());
+        for (status, reason) in [
+            (
+                fp(
+                    "node schema: 10.0.0.7:7001 reports schema 0, below the cluster's schema_write 5",
+                ),
+                "node schema",
+            ),
+            (
+                fp("incarnation rejected: node adopted 01ab, request carries none"),
+                "incarnation rejected",
+            ),
+            (
+                fp("node rejected: the write is for node 3, this disk is node 4"),
+                "node rejected",
+            ),
+            (
+                fp("epoch rejected: group 1 is at epoch 2, request carries 1"),
+                "epoch rejected",
+            ),
+            (
+                tonic::Status::resource_exhausted("insufficient capacity at /var/lib/x"),
+                "capacity",
+            ),
+        ] {
+            let e = write_failure(&status);
+            assert!(e.ends_with(&format!(": {reason}")), "{e}");
+            assert!(!e.contains("10.0.0.7") && !e.contains("/var"), "{e}");
+        }
+        let e = write_failure(&tonic::Status::internal(format!(
+            "open /srv/arca/node1/seg-0001.arca failed at node1.example:7001 (http://10.1.2.3:9000) {}",
+            "x".repeat(4096)
+        )));
+        assert!(e.starts_with("write failed: "), "{e}");
+        for leaked in ["/srv", "node1.example:7001", "http://", "10.1.2.3"] {
+            assert!(!e.contains(leaked), "{leaked} in {e}");
+        }
+        assert!(
+            e.len() <= "write failed: ".len() + 64 + REASON_MAX,
+            "{}",
+            e.len()
+        );
+        // A cut never splits a character.
+        let e = sanitised(&"é".repeat(400));
+        assert!(e.len() <= REASON_MAX && e.chars().all(|c| c == 'é'));
+    }
 }

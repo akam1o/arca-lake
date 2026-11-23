@@ -390,9 +390,10 @@ pub struct RpcStats {
     /// Nodes refused because their protocol window does not intersect ours
     /// (RFC-014 §5.2).
     pub incompatible: AtomicU64,
-    /// Deletes of this process's own partial copies that a node refused
-    /// (identity, fence, epoch): the copies stay until reconciliation
-    /// removes them ([`NodeClients::note_cleanup_refused`]).
+    /// Deletes of cache copies (this process's partial copies, evictions,
+    /// invalidations) that a node refused (identity, fence, epoch): the
+    /// copies stay until reconciliation removes them
+    /// ([`NodeClients::note_cleanup_refused`]).
     pub cleanup_refused: AtomicU64,
 }
 
@@ -669,6 +670,13 @@ impl NodeClients {
         }
     }
 
+    /// The identity (node id, token) this pool stamps on deletes and
+    /// writes to `addr`, if any.
+    #[must_use]
+    pub fn noted_identity(&self, addr: &str) -> Option<(u64, [u8; 16])> {
+        self.identity_of(addr)
+    }
+
     fn identity_of(&self, addr: &str) -> Option<(u64, [u8; 16])> {
         self.identities
             .lock()
@@ -886,8 +894,9 @@ impl NodeClients {
         }
     }
 
-    /// Count a delete of this process's own partial copy that a node
-    /// refused (the copy is left to reconciliation).
+    /// Count a delete of a cache copy (a partial copy, an eviction, an
+    /// invalidation) that a node refused (the copy is left to
+    /// reconciliation).
     pub fn note_cleanup_refused(&self) {
         self.stats
             .cleanup_refused
