@@ -146,7 +146,12 @@ async fn wait_until(what: &str, timeout: Duration, mut cond: impl AsyncFnMut() -
 
 /// A leader with its generation open on every node.
 async fn leading(c: &TestCluster, id: &str) -> ControllerHandle {
-    let ctl = spawn(Arc::clone(&c.meta), controller(id)).await.unwrap();
+    leading_with(c, controller(id)).await
+}
+
+/// [`leading`] with the controller configuration `cfg`.
+async fn leading_with(c: &TestCluster, cfg: ControllerConfig) -> ControllerHandle {
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
     wait_until(
         "a leader's generation open everywhere",
         Duration::from_secs(30),
@@ -349,13 +354,33 @@ async fn finish(c: &TestCluster, path: &std::path::Path) -> Result<mr::Journal, 
 async fn a_managed_restore_applies_no_delete_decided_before_it() {
     let mut c = cluster().await;
     let kept = put(&c, "kept", 1).await;
-    let ctl = leading(&c, "ctl-before").await;
+    // The leader's deletes of `kept` are the ones decided below and
+    // delivered by `deliver`, not its own GC's: with the grace of 0 the
+    // other tests use, a GC pass running when the leader is aborted
+    // finishes (abort ends the main task; each scheduler returns only after
+    // its pass) and deletes `kept`'s shards before the restore closes the
+    // fence; test nodes keep no retention (deferred reclamation would
+    // otherwise protect them, ADR-0028), so the restored object would be
+    // unreadable ("0 of 2 shards"). The GC passes awaited below made that
+    // race certain before this grace.
+    let mut before = controller("ctl-before");
+    before.gc_grace = Duration::from_secs(3600);
+    let ctl = leading_with(&c, before).await;
     let backup = Snapshot::take(&c.meta).await;
     // After the backup point: deleted; the leader decided its deletes.
     let deletes = decided_deletes(&c, "kept").await;
     let old = frozen(&c).await;
     let _ = put(&c, "post", 2).await;
     s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
+    // A whole GC pass of the leader after the delete (it started after
+    // it), as a leader that runs on until it is stopped would.
+    let passes = ctl.metrics.gc_passes_total.load(Ordering::SeqCst);
+    wait_until(
+        "a GC pass started after the delete",
+        Duration::from_secs(30),
+        async || ctl.metrics.gc_passes_total.load(Ordering::SeqCst) >= passes + 2,
+    )
+    .await;
     ctl.abort();
     let dir = tempfile::tempdir().unwrap();
     let path = journal_path(&dir);

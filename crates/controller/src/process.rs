@@ -344,6 +344,7 @@ pub async fn spawn<S: KvStore + 'static>(
 
 /// Election loop: follower until the lease can be taken, leader until a
 /// renewal fails or shutdown is requested.
+#[allow(clippy::too_many_lines)]
 async fn run<S: KvStore + 'static>(
     meta: Arc<S>,
     cfg: ControllerConfig,
@@ -431,7 +432,14 @@ async fn run<S: KvStore + 'static>(
         // Leader: fenced store, scheduler tasks, renewal loop.
         let fenced = Arc::new(FencedKv::new(Arc::clone(&meta), leadership.clone()));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let (tasks, trip) = start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx, incarnation);
+        // The node schema shard writes need (ADR-0039) until the first
+        // health pass or repair pass reads it again; unknown (the read
+        // failed) refuses every write until then.
+        let node_schema = compat::gate(meta.as_ref())
+            .await
+            .map_or(u64::MAX, |g| compat::required_node_schema(g.schema_write));
+        let (tasks, trip) =
+            start_leader_tasks(&fenced, &cfg, &metrics, &stop_rx, incarnation, node_schema);
         let lost = hold_term(
             meta.as_ref(),
             &cfg,
@@ -576,6 +584,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
     metrics: &Arc<Metrics>,
     stop: &watch::Receiver<bool>,
     incarnation: [u8; 16],
+    node_schema: u64,
 ) -> (Vec<JoinHandle<()>>, Arc<crate::trip::Trip>) {
     let clients =
         NodeClients::with_policy(cfg.rpc_policy.clone().unwrap_or_else(|| {
@@ -583,6 +592,7 @@ fn start_leader_tasks<S: KvStore + 'static>(
         }))
         .with_tls(cfg.tls.clone());
     clients.set_incarnation(Some(incarnation));
+    clients.set_required_node_schema(node_schema);
     clients.set_fault_hook(cfg.rpc_fault_hook.as_ref().map(|h| h.0.clone()));
     // Every task's store trips the term's deletes off on a failure that
     // means the metadata is no longer the one they were decided on.
@@ -1414,6 +1424,29 @@ async fn health_pass<S: KvStore>(
     // Cluster facts for the nodes (RFC-014 §5.3, RFC-015 §5.3): the format
     // they may write and the incarnation, with its change time.
     let gate = compat::gate(meta).await?;
+    // Repair and integrity writes count only on nodes of schema_write's
+    // release once it is 5 or later (ADR-0039).
+    let node_schema = compat::required_node_schema(gate.schema_write);
+    clients.set_required_node_schema(node_schema);
+    // Controllers and gateways of an earlier release that still heartbeat
+    // after the finalize (ADR-0039: one started between the cut-off and
+    // the schema raise, or one the operator named absent): flagged on
+    // every pass until stopped.
+    let mut procs_below = 0u64;
+    if node_schema > 0 {
+        let at = now_ms();
+        for p in compat::procs(meta).await? {
+            if at.saturating_sub(p.last_ms) <= crate::upgrade::PROC_STALE_MS
+                && p.caps.schema_max < node_schema
+            {
+                procs_below += 1;
+                tracing::error!(process = %p.id, kind = ?p.kind, software = %p.software, schema_max = p.caps.schema_max, schema_write = node_schema, "a process of an earlier release runs after the finalize: stop it");
+            }
+        }
+    }
+    metrics
+        .procs_below_schema
+        .store(procs_below, Ordering::Relaxed);
     // The delete fence (ADR-0023): open for this term while Active, closed
     // otherwise; pushed to every node with the other facts. Deletes of
     // this process carry the generation only while it is open.
@@ -1668,6 +1701,34 @@ async fn health_pass<S: KvStore>(
                 .filter(|i| i.acknowledged)
                 .map(|i| (n.id, i.token)),
         );
+        // A node of an earlier release once schema 5 is written (ADR-0039):
+        // asked facts-free first, so that it receives nothing (no fence, no
+        // schema floor, no incarnation) before it is quarantined below.
+        if node_schema > 0 {
+            match clients.health(&n.address).await {
+                Ok(p) if crate::upgrade::node_below_schema(&p, node_schema) => {
+                    let reason = format!(
+                        "the node runs {} and enforces schema at most {}; the cluster writes schema {node_schema}: an earlier release after the finalize",
+                        p.software, p.schema_max
+                    );
+                    if quarantine_unless_held(meta, n.id, &reason, now).await? {
+                        tracing::error!(node = n.id, address = %n.address, %reason, "storage node quarantined");
+                    }
+                    metrics
+                        .nodes_quarantined_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    unhealthy += 1;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    if now.saturating_sub(n.last_seen_ms) > ms(cfg.unhealthy_after) {
+                        unhealthy += 1;
+                    }
+                    continue;
+                }
+            }
+        }
         let mut node_req = req.clone();
         if let Some(i) = &ident {
             node_req.node_id = n.id;
@@ -1733,6 +1794,25 @@ async fn health_pass<S: KvStore>(
                         unhealthy += 1;
                         continue;
                     }
+                }
+                // Replaced by an earlier release between the probe above and
+                // this push (ADR-0039): quarantined at once.
+                if crate::upgrade::node_below_schema(&h, node_schema) {
+                    if quarantine_unless_held(
+                        meta,
+                        n.id,
+                        "the node answered the push as an earlier release after the finalize",
+                        now,
+                    )
+                    .await?
+                    {
+                        tracing::error!(node = n.id, address = %n.address, "storage node quarantined: an earlier release after the finalize");
+                    }
+                    metrics
+                        .nodes_quarantined_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    unhealthy += 1;
+                    continue;
                 }
                 // A node at this incarnation's sequence with another
                 // incarnation, or above it, refuses this cluster's opens
@@ -1852,6 +1932,7 @@ async fn repair_pass<S: KvStore>(
     if token == 0 || metrics.health_seen_term.load(Ordering::Relaxed) != token {
         return Ok(());
     }
+    crate::integrity::refresh_required_node_schema(meta, clients).await?;
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
         .into_iter()

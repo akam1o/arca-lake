@@ -51,6 +51,12 @@ pub mod storage {
         /// nothing.
         pub const REJOIN_FENCE_SCHEMA: u64 = 3;
 
+        /// Newest metadata schema whose protections a node of this build
+        /// enforces, reported as `HealthResponse.schema_max` (ADR-0039):
+        /// the metadata schema of this build (one more in a `version-bump`
+        /// build). 0.1.0 nodes report nothing (0).
+        pub const NODE_SCHEMA_MAX: u64 = 5 + arca_lake_common::compat::BUMP;
+
         /// Oldest protocol version whose nodes enforce the delete fence.
         pub const FENCED_DELETE_VERSION: u32 = 3;
 

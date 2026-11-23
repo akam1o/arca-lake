@@ -35,6 +35,25 @@ break compatibility).
 - R-110 harness: the scrub parser reads both line formats; the judge's
   count rule for unexpected shards applies only to timelines of earlier
   binaries; unclassified shards make C5 Inconclusive.
+- Metadata schema 5
+  ([ADR-0039](docs/adr/0039-schema-5-and-the-0.1.0-upgrade.md)). 0.2.0
+  reads schemas 4 and 5 and initialises new stores at 5. A cluster
+  upgraded from 0.1.0 stays at schema 4, with the 0.2.0 protections
+  degraded, until `admin upgrade finalize` raises it to 5. After that,
+  0.1.0 controllers and gateways refuse to start. The leader quarantines
+  0.1.0 storage nodes before pushing them anything, and gateways and the
+  controller never count a shard write on them (the node must report
+  schema 5 in `Health` and in the write's acknowledgement). Restoring a
+  pre-finalize backup does not bring 0.1.0 back. The finalize is refused while any
+  0.1.0 (or unknown) process or node takes part.
+  `admin status --versions` shows each process's and node's software
+  and schema, and whether protections are degraded or mandatory.
+  Compatibility impact: no record layout, record version byte, wire
+  protocol version or segment format change. Two additive fields,
+  `HealthResponse.schema_max` (50) and `PutShardResponse.schema_max`
+  (5), are ignored by 0.1.0. Stores of
+  schema 3 or below must be upgraded through 0.1.0 first
+  ([upgrading from 0.1.0](docs/guide/operations.md#upgrading-from-010-to-020)).
 
 ### Fixed
 

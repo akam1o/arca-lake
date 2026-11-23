@@ -9,9 +9,10 @@
 
 use arca_lake_common::compat::Capabilities;
 use arca_lake_metadata::KvStore;
+use arca_lake_metadata::keys;
 use arca_lake_metadata::ops::compat::{self, VersionKey};
 use arca_lake_metadata::ops::{cluster, recovery};
-use arca_lake_metadata::records::UpgradeStep;
+use arca_lake_metadata::records::{UpgradeCursor, UpgradeStep};
 use arca_lake_protocol::client::NodeClients;
 use tracing::{info, warn};
 
@@ -63,73 +64,7 @@ pub async fn upgrade_pass<S: KvStore>(
     }
     match cur.step {
         UpgradeStep::Requested => {
-            // Step 1: every node (live Health) and every fresh heartbeat
-            // reaches the target. Absent nodes block unless ignored.
-            let mut blockers = Vec::new();
-            // A removed node is out of the cluster (Phase 3.11, R-100);
-            // only a decommissioned or removed node may be named absent.
-            let states = arca_lake_metadata::ops::node_lifecycle::states(meta).await?;
-            let state_of = |id: u64| {
-                states
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(arca_lake_metadata::ops::node_lifecycle::State::Active)
-            };
-            for n in cluster::list_nodes(meta).await? {
-                let id = n.id.to_string();
-                let state = state_of(n.id);
-                if state == arca_lake_metadata::ops::node_lifecycle::State::Removed {
-                    continue;
-                }
-                let may_ignore = cur.ignore_absent.contains(&id)
-                    && matches!(
-                        state,
-                        arca_lake_metadata::ops::node_lifecycle::State::Decommissioned
-                    );
-                if cur.ignore_absent.contains(&id) && !may_ignore {
-                    blockers.push(format!(
-                        "node {} is named absent but is {}: only a decommissioned node may be (decommission or unregister it first)",
-                        n.id,
-                        state.name()
-                    ));
-                    continue;
-                }
-                match clients.health(&n.address).await {
-                    Ok(h) => {
-                        let caps = arca_lake_protocol::client::NodeCaps::from_health(&h).caps;
-                        let ok = caps.protocol_max >= target.protocol
-                            && caps.format_max >= target.format;
-                        if !ok {
-                            blockers.push(format!(
-                                "node {} ({}) speaks protocol {} format {}",
-                                n.id, h.software, caps.protocol_max, caps.format_max
-                            ));
-                        }
-                    }
-                    Err(e) if may_ignore => {
-                        warn!(node = n.id, error = %e, "finalize: absent decommissioned node ignored");
-                    }
-                    Err(e) => blockers.push(format!("node {} unreachable: {}", n.id, e.code())),
-                }
-            }
-            for p in compat::procs(meta).await? {
-                if now_ms.saturating_sub(p.last_ms) > PROC_STALE_MS
-                    || cur.ignore_absent.contains(&p.id)
-                {
-                    continue;
-                }
-                if !(p.caps.schema_max >= target.schema && p.caps.protocol_max >= target.protocol) {
-                    blockers.push(format!(
-                        "{:?} {} ({}) reads schema {} protocol {}",
-                        p.kind, p.id, p.software, p.caps.schema_max, p.caps.protocol_max
-                    ));
-                }
-            }
-            // From schema 5 no 0.1.0 process runs: every group's failure
-            // domain must be recorded first (ADR-0038).
-            if let Some(b) = crate::failure_domain::finalize_blocker(meta, target.schema).await? {
-                blockers.push(b);
-            }
+            let blockers = precondition(meta, clients, &cur, now_ms).await?;
             if !blockers.is_empty() {
                 let why = format!("precondition: {}", blockers.join("; "));
                 compat::note_upgrade_error(meta, &why, now_ms).await?;
@@ -167,7 +102,16 @@ pub async fn upgrade_pass<S: KvStore>(
             }
         }
         UpgradeStep::Migrated => {
-            // Step 3: the downgrade cut-off.
+            // Step 3: the downgrade cut-off. The precondition again (ADR-0039):
+            // a process of an earlier release started since step 1 (a
+            // rollback within the window) holds the cut-off back.
+            let blockers = precondition(meta, clients, &cur, now_ms).await?;
+            if !blockers.is_empty() {
+                let why = format!("precondition at the cut-off: {}", blockers.join("; "));
+                compat::note_upgrade_error(meta, &why, now_ms).await?;
+                report.blocked = Some(why);
+                return Ok(report);
+            }
             let v = target.schema;
             if compat::advance_upgrade_raising(
                 meta,
@@ -254,7 +198,11 @@ pub async fn upgrade_pass<S: KvStore>(
                     decommissioned.contains(&n.id) && cur.ignore_absent.contains(&n.id.to_string());
                 !removed.contains(&n.id) && !named_away
             };
-            let mut missing = Vec::new();
+            // Processes of an earlier release started after the cut-off
+            // (their gate still admits schema `schema`, ADR-0039) are
+            // stopped first: once the schema is raised they would run on
+            // past the protections they do not enforce.
+            let mut missing = procs_below(meta, &cur, now_ms).await?;
             for n in cluster::list_nodes(meta)
                 .await?
                 .into_iter()
@@ -266,6 +214,9 @@ pub async fn upgrade_pass<S: KvStore>(
                     ..Default::default()
                 };
                 match clients.health_with(&n.address, req).await {
+                    Ok(h) if node_below_schema(&h, target.schema) => {
+                        missing.push(node_below_message(n.id, &h, target.schema));
+                    }
                     // The floor, and a segment of the target format on the
                     // device (re-review: a node that missed the format step,
                     // or whose rollover failed).
@@ -298,8 +249,10 @@ pub async fn upgrade_pass<S: KvStore>(
             let v = compat::raise_version(meta, VersionKey::Schema, target.schema).await?;
             // Again after the raise: a node registered while the step ran
             // is waited for too; until then the upgrade stays open and the
-            // step is retried (re-review).
-            let mut missing_after = Vec::new();
+            // step is retried (re-review). So is a process of an earlier
+            // release that started before the raise (ADR-0039): its gate
+            // admitted it, and it runs on until stopped.
+            let mut missing_after = procs_below(meta, &cur, now_ms).await?;
             for n in cluster::list_nodes(meta)
                 .await?
                 .into_iter()
@@ -311,6 +264,9 @@ pub async fn upgrade_pass<S: KvStore>(
                     ..Default::default()
                 };
                 match clients.health_with(&n.address, req).await {
+                    Ok(h) if node_below_schema(&h, target.schema) => {
+                        missing_after.push(node_below_message(n.id, &h, target.schema));
+                    }
                     // The floor, and a segment of the target format on the
                     // device (re-review: a node that missed the format step,
                     // or whose rollover failed).
@@ -352,4 +308,169 @@ pub async fn upgrade_pass<S: KvStore>(
         }
     }
     Ok(report)
+}
+
+/// Whether node health `h` shows a release that does not enforce the
+/// protections of `schema` (ADR-0039: from [`keys::SCHEMA_V5`] on, a node
+/// reports the newest schema it enforces; 0.1.0 and earlier report none).
+/// Below schema 5 the field is not required (the earlier finalizes predate
+/// it).
+#[must_use]
+pub fn node_below_schema(h: &arca_lake_protocol::storage::v1::HealthResponse, schema: u64) -> bool {
+    schema >= keys::SCHEMA_V5 && h.schema_max < schema
+}
+
+fn node_below_message(
+    id: u64,
+    h: &arca_lake_protocol::storage::v1::HealthResponse,
+    schema: u64,
+) -> String {
+    if h.schema_max == 0 {
+        format!(
+            "node {id} runs {} (0.1.0 or earlier, or an unknown release: it reports no schema): upgrade it to a release of schema {schema} first",
+            h.software
+        )
+    } else {
+        format!(
+            "node {id} runs {} (enforces schema up to {}): upgrade it to a release of schema {schema} first",
+            h.software, h.schema_max
+        )
+    }
+}
+
+/// Fresh heartbeats of processes that do not read the target schema. A
+/// process named absent is passed over only while its heartbeat has not
+/// advanced since the request (ADR-0039): one that heartbeats after it is
+/// not absent.
+async fn procs_below<S: KvStore>(
+    meta: &S,
+    cur: &UpgradeCursor,
+    now_ms: u64,
+) -> Result<Vec<String>, ControlError> {
+    let target = cur.target;
+    let mut blockers = Vec::new();
+    for p in compat::procs(meta).await? {
+        if now_ms.saturating_sub(p.last_ms) > PROC_STALE_MS {
+            continue;
+        }
+        let reaches = p.caps.schema_max >= target.schema && p.caps.protocol_max >= target.protocol;
+        if cur.ignore_absent.contains(&p.id) {
+            if !reaches && p.last_ms > cur.started_ms {
+                blockers.push(format!(
+                    "{:?} {} ({}) is named absent but heartbeated after the request (reads schema {}): stop it",
+                    p.kind, p.id, p.software, p.caps.schema_max
+                ));
+            }
+            continue;
+        }
+        if !(p.caps.schema_max >= target.schema && p.caps.protocol_max >= target.protocol) {
+            blockers.push(format!(
+                "{:?} {} ({}) reads schema {} protocol {}",
+                p.kind, p.id, p.software, p.caps.schema_max, p.caps.protocol_max
+            ));
+        }
+    }
+    Ok(blockers)
+}
+
+/// Step 1 (RFC-014 §5.5): every node (live Health) and every fresh
+/// heartbeat reaches the target; absent nodes block unless ignored. From
+/// schema 5 on a node must also report the schema (ADR-0039).
+async fn precondition<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    cur: &UpgradeCursor,
+    now_ms: u64,
+) -> Result<Vec<String>, ControlError> {
+    let target = cur.target;
+    let mut blockers = Vec::new();
+    // A removed node is out of the cluster (Phase 3.11, R-100);
+    // only a decommissioned or removed node may be named absent.
+    let states = arca_lake_metadata::ops::node_lifecycle::states(meta).await?;
+    let state_of = |id: u64| {
+        states
+            .get(&id)
+            .copied()
+            .unwrap_or(arca_lake_metadata::ops::node_lifecycle::State::Active)
+    };
+    for n in cluster::list_nodes(meta).await? {
+        let id = n.id.to_string();
+        let state = state_of(n.id);
+        if state == arca_lake_metadata::ops::node_lifecycle::State::Removed {
+            continue;
+        }
+        let may_ignore = cur.ignore_absent.contains(&id)
+            && matches!(
+                state,
+                arca_lake_metadata::ops::node_lifecycle::State::Decommissioned
+            );
+        if cur.ignore_absent.contains(&id) && !may_ignore {
+            blockers.push(format!(
+                "node {} is named absent but is {}: only a decommissioned node may be (decommission or unregister it first)",
+                n.id,
+                state.name()
+            ));
+            continue;
+        }
+        match clients.health(&n.address).await {
+            Ok(h) => {
+                let caps = arca_lake_protocol::client::NodeCaps::from_health(&h).caps;
+                let ok = caps.protocol_max >= target.protocol && caps.format_max >= target.format;
+                if !ok {
+                    blockers.push(format!(
+                        "node {} ({}) speaks protocol {} format {}",
+                        n.id, h.software, caps.protocol_max, caps.format_max
+                    ));
+                } else if node_below_schema(&h, target.schema) {
+                    blockers.push(node_below_message(n.id, &h, target.schema));
+                }
+            }
+            Err(e) if may_ignore => {
+                warn!(node = n.id, error = %e, "finalize: absent decommissioned node ignored");
+            }
+            Err(e) => blockers.push(format!("node {} unreachable: {}", n.id, e.code())),
+        }
+    }
+    blockers.extend(procs_below(meta, cur, now_ms).await?);
+    // From schema 5 no 0.1.0 process runs: every group's failure domain
+    // must be recorded first (ADR-0038); re-checked at the cut-off, so a
+    // group a 0.1.0 `admin create-groups` made meanwhile blocks it too.
+    blockers.extend(crate::failure_domain::finalize_blocker(meta, target.schema).await?);
+    Ok(blockers)
+}
+
+#[cfg(test)]
+mod tests {
+    use arca_lake_protocol::storage::v1 as pb;
+
+    use super::*;
+
+    fn health(software: &str, schema_max: u64) -> pb::HealthResponse {
+        pb::HealthResponse {
+            software: software.into(),
+            schema_max,
+            ..Default::default()
+        }
+    }
+
+    /// A 0.1.0 node reports no schema (the field is new in 0.2.0): it blocks
+    /// a finalize to schema 5 and later; the earlier finalizes do not ask.
+    #[test]
+    fn a_node_without_a_schema_is_below_schema_5_only() {
+        let old = health("0.1.0", 0);
+        assert!(node_below_schema(&old, keys::SCHEMA_V5));
+        assert!(!node_below_schema(&old, keys::SCHEMA_V5 - 1));
+        assert!(node_below_message(3, &old, keys::SCHEMA_V5).contains("0.1.0 or earlier"));
+        let cur = health("0.2.0", pb::NODE_SCHEMA_MAX);
+        assert!(!node_below_schema(&cur, keys::SCHEMA_VERSION));
+        assert!(node_below_schema(&cur, keys::SCHEMA_VERSION + 1));
+    }
+
+    /// The schema a node reports is this build's metadata schema.
+    #[test]
+    fn nodes_report_the_metadata_schema() {
+        assert_eq!(pb::NODE_SCHEMA_MAX, keys::SCHEMA_VERSION);
+        assert_eq!(keys::SCHEMA_V5, 5);
+        assert_eq!(keys::SCHEMA_VERSION_MIN, 4 + arca_lake_common::compat::BUMP);
+    }
 }

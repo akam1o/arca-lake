@@ -2462,7 +2462,7 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                         );
                         for p in procs {
                             println!(
-                                "proc {:?} {} software {} protocol [{}, {}] schema [{}, {}] incarnation {} last_ms {}",
+                                "proc {:?} {} software {} protocol [{}, {}] schema [{}, {}] incarnation {} last_ms {}{}",
                                 p.kind,
                                 p.id,
                                 p.software,
@@ -2471,12 +2471,13 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                                 p.caps.schema_min,
                                 p.caps.schema_max,
                                 arca_lake_metadata::ops::compat::hex(&p.incarnation),
-                                p.last_ms
+                                p.last_ms,
+                                proc_marks(p.caps.schema_max, p.last_ms, now)
                             );
                         }
                         for c in caps {
                             println!(
-                                "node {} software {} protocol [{}, {}] format [{}, {}] format_write {} incarnation {} epochs {:?} seen_ms {}",
+                                "node {} software {} protocol [{}, {}] format [{}, {}] format_write {} schema_max {} incarnation {} epochs {:?} seen_ms {}{}",
                                 c.node_id,
                                 c.software,
                                 c.caps.protocol_min,
@@ -2484,12 +2485,14 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                                 c.caps.format_min,
                                 c.caps.format_max,
                                 c.format_write,
+                                c.caps.schema_max,
                                 c.incarnation.map_or_else(
                                     || "-".into(),
                                     |i| arca_lake_metadata::ops::compat::hex(&i)
                                 ),
                                 c.group_epochs,
-                                c.seen_ms
+                                c.seen_ms,
+                                below_schema_5(c.caps.schema_max)
                             );
                         }
                     }
@@ -4500,11 +4503,42 @@ async fn check_config<S: arca_lake_metadata::KvStore>(meta: &S) -> ExitCode {
     }
 }
 
+/// A process or node below schema 5 is 0.1.0 or an unknown release
+/// (ADR-0039): it blocks the finalize.
+fn below_schema_5(schema_max: u64) -> &'static str {
+    if schema_max < arca_lake_metadata::keys::SCHEMA_V5 {
+        " below-schema-5"
+    } else {
+        ""
+    }
+}
+
+/// The mark of a heartbeat line in `admin status --versions`: a record
+/// older than the heartbeat window is a process gone (it blocks nothing).
+fn proc_marks(schema_max: u64, last_ms: u64, now_ms: u64) -> &'static str {
+    if now_ms.saturating_sub(last_ms) > arca_lake_controller::upgrade::PROC_STALE_MS {
+        " (stale)"
+    } else {
+        below_schema_5(schema_max)
+    }
+}
+
 fn print_gate(g: &arca_lake_metadata::ops::compat::Gate) {
     println!(
         "schema {:?} schema_write {:?} format_write {:?} has_data {}",
         g.schema, g.schema_write, g.format_write, g.has_data
     );
+    if g.schema_v5_enforced() {
+        println!(
+            "protections mandatory (schema_write >= {}, ADR-0039): no 0.1.0 process may run",
+            arca_lake_metadata::keys::SCHEMA_V5
+        );
+    } else {
+        println!(
+            "protections degraded (schema_write below {}, ADR-0039): 0.1.0 processes may still run and bypass the 0.2.0 protections; `admin upgrade finalize` makes them mandatory",
+            arca_lake_metadata::keys::SCHEMA_V5
+        );
+    }
     match &g.cluster {
         Some(c) => println!(
             "cluster {} incarnation {} changed_ms {} by {} restored_at_ms {:?} restored_from {:?}",
@@ -6366,6 +6400,22 @@ mod gateway_auth_tests {
         assert!(gateway_auth(true, None, None).is_err());
         let (store, creds) = gateway_auth(false, None, None).unwrap();
         assert!(store.is_none() && creds.is_none());
+    }
+}
+
+#[cfg(test)]
+mod version_marks {
+    //! `admin status --versions` marks (ADR-0039).
+    use super::proc_marks;
+    use arca_lake_controller::upgrade::PROC_STALE_MS;
+
+    #[test]
+    fn a_stale_heartbeat_is_marked_stale_and_a_fresh_one_by_its_schema() {
+        let now = 10 * PROC_STALE_MS;
+        assert_eq!(proc_marks(4, now - 1_000, now), " below-schema-5");
+        assert_eq!(proc_marks(5, now - 1_000, now), "");
+        assert_eq!(proc_marks(4, now - PROC_STALE_MS - 1, now), " (stale)");
+        assert_eq!(proc_marks(5, now - PROC_STALE_MS - 1, now), " (stale)");
     }
 }
 

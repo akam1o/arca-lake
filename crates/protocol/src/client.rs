@@ -409,7 +409,14 @@ pub struct NodeCaps {
     pub incarnation: Option<[u8; 16]>,
     /// The node's delete fence: generation (0 = none) and whether open.
     pub delete_fence: (u64, bool),
+    /// When the `Health` answer was received.
+    pub seen: std::time::Instant,
 }
+
+/// How long the capabilities a node reported are trusted for the write
+/// schema check ([`NodeClients::set_required_node_schema`]) before they are
+/// asked again (ADR-0039; the gateway's cluster-state refresh interval).
+pub const WRITE_CAPS_MAX_AGE: Duration = Duration::from_secs(2);
 
 impl NodeCaps {
     /// Interpret a `Health` response (zero fields = version 1 node).
@@ -419,7 +426,7 @@ impl NodeCaps {
             protocol_min: h.protocol_min.max(1),
             protocol_max: h.protocol_max.max(1),
             schema_min: 0,
-            schema_max: 0,
+            schema_max: h.schema_max,
             format_min: h.format_min.max(1),
             format_max: h.format_max.max(1),
         };
@@ -432,6 +439,7 @@ impl NodeCaps {
             format_write: h.format_write,
             incarnation: <[u8; 16]>::try_from(h.incarnation.as_ref()).ok(),
             delete_fence: (h.delete_fence_generation, h.delete_fence_open),
+            seen: std::time::Instant::now(),
         }
     }
 
@@ -530,6 +538,9 @@ pub struct NodeClients {
     /// `GetShard` RPCs in flight per node address (durable-read priority
     /// for cache populations).
     reads_in_flight: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
+    /// The metadata schema a node must enforce for a shard write to it to
+    /// count (ADR-0039; 0: none required).
+    required_node_schema: Arc<AtomicU64>,
 }
 
 /// A node's identity: its id and the token it acknowledged.
@@ -586,6 +597,7 @@ impl NodeClients {
             tls: None,
             node_ids: Arc::default(),
             identities: Arc::default(),
+            required_node_schema: Arc::default(),
         }
     }
 
@@ -1091,6 +1103,57 @@ impl NodeClients {
         Ok(StorageNodeClient::new(self.channel(addr)?).max_decoding_message_size(64 << 20))
     }
 
+    /// Require nodes to enforce metadata schema `schema` for a shard write
+    /// to count (ADR-0039: the cluster's `schema_write` once it reached
+    /// schema 5; 0 below it). A node that reports less, in `Health` (asked
+    /// again at most [`WRITE_CAPS_MAX_AGE`] after the last answer, and
+    /// after every connection failure) or in the write's acknowledgement,
+    /// is a failed write: [`Self::is_node_schema_refused`].
+    pub fn set_required_node_schema(&self, schema: u64) {
+        self.required_node_schema
+            .store(schema, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// See [`Self::set_required_node_schema`].
+    #[must_use]
+    pub fn required_node_schema(&self) -> u64 {
+        self.required_node_schema
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether a shard write was refused because the node runs a release
+    /// below the required schema ([`Self::set_required_node_schema`]).
+    #[must_use]
+    pub fn is_node_schema_refused(status: &tonic::Status) -> bool {
+        status.code() == tonic::Code::FailedPrecondition
+            && status.message().starts_with("node schema")
+    }
+
+    fn node_schema_refusal(addr: &str, reported: u64, required: u64, what: &str) -> tonic::Status {
+        tonic::Status::failed_precondition(format!(
+            "node schema: {addr} {what} schema {reported}, below the cluster's schema_write {required} (an earlier release, ADR-0039): the shard write does not count"
+        ))
+    }
+
+    /// The write schema check before a shard write: the node's reported
+    /// schema, from a `Health` answer at most [`WRITE_CAPS_MAX_AGE`] old.
+    async fn check_write_schema(&self, addr: &str) -> Result<(), tonic::Status> {
+        let required = self.required_node_schema();
+        if required == 0 {
+            return Ok(());
+        }
+        let reported = match self.node_caps(addr) {
+            Some(c) if c.seen.elapsed() <= WRITE_CAPS_MAX_AGE => c.caps.schema_max,
+            _ => self.health(addr).await?.schema_max,
+        };
+        if reported < required {
+            return Err(Self::node_schema_refusal(
+                addr, reported, required, "reports",
+            ));
+        }
+        Ok(())
+    }
+
     /// Whether a status is the node's epoch fence.
     #[must_use]
     pub fn is_epoch_rejected(status: &tonic::Status) -> bool {
@@ -1147,10 +1210,48 @@ impl NodeClients {
             shard: Some(shard),
             group_id: Some(shard.group_id),
         };
-        self.with_retry(ctx, |fault| {
-            self.put_shard_raw(addr, shard, epoch, data.clone(), frame_bytes, class, fault)
-        })
-        .await
+        self.check_write_schema(addr).await?;
+        let resp = self
+            .with_retry(ctx, |fault| {
+                self.put_shard_raw(addr, shard, epoch, data.clone(), frame_bytes, class, fault)
+            })
+            .await;
+        // The acknowledgement itself shows the node's release (ADR-0039): a
+        // node replaced by an earlier release since its last `Health` stored
+        // the bytes, but the write does not count (they are an unreferenced
+        // record, collected as any failed write's).
+        let required = self.required_node_schema();
+        match resp {
+            Ok(r) if required > 0 && r.schema_max < required => {
+                self.forget_caps(addr);
+                Err(Self::node_schema_refusal(
+                    addr,
+                    r.schema_max,
+                    required,
+                    "acknowledged the write at",
+                ))
+            }
+            Ok(r) => Ok(r),
+            Err(e) => {
+                // A connection failure: the node may come back as another
+                // binary; its capabilities are asked again.
+                if matches!(
+                    e.code(),
+                    tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Cancelled
+                ) {
+                    self.forget_caps(addr);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Drop the capabilities learned from `addr` (asked again on next use).
+    pub fn forget_caps(&self, addr: &str) {
+        self.negotiated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(addr);
     }
 
     /// Whether a node refused a write for lack of capacity.
