@@ -1,7 +1,7 @@
 # Roadmap and phase records
 
 The active plan is [Phase 4](phase-4.md). arca-lake is experimental;
-0.1.0 is the first experimental release (candidate; not yet published).
+0.1.0 is the first experimental release (2026-11-23, [0.1.0 release](https://github.com/akam1o/arca-lake/releases/tag/v0.1.0)).
 A delivered implementation or completed development phase does
 not establish production readiness; each verification report states the
 conditions it exercised and the criteria it did not meet.

@@ -1,7 +1,7 @@
 # Contributing to arca-lake
 
 arca-lake is an experimental implementation; 0.1.0 is the first
-experimental release (candidate; not yet published). Useful contributions
+experimental release. Useful contributions
 include reproducible bug reports, S3 compatibility fixes, tests of failure
 and recovery behavior, documentation, and design review. Start with the
 [architecture overview](docs/architecture/overview.md),
