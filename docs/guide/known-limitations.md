@@ -56,8 +56,10 @@ entry in the [risk register](../architecture/risks.md).
   members were put in one domain by a replacement made before the fix are
   not reported; a node without the failure-domain label stalls the
   replacement of its groups (nothing is placed in a wrong domain).
-- R-118: tiering resets a generation's whole access record after
-  outcomes that may not have acted on it; tiering accuracy is limited.
+- R-118 (residual, fixed in 0.2.0 preparation): a generation with a
+  chunk that cannot move is retried by every pass in which it qualifies;
+  a partly promoted generation whose reads age out stays split over two
+  tiers until it is demoted (readable throughout).
 - R-111: small objects cost far more node capacity than their payload
   (about 24 KiB for a 1 KiB object with three replicas).
 - R-112: concurrent overwrites of one hot key are often answered `503
