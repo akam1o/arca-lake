@@ -49,6 +49,7 @@ pub fn label_for(
 /// # Errors
 ///
 /// Why it may not.
+#[allow(clippy::implicit_hasher)]
 pub fn check_move(
     domains: &BTreeMap<u64, GroupDomain>,
     nodes: &HashMap<u64, NodeRecord>,
@@ -169,6 +170,7 @@ impl fmt::Display for Finding {
 
 /// Every finding of `groups` against `nodes` and `domains`.
 #[must_use]
+#[allow(clippy::implicit_hasher)]
 pub fn audit_groups(
     groups: &[GroupRecord],
     nodes: &HashMap<u64, NodeRecord>,
