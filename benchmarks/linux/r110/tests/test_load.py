@@ -31,10 +31,11 @@ def windows(times, width):
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # A cleanup, not tearDown: cleanups run last to first, so every
+        # load's close (which joins its probe thread) runs before the
+        # directory it writes in is removed. tearDown would run first.
+        self.addCleanup(self.tmp.cleanup)
         self.dir = self.tmp.name
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def load(self, client, limits=None, clock=None, size=1024):
         self.clock = clock or common.FakeClock()
@@ -516,6 +517,34 @@ class ReviewFindings(Base):
         # found, missing, found, missing, missing, missing: the third in a row.
         self.assertEqual((ld.stop_reason, state["n"]), ("probe", 6))
         self.assertEqual(common.reason_class("probe"), "anomaly")
+
+
+class Cleanup(unittest.TestCase):
+    def test_a_test_directory_is_removed_only_after_the_load_stopped_writing(self):
+        """CI failed with "Directory not empty" at the temporary directory's
+        cleanup: the probe thread sets the stop reason, then writes the stop
+        file; the test sees the reason and returns, and the directory was
+        removed (tearDown) before the load was closed (a cleanup) and its
+        thread joined. A slow stop-file write (a slow disk) makes that
+        window certain: the directory must still hold the finished stop
+        file when it is removed."""
+        real_link, real_cleanup = common.link_new, tempfile.TemporaryDirectory.cleanup
+        seen = []
+
+        def slow_link(path, text):
+            time.sleep(0.5)  # the injected slow disk: the write ends after the stop is seen
+            return real_link(path, text)
+
+        def cleanup(td):
+            seen.append(os.path.exists(os.path.join(td.name, "stop.json")))
+            real_cleanup(td)
+
+        result = unittest.TestResult()
+        with mock.patch.object(common, "link_new", slow_link), \
+                mock.patch.object(tempfile.TemporaryDirectory, "cleanup", cleanup):
+            ReviewFindings("test_the_baseline_probe_stops_the_run_after_three_failures").run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertEqual(seen, [True], "the directory was removed while the load was still writing in it")
 
 
 class Process(Base):
