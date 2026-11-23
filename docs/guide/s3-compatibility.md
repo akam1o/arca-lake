@@ -22,3 +22,7 @@ for clients:
 - `Content-MD5` is verified (`400 BadDigest` on a mismatch, `400
   InvalidDigest` if malformed; nothing is stored). DeleteObjects does not
   require it.
+- Re-creating a bucket you own is `409 BucketAlreadyOwnedByYou` in every
+  region, including us-east-1, where AWS answers `200 OK`.
+- A body that does not match its signed `x-amz-content-sha256` is `400
+  XAmzContentSHA256Mismatch`; nothing is stored.

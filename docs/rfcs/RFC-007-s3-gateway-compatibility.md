@@ -107,6 +107,7 @@ full AWS S3 compatibility: this table is the claim.
 | `ListObjectVersions` with a version marker whose key no longer exists | resumes after the key | undefined |
 | Object ACLs | `NotImplemented` | supported |
 | DeleteObjects without `Content-MD5` or `x-amz-checksum-*` | accepted; `x-amz-checksum-*` on XML bodies is not verified (`Content-MD5` is) | `400 InvalidRequest` (one of them is required) |
+| `CreateBucket` of a bucket the requester owns | `409 BucketAlreadyOwnedByYou` in every region (another principal's bucket: `409 BucketAlreadyExists`) | `409 BucketAlreadyOwnedByYou`, except in us-east-1, where it is `200 OK` for legacy compatibility |
 | Multipart upload expiry | controller sweep after `--multipart-expiry` (7 days by default) | lifecycle rule only |
 
 ### 5.2 Object model recap (RFC-002) and generation kinds
@@ -476,6 +477,17 @@ beyond the standard CRC combination step below).
   PutBucketVersioning, CreateBucket) are checked by the server wrapper on
   the bytes as `s3s` reads them, after authentication; the operation does
   not run.
+- **Signed payload and body framing** (PUT and UploadPart): `s3s`
+  verifies the body against the signed `x-amz-content-sha256` and the
+  declared length while the gateway reads it, and the chunk signatures
+  and framing of `aws-chunked` bodies. A failed check is the client's
+  request and answers as AWS: payload hash → `400
+  XAmzContentSHA256Mismatch`, length or framing → `400 IncompleteBody`,
+  chunk signature → `403 SignatureDoesNotMatch`, oversized chunk → `400
+  EntityTooLarge`. The pending generation is aborted and nothing is
+  published; shards placed before the end of the body are collected by
+  GC and node reconciliation (RFC-004 §5.10). Only a failure of the
+  connection itself stays `500 InternalError`.
 
 ### 5.8 DeleteObjects
 
@@ -600,4 +612,5 @@ phase report.
 | A15 | Property-based and model-based tests of the versioned key state machine | Implemented, Verified (`version_model.rs`: random PUT / DELETE / DELETE-version / Enable / Suspend sequences against a reference model, 400 cases; it found and fixed a duplicated `null` version record after a version delete restored the null version). The generation model (`model.rs`) and the policy monotonicity property (`policy.rs`) also exist |
 | A16 | The compatibility matrix is generated from the conformance suite's list of exercised operations | Not Implemented (maintained by hand; §5.1) |
 | A17 | Performance regression with multipart PUT added | see the Phase 3.1 report (`benchmarks/linux/results`) |
+| A18 | A signed PUT or UploadPart whose body does not match its `x-amz-content-sha256` is `400 XAmzContentSHA256Mismatch` and changes nothing; re-creating one's own bucket is `409 BucketAlreadyOwnedByYou`, another principal's `409 BucketAlreadyExists` | Verified (`s3_errors.rs`, cluster and memory backends, AWS SDK for Rust; body stream error mapping unit tests in `gateway/src/body.rs`) |
 | A19 | `Content-MD5`: malformed → `400 InvalidDigest`, mismatch → `400 BadDigest`, nothing committed, on PutObject (single and multi-chunk, plain and `aws-chunked`) and UploadPart, and on the DeleteObjects and PutBucketPolicy bodies | Verified (`s3_content_md5.rs`, cluster and memory backends, AWS SDK for Rust; `gateway/src/content_md5.rs` unit tests) |

@@ -638,7 +638,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 let next = body
                     .try_next()
                     .await
-                    .map_err(|e| s3_error!(InternalError, "body read failed: {e}"))?;
+                    .map_err(|e| crate::body::body_error(&e))?;
                 let Some(b) = next else {
                     finished = true;
                     break;

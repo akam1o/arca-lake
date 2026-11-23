@@ -81,6 +81,7 @@ mod request_metrics;
 mod retirement_crash;
 mod s3_compat;
 mod s3_content_md5;
+mod s3_errors;
 mod scrub_classes;
 mod system_model;
 mod tiering;
