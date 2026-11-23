@@ -267,7 +267,19 @@ pub async fn delete_copy(
         match clients.delete_shard_if(&addr, shard, epoch, token).await {
             Ok(()) => {}
             Err(s) if s.code() == tonic::Code::NotFound || NodeClients::is_changed(&s) => {}
-            Err(_) => failed += 1,
+            Err(s) => {
+                // Left to reconciliation (an eviction's, an invalidation's
+                // or a failed population's delete): counted and logged.
+                clients.note_cleanup_refused();
+                tracing::warn!(
+                    node = %addr,
+                    group = shard.group_id,
+                    shard = shard.shard_index,
+                    error = %s,
+                    "cache copy not deleted: left to reconciliation"
+                );
+                failed += 1;
+            }
         }
     }
     failed

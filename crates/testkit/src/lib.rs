@@ -519,6 +519,9 @@ impl<S: KvStore + 'static> TestCluster<S> {
             )
             .await;
         }
+        // The gateway takes the identities now rather than at its next
+        // refresh (its deletes of its own partial copies carry them).
+        backend.refresh_node_identities().await;
         // A test cluster runs no controller: the fence a leader would open
         // (ADR-0023), so that deletes go through (the gateway takes it
         // now rather than at its next refresh).
@@ -741,6 +744,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
                     .map(|i| (n.id, i.token)),
             );
         }
+        self.backend.refresh_node_identities().await;
     }
 
     /// Advertise `bytes` as node `i`'s capacity (`None`: the file

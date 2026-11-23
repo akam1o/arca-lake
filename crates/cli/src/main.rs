@@ -5678,6 +5678,10 @@ fn render_cache_stats(
         ),
         ("arca_gateway_node_rpc_retries_total", r.retries),
         ("arca_gateway_node_rpc_exhausted_total", r.exhausted),
+        (
+            "arca_gateway_cache_cleanup_refused_total",
+            r.cleanup_refused,
+        ),
     ] {
         let _ = writeln!(out, "# TYPE {name} counter\n{name} {value}");
     }
