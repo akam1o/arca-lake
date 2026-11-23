@@ -386,7 +386,7 @@ async fn an_identity_is_acknowledged_only_after_writes_checked_without_it() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     // The controller gives the disk its identity: node 2.
-    let h = c
+    let health = c
         .health_with(
             &addr,
             HealthRequest {
@@ -399,15 +399,15 @@ async fn an_identity_is_acknowledged_only_after_writes_checked_without_it() {
         .await
         .unwrap();
     let adopted = Instant::now();
-    assert_eq!(h.identity_node_id, 2);
-    let r = put.await.unwrap();
+    assert_eq!(health.identity_node_id, 2);
+    let put = put.await.unwrap();
     faults::set_io_hook(None);
     let stored = written.lock().unwrap().expect("the record was written");
     assert!(
         stored <= adopted,
         "the identity was acknowledged while a write checked without it was still in the store"
     );
-    r.unwrap();
+    put.unwrap();
     // From the acknowledgement, writes for node 1 are refused.
     let e = c
         .put_shard(&addr, shard(6), 0, data(6), 1024)
