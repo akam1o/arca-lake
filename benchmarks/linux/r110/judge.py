@@ -533,7 +533,16 @@ def c5(tl):
                        violations=vr["violations"][:20])
     if mf is not None and mf > 0:
         return verdict("C5", FAILED, [f"manifest findings {mf}, scrub findings {sc}"])
+    held = s7.get("scrub_held")
+    if sc is not None and sc > 0 and isinstance(held, dict):
+        # 0.2.0 binary: the scrub classifies each shard itself (records kept
+        # for reclaim are not findings), so every finding fails, settled or
+        # not; no count-based excuse.
+        return verdict("C5", FAILED, [f"manifest findings {mf}, scrub findings {sc}"],
+                       scrub_by_class=s7.get("scrub_by_class"), scrub_held=held)
     if sc is not None and sc > 0:
+        # A binary before 0.2.0 (no per-shard classes printed): the rule of
+        # plan v3, kept only to judge such timelines as they were judged.
         by = s7.get("scrub_by_class")
         # Plan v3: a scrub read before the background passes settled lists
         # the records retained for reclaim as unexpected shards (class 4):
@@ -551,7 +560,11 @@ def c5(tl):
                        pending_before_scrub=pend)
     if not vr.get("complete") or mf is None or sc is None:
         return verdict("C5", INCONCLUSIVE, ["the verification, the manifests or the scrub incomplete"])
-    return verdict("C5", PASSED, [], keys=vr["keys"], unknown_resolved=vr.get("unknown_resolved"))
+    if isinstance(held, dict) and held.get("unclassified", 0) > 0:
+        return verdict("C5", INCONCLUSIVE, [f"{held['unclassified']} shards not classified by the scrub"],
+                       scrub_held=held)
+    return verdict("C5", PASSED, [], keys=vr["keys"], unknown_resolved=vr.get("unknown_resolved"),
+                   **({"scrub_held": held} if held is not None else {}))
 
 
 CRITERIA_STAGE = {"C1a": "4", "C1b": "4", "C2": "5", "C3a": "5", "C3b": "6", "C4": "6", "C5": "7"}
