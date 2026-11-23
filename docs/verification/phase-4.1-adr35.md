@@ -474,6 +474,13 @@ backend job); processes: §7 on three hosts.
 
 ### 7.8 Access-record resets after outcomes that may not have acted (R-118)
 
+Later note (0.2.0 preparation): decided and fixed in
+[ADR-0040](../adr/0040-tiering-access-reset-completion.md); the
+reproductions 1 to 4 below are written (with a hook in the pass instead
+of the `fault-injection` hold), plus one for reads recorded during the
+pass; 5 (the target at its reserve) is not. The text below is kept as
+reported.
+
 The fix of §7.5 covers one path: a chunk whose migration another attempt
 holds. Two further paths through the same decision are pre-existing,
 unchanged by this work, and tracked as R-118; whether either is a defect

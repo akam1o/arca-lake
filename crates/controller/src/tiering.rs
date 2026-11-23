@@ -15,7 +15,7 @@ use arca_lake_metadata::records::GenId;
 use arca_lake_metadata::records::{GenState, GroupRecord, GroupState, NodeRecord};
 use arca_lake_protocol::client::NodeClients;
 use arca_lake_tiering::durable::Coders;
-use arca_lake_tiering::migrate::{MigrateOutcome, migrate_chunk, migrate_chunk_for_tiering};
+use arca_lake_tiering::migrate::{MigrateOutcome, migrate_chunk_for_tiering, migrate_chunk_with};
 
 use crate::ControlError;
 
@@ -56,6 +56,12 @@ pub struct TieringReport {
     /// (ADR-0035 §10.1: a move refused at its switch).
     pub policy_changed: bool,
 }
+
+/// A hook a pass calls once a chunk's target is written and verified,
+/// right before its switch, with the generation and chunk index (tests
+/// interleave other work there; [`run_once_bounded_fenced_with`]).
+pub type BeforeSwitch =
+    dyn Fn(GenId, u32) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync;
 
 /// The tiering record's terms a pass runs under (ADR-0035 §10.1, §10.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +127,7 @@ pub async fn run_once<S: KvStore>(
         None,
         usize::MAX,
         None,
+        None,
         &mut report,
     )
     .await?;
@@ -162,6 +169,23 @@ pub async fn run_once_bounded_fenced<S: KvStore>(
     budget: usize,
     fence: Option<PolicyFence>,
 ) -> Result<TieringReport, ControlError> {
+    run_once_bounded_fenced_with(meta, clients, policy, now_ms, budget, fence, None).await
+}
+
+/// [`run_once_bounded_fenced`] calling `before_switch` before each switch.
+///
+/// # Errors
+///
+/// As [`run_once_bounded`].
+pub async fn run_once_bounded_fenced_with<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    policy: &TieringPolicy,
+    now_ms: u64,
+    budget: usize,
+    fence: Option<PolicyFence>,
+    before_switch: Option<std::sync::Arc<BeforeSwitch>>,
+) -> Result<TieringReport, ControlError> {
     let mut cursor = bg_cursor::get(meta, bg_cursor::TIERING).await?;
     let after = GenId::try_from(cursor.after.as_slice()).ok();
     if after.is_none() {
@@ -179,6 +203,7 @@ pub async fn run_once_bounded_fenced<S: KvStore>(
         after,
         budget,
         fence,
+        before_switch.as_ref(),
         &mut report,
     )
     .await;
@@ -210,6 +235,7 @@ async fn sweep<S: KvStore>(
     start: Option<GenId>,
     budget: usize,
     fence: Option<PolicyFence>,
+    before_switch: Option<&std::sync::Arc<BeforeSwitch>>,
     report: &mut TieringReport,
 ) -> Result<(), ControlError> {
     // Intents of migrations that crashed: their targets become reclaimable.
@@ -279,13 +305,19 @@ async fn sweep<S: KvStore>(
             let Some(manifest) = manifest else {
                 continue;
             };
-            let Some((_, first)) = manifest.first() else {
-                continue;
+            // The tier of each chunk (R-118, ADR-0040): a generation an
+            // earlier pass moved in part spans two tiers; it is promoted
+            // from its lowest chunk and demoted from its highest, so that
+            // the chunks left behind are moved by a later pass.
+            let tier_of = |r: &arca_lake_metadata::records::ChunkRecord| {
+                groups
+                    .get(&r.placement.group_id)
+                    .and_then(|g| tier_index(&g.tier).map(|t| (t, g)))
             };
-            let Some(current_group) = groups.get(&first.placement.group_id) else {
-                continue;
-            };
-            let Some(current) = tier_index(&current_group.tier) else {
+            let placed: Vec<(usize, &GroupRecord)> =
+                manifest.iter().filter_map(|(_, r)| tier_of(r)).collect();
+            let Some(((lowest, lowest_group), (highest, highest_group))) = tier_span(&placed)
+            else {
                 continue;
             };
             // ADR-0035 §10.4: counts from before the promotion cutoff do not
@@ -306,14 +338,14 @@ async fn sweep<S: KvStore>(
             };
             let recent = now_ms.saturating_sub(access.last_ms) <= ms(policy.promote_window);
             let target =
-                if count >= policy.promote_reads && recent && current + 1 < policy.tiers.len() {
-                    Some((current + 1, true))
-                } else if now_ms.saturating_sub(touched) > ms(policy.demote_after) && current > 0 {
-                    Some((current - 1, false))
+                if count >= policy.promote_reads && recent && lowest + 1 < policy.tiers.len() {
+                    Some((lowest + 1, true, lowest_group))
+                } else if now_ms.saturating_sub(touched) > ms(policy.demote_after) && highest > 0 {
+                    Some((highest - 1, false, highest_group))
                 } else {
                     None
                 };
-            let Some((target_index, promote)) = target else {
+            let Some((target_index, promote, current_group)) = target else {
                 continue;
             };
             let Some(target_group) = target_group(
@@ -324,51 +356,79 @@ async fn sweep<S: KvStore>(
             ) else {
                 continue;
             };
-            let mut settled = false;
+            // A chunk in the target tier, or past it in the move's
+            // direction, has nothing left to do.
+            let reached = |t: usize| {
+                if promote {
+                    t >= target_index
+                } else {
+                    t <= target_index
+                }
+            };
+            let arrived = |r: &arca_lake_metadata::records::ChunkRecord| {
+                tier_of(r).is_some_and(|(t, _)| reached(t))
+            };
             for (index, record) in &manifest {
                 let Some(source) = groups.get(&record.placement.group_id) else {
                     continue;
                 };
-                let moved = match fence {
-                    Some(f) => {
-                        migrate_chunk_for_tiering(
-                            meta,
-                            clients,
-                            &coders,
-                            &addr_of,
-                            source,
-                            target_group,
-                            generation,
-                            *index,
-                            record,
-                            f.generation,
-                            {
-                                #[cfg(feature = "fault-injection")]
-                                let (g, i, pg) = (*generation, *index, f.generation);
-                                async move || {
-                                    #[cfg(feature = "fault-injection")]
-                                    crate::fault_control::before_tiering_switch(g, i, pg).await;
-                                }
-                            },
-                        )
-                        .await
-                    }
-                    None => {
-                        migrate_chunk(
-                            meta,
-                            clients,
-                            &coders,
-                            &addr_of,
-                            source,
-                            target_group,
-                            generation,
-                            *index,
-                            record,
-                            None,
-                        )
-                        .await
-                    }
+                if arrived(record) {
+                    report.skipped_chunks += 1;
+                    continue;
+                }
+                let (g, i) = (*generation, *index);
+                #[cfg(feature = "fault-injection")]
+                let pg = fence.map(|f| f.generation);
+                let hook = before_switch.cloned();
+                let hook = move || -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
+                    let next = hook.as_ref().map(|h| h(g, i));
+                    Box::pin(async move {
+                        #[cfg(feature = "fault-injection")]
+                        if let Some(pg) = pg {
+                            crate::fault_control::before_tiering_switch(g, i, pg).await;
+                        }
+                        if let Some(next) = next {
+                            next.await;
+                        }
+                    })
                 };
+                // Boxed as `Send` here: the closure in the future type
+                // otherwise defeats the spawned pass's `Send` proof.
+                let moved: std::pin::Pin<
+                    Box<
+                        dyn Future<Output = Result<MigrateOutcome, arca_lake_tiering::TierError>>
+                            + Send
+                            + '_,
+                    >,
+                > = match fence {
+                    Some(f) => Box::pin(migrate_chunk_for_tiering(
+                        meta,
+                        clients,
+                        &coders,
+                        &addr_of,
+                        source,
+                        target_group,
+                        generation,
+                        *index,
+                        record,
+                        f.generation,
+                        hook,
+                    )),
+                    None => Box::pin(migrate_chunk_with(
+                        meta,
+                        clients,
+                        &coders,
+                        &addr_of,
+                        source,
+                        target_group,
+                        generation,
+                        *index,
+                        record,
+                        None,
+                        hook,
+                    )),
+                };
+                let moved = moved.await;
                 match moved {
                     // ADR-0035 §10.1: the policy changed under the pass. It
                     // ends here and resets nothing (a reset would erase the
@@ -394,15 +454,16 @@ async fn sweep<S: KvStore>(
                         report.skipped_chunks += 1;
                     }
                     Ok(MigrateOutcome::Switched { .. }) => {
-                        settled = true;
                         if promote {
                             report.promoted_chunks += 1;
                         } else {
                             report.demoted_chunks += 1;
                         }
                     }
+                    // Found there, or the switch refused (`Skipped`: the
+                    // intent lost, the target or the record changed): judged
+                    // by the placement read back below.
                     Ok(_) => {
-                        settled = true;
                         report.skipped_chunks += 1;
                     }
                     // The target is at its reserve (Phase 3.12 liveness
@@ -426,26 +487,49 @@ async fn sweep<S: KvStore>(
                     }
                 }
             }
-            // Only once a chunk was settled (moved, or found there or
-            // changed; Phase 3.12 liveness audit): a generation whose every
-            // move failed keeps its access record and is tried again on the
-            // next pass.
-            if settled
-                && !object::reset_access_fenced(
-                    meta,
-                    generation,
-                    now_ms,
-                    fence.map(|f| f.generation),
-                )
-                .await?
+            // R-118, ADR-0040: the record is reset only once every chunk of
+            // the generation is in the target tier (moved by this pass or
+            // found there, by whichever mover), checked in the reset's
+            // transaction. A generation with a chunk left behind (failed,
+            // refused, held by another move) keeps its record and is tried
+            // again; a generation whose every move failed keeps it too
+            // (Phase 3.12 liveness audit). Only the reads this pass decided
+            // on are consumed: those recorded since it read the record are
+            // kept.
+            let accepted: Vec<u64> = groups
+                .values()
+                .filter(|g| tier_index(&g.tier).is_some_and(reached))
+                .map(|g| g.id)
+                .collect();
+            match object::reset_access_seen(
+                meta,
+                generation,
+                now_ms,
+                fence.map(|f| f.generation),
+                count,
+                &accepted,
+            )
+            .await?
             {
-                // ADR-0035 §10.1: the policy changed after the last switch;
-                // the reads recorded since are kept and the pass ends.
-                tracing::info!("tiering: the tiering record changed, pass stopped before a reset");
-                report.policy_changed = true;
-                // Examined again under the new policy.
-                report.last = before;
-                return Ok(());
+                object::AccessReset::Reset => {}
+                object::AccessReset::Unfinished => {
+                    tracing::debug!(
+                        generation = %arca_lake_metadata::ops::compat::hex(generation),
+                        "tiering: a chunk is not in the target tier yet; access record kept"
+                    );
+                }
+                object::AccessReset::PolicyChanged => {
+                    // ADR-0035 §10.1: the policy changed after the last
+                    // switch; the reads recorded since are kept and the pass
+                    // ends.
+                    tracing::info!(
+                        "tiering: the tiering record changed, pass stopped before a reset"
+                    );
+                    report.policy_changed = true;
+                    // Examined again under the new policy.
+                    report.last = before;
+                    return Ok(());
+                }
             }
         }
         if page.len() < 256 {
@@ -454,6 +538,17 @@ async fn sweep<S: KvStore>(
         }
     }
     Ok(())
+}
+
+/// The lowest and the highest of a generation's chunks (`(tier, group)` in
+/// chunk order), each the first chunk at its tier: a generation in one
+/// tier is judged by its first chunk's group.
+fn tier_span<T: Copy>(placed: &[(usize, T)]) -> Option<((usize, T), (usize, T))> {
+    Some((
+        *placed.iter().min_by_key(|(t, _)| *t)?,
+        // `max_by_key` keeps the last of equal keys.
+        *placed.iter().rev().max_by_key(|(t, _)| *t)?,
+    ))
 }
 
 /// The group of `tier` a generation moves to: the Active durable groups of
@@ -488,4 +583,24 @@ fn target_group<'a>(
     let salt = u64::from_le_bytes(generation[8..].try_into().unwrap_or_default());
     let i = usize::try_from(salt % pool.len() as u64).unwrap_or(0);
     Some(pool[i])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tier_span;
+
+    /// The chunk a generation is judged by is the first at its tier, as the
+    /// first chunk was before ADR-0040 for a generation in one tier (review).
+    #[test]
+    fn a_generation_is_judged_by_the_first_chunk_at_each_end() {
+        assert_eq!(tier_span::<u64>(&[]), None);
+        assert_eq!(
+            tier_span(&[(1, 10), (1, 11), (1, 12)]),
+            Some(((1, 10), (1, 10)))
+        );
+        assert_eq!(
+            tier_span(&[(0, 10), (1, 11), (0, 12), (1, 13)]),
+            Some(((0, 10), (1, 11)))
+        );
+    }
 }

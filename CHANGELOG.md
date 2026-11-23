@@ -34,6 +34,15 @@ break compatibility).
   one can still be stored. `arcabench nodebench` writes with the
   target node's incarnation.
 
+### Fixed
+
+- Automatic tiering no longer consumes a generation's access record
+  after a move that did not happen (R-118,
+  [ADR-0040](docs/adr/0040-tiering-access-reset-completion.md)): the
+  record is reset only once every chunk of the generation is in the
+  target tier, a generation moved in part is finished by a later pass,
+  and reads recorded while the pass ran are kept. No format change.
+
 ## [0.1.0] - 2026-11-23
 
 First experimental release (tag `v0.1.0`; [0.1.0 release](https://github.com/akam1o/arca-lake/releases/tag/v0.1.0)), for
