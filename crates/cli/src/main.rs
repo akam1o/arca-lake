@@ -275,7 +275,9 @@ fn adaptive_policy(
 /// Dry runs of member moves: node access and the controller's settings.
 #[derive(Debug, clap::Args)]
 struct PlanArgs {
-    /// Failure domain label the controller uses.
+    /// Failure domain label the controller uses for a one-member group
+    /// without a recorded domain; every other group's move keeps its
+    /// recorded domain (ADR-0038).
     #[arg(long = "failure-domain", default_value = "host")]
     plan_failure_domain: String,
     /// Estimated rebuild rate for the time estimate, MiB/s.
@@ -776,7 +778,9 @@ struct ControllerArgs {
     /// Health probe interval in seconds.
     #[arg(long, default_value_t = 5)]
     health_interval_secs: u64,
-    /// Failure domain label for replacement choice.
+    /// Failure domain label for replacement choice in a one-member group
+    /// without a recorded domain. Every other group's moves keep its
+    /// recorded domain (ADR-0038); a different value here is reported.
     #[arg(long, default_value = "host")]
     failure_domain: String,
     /// How a member move obtains shards while the leaving member still
@@ -1118,6 +1122,39 @@ enum AdminCommand {
     Integrity {
         #[command(subcommand)]
         command: IntegrityCommand,
+    },
+    /// Stripe groups' failure domains (ADR-0038): check, set.
+    Group {
+        #[command(subcommand)]
+        command: GroupCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GroupCommand {
+    /// Check every group's members against its recorded failure domain:
+    /// groups with two members in one domain, groups without a recorded
+    /// domain, members whose node lacks the label. Reads only (never moves
+    /// a member or deletes data). Exits 1 when anything is found.
+    Check,
+    /// Record the failure domain (a topology label) of a group created by a
+    /// release that did not record it (0.1.0): until then no member of the
+    /// group is moved. Never inferred from the nodes: name the label the
+    /// group was created with. Moves nothing; members that break it are
+    /// reported by `admin group check`.
+    SetFailureDomain {
+        /// Group id.
+        #[arg(long, required_unless_present = "all_unrecorded")]
+        group: Option<u64>,
+        /// Every group of several members without a recorded domain.
+        #[arg(long, conflicts_with = "group")]
+        all_unrecorded: bool,
+        /// Topology label whose values must differ between the members.
+        #[arg(long)]
+        label: String,
+        /// Replace a different label already recorded.
+        #[arg(long)]
+        change: bool,
     },
 }
 
@@ -2191,6 +2228,15 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
             {
                 Ok(n) => {
                     println!("node {} registered at {}", n.id, n.address);
+                    // A changed label can put two members of a group in one
+                    // domain: reported, not refused (ADR-0038).
+                    if let Ok(a) =
+                        arca_lake_controller::failure_domain::audit(meta.as_ref(), None).await
+                    {
+                        for f in a.findings.iter().filter(|f| finding_names(f, n.id)) {
+                            println!("warning: {f}");
+                        }
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(e),
@@ -2279,6 +2325,7 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
             }
         }
         AdminCommand::Integrity { command } => run_admin_integrity(meta, command, now).await,
+        AdminCommand::Group { command } => group_command(meta.as_ref(), command, now).await,
         AdminCommand::Init => {
             match arca_lake_metadata::ops::compat::check_startup(
                 meta.as_ref(),
@@ -2345,6 +2392,9 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                 return fail(
                     "replace-member moves a member and rebuilds its shards; re-run with --yes",
                 );
+            }
+            if let Err(e) = domain_recorded(meta.as_ref(), &[group]).await {
+                return fail(e);
             }
             match membership::request_replace(meta.as_ref(), group, index, node, "admin", now).await
             {
@@ -2444,6 +2494,9 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
             let nodes = arca_lake_metadata::ops::cluster::list_nodes(meta.as_ref()).await;
             let groups = arca_lake_metadata::ops::cluster::list_groups(meta.as_ref()).await;
             let leader = arca_lake_metadata::ops::leader::current(meta.as_ref()).await;
+            let domains = arca_lake_metadata::ops::group_domain::list(meta.as_ref())
+                .await
+                .unwrap_or_default();
             match (nodes, groups, leader) {
                 (Ok(nodes), Ok(groups), Ok(leader)) => {
                     for n in nodes {
@@ -2464,6 +2517,26 @@ async fn run_admin(args: AdminArgs) -> ExitCode {
                             g.state,
                             g.members.iter().map(|m| m.node_id).collect::<Vec<_>>()
                         );
+                    }
+                    // A line of its own (scripts parse the group lines).
+                    for d in domains.values() {
+                        println!(
+                            "failure_domain group {} label {} source {} set_ms {}",
+                            d.group,
+                            d.label,
+                            d.source.as_str(),
+                            d.set_ms
+                        );
+                    }
+                    // ADR-0038 (R-119): groups that break or lack their
+                    // failure domain.
+                    if let Ok(a) =
+                        arca_lake_controller::failure_domain::audit(meta.as_ref(), None).await
+                    {
+                        println!("{}", a.enforcement());
+                        for f in &a.findings {
+                            println!("failure domain: {f}");
+                        }
                     }
                     match leader {
                         Some(l) => println!(
@@ -3257,6 +3330,121 @@ async fn restore_command<S: arca_lake_metadata::KvStore + 'static>(
 }
 
 /// `admin decommission-node` and `admin node decommission`.
+/// Whether finding `f` is about node `node`.
+fn finding_names(f: &arca_lake_controller::failure_domain::Finding, node: u64) -> bool {
+    use arca_lake_controller::failure_domain::Finding;
+    match f {
+        Finding::SharedDomain { nodes, .. } => nodes.contains(&node),
+        Finding::MemberUnlabeled { node: n, .. } => *n == node,
+        Finding::Unrecorded { .. } => false,
+    }
+}
+
+/// Refuse an operator move of a member of `groups` when one of them has
+/// several members and no recorded failure domain (ADR-0038): the leader
+/// would refuse it anyway, and the reason is clearer here.
+async fn domain_recorded<S: arca_lake_metadata::KvStore>(
+    meta: &S,
+    groups: &[u64],
+) -> Result<(), String> {
+    let domains = arca_lake_metadata::ops::group_domain::list(meta)
+        .await
+        .map_err(|e| e.to_string())?;
+    let all = arca_lake_metadata::ops::cluster::list_groups(meta)
+        .await
+        .map_err(|e| e.to_string())?;
+    let missing: Vec<u64> = all
+        .iter()
+        .filter(|g| groups.contains(&g.id) && g.members.len() > 1 && !domains.contains_key(&g.id))
+        .map(|g| g.id)
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "groups {missing:?} have no recorded failure domain, and no member of theirs is moved until it is set: run `admin group set-failure-domain --group <id> --label <label>` with the label they were created with"
+        ))
+    }
+}
+
+/// `admin group` (ADR-0038).
+async fn group_command<S: arca_lake_metadata::KvStore>(
+    meta: &S,
+    command: GroupCommand,
+    now: u64,
+) -> ExitCode {
+    use arca_lake_metadata::ops::group_domain;
+    match command {
+        GroupCommand::Check => {
+            match arca_lake_controller::failure_domain::audit(meta, None).await {
+                Ok(a) => {
+                    println!("{}", a.enforcement());
+                    for f in &a.findings {
+                        println!("{f}");
+                    }
+                    println!(
+                        "groups breaking their failure domain: {}; groups without a recorded failure domain: {}",
+                        a.violating_groups(),
+                        a.unrecorded_groups()
+                    );
+                    if a.findings.is_empty() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(1)
+                    }
+                }
+                Err(e) => fail(e),
+            }
+        }
+        GroupCommand::SetFailureDomain {
+            group,
+            all_unrecorded,
+            label,
+            change,
+        } => {
+            let targets: Vec<u64> = if all_unrecorded {
+                let domains = match group_domain::list(meta).await {
+                    Ok(d) => d,
+                    Err(e) => return fail(e),
+                };
+                match arca_lake_metadata::ops::cluster::list_groups(meta).await {
+                    Ok(gs) => gs
+                        .iter()
+                        .filter(|g| g.members.len() > 1 && !domains.contains_key(&g.id))
+                        .map(|g| g.id)
+                        .collect(),
+                    Err(e) => return fail(e),
+                }
+            } else {
+                group.into_iter().collect()
+            };
+            if targets.is_empty() {
+                println!("no group without a recorded failure domain");
+                return ExitCode::SUCCESS;
+            }
+            for g in &targets {
+                match group_domain::set(meta, *g, &label, change, now).await {
+                    Ok(group_domain::Set::Recorded { previous }) => println!(
+                        "group {g}: failure domain '{label}' recorded{}",
+                        previous.map_or_else(String::new, |p| format!(" (was '{p}')"))
+                    ),
+                    Ok(group_domain::Set::Unchanged) => {
+                        println!("group {g}: failure domain '{label}' already recorded");
+                    }
+                    Err(e) => return fail(e),
+                }
+            }
+            // What the members look like under it (nothing is moved).
+            if let Ok(a) = arca_lake_controller::failure_domain::audit(meta, None).await {
+                for f in a.findings.iter().filter(|f| targets.contains(&f.group())) {
+                    println!("warning: {f}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 async fn decommission_command<S: arca_lake_metadata::KvStore>(
     meta: &S,
     node: u64,
@@ -3295,6 +3483,17 @@ async fn decommission_command<S: arca_lake_metadata::KvStore>(
     }
     if !yes {
         return fail("decommission-node moves every member off the node; re-run with --yes");
+    }
+    let member_of: Vec<u64> = match arca_lake_metadata::ops::cluster::list_groups(meta).await {
+        Ok(gs) => gs
+            .iter()
+            .filter(|g| g.members.iter().any(|m| m.node_id == node))
+            .map(|g| g.id)
+            .collect(),
+        Err(e) => return fail(e),
+    };
+    if let Err(e) = domain_recorded(meta, &member_of).await {
+        return fail(e);
     }
     match membership::drain_node(meta, node, "admin", now).await {
         Ok(r) => {

@@ -9,7 +9,7 @@
 //! (RFC-004 §5.4): a late delete or shard write carries the epoch under
 //! which it was decided and is rejected by any member fenced since.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -23,7 +23,9 @@ use arca_lake_metadata::ops::cluster;
 use arca_lake_metadata::ops::leader;
 use arca_lake_metadata::ops::repair_status::{self, RepairReason, RepairStatus};
 use arca_lake_metadata::ops::reservation::{self, CapacityReservation, ReservationKind};
-use arca_lake_metadata::ops::{bg_cursor, compat, epoch_intent, membership, node_lifecycle};
+use arca_lake_metadata::ops::{
+    bg_cursor, compat, epoch_intent, group_domain, membership, node_lifecycle,
+};
 use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupState, NodeRecord};
 use arca_lake_metadata::{KvError, KvStore, MetaError};
 use arca_lake_placement::{GroupSpec, choose_replacement};
@@ -259,7 +261,7 @@ impl ControllerHandle {
     }
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
@@ -1894,6 +1896,7 @@ async fn repair_pass<S: KvStore>(
     // while the cluster is Active (RFC-015 §5.6); repairs of unhealthy
     // members and resumed repairs run in every state that admits repair.
     let intents = Intents::load(meta, &all_groups).await?;
+    note_failure_domains(cfg, metrics, &nodes, &all_groups, &intents.domains, token);
     // Repair statuses (Phase 3.13, R-104): those of groups gone or Active
     // again are done.
     let mut statuses = repair_liveness::statuses(meta).await?;
@@ -2018,7 +2021,29 @@ async fn repair_pass<S: KvStore>(
             && g.members
                 .get(usize::from(intent.index))
                 .is_some_and(|m| *m != intent.replacement && leaving(m));
-        if wanted {
+        // Whichever release chose the target (one that took the domains
+        // from the candidates, or from its flag only: R-119), the move is
+        // resumed only if it keeps the group's recorded failure domain;
+        // otherwise it is settled with the membership unchanged.
+        let domain = crate::failure_domain::check_move(
+            &intents.domains,
+            &nodes,
+            g,
+            usize::from(intent.index),
+            intent.replacement,
+        );
+        if wanted && let Err(why) = &domain {
+            warn!(
+                group = g.id,
+                index = intent.index,
+                node = target,
+                "interrupted epoch change refused: {why}; settled with the membership unchanged"
+            );
+            metrics
+                .failure_domain_refusals_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if wanted && domain.is_ok() {
             info!(
                 group = g.id,
                 index = intent.index,
@@ -2236,6 +2261,54 @@ async fn repair_pass<S: KvStore>(
     Ok(())
 }
 
+/// Check every group's members against its recorded failure domain
+/// (ADR-0038, R-119) on every pass, so that a group changed meanwhile by
+/// a process that ignores the records (a 0.1.0 leader) is found by the
+/// next 0.2.0 one: gauges each pass, the findings logged once per term and
+/// whenever their number changes. Nothing is moved or deleted here.
+fn note_failure_domains(
+    cfg: &ControllerConfig,
+    metrics: &Metrics,
+    nodes: &HashMap<u64, NodeRecord>,
+    groups: &[GroupRecord],
+    domains: &BTreeMap<u64, group_domain::GroupDomain>,
+    token: u64,
+) {
+    let audit = crate::failure_domain::Audit {
+        findings: crate::failure_domain::audit_groups(groups, nodes, domains),
+        flag_differs: domains
+            .values()
+            .filter(|d| d.label != cfg.failure_domain)
+            .map(|d| (d.group, d.label.clone()))
+            .collect(),
+        schema_write: None,
+    };
+    let violating = audit.violating_groups() as u64;
+    let unrecorded = audit.unrecorded_groups() as u64;
+    let before_v = metrics
+        .groups_failure_domain_violations
+        .swap(violating, Ordering::Relaxed);
+    let before_u = metrics
+        .groups_failure_domain_unrecorded
+        .swap(unrecorded, Ordering::Relaxed);
+    let new_term = metrics
+        .failure_domain_audit_term
+        .swap(token, Ordering::Relaxed)
+        != token;
+    if new_term || before_v != violating || before_u != unrecorded {
+        for f in &audit.findings {
+            warn!(group = f.group(), "failure domain: {f}");
+        }
+    }
+    if new_term && !audit.flag_differs.is_empty() {
+        warn!(
+            flag = %cfg.failure_domain,
+            groups = ?audit.flag_differs,
+            "groups whose recorded failure domain differs from --failure-domain: their recorded one is used"
+        );
+    }
+}
+
 /// Draining nodes and open replacement requests, as read at the start of
 /// a repair pass.
 struct Intents {
@@ -2243,6 +2316,9 @@ struct Intents {
     draining: BTreeSet<u64>,
     retired: BTreeSet<u64>,
     requests: HashMap<u64, membership::ReplaceRequest>,
+    /// The groups' recorded failure domains (ADR-0038): every member move
+    /// keeps them.
+    domains: BTreeMap<u64, group_domain::GroupDomain>,
 }
 
 impl Intents {
@@ -2287,6 +2363,7 @@ impl Intents {
             draining,
             retired,
             requests,
+            domains: group_domain::list(meta).await?,
         })
     }
 
@@ -2507,7 +2584,7 @@ async fn repair_one<S: KvStore>(
                                 .fetch_add(1, Ordering::Relaxed);
                             Ok(busy)
                         }
-                        Started::NoTarget { capacity, msg } => {
+                        Started::NoTarget { capacity, msg, .. } => {
                             warn!(group = g.id, index, "{why}; no other target: {msg}");
                             let mut s = repair_liveness::no_new_target(
                                 &obs,
@@ -2658,7 +2735,7 @@ async fn repair_one<S: KvStore>(
                             .await?
                             {
                                 Started::Ran(busy) => Ok(busy),
-                                Started::NoTarget { capacity, msg } => {
+                                Started::NoTarget { capacity, msg, .. } => {
                                     let mut s = fresh.get(&g.id).cloned().unwrap_or(current);
                                     s.reason = if capacity {
                                         RepairReason::AwaitingCapacity
@@ -2755,15 +2832,17 @@ async fn repair_one<S: KvStore>(
             .await?
             {
                 Started::Ran(busy) => Ok(busy),
-                Started::NoTarget { msg, .. } => {
+                Started::NoTarget { msg, refused, .. } => {
                     warn!(group = g.id, index, why, "{msg}");
                     if why == "replace request" {
                         membership::note_replace_error(meta, g.id, Some(msg)).await?;
                     } else if why == "drain" {
                         membership::update_drain(meta, leaving, None, Some(msg)).await?;
                     }
-                    // Only an unhealthy member keeps cache repair waiting.
-                    Ok(why == "auto repair")
+                    // Only an unhealthy member keeps cache repair waiting,
+                    // and not when its group's failure domain refuses the
+                    // move: that holds back this group alone (R-119).
+                    Ok(why == "auto repair" && !refused)
                 }
             }
         }
@@ -2776,8 +2855,13 @@ enum Started {
     /// The move started (or resumed); whether it holds cache repair.
     Ran(bool),
     /// No node can take the member (`capacity`: candidates exist, none
-    /// with room).
-    NoTarget { capacity: bool, msg: String },
+    /// with room; `refused`: the group's failure domain refuses any move,
+    /// ADR-0038, which holds back nothing but this group).
+    NoTarget {
+        capacity: bool,
+        refused: bool,
+        msg: String,
+    },
 }
 
 /// Rebuild slot `index` of `g` onto a node chosen now (capacity checked,
@@ -2852,13 +2936,34 @@ async fn start_move<S: KvStore>(
             need,
         )
     };
+    // The group's recorded failure domain (ADR-0038), not the flag; a
+    // group without one, or a member whose domain is unknown, moves no
+    // member, and says why (to the replacement request or the drain).
+    let refuse = |msg: String| {
+        metrics
+            .failure_domain_refusals_total
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(Started::NoTarget {
+            capacity: false,
+            refused: true,
+            msg,
+        })
+    };
+    let label = match crate::failure_domain::label_for(&intents.domains, g, &cfg.failure_domain) {
+        Ok(l) => l,
+        Err(msg) => return refuse(msg),
+    };
     let pick = |with_room: bool| {
-        choose_for(nodes, all_groups, g, index, &cfg.failure_domain, &|id| {
+        choose_for(nodes, all_groups, g, index, &label, &|id| {
             to_node.is_none_or(|n| n == id) && candidate(id) && (!with_room || roomy(id))
         })
     };
-    let Some(replacement) = pick(true)? else {
-        let without_room = pick(false)?;
+    let chosen = match pick(true) {
+        Ok(c) => c,
+        Err(msg) => return refuse(msg),
+    };
+    let Some(replacement) = chosen else {
+        let without_room = pick(false).ok().flatten();
         let msg = match (without_room, to_node) {
             (Some(m), _) => format!(
                 "insufficient capacity: node {} has {} bytes free ({} reserved by other moves), the member needs {}; paused until a node has room",
@@ -2874,6 +2979,7 @@ async fn start_move<S: KvStore>(
         };
         return Ok(Started::NoTarget {
             capacity: without_room.is_some(),
+            refused: false,
             msg,
         });
     };
@@ -2905,6 +3011,7 @@ async fn start_move<S: KvStore>(
                 .fetch_add(1, Ordering::Relaxed);
             return Ok(Started::NoTarget {
                 capacity: true,
+                refused: false,
                 msg: format!(
                     "insufficient capacity: node {} has {room} bytes of room, {held} reserved by other moves, the member needs {need}; paused until a node has room",
                     replacement.node_id
@@ -3171,6 +3278,15 @@ async fn put_status<S: KvStore>(
     Ok(())
 }
 
+/// A replacement for slot `index` of `g` among the nodes `healthy` admits,
+/// in a domain of `failure_domain` (the group's recorded label) that no
+/// other member uses; `None` when no candidate qualifies.
+///
+/// # Errors
+///
+/// Why no replacement may be chosen for this group at all: a remaining
+/// member's domain is unknown (its node record is gone, or it lacks the
+/// label). The caller reports it for this group only.
 pub(crate) fn choose_for(
     nodes: &HashMap<u64, NodeRecord>,
     all_groups: &[GroupRecord],
@@ -3178,7 +3294,7 @@ pub(crate) fn choose_for(
     index: usize,
     failure_domain: &str,
     healthy: &impl Fn(u64) -> bool,
-) -> Result<Option<GroupMember>, ControlError> {
+) -> Result<Option<GroupMember>, String> {
     let node_list: Vec<NodeRecord> = nodes.values().filter(|n| healthy(n.id)).cloned().collect();
     let devices = groups::devices_of(&node_list, all_groups);
     // The remaining members' domains come from their node records' labels,
@@ -3190,12 +3306,10 @@ pub(crate) fn choose_for(
     let mut remaining = Vec::new();
     for (_, m) in g.members.iter().enumerate().filter(|(i, _)| *i != index) {
         let Some(n) = nodes.get(&m.node_id) else {
-            warn!(
-                group = g.id,
-                node = m.node_id,
-                "no replacement chosen: a remaining member's node record is gone, so its failure domain is unknown"
-            );
-            return Ok(None);
+            return Err(format!(
+                "no replacement chosen for group {}: member node {} has no node record, so its '{failure_domain}' domain is unknown",
+                g.id, m.node_id
+            ));
         };
         remaining.push(arca_lake_placement::Device {
             node_id: m.node_id,
@@ -3235,7 +3349,7 @@ pub(crate) fn choose_for(
             device_id: m.device_id,
         })),
         Err(arca_lake_placement::PlacementError::InsufficientDomains { .. }) => Ok(None),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(format!("no replacement chosen for group {}: {e}", g.id)),
     }
 }
 
@@ -3674,11 +3788,12 @@ mod tests {
         n.get_mut(&6).unwrap().devices.clear();
         let r = choose_for(&n, &groups, &groups[1], 1, "host", &|id| id != 5).unwrap();
         assert_eq!(r.map(|m| m.node_id), Some(2));
-        // A remaining member's node record gone: its domain is unknown.
+        // A remaining member's node record gone: its domain is unknown, no
+        // replacement is chosen, and the reason names it (R-119).
         let mut n = nodes.clone();
         n.remove(&6);
-        let r = choose_for(&n, &groups, &groups[1], 1, "host", &|id| id != 5).unwrap();
-        assert_eq!(r, None);
+        let r = choose_for(&n, &groups, &groups[1], 1, "host", &|id| id != 5);
+        assert!(r.as_ref().is_err_and(|e| e.contains("node 6")), "{r:?}");
     }
 
     /// ADR-0035 §10.1: the controller's flags only seed an absent record;

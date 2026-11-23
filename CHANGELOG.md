@@ -13,6 +13,25 @@ break compatibility).
 
 ### Fixed
 
+- A group's failure domain is recorded and kept by every member move
+  (R-119, [ADR-0038](docs/adr/0038-group-failure-domain-record.md)):
+  new groups record their label at creation (new metadata key
+  `("al","gdomain",group)`; no version change); auto repair,
+  `replace-member`, drains, retargets, the dry-run planner, resumed
+  moves and the membership commit use the recorded label, not the
+  controller's `--failure-domain`. A group created by 0.1.0 moves no
+  member until `admin group set-failure-domain` records its label
+  (never inferred). `admin group check` and `admin status` report groups
+  with two members in one domain, groups without a record and members
+  whose node lacks the label (gauges
+  `arca_controller_groups_failure_domain_violations`,
+  `arca_controller_groups_failure_domain_unrecorded`); a member without
+  the label no longer stops cache-group repair for the whole pass, and
+  the reason is shown on the replacement request or drain;
+  `register-node` refuses a node without a label its groups need.
+  `admin upgrade finalize` to schema 5 waits until every group's domain
+  is recorded.
+
 - Automatic tiering no longer consumes a generation's access record
   after a move that did not happen (R-118,
   [ADR-0040](docs/adr/0040-tiering-access-reset-completion.md)): the

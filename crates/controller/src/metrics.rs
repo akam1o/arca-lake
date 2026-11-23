@@ -302,6 +302,18 @@ pub struct Metrics {
     /// Durable groups rebuilding a member whose former node does not
     /// answer: one shard of redundancy short until the rebuild ends (R-65).
     pub groups_reduced_redundancy: AtomicU64,
+    /// Groups whose members break their recorded failure domain (two in
+    /// one domain, or one whose domain is unknown), per the last repair
+    /// pass (ADR-0038, R-119).
+    pub groups_failure_domain_violations: AtomicU64,
+    /// Groups of several members without a recorded failure domain: no
+    /// member of theirs is moved until one is set (ADR-0038).
+    pub groups_failure_domain_unrecorded: AtomicU64,
+    /// Member moves refused by the failure-domain rule (ADR-0038).
+    pub failure_domain_refusals_total: AtomicU64,
+    /// Leader term of the last failure-domain findings logged. Not
+    /// exported.
+    pub failure_domain_audit_term: AtomicU64,
     /// Retired generations waiting for GC after the last pass (counted up
     /// to a cap) and the age of the oldest (R-64).
     pub gc_backlog: AtomicU64,
@@ -656,6 +668,10 @@ impl Metrics {
             self.repair_retargets_total.load(Ordering::Relaxed),
         );
         out += &c(
+            "arca_controller_failure_domain_refusals_total",
+            self.failure_domain_refusals_total.load(Ordering::Relaxed),
+        );
+        out += &c(
             "arca_controller_reconcile_errors_total",
             self.reconcile_errors_total.load(Ordering::Relaxed),
         );
@@ -861,6 +877,14 @@ impl Metrics {
             (
                 "arca_controller_groups_reduced_redundancy",
                 &self.groups_reduced_redundancy,
+            ),
+            (
+                "arca_controller_groups_failure_domain_violations",
+                &self.groups_failure_domain_violations,
+            ),
+            (
+                "arca_controller_groups_failure_domain_unrecorded",
+                &self.groups_failure_domain_unrecorded,
             ),
             ("arca_controller_gc_backlog", &self.gc_backlog),
             (

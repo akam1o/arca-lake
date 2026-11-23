@@ -125,6 +125,11 @@ pub async fn upgrade_pass<S: KvStore>(
                     ));
                 }
             }
+            // From schema 5 no 0.1.0 process runs: every group's failure
+            // domain must be recorded first (ADR-0038).
+            if let Some(b) = crate::failure_domain::finalize_blocker(meta, target.schema).await? {
+                blockers.push(b);
+            }
             if !blockers.is_empty() {
                 let why = format!("precondition: {}", blockers.join("; "));
                 compat::note_upgrade_error(meta, &why, now_ms).await?;
