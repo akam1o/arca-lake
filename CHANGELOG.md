@@ -23,9 +23,12 @@ break compatibility).
   `--commit-queue off` restores the previous behaviour. Measured with 64
   writers on one key through four gateways: SlowDown 55 % → under 1 %,
   acknowledged PUT/s 1.6–1.7 ×, acknowledged PUT latency higher (p50
-  about 200 → 450 ms); 16 keys unchanged
-  ([results](docs/verification/0.2.0-hot-key-results.md)). No format
-  change.
+  about 200 → 450 ms, p99 about 0.8 → 1.7 s); 16 keys within 3–6 %
+  ([results](docs/verification/0.2.0-hot-key-results.md); measured
+  against the 0.1.0 tag, so the gain is of all 0.2.0 changes, the queue
+  being its cause by mechanism; an on/off control is pending). Every
+  DELETE form (single, version-specific, DeleteObjects entries) takes
+  the same turn and backoff. No format change.
 - Gateway deletes of its own partial cache copies (a population that
   could not write every member) now carry the identity token each node
   acknowledged, read with the cluster state every 2 s, so nodes holding

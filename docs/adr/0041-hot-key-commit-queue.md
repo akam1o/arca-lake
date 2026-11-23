@@ -3,9 +3,14 @@
 Status: **accepted** (0.2.0 preparation, R-112). Adopted by the
 pre-registered A/B ([plan](../verification/0.2.0-hot-key-plan.md),
 [results](../verification/0.2.0-hot-key-results.md)): on one key through
-four gateways SlowDown 55 % → 0.5–0.8 %, acknowledged PUT/s 1.6–1.7 ×,
-16 keys unchanged; acknowledged PUTs on one key wait longer (p50 about
-200 → 450 ms). No record, key, protocol or format change.
+four gateways SlowDown 55 % → 0.5–0.8 %, acknowledged PUT/s 1.6–1.7 ×;
+acknowledged PUTs on one key wait longer (p50 about 200 → 450 ms, p99
+about 0.8 → 1.7 s); 16 keys within 3–6 % (0.97 × PUT/s, 1.06 × p99).
+That comparison is of the tag rebuild against the whole candidate, which
+carries other 0.2.0 changes too: the gain is attributed to the queue by
+mechanism only, the 16-key differences not at all, until the
+pre-registered on/off control in one binary (plan §10) is reported. No
+record, key, protocol or format change.
 
 ## 1. Problem
 
@@ -44,13 +49,16 @@ metadata benchmark shows about 60 attempts per operation.
    2^(n−1))]`); the attempt bound (32) and its `TooManyRetries` →
    `SlowDown` (definitely not applied: every attempt conflicted) are
    unchanged. The metadata crate gets the hook (`ConflictBackoff`,
-   `transact_with_backoff`, `commit_put_with`, `delete_object_as_with`,
-   `complete_with`); it stays runtime-agnostic, the gateway supplies the
+   `transact_with_backoff`, `transact_idempotent_with_backoff`,
+   `commit_put_with`, `delete_object_as_with`, `delete_version_with`,
+   `complete_with`): every form of DELETE (single, version-specific, each
+   DeleteObjects entry) and Complete back off as PUT does. It stays runtime-agnostic, the gateway supplies the
    timer.
 5. **Bounded table.** At most 16,384 keys have an entry; an entry is
    removed when nobody holds or waits for its turn. With the table full,
-   a commit to another key proceeds without a turn (the behaviour without
-   the queue) rather than being refused.
+   a commit to another key proceeds without a turn rather than being
+   refused; its transactions still wait on the jittered backoff after a
+   conflict (only the turn is skipped).
 6. **Cancellation.** A turn and a waiting place are released when their
    future is dropped (client gone, task aborted); the pending generation
    is then left to its lease, as before.
@@ -99,5 +107,17 @@ and the gauge `arca_gateway_commit_queue_keys`.
   PUT exactly one version with its id, real-time order, no refused PUT
   visible, no pending generation left, table empty); unknown commit
   outcomes (`UnknownAfterApply`, `UnknownWithoutApply`,
-  `TimeoutAfterApply`) resolved under the turn. The R-112/R-114 tests in
-  `commit_timeouts.rs` are unchanged.
+  `TimeoutAfterApply`) resolved under the turn; every DELETE form
+  (version-specific, DeleteObjects with and without a version id) backs
+  off after a conflict. The R-112/R-114 tests in `commit_timeouts.rs` are
+  unchanged.
+
+## 6. Deviation from the plan
+
+The plan's description of the approach (§4) named DELETE without a
+version id among the queued operations. The implementation queues every
+DELETE form: version-specific DELETE and each DeleteObjects entry also
+take the key's turn (they can move the current pointer, so they contend
+like the others), and, since the review, back off after conflicts too.
+The A/B measured PUT only; the DELETE forms are covered by the tests
+above, not by a measurement.
