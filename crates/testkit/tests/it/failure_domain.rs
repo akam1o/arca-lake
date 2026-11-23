@@ -43,7 +43,6 @@ async fn wait_until(what: &str, timeout: Duration, mut cond: impl AsyncFnMut() -
     }
 }
 
-// BEGIN new-API helpers
 async fn set_domain<S: KvStore>(meta: &S, group: u64, label: &str) {
     arca_lake_metadata::ops::group_domain::set(meta, group, label, false, now_ms())
         .await
@@ -66,7 +65,6 @@ async fn findings<S: KvStore>(meta: &S) -> Vec<String> {
         .map(ToString::to_string)
         .collect()
 }
-// END new-API helpers
 
 async fn nodes<S: KvStore>(meta: &S) -> Vec<NodeRecord> {
     cluster::list_nodes(meta).await.unwrap()
@@ -461,7 +459,7 @@ async fn a_missing_label_is_refused_and_a_changed_one_reported() {
             "{e:?}"
         );
     }
-    assert!(findings(c.meta.as_ref()).await.is_empty());
+    assert_eq!(findings(c.meta.as_ref()).await, Vec::<String>::new());
     // A member's host changed to another member's.
     let all = nodes(c.meta.as_ref()).await;
     let shared = label(
@@ -495,7 +493,6 @@ async fn a_missing_label_is_refused_and_a_changed_one_reported() {
     ctl.shutdown().await;
 }
 
-// BEGIN new-API helpers 2
 fn violations(ctl: &arca_lake_controller::process::ControllerHandle) -> u64 {
     ctl.metrics
         .groups_failure_domain_violations
@@ -507,4 +504,3 @@ fn refusals(ctl: &arca_lake_controller::process::ControllerHandle) -> u64 {
         .failure_domain_refusals_total
         .load(std::sync::atomic::Ordering::Relaxed)
 }
-// END new-API helpers 2

@@ -411,4 +411,60 @@ mod tests {
         );
         assert_eq!(list(&kv).await.unwrap().len(), 1);
     }
+
+    /// The record's body is pinned (ADR-0038 §3), and the key family lies
+    /// outside the group listing a 0.1.0 process decodes as `GroupRecord`.
+    #[test]
+    fn the_record_and_its_key_stay_out_of_the_way_of_earlier_releases() {
+        let d = GroupDomain {
+            group: 7,
+            label: "host".into(),
+            source: DomainSource::Operator,
+            set_ms: 300,
+        };
+        let v = crate::records::encode(&d).unwrap();
+        assert_eq!(&v[1..], b"\x07\x04host\x01\xac\x02");
+        assert_eq!(decode::<GroupDomain>(&v).unwrap(), d);
+        let groups = KeyRange::prefix(&keys::groups_prefix());
+        assert!(!groups.contains(&keys::group_domain(7)));
+        assert!(!groups.contains(&keys::group_domains_prefix()));
+        assert!(!KeyRange::prefix(&keys::group_domains_prefix()).contains(&keys::group(7)));
+    }
+
+    /// A group rewrite as every release makes it (`update_group`, the path
+    /// of 0.1.0's membership changes and repair cursor) leaves the record.
+    #[test]
+    fn a_group_rewrite_keeps_the_domain_record() {
+        futures::executor::block_on(async {
+            let kv = MemKv::default();
+            let g = crate::ops::cluster::create_group(
+                &kv,
+                GroupRecord {
+                    id: 0,
+                    profile: "p".into(),
+                    tier: "t".into(),
+                    scheme: "rs-gf8-v1".into(),
+                    data_shards: 2,
+                    parity_shards: 1,
+                    members: vec![],
+                    epoch: 0,
+                    state: GroupState::Active,
+                    repair_cursor: None,
+                    role: GroupRole::Durable,
+                },
+            )
+            .await
+            .unwrap();
+            set(&kv, g.id, "host", false, 2).await.unwrap();
+            crate::ops::cluster::update_group(&kv, g.id, |g| {
+                g.epoch += 1;
+                g.state = GroupState::Repairing;
+                true
+            })
+            .await
+            .unwrap();
+            let d = get(&kv, g.id).await.unwrap().unwrap();
+            assert_eq!((d.label.as_str(), d.set_ms), ("host", 2));
+        });
+    }
 }

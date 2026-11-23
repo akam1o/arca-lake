@@ -192,7 +192,9 @@ previous main):
   the audit and the leader's gauge report an existing violation and move
   nothing).
 
-Unit tests: the rule and the setter (`metadata/src/ops/group_domain.rs`),
+Unit tests: the rule and the setter (`metadata/src/ops/group_domain.rs`;
+with compatibility tests: the record's pinned body, the key outside the
+group listing, a group rewrite through `update_group` keeping the record),
 the audit and `label_for` (`controller/src/failure_domain.rs`), an
 unlabeled candidate passed over (`placement`).
 
