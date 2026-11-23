@@ -57,6 +57,10 @@ pub struct NodeConfig {
     /// Clock skew allowed between a reclaim's observation and this node's
     /// clock (an observation further ahead is refused).
     pub reclaim_skew: Duration,
+    /// The metadata schema reported in `Health` and `PutShard` answers
+    /// (ADR-0039): [`pb::NODE_SCHEMA_MAX`]. Tests set a lower one to stand
+    /// in for an earlier release.
+    pub reported_schema_max: u64,
 }
 
 impl NodeConfig {
@@ -75,6 +79,7 @@ impl NodeConfig {
             fence_lease: Duration::from_secs(30),
             reclaim_retention: Duration::ZERO,
             reclaim_skew: Duration::from_secs(60),
+            reported_schema_max: pb::NODE_SCHEMA_MAX,
         }
     }
 }
@@ -150,6 +155,8 @@ pub struct StorageNodeService {
     data_at_open: bool,
     /// See [`Self::writes_unproven`].
     writes_unproven: AtomicU64,
+    /// See [`NodeConfig::reported_schema_max`].
+    reported_schema_max: u64,
 }
 
 /// Decrements a gauge when dropped (`PutShard` streams in flight).
@@ -294,6 +301,7 @@ impl StorageNodeService {
             tls: cfg.tls.clone(),
             compaction: Arc::default(),
             capacity_bytes: cfg.capacity_bytes,
+            reported_schema_max: cfg.reported_schema_max,
             admission: crate::capacity::Admission::new(reserve),
             domain: crate::domain::of(&cfg.store.dir),
             class_bytes: Default::default(),
@@ -972,6 +980,7 @@ impl StorageNode for StorageNodeService {
             bytes_received: header.payload_len,
             sequence,
             store_epoch: self.store.store_epoch(),
+            schema_max: self.reported_schema_max,
         }))
     }
 
@@ -1905,6 +1914,7 @@ impl StorageNode for StorageNodeService {
             software: arca_lake_common::compat::software_version(),
             group_epochs,
             version_bump: arca_lake_common::compat::BUMP,
+            schema_max: self.reported_schema_max,
             puts_in_flight: self.stats.puts_in_flight.load(Ordering::Relaxed),
             gets_in_flight: self.stats.gets_in_flight.load(Ordering::Relaxed),
             device_free_bytes: space.map_or(0, |s| s.0),

@@ -231,13 +231,12 @@ that crosses the finalize. Restore with 0.2.0 processes only.
 **When it takes effect.** The checks that do not depend on the schema
 (another incarnation, a new disk without one, another node named, the
 fence guard) apply as soon as a node runs 0.2.0. Strict mode needs
-schema 5, which a normal 0.2.0 build cannot reach until the coordinated
-schema-5 change (the upgrade stream, ADR-0039) raises `SCHEMA_VERSION`:
-until then every 0.2.0 cluster is in the mixed window, and unproven
-writes are taken and counted. A `version-bump` build already reports
-schema 5, so its clusters are strict from initialisation; CI's
-all-features test step is such a build and runs the whole testkit suite
-(including `write_ownership`) with strict nodes.
+schema 5, which 0.2.0 has with the schema-5 change (ADR-0039): a cluster
+0.2.0 initialises is at schema 5 and strict from its first write; a
+cluster upgraded from 0.1.0 is in the mixed window, unproven writes taken
+and counted, until `upgrade finalize` to schema 5. The testkit suite runs
+strict clusters (every test cluster is initialised at schema 5, or 6 in
+CI's all-features `version-bump` build), including `write_ownership`.
 
 Guaranteed by the node, whatever the CA and trust domain: a write
 misdirected from another cluster (a reused address, a repeated node id,

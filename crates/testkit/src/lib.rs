@@ -160,8 +160,8 @@ pub struct ClusterOptions {
     /// (a file-backed store for rotation tests); the cluster's generated
     /// `credentials` are then not registered anywhere.
     pub credential_store: Option<Arc<CredentialStore>>,
-    /// In a cluster initialised at the strict schema (ADR-0037; a
-    /// `version-bump` build's), every node is given its identity with the
+    /// In a cluster initialised at the strict schema (ADR-0037; every
+    /// test cluster since schema 5, ADR-0039), every node is given its identity with the
     /// cluster facts, as a controller's first health pass does (default).
     /// Off: nodes hold no identity until a test gives one, and the cluster
     /// is not made strict either (a strict node without an identity takes
@@ -255,8 +255,8 @@ impl ClusterOptions {
 /// time, as a controller's health pass does (without the sequence: tests
 /// push incarnations ordered by change time, which a sequence held would
 /// override). From the strict schema on (ADR-0037: a cluster initialised
-/// there is strict from its first write, which a `version-bump` build's
-/// clusters are), with `identities`, also what that pass gives with it:
+/// there is strict from its first write, as every test cluster is since
+/// schema 5), with `identities`, also what that pass gives with it:
 /// the schema floor and the node's identity, acknowledged and stamped on
 /// `clients` with the node id (the test's own writes and deletes name the
 /// node and carry its token, as a leader's do). Otherwise the floor, the
@@ -855,6 +855,17 @@ impl<S: KvStore + 'static> TestCluster<S> {
     ///
     /// When the node cannot be started.
     pub async fn start_node_quiet(&mut self, i: usize) {
+        self.start_node_reporting(i, arca_lake_protocol::storage::v1::NODE_SCHEMA_MAX)
+            .await;
+    }
+
+    /// [`Self::start_node_quiet`] with the node reporting metadata schema
+    /// `schema` (ADR-0039; below 5 it stands in for 0.1.0).
+    ///
+    /// # Panics
+    ///
+    /// When the node cannot be started.
+    pub async fn start_node_reporting(&mut self, i: usize, schema: u64) {
         let n = &mut self.nodes[i];
         if let Some(h) = n.held.take() {
             h.abort();
@@ -866,6 +877,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
         cfg.store = node_store_config(&n.dir);
         cfg.tls = n.tls.clone();
         cfg.capacity_bytes = n.capacity;
+        cfg.reported_schema_max = schema;
         let mut last_err = None;
         for _ in 0..50 {
             match arca_lake_storage_node::serve(cfg.clone()).await {

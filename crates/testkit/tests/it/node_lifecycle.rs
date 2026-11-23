@@ -513,10 +513,22 @@ async fn ignore_absent_takes_only_decommissioned_nodes_and_removed_ones_are_not_
 async fn a_delete_decided_for_one_node_is_refused_by_another_disk_at_its_address() {
     let mut c = cluster().await;
     let objects = put_objects(&c, 3).await;
-    let ctl = leader(&c).await;
-    identities_acknowledged(&c).await;
     // The leader keeps running (a shutdown closes its generation on the
-    // nodes, which would refuse the delete below for another reason).
+    // nodes, which would refuse the delete below for another reason), but
+    // repairs nothing: its health passes quarantine both swapped disks, and
+    // with auto repair it replaced one onto the spare, raising the group's
+    // epoch on the members; a delete decided at the epoch read here was then
+    // refused for its epoch before its identity was checked ("epoch
+    // rejected: group 1 is at epoch 2", seen under parallel load, when the
+    // repair came before the delete).
+    let mut cfg = ctl();
+    cfg.auto_repair = false;
+    let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
+    wait_until("leadership", Duration::from_secs(20), async || {
+        ctl.is_leader()
+    })
+    .await;
+    identities_acknowledged(&c).await;
     let g = c.groups().await.remove(0);
     let (x, z) = (
         c.node_index(&g.members[0]).unwrap(),
@@ -551,6 +563,22 @@ async fn a_delete_decided_for_one_node_is_refused_by_another_disk_at_its_address
     // there: the leader's pushes carry X's identity and are not adopted).
     let held = c.clients.health(&xaddr).await.unwrap();
     assert!(held.delete_fence_open, "{held:?}");
+    // The delete is decided at the group's current epoch, which the disk
+    // there has not passed: what is checked below is its identity.
+    let node_epoch = held
+        .group_epochs
+        .iter()
+        .find(|e| e.group_id == g.id)
+        .map_or(0, |e| e.epoch);
+    assert!(
+        node_epoch <= g.epoch,
+        "the group's epoch moved: {node_epoch}"
+    );
+    assert_eq!(
+        c.groups().await[0].epoch,
+        g.epoch,
+        "the group's epoch moved"
+    );
     old.set_delete_fence(Some(held.delete_fence_generation));
     old.note_identity(&xaddr, Some((xid, xtoken)));
     let before = c.shard_count(x, g.id);

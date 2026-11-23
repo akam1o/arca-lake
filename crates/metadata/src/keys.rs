@@ -50,11 +50,22 @@ const ROOT: &str = "al";
 /// record layout changes, but once `upgrade finalize` raised it, every
 /// controller reads the tiering record (no release that would run tiering
 /// from its flags alone starts), so tiering may be disabled and gateways
-/// stop recording reads. 5 exists only in a `version-bump` build.
-pub const SCHEMA_VERSION: u64 = 4 + arca_lake_common::compat::BUMP;
+/// stop recording reads. 5 = 0.2.0 ([`SCHEMA_V5`], ADR-0039): no record
+/// layout changes either; it is the cut-off for 0.1.0 (schema 4), after
+/// which the 0.2.0 protections are mandatory. 6 exists only in a
+/// `version-bump` build.
+pub const SCHEMA_VERSION: u64 = 5 + arca_lake_common::compat::BUMP;
 
-/// Oldest schema version this build serves (`M_cur − 1`, RFC-014 §5.4).
+/// Oldest schema version this build serves (`M_cur − 1`, RFC-014 §5.4):
+/// 4, the schema of 0.1.0 stores.
 pub const SCHEMA_VERSION_MIN: u64 = SCHEMA_VERSION - 1;
+
+/// The schema of 0.2.0 (ADR-0039), also in a `version-bump` build. Once
+/// `schema_write` reaches it (`admin upgrade finalize`), no 0.1.0 process
+/// runs on the cluster and the protections 0.1.0 would bypass are
+/// mandatory ([`crate::ops::compat::Gate::schema_v5_enforced`]); below it
+/// the cluster is in the mixed window with 0.1.0 and they are degraded.
+pub const SCHEMA_V5: u64 = 5;
 
 /// Key holding the schema writers may encode (RFC-014 §5.4).
 #[must_use]

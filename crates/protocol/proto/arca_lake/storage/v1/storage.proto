@@ -109,6 +109,11 @@ message PutShardResponse {
   uint64 sequence = 3;
   // The node store's epoch: with `sequence`, the delete token of this write.
   uint64 store_epoch = 4;
+  // Newest metadata schema whose protections the node enforces, as
+  // HealthResponse.schema_max (ADR-0039; 0 from 0.1.0 and earlier). Once
+  // schema_write is 5 or later, a writer counts the write only if this
+  // reaches schema_write.
+  uint64 schema_max = 5;
 }
 
 message GetShardRequest {
@@ -523,6 +528,10 @@ message HealthResponse {
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").
   bool load_reported = 26;
+  // Newest metadata schema whose protections the node enforces (0.2.0,
+  // ADR-0039: 5). 0 from 0.1.0 and earlier: such a node blocks a finalize
+  // to schema 5 and is reported as below it afterwards.
+  uint64 schema_max = 50;
 }
 
 service StorageNode {

@@ -86,5 +86,7 @@ mod tiering_fdb;
 mod tls_cluster;
 mod transport;
 mod upgrade;
+#[cfg(feature = "fdb")]
+mod upgrade_v010;
 mod verify_object;
 mod write_ownership;

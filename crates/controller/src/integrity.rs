@@ -348,6 +348,33 @@ async fn manifest_scrub_step<S: KvStore>(
     Ok(())
 }
 
+/// Read the node schema shard writes need again (ADR-0039) at the start of
+/// a pass: a `schema_write` raised mid-term (finalize step 3, or a restore's
+/// `restore_floors`) applies before the pass's first write, not only from
+/// the next health pass. An unreadable gate refuses every write until it
+/// is read.
+///
+/// # Errors
+///
+/// Metadata errors (the pass does not run).
+pub async fn refresh_required_node_schema<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+) -> Result<(), ControlError> {
+    match arca_lake_metadata::ops::compat::gate(meta).await {
+        Ok(g) => {
+            clients.set_required_node_schema(
+                arca_lake_metadata::ops::compat::required_node_schema(g.schema_write),
+            );
+            Ok(())
+        }
+        Err(e) => {
+            clients.set_required_node_schema(u64::MAX);
+            Err(e.into())
+        }
+    }
+}
+
 /// One scrub pass: scrub up to `opts.concurrency` due groups (resuming
 /// cursors), paced by the byte budget.
 ///
@@ -367,6 +394,7 @@ pub async fn scrub_pass<S: KvStore>(
     if opts.interval_ms == 0 {
         return Ok(report);
     }
+    refresh_required_node_schema(meta, clients).await?;
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
         .into_iter()
@@ -1030,6 +1058,7 @@ pub async fn repair_pass<S: KvStore>(
     now_ms: u64,
 ) -> Result<RepairWorkerReport, ControlError> {
     let mut report = RepairWorkerReport::default();
+    refresh_required_node_schema(meta, clients).await?;
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
         .into_iter()

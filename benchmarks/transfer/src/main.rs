@@ -513,6 +513,7 @@ impl pb::storage_node_server::StorageNode for GrpcServer {
             bytes_received: received,
             sequence: 0,
             store_epoch: 0,
+            schema_max: pb::NODE_SCHEMA_MAX,
         }))
     }
 

@@ -30,15 +30,16 @@ static SCHEMA_WRITE: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(RECORD_WRITE_MIN);
 
 /// Record encoding version of metadata schema `schema`: schemas 1 and 2
-/// are record versions 1 and 2; schemas 3 (Phase 3.10, ADR-0024) and 4
-/// (ADR-0035) changed no record and keep version 2, so from schema 4 on
-/// the record version is two less than the schema.
+/// are record versions 1 and 2; schemas 3 (Phase 3.10, ADR-0024), 4
+/// (ADR-0035) and 5 (0.2.0, ADR-0039) changed no record and keep version
+/// 2, so from schema 5 on the record version is three less than the
+/// schema.
 #[must_use]
 pub fn record_version_of_schema(schema: u64) -> u64 {
     match schema {
         0..=2 => schema,
-        3 => 2,
-        _ => schema - 2,
+        3..=5 => 2,
+        _ => schema - 3,
     }
 }
 
@@ -1007,5 +1008,20 @@ mod tests {
         assert_eq!(decode::<GenerationHeader>(&b).unwrap(), h);
         assert!(decode::<GenerationHeader>(&[9, 0]).is_err());
         assert!(decode::<GenerationHeader>(&[]).is_err());
+    }
+
+    /// Schema 5 (ADR-0039) changes no record: 0.1.0 (schema 4) and 0.2.0
+    /// write the same record version, so records written either side of
+    /// the finalize read back on both.
+    #[test]
+    fn schemas_4_and_5_share_record_version_2() {
+        assert_eq!(record_version_of_schema(3), 2);
+        assert_eq!(record_version_of_schema(4), 2);
+        assert_eq!(record_version_of_schema(crate::keys::SCHEMA_V5), 2);
+        assert_eq!(record_version_of_schema(6), 3);
+        assert_eq!(
+            record_version_of_schema(crate::keys::SCHEMA_VERSION),
+            u64::from(RECORD_VERSION)
+        );
     }
 }

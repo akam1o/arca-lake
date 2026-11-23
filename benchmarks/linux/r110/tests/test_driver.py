@@ -3,10 +3,12 @@ evidence, judgement and teardown (plan §7, §8, §10, §11). Nothing here
 connects to a host: ``subprocess``, ``socket`` and the cluster are fakes,
 and a test fails if anything tries to reach out."""
 
+import contextlib
 import copy
 import datetime
 import shlex
 import hashlib
+import io
 import json
 import os
 import socket
@@ -227,6 +229,7 @@ class FakeCluster:
         self.stop_at_stage = None
         self.smoke_result = {"stop_layers_exercised": True, "limits_exercised": True, "errors": 0}
         self.fail_collect = False
+        self.incomplete = False
         self.steps = []
         self.admission = 0
         self.backlog = 0
@@ -365,10 +368,14 @@ class FakeCluster:
     def ledger_records(self):
         return []
 
-    def collect_logs(self):
+    def collect_evidence(self, dest, meta=None, **kw):
+        """The real manifest's shape (evidence.collect)."""
+        self.stop_calls.append(("collect_evidence", None))
+        self.collect_kw = kw
         if self.fail_collect:
             raise OSError("collection failed")
-        return ""
+        return {"complete": not self.incomplete, "attempt": 1, "files": [],
+                "incomplete": ["run/logs/node0.log: capped"] if self.incomplete else []}
 
     def stop_load(self):
         self.stop_calls.append(("stop_load", None))
@@ -443,7 +450,7 @@ class Engine(EngineBase):
         c.fail_collect = True
         c.stop_at_stage, c.stop_reason = "4", "memory"
         res, ev = self.go(c)
-        self.assertIn("logs: collection failed", res["evidence_failures"])
+        self.assertIn("host_evidence: OSError: collection failed", res["evidence_failures"])
         self.assertNotEqual(res["outcome"], judge.PASSED)
         self.assertTrue(os.path.exists(os.path.join(ev.dir, "result.json")))
 
@@ -1158,9 +1165,59 @@ class ReviewFindingsEngine(EngineBase):
         c = FakeCluster(self.cfg, self.clock)
         e = self.ended(c)
         self.assertEqual(e.result["outcome"], judge.PASSED)
+        # The host's evidence is read only once every stop has been made.
         self.assertEqual([n for n, _ in c.stop_calls],
-                         ["stop_load", "stop_services", "stop_sampler", "stop_sentinel", "stop_watchdog"])
+                         ["stop_load", "stop_services", "stop_sampler", "stop_sentinel", "stop_watchdog",
+                          "collect_evidence"])
         self.assertNotIn("intervention", e.tl["final_stops"])
+        self.assertTrue(e.tl["host_evidence"]["complete"])
+
+    def test_an_incomplete_host_evidence_is_never_a_pass(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.incomplete = True
+        e = self.ended(c)
+        self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE)
+        self.assertFalse(e.tl["host_evidence"]["complete"])
+        self.assertTrue(any(f.startswith("host_evidence: incomplete") for f in e.result["evidence_failures"]))
+
+    def test_a_boot_not_compared_or_a_reboot_gives_gone_verdicts_their_cause(self):
+        for boot, cause in (({"rebooted": True}, "host-reboot"), ({"rebooted": None}, "unknown"),
+                            (RuntimeError("ssh: lost"), "unknown")):
+            c = FakeCluster(self.cfg, self.clock)
+
+            def check(boot=boot):
+                if isinstance(boot, Exception):
+                    raise boot
+                return boot
+
+            c.boot_check = check
+            e = self.ended(c)
+            self.assertEqual(e.result["outcome"], judge.INCONCLUSIVE, boot)
+            self.assertTrue(e.tl["final_stops"]["stop_load"]["load"]["cause"].startswith(cause), boot)
+            self.assertNotIn("cause", e.tl["final_stops"]["stop_load"]["guard"])  # stopped, not gone
+            self.assertTrue(any(f.startswith(("host_boot: not compared", "the host booted again"))
+                                for f in e.result["evidence_failures"]), boot)
+        c = FakeCluster(self.cfg, self.clock)
+        c.boot_check = lambda: {"rebooted": False}
+        e = self.ended(c)
+        self.assertEqual(e.result["outcome"], judge.PASSED)
+        self.assertNotIn("cause", e.tl["final_stops"]["stop_load"]["load"])
+
+    def test_evidence_with_writers_not_confirmed_stopped_is_not_complete(self):
+        c = FakeCluster(self.cfg, self.clock)
+        c.verdicts = {"node1.json": {"verdict": "not-stopped", "state": "alive"}}
+        e = self.ended(c)
+        self.assertFalse(e.tl["host_evidence"]["complete"])
+        self.assertEqual(e.tl["host_evidence"]["state"], "complete, writers not confirmed stopped")
+
+    def test_the_collection_limits_reach_the_collection(self):
+        c = FakeCluster(self.cfg, self.clock)
+        root = tempfile.mkdtemp(dir=self.dir)
+        engine = driver.Run(self.cfg, c, driver.Evidence(root, self.cfg["run_id"]), self.clock,
+                            collect={"log_cap": 5 << 20, "call_s": 30.0})
+        with self.passing():
+            engine.finish()
+        self.assertEqual(c.collect_kw, {"deadline_s": driver.COLLECT_S, "log_cap": 5 << 20, "call_s": 30.0})
 
     def test_a_service_not_stopped_is_retried_then_keeps_the_watching(self):
         for verdict in ({"verdict": "not-stopped", "state": "alive"}, {"verdict": "unverified", "reason": "x"}):
@@ -1298,9 +1355,15 @@ class Recorder:
 
 
 class Commands(Base):
+    # The host's answers to the reach, the boot and the inventory: an
+    # empty run (nothing on the host to save).
+    HOST = [("echo r110-reach", "r110-reach\n"), ("# r110:boot", json.dumps({"boot_id": "b1"}) + "\n"),
+            ("# r110:inventory", json.dumps({"files": [], "errors": [], "excluded": [],
+                                             "roots": {"run": "absent", "fdb": "absent"}}) + "\n")]
+
     def cluster(self, answers=None):
         cfg = driver.validate(copy.deepcopy(self.cfg))
-        rec = Recorder(answers)
+        rec = Recorder(list(answers or []) + self.HOST)
         return remote.SshCluster(cfg, runner=rec), rec, cfg
 
     def test_scrub_lines_of_both_formats_are_parsed(self):
@@ -1319,19 +1382,44 @@ class Commands(Base):
             self.assertEqual(c.last_scrub_held, held, line)
 
     def test_teardown_removes_only_marked_run_directories(self):
-        c, rec, cfg = self.cluster(answers=[('print("checked %d"', "checked 0\n")])
-        out = c.teardown()
+        c, rec, cfg = self.cluster(answers=[('print("checked %d"', "checked 0\n"), ("rm -rf --", "removed\n")])
+        out = c.teardown(os.path.join(self.dir, "evidence"))
         rms = [cmd for _, cmd, _ in rec.commands if "rm " in cmd]
         self.assertEqual(len(rms), 2)
-        for cmd, d in zip(rms, (cfg["remote"]["run_dir"], cfg["remote"]["fdb_data"])):
+        for cmd, d in zip(rms, (cfg["remote"]["fdb_data"], cfg["remote"]["run_dir"])):
             self.assertIn(f"rm -rf -- {d}", cmd)
             self.assertIn(f"cat {d}/.r110-run", cmd)
             self.assertIn(cfg["run_id"], cmd)
         self.assertNotIn("kept", out)
 
+    def test_teardown_command_fails_when_a_directory_is_left(self):
+        for answer, rc in (("removed\n", 0), ("absent\n", 0), ("kept\n", 1), ("", 1)):
+            c, rec, cfg = self.cluster(answers=[('print("checked %d"', "checked 0\n"), ("rm -rf --", answer)])
+            out = c.teardown(os.path.join(self.dir, "evidence"))
+            self.assertEqual("kept" in out, rc == 1, answer)
+            if rc:
+                self.assertEqual(out["kept_dirs"], [cfg["remote"]["fdb_data"], cfg["remote"]["run_dir"]])
+                self.assertNotIn("parent", out)
+            else:
+                self.assertIn("rmdir -- " + os.path.dirname(cfg["remote"]["run_dir"]),
+                              " ".join(cmd for _, cmd, _ in rec.commands))
+            a = os.path.join(self.dir, "approval.json")
+            p = os.path.join(self.dir, "run.json")
+            with open(p, "w") as f:
+                json.dump(self.cfg, f)
+            with open(a, "w") as f:
+                json.dump({"config_sha256": hashlib.sha256(open(p, "rb").read()).hexdigest(), "scope": ["teardown"],
+                           "window_start": "2027-01-01T00:00:00+00:00", "window_end": "2027-01-02T00:00:00+00:00",
+                           "approved_by": "approver"}, f)
+            made = self.cluster(answers=[('print("checked %d"', "checked 0\n"), ("rm -rf --", answer)])[0]
+            with contextlib.redirect_stdout(io.StringIO()):
+                got = driver.main(["teardown", p, "--execute", "--approval", a, "--evidence",
+                                   os.path.join(self.dir, "ev")], now=NOW, cluster_factory=lambda cfg: made)
+            self.assertEqual(got, rc, answer)
+
     def test_teardown_keeps_everything_while_a_test_process_runs(self):
         c, rec, _ = self.cluster(answers=[("proc.matches(json.load", "node0.json\n")])
-        out = c.teardown()
+        out = c.teardown(os.path.join(self.dir, "evidence"))
         self.assertIn("still running", out["kept"])
         self.assertFalse(any("rm " in cmd for _, cmd, _ in rec.commands))
 
@@ -1366,7 +1454,7 @@ class Commands(Base):
             c, rec, _ = self.cluster(answers=[("ls ", "node0.json\n"),
                                               ("stop_identified", json.dumps({"verdict": verdict}) + "\n"),
                                               ('print("checked %d"', "checked 1\n")])
-            out = c.teardown()
+            out = c.teardown(os.path.join(self.dir, "evidence"))
             self.assertIn("not confirmed", out["kept"], verdict)
             self.assertFalse(any("rm " in cmd for _, cmd, _ in rec.commands), verdict)
 
@@ -1375,7 +1463,7 @@ class Commands(Base):
             c, rec, _ = self.cluster(answers=answer)
             if answer == []:
                 c.runner = lambda *a: (1, "", "Traceback")
-            out = c.teardown()
+            out = c.teardown(os.path.join(self.dir, "evidence"))
             self.assertIn("kept", out, answer)
             self.assertFalse(any("rm " in cmd for _, cmd, _ in rec.commands), answer)
 
