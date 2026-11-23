@@ -207,6 +207,15 @@ fn main() {
         .expect("runtime");
     rt.block_on(async {
         let clients = NodeClients::new(Duration::from_secs(60));
+        // The node takes writes only with the incarnation it adopted
+        // (ADR-0037): the benchmark targets this one node by address, so
+        // it writes as the node's own cluster.
+        let held = clients
+            .health(&args.addr)
+            .await
+            .ok()
+            .and_then(|h| <[u8; 16]>::try_from(h.incarnation.as_ref()).ok());
+        clients.set_incarnation(held);
         let written = Arc::new(std::sync::Mutex::new(Vec::new()));
         for name in ["put", "get"] {
             if args.op == name || args.op == "put-get" {

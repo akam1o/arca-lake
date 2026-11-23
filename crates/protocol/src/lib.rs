@@ -51,6 +51,13 @@ pub mod storage {
         /// nothing.
         pub const REJOIN_FENCE_SCHEMA: u64 = 3;
 
+        /// Metadata schema from which nodes refuse every shard write that
+        /// does not carry their adopted incarnation and name their node
+        /// (ADR-0037, R-117): schema 5, the one 0.2.0 initialises at and
+        /// finalizes to (`keys::SCHEMA_V5`, ADR-0039; equal by test). Below
+        /// it (a cluster that may still run 0.1.0 processes) such writes are
+        /// accepted and counted.
+        pub const WRITE_OWNERSHIP_SCHEMA: u64 = 5;
         /// Newest metadata schema whose protections a node of this build
         /// enforces, reported as `HealthResponse.schema_max` (ADR-0039):
         /// the metadata schema of this build (one more in a `version-bump`

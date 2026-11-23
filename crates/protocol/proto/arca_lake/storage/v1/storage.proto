@@ -30,8 +30,20 @@ message PutShardHeader {
   // Cluster incarnation of the writer (R-117): a node that has adopted an
   // incarnation refuses a write carrying a different one, so a shard sent
   // to a node of another cluster (an address reused) is never counted
-  // written. Empty is accepted (a writer that holds none, or predates it).
+  // written. A node that has adopted none refuses every write unless it
+  // already held data (an earlier release's disk). Empty is refused once
+  // the node was told schema WRITE_OWNERSHIP_SCHEMA (ADR-0037); below it,
+  // accepted and counted (a tool of an earlier release that holds none).
   bytes incarnation = 6;
+  // The node the write is for (ADR-0037): the placement member being
+  // written, and the identity token that node acknowledged, if the writer
+  // knows it (as DeleteShardRequest.node_id/node_identity; 0 and empty: not
+  // named). A node holding another identity refuses the write: another
+  // node of the same cluster at an address the writer still maps to the
+  // member. Not named: refused once the node is strict, accepted and
+  // counted before. An earlier release ignores both.
+  uint64 node_id = 7;
+  bytes node_identity = 8;
 }
 
 enum WriteClass {
@@ -499,6 +511,19 @@ message HealthResponse {
   // (counted as used by device_free_bytes) until reclaimed. 0 from an
   // earlier release.
   uint64 reclaim_retained_bytes = 46;
+  // Shard write ownership (ADR-0037, R-117; capability, not a protocol
+  // version): the node refuses writes to it while it has adopted no
+  // incarnation (a new disk), refuses a write naming another node
+  // (PutShardHeader.node_id), and enforces write_ownership_strict. Strict
+  // (told schema WRITE_OWNERSHIP_SCHEMA or later): every write must carry
+  // the adopted incarnation and name this node. Not strict (a cluster that
+  // may still run earlier releases): a write carrying no incarnation or
+  // naming no node, or one to a node holding data and no incarnation, is
+  // accepted and counted in writes_unproven since start. All false/0 from
+  // an earlier release, which accepts all of these.
+  bool write_ownership_supported = 47;
+  bool write_ownership_strict = 48;
+  uint64 writes_unproven = 49;
   uint32 load_device_read_await_us = 25;
   // The node reports the load fields above (older nodes: false, and their
   // zeros mean "unknown", not "idle").

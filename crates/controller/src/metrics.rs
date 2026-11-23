@@ -251,6 +251,10 @@ pub struct Metrics {
     pub nodes_unhealthy: AtomicU64,
     /// Nodes known at the last health pass.
     pub nodes_total: AtomicU64,
+    /// Nodes that answered the last health pass without refusing shard
+    /// writes that lack the cluster's incarnation (ADR-0037: not strict
+    /// yet, or an earlier release).
+    pub nodes_write_ownership_lenient: AtomicU64,
     /// Cache entries evicted.
     pub cache_evicted_total: AtomicU64,
     /// Cache usage (bytes) after the last eviction pass (last tier).
@@ -597,6 +601,10 @@ impl Metrics {
         out += &g(
             "arca_controller_nodes_unhealthy",
             self.nodes_unhealthy.load(Ordering::Relaxed),
+        );
+        out += &g(
+            "arca_controller_nodes_write_ownership_lenient",
+            self.nodes_write_ownership_lenient.load(Ordering::Relaxed),
         );
         out += &g(
             "arca_controller_nodes_registered",

@@ -31,8 +31,16 @@ const BUCKET: &str = "nodes";
 
 /// Four nodes, one group of three: one spare.
 async fn cluster() -> TestCluster {
+    cluster_with(true).await
+}
+
+/// [`cluster`]; `node_identities` off: nodes, and nodes added, hold no
+/// identity until a test or a controller gives one (in a strict cluster
+/// the harness gives them, ADR-0037).
+async fn cluster_with(node_identities: bool) -> TestCluster {
     let c = TestCluster::start(ClusterOptions {
         groups: 1,
+        node_identities,
         ..ClusterOptions::rs(4, 2, 1, 128 * KIB, 0)
     })
     .await;
@@ -601,7 +609,7 @@ async fn a_delete_decided_for_one_node_is_refused_by_another_disk_at_its_address
 /// quarantined, never imported, and takes none of this cluster's work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_node_holding_another_clusters_identity_is_quarantined_not_imported() {
-    let mut c = cluster().await;
+    let mut c = cluster_with(false).await;
     let i = c.add_node().await;
     let id = c.nodes[i].id;
     let addr = c.nodes[i].addr.to_string();
@@ -1244,7 +1252,7 @@ async fn fence_pushes_carry_the_identity_and_unreachable_covers_an_answering_dis
 /// nothing is pushed; `--unreachable` is the operator's way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_without_an_acknowledged_identity_is_not_removed_while_it_answers() {
-    let mut c = cluster().await;
+    let mut c = cluster_with(false).await;
     let i = c.add_node().await;
     let id = c.nodes[i].id;
     let addr = c.nodes[i].addr.to_string();

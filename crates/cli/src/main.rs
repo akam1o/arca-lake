@@ -1865,6 +1865,11 @@ async fn run_storage_node(args: StorageNodeArgs) -> ExitCode {
                 service.fence_refusals(),
                 service.format_rollover_failures(),
             );
+            render_node_write_ownership(
+                &mut out,
+                service.write_ownership_strict(),
+                service.writes_unproven(),
+            );
             out += &arca_lake_protocol::tls::render_metrics(
                 "arca_node",
                 service.tls_stats().as_deref(),
@@ -3828,7 +3833,7 @@ async fn node_command<S: arca_lake_metadata::KvStore>(
             clients.note_node_id(&n.address, n.id);
             match clients.health(&n.address).await {
                 Ok(h) => println!(
-                    "  answers: {} protocol {} format {}..{} schema floor {} incarnation seq {} live shards {} identity {}",
+                    "  answers: {} protocol {} format {}..{} schema floor {} incarnation seq {} live shards {} identity {} write ownership {}",
                     h.software,
                     h.protocol_max,
                     h.format_min,
@@ -3842,6 +3847,17 @@ async fn node_command<S: arca_lake_metadata::KvStore>(
                         "none".to_string()
                     } else {
                         format!("node {}", h.identity_node_id)
+                    },
+                    if !h.write_ownership_supported {
+                        "not enforced (earlier release)".to_string()
+                    } else if h.write_ownership_strict {
+                        "strict".to_string()
+                    } else {
+                        format!(
+                            "not strict until schema {} ({} writes accepted without proof since start)",
+                            arca_lake_protocol::storage::v1::WRITE_OWNERSHIP_SCHEMA,
+                            h.writes_unproven
+                        )
                     }
                 ),
                 Err(e) => println!("  does not answer: {}", e.code()),
@@ -5837,6 +5853,21 @@ fn render_node_fence(
     );
 }
 
+/// Shard write ownership (ADR-0037): strict mode and the writes accepted
+/// without proof of the node's cluster outside it.
+fn render_node_write_ownership(out: &mut String, strict: bool, unproven: u64) {
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
+        "# TYPE arca_node_write_ownership_strict gauge\narca_node_write_ownership_strict {}",
+        u64::from(strict)
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE arca_node_writes_unproven_total counter\narca_node_writes_unproven_total {unproven}"
+    );
+}
+
 fn render_admission_stats(
     out: &mut String,
     a: &arca_lake_gateway::cluster::admission::AdmissionStatsSnapshot,
@@ -6224,6 +6255,7 @@ mod metrics_registry {
         render_device_space(&mut out, Some((1, 2)));
         render_node_capacity(&mut out, None, (0, [0; 4]), &Default::default());
         render_node_fence(&mut out, (0, false, false), 0, 0);
+        render_node_write_ownership(&mut out, false, 0);
         out += &arca_lake_protocol::tls::render_metrics("arca_node", tls(tls_on).as_ref());
         arca_lake_common::metrics::annotate(&out)
     }

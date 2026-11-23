@@ -117,6 +117,12 @@ async fn every_rpc_is_authorised_by_role() {
     let admin = client(Some(pki.ctx("adm", Role::Admin, "op")), &addr, Some(1));
     let peer = client(Some(pki.ctx("peer", Role::Node, "2")), &addr, Some(1));
     let data = Bytes::from(vec![5u8; 4096]);
+    // The cluster's incarnation, as its controller gives it: a node takes
+    // no shard write before (ADR-0037).
+    ctl.health_with(&addr, facts()).await.unwrap();
+    for c in [&gw, &ctl, &admin, &peer] {
+        c.set_incarnation(Some([7; 16]));
+    }
 
     // Data path: gateway, controller, admin yes; another node no.
     for (who, c) in [("gateway", &gw), ("controller", &ctl), ("admin", &admin)] {
@@ -187,11 +193,34 @@ async fn every_rpc_is_authorised_by_role() {
         assert!(denied(&e), "{who} release alone: {e}");
     }
     assert_eq!(
-        ctl.push_delete_fence(&addr, 7, true).await.unwrap(),
+        ctl.push_delete_fence_with(
+            &addr,
+            7,
+            true,
+            arca_lake_protocol::client::FencePush {
+                incarnation: Some([7; 16]),
+                ..Default::default()
+            },
+        )
+        .await
+        .map(|(g, o, _)| (g, o))
+        .unwrap(),
         (7, true)
     );
     assert_eq!(
-        admin.push_delete_fence(&addr, 8, false).await.unwrap(),
+        admin
+            .push_delete_fence_with(
+                &addr,
+                8,
+                false,
+                arca_lake_protocol::client::FencePush {
+                    incarnation: Some([7; 16]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(|(g, o, _)| (g, o))
+            .unwrap(),
         (8, false)
     );
     assert!(denied(&peer.update_epoch(&addr, 1, 5).await.unwrap_err()));
@@ -353,6 +382,15 @@ async fn certificates_and_trust_rotate_with_traffic_in_flight() {
     let gw_files = pki.write("gw", &gw_issued, &pki.ca.cert_pem, None);
     let gw_ctx = TlsContext::load(gw_files.clone(), Role::Gateway).unwrap();
     let gw = client(Some(Arc::clone(&gw_ctx)), &addr, Some(1));
+    client(
+        Some(pki.ctx("ctl", Role::Controller, "ctl")),
+        &addr,
+        Some(1),
+    )
+    .health_with(&addr, facts())
+    .await
+    .unwrap();
+    gw.set_incarnation(Some([7; 16]));
 
     // Background traffic for the whole test: every PUT that is
     // acknowledged must read back.
@@ -457,4 +495,79 @@ async fn certificates_and_trust_rotate_with_traffic_in_flight() {
     for (s, data) in ok {
         assert_eq!(fresh.get_shard(&addr, s, 0, 0).await.unwrap(), data);
     }
+}
+
+/// Two clusters sharing one CA and trust domain, with the same node id
+/// (R-117, ADR-0037): the handshake authenticates the other cluster's
+/// gateway, and the pinned node name matches, so the incarnation is what
+/// tells them apart: its writes to a node of this cluster, and to a node
+/// that has adopted none yet, are refused and store nothing. A gateway of
+/// another trust domain under the same CA fails the handshake.
+#[tokio::test]
+async fn clusters_sharing_a_ca_are_told_apart_by_the_incarnation() {
+    let pki = Pki::new();
+    let store = tempfile::tempdir().unwrap();
+    let n = node(store.path(), Some(pki.ctx("node-a", Role::Node, "1"))).await;
+    let addr = n.local_addr.to_string();
+    let fresh_store = tempfile::tempdir().unwrap();
+    let fresh = node(fresh_store.path(), Some(pki.ctx("node-f", Role::Node, "1"))).await;
+    let fresh_addr = fresh.local_addr.to_string();
+    // Cluster A's controller reached its node; the fresh one is not
+    // reached yet.
+    client(
+        Some(pki.ctx("ctl-a", Role::Controller, "ctl-a")),
+        &addr,
+        Some(1),
+    )
+    .health_with(&addr, facts())
+    .await
+    .unwrap();
+    // Cluster B's gateway: same CA, same trust domain, node id 1 pinned.
+    let b = client(Some(pki.ctx("gw-b", Role::Gateway, "gw-b")), &addr, Some(1));
+    b.note_node_id(&fresh_addr, 1);
+    b.set_incarnation(Some([0xb0; 16]));
+    for a in [&addr, &fresh_addr] {
+        b.health(a).await.expect("the shared CA authenticates B");
+        let e = b
+            .put_shard(a, shard(1), 0, Bytes::from(vec![1u8; 4096]), 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code(), tonic::Code::FailedPrecondition, "{a}: {e}");
+        assert!(e.message().starts_with("incarnation rejected"), "{a}: {e}");
+    }
+    assert_eq!(n.service().stats().put_store.count, 0);
+    assert_eq!(fresh.service().stats().put_store.count, 0);
+    // Cluster A's own gateway writes.
+    let a_gw = client(Some(pki.ctx("gw-a", Role::Gateway, "gw-a")), &addr, Some(1));
+    a_gw.set_incarnation(Some([7; 16]));
+    a_gw.put_shard(&addr, shard(1), 0, Bytes::from(vec![1u8; 4096]), 1024)
+        .await
+        .unwrap();
+    // Another trust domain under the same CA.
+    let issued = pki
+        .ca
+        .issue(
+            "other.example",
+            Role::Gateway,
+            "gw-c",
+            pki.next_serial(),
+            DAY,
+        )
+        .unwrap();
+    let mut files = pki.write("gw-c", &issued, &pki.ca.cert_pem, None);
+    files.trust_domain = "other.example".into();
+    let c = client(
+        Some(TlsContext::load(files, Role::Gateway).unwrap()),
+        &addr,
+        Some(1),
+    );
+    c.set_incarnation(Some([7; 16]));
+    assert!(c.health(&addr).await.is_err());
+    assert!(
+        c.put_shard(&addr, shard(2), 0, Bytes::from(vec![2u8; 4096]), 1024)
+            .await
+            .is_err()
+    );
+    n.shutdown().await;
+    fresh.shutdown().await;
 }

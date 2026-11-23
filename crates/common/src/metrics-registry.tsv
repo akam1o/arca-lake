@@ -65,6 +65,7 @@ arca_controller_manifest_findings	gauge	controller	findings	-	multipart manifest
 arca_controller_manifest_findings_total	counter	controller	findings	-	multipart manifest findings detected
 arca_controller_manifest_roots_verified_total	counter	controller	roots	-	multipart roots verified against their parts
 arca_controller_nodes_registered	gauge	controller	nodes	-	registered storage nodes
+arca_controller_nodes_write_ownership_lenient	gauge	controller	nodes	-	nodes answering the last health pass that do not refuse shard writes without the cluster's incarnation (not told schema 5 yet, or an earlier release; ADR-0037)
 arca_controller_nodes_unhealthy	gauge	controller	nodes	-	storage nodes not seen within the unhealthy threshold
 arca_controller_passes_skipped_by_state_total	counter	controller	passes	-	scheduler passes the cluster phase did not admit
 arca_controller_passes_total	counter	controller	passes	task=gc|reconcile|reclaim|health|evict|rebalance|tiering|repair|scrub|stripe-repair|recovery|upgrade	scheduler passes run, by task (Phase 4.0)
@@ -240,6 +241,8 @@ arca_node_delete_fence_generation	gauge	node	generation	-	delete fence generatio
 arca_node_delete_fence_hold	gauge	node	bool	-	1 while the node holds an operator hold on its delete fence (before a restore, maintenance)
 arca_node_delete_fence_open	gauge	node	bool	-	1 while the node admits deletes under its delete fence generation
 arca_node_delete_fence_refusals_total	counter	node	deletes	-	deletes the node refused for its delete fence (stale generation, closed fence, none adopted, older protocol)
+arca_node_write_ownership_strict	gauge	node	bool	-	1 while the node refuses every shard write that does not carry its adopted incarnation (told schema 5 or later; ADR-0037)
+arca_node_writes_unproven_total	counter	node	writes	-	shard writes accepted outside strict mode without proof of the node's cluster (no incarnation carried, or none adopted by a node holding earlier data; ADR-0037)
 arca_node_format_rollover_failures_total	counter	node	rollovers	-	rollovers to a raised segment format that failed (the finalize waits on the node's reported format)
 arca_node_device_free_bytes	gauge	node	bytes	-	bytes free for placement on the device (capped by --capacity-bytes)
 arca_node_device_total_bytes	gauge	node	bytes	-	size of the device for placement (capped by --capacity-bytes)

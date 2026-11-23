@@ -377,8 +377,9 @@ async fn write_all_and_verify(
         };
         let expected = arca_lake_storage::format::crc32c(&shards[i]);
         let resp = clients
-            .put_shard_as(
+            .put_shard_to(
                 &addr,
+                member.node_id,
                 shard,
                 target.epoch,
                 shards[i].clone(),

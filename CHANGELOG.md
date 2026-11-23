@@ -55,6 +55,33 @@ break compatibility).
   schema 3 or below must be upgraded through 0.1.0 first
   ([upgrading from 0.1.0](docs/guide/operations.md#upgrading-from-010-to-020)).
 
+### Security
+
+- Shard write ownership (R-117, ADR-0037): a storage node that has
+  adopted no incarnation yet (a new disk its controller has not reached)
+  refuses every shard write, so another cluster's gateway at a reused
+  address can no longer have its shards stored there and counted
+  written. Every shard write now names the node it is for (the
+  placement member; `PutShardHeader` fields 7–8, the node id and, from
+  the controller, the identity token), and a node holding another
+  identity refuses it: a write reaching another node of the same cluster
+  is never stored or counted written. Once the cluster is finalized to
+  metadata schema 5, nodes also refuse shard writes carrying no
+  incarnation or naming no node (a cluster 0.2.0 initialises, at schema 5
+  (ADR-0039), is strict from its first write; one upgraded from 0.1.0
+  accepts such writes and counts them until the finalize). Nodes turn strict when `upgrade finalize`
+  pushes schema 5, before the schema is raised: stop or upgrade tools
+  that write shards without an incarnation (0.1.0 `nodebench`) first,
+  or their writes fail. Accepted unproven writes are counted and
+  reported: new metrics `arca_node_writes_unproven_total`,
+  `arca_node_write_ownership_strict` and
+  `arca_controller_nodes_write_ownership_lenient`, `HealthResponse`
+  fields 47–49 (a capability; no protocol version change), and
+  `admin node show` reports the mode. A new incarnation (a recovery or a
+  restore) is acknowledged by a node only once no write of the previous
+  one can still be stored. `arcabench nodebench` writes with the
+  target node's incarnation.
+
 ### Fixed
 
 - A group's failure domain is recorded and kept by every member move

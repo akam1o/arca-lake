@@ -20,6 +20,12 @@ other paths, but only under the assumptions of
 - Restored metadata is operated under a new cluster incarnation, established
   by `admin restore` or `admin recovery begin`.
 
+Nodes keep the schema floor across a restore: after a finalize to
+schema 5 they stay strict (ADR-0037), so a backup taken at schema 4 and
+restored onto them still has every shard write without the cluster
+incarnation and the target node refused. Run only 0.2.0 processes on the
+restored metadata; 0.1.0 writers get failed writes.
+
 Older backups may need shards already reclaimed. A surviving leader that
 continues on directly restored metadata under the old incarnation, followed
 by another restore of that intervening history, is outside the documented

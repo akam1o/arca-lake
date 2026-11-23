@@ -37,6 +37,8 @@ async fn adopt(c: &TestCluster, i: usize, node_id: u64, token: [u8; 16]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_manual_close_counts_only_the_disk_the_metadata_records() {
     let c = TestCluster::start(ClusterOptions {
+        // Nodes that hold no identity until the test gives them one.
+        node_identities: false,
         groups: 1,
         ..ClusterOptions::rs(4, 2, 1, 1 << 20, 0)
     })
@@ -96,6 +98,8 @@ async fn a_manual_close_counts_only_the_disk_the_metadata_records() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adopting_an_identity_needs_the_facts_role_and_the_certificates_node_id() {
     let c = TestCluster::start(ClusterOptions {
+        // Nodes that hold no identity until the test gives them one.
+        node_identities: false,
         groups: 1,
         tls: true,
         ..ClusterOptions::rs(3, 2, 1, 1 << 20, 0)
