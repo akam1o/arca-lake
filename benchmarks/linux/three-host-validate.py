@@ -514,11 +514,13 @@ def verify(phase, collapse=False):
 
 
 def chunk_groups(key):
-    """Groups holding the current generation's chunks of `key` (from
-    `integrity verify-object`); None if the object is not found."""
+    """Groups of the current generation's chunks of `key` that are not
+    whole (`integrity verify-object` prints only those); None if the object
+    line is missing (not found or not read)."""
     rc, o, e = admin(f"integrity verify-object --bucket v3h --key {q(key)}", timeout=120)
-    gs = {int(g) for g in re.findall(r"^  part \S+ chunk \d+ id \S+ group (\d+) ", o, re.M)}
-    return gs if gs else None
+    if not re.search(rf"^object v3h/{re.escape(key)} .* verdict \w+", o, re.M):
+        return None
+    return {int(g) for g in re.findall(r"^  part \S+ chunk \d+ id \S+ group (\d+) ", o, re.M)}
 
 
 def acked_in(recs, t0, t1):
@@ -533,8 +535,10 @@ def acked_in(recs, t0, t1):
 
 
 def no_chunk_on(keys, groups_of_node):
-    """For every key: its chunks' groups; the keys with a chunk in one of
-    `groups_of_node`, and those whose groups could not be read."""
+    """Run while the node of `groups_of_node` is stopped: a chunk counted
+    written in one of its groups is then not whole and printed. For every
+    key: the groups of its chunks that are not whole; the keys with such a
+    chunk in one of `groups_of_node`, and those that could not be read."""
     placed, bad, unread = {}, [], []
     for k in keys:
         gs = chunk_groups(k)
@@ -1211,17 +1215,33 @@ def step7b():
     doms_ok = all(st["domains"].get(g, {}).get("label") == "host" for g in st["groups"])
     sc = scrub(sorted(st["groups"]))
     v = verify("s7b-verify")
+    # The emptied disk, without members now, comes back with a new identity.
+    rc_j, oj, ej = admin(f"node rejoin --node {vid} --fresh-identity --yes")
+    rejoined, sj = None, ""
+    t2 = time.time()
+    while time.time() - t2 < 60:
+        state, _ = node_state(vid)
+        sj = node_status(vid)
+        if state == "active" and "identity given (acknowledged: true)" in sj and "write ownership strict" in sj:
+            rejoined = round(time.time() - t2, 1)
+            break
+        time.sleep(3)
     ok = (quarantined_after is not None and v_deg["ok"] and done_after is not None and hosts_ok and target_ok
-          and damage_free(sc) and v["ok"] and rc_c == 0 and doms_ok)
+          and damage_free(sc) and v["ok"] and rc_c == 0 and doms_ok and rc_j == 0 and rejoined is not None)
     return result("7b-wipe-replace", "PASS" if ok else "FAIL",
                   {"victim": victim, "quarantined_after_s": quarantined_after, "verify_while_wiped": v_deg,
                    "replace": replace, "replaced_after_s": done_after, "members_after": members,
                    "one_member_per_host": hosts_ok, "target_is_b0": target_ok, "group_check_rc": rc_c,
-                   "group_check": chk.splitlines(), "domains_after": st["domains"], "scrub_all": sc, "verify": v},
+                   "group_check": chk.splitlines(), "domains_after": st["domains"], "scrub_all": sc, "verify": v,
+                   "rejoin_fresh_identity": {"rc": rc_j, "out": [l for l in redact(oj + ej).strip().splitlines()
+                                                                 if not l.startswith("20")]},
+                   "rejoined_active_after_s": rejoined,
+                   "status_after_rejoin": [l for l in sj.splitlines() if not l.startswith("20")]},
                   "the wiped node restarts without its identity and is quarantined; GETs still answered (k of 3); "
                   "replace-member rebuilds each of its groups onto b0 (the only healthy non-member in domain b); "
                   "groups Active, one member per host; group check exit 0, every domain still host; scrub 0 damage; "
-                  "verify clean")
+                  "verify clean; then `node rejoin --fresh-identity --yes` makes b1 active (no members) with a new "
+                  "identity acknowledged and strict within 60 s")
 
 
 def final_check(step, extra_rule=None):
@@ -1288,7 +1308,7 @@ def second_cluster(tag, ca, admin_cert, ctl_cert, imp_cert):
     # Ids below c1's at addresses nothing listens on, then the impostor.
     for i in range(1, cid):
         adm2(f"register-node --address 127.0.0.1:{19000 + i} --label host=z --label node=placeholder{i}")
-    rc, out, err = adm2(f"register-node --address {ADDR['c']}:{NODE_PORTS[1]} --label host=z --label node=impostor")
+    rc, out, err = adm2(f"register-node --address {ADDR['c']}:{IMP_ADOPT_PORT} --label host=z --label node=impostor")
     m = re.search(r"node (\d+) registered", out)
     if not m or int(m.group(1)) != cid:
         raise RuntimeError(f"second cluster {tag}: the impostor got id {m and m.group(1)}, not {cid}")
@@ -1298,9 +1318,13 @@ def second_cluster(tag, ca, admin_cert, ctl_cert, imp_cert):
     return adm2, cf
 
 
+IMP_ADOPT_PORT = 9614  # where the impostor adopts the second cluster's identity
+
+
 def r117_step(step, tag, same_ca):
-    """Steps 8a and 8b: c1 replaced by another cluster's node at its
-    address while the main cluster serves load."""
+    """Steps 8a and 8b: another cluster's node (its identity adopted from
+    its own controller first, at another port) started at c1's address
+    while the main cluster serves load."""
     st0 = status()
     cid = IDS["c1"]
     c1_groups = [g for g, x in st0["groups"].items() if cid in x["members"]]
@@ -1308,95 +1332,126 @@ def r117_step(step, tag, same_ca):
     admin_cert = "admin" if same_ca else "admin-other"
     adm2, cf = second_cluster(tag, ca, admin_cert, f"ctl-z{tag}", f"imp-{tag}")
     imp = f"imp-{tag}"
-    imp_cmd = (f"{BIN} storage-node --listen {ADDR['c']}:{NODE_PORTS[1]} --dir {R}/{imp} "
-               f"--metrics-listen 127.0.0.1:9632 --capacity-bytes {1 << 30} --segment-max-bytes {SEGMENT}")
+
+    def imp_cmd(port):
+        return (f"{BIN} storage-node --listen {ADDR['c']}:{port} --dir {R}/{imp} "
+                f"--metrics-listen 127.0.0.1:9632 --capacity-bytes {1 << 30} --segment-max-bytes {SEGMENT}")
+
     ev = {"c1_id": cid, "c1_groups": c1_groups, "ca": "main" if same_ca else "other"}
+    # The impostor becomes the second cluster's node `cid` (identity and
+    # incarnation adopted, strict) before it ever answers at c1's address.
+    t_adopt = time.time()
+    start("c", imp, imp_cmd(IMP_ADOPT_PORT))
+    start("b", f"ctl-z{tag}", ctl_cmd("ctl-z", http="127.0.0.1:9641", cluster_file=cf),
+          env=f"ARCA_FDB_INSECURE_PLAINTEXT=1 {node_tls(f'ctl-z{tag}')}")
+    adopted, s2 = None, ""
+    while time.time() - t_adopt < 60:
+        _, o, e = adm2(f"node status --node {cid}")
+        s2 = redact(o + e)
+        if "identity given (acknowledged: true)" in s2 and "write ownership strict" in s2:
+            adopted = round(time.time() - t_adopt, 1)
+            break
+        time.sleep(2)
+    ev["impostor_adopted_after_s"] = adopted
+    ev["impostor_status_second_cluster_at_adoption"] = [l for l in s2.strip().splitlines() if not l.startswith("20")]
+    stop("b", f"ctl-z{tag}")
+    stop("c", imp)
     phase = f"s8{tag}"
     quarantined_after = None
     with Load(phase):
         time.sleep(10)
         stop("c", "n-c1")
         t_imp = ts("c")
-        start("c", imp, imp_cmd)
-        start("b", f"ctl-z{tag}", ctl_cmd("ctl-z", http="127.0.0.1:9641", cluster_file=cf),
-              env=f"ARCA_FDB_INSECURE_PLAINTEXT=1 {node_tls(f'ctl-z{tag}')}")
-        adopted = None
-        s2 = ""
-        while ts("c") - t_imp < 60:
-            _, o, e = adm2(f"node status --node {cid}")
-            s2 = redact(o + e)
-            if "identity given (acknowledged: true)" in s2 and "write ownership strict" in s2:
-                adopted = round(ts("c") - t_imp, 1)
-                break
-            time.sleep(2)
-        ev["impostor_adopted_after_s"] = adopted
-        ev["impostor_status_second_cluster_at_adoption"] = s2.strip().splitlines()
-        t_win = ts("c")
-        while ts("c") - t_win < 40:
-            if same_ca and quarantined_after is None:
+        start("c", imp, imp_cmd(NODE_PORTS[1]))
+        while ts("c") - t_imp < 45:
+            if quarantined_after is None:
                 state, _ = node_state(cid)
                 if state == "quarantined":
                     quarantined_after = round(ts("c") - t_imp, 1)
             time.sleep(3)
-        if same_ca:
-            rc, o, e = admin(f"node rejoin --node {cid} --check")
-            ev["main_rejoin_check_while_impostor"] = {"rc": rc, "out": redact(o + e).strip().splitlines()}
-        ev["main_node_status_while_impostor"] = node_status(cid).splitlines()
+        rc, o, e = admin(f"node rejoin --node {cid} --check")
+        ev["main_rejoin_check_while_impostor"] = {"rc": rc, "out": [l for l in redact(o + e).strip().splitlines()
+                                                                    if not l.startswith("20")]}
+        ev["main_node_status_while_impostor"] = [l for l in node_status(cid).splitlines() if not l.startswith("20")]
         t_end = ts("c")
-    _, o, e = adm2(f"node status --node {cid}")
-    ev["impostor_status_after_load"] = redact(o + e).strip().splitlines()
-    m = re.search(r"live shards (\d+)", o)
-    imp_live = int(m.group(1)) if m else None
-    ev["impostor_live_shards"] = imp_live
+    imp_entries = node_metric("c", 9632, "arca_node_index_entries")
+    ev["impostor_index_entries"] = imp_entries
     ev["impostor_handshake_failures"] = node_metric("c", 9632, "arca_node_tls_handshake_failures_total")
-    ev["impostor_index_entries"] = node_metric("c", 9632, "arca_node_index_entries")
+    stop("c", imp)
+    # Nothing at c1's address now: a chunk counted on the impostor would
+    # show as not whole.
     recs = ledger(phase)
     keys = acked_in(recs, t_imp, t_end)
     placed, on_c1, unread = no_chunk_on(keys, c1_groups)
     _, rej, _ = ssh("c", f"grep -hcE 'incarnation rejected|node rejected' {R}/logs/{imp}.log {R}/logs/gw-c.log")
     _, rejb, _ = ssh("b", f"grep -cE 'incarnation rejected|node rejected' {R}/logs/gw-b.log")
     ev["refusal_log_lines"] = {"impostor+gw-c": [int(x) for x in rej.split()], "gw-b": int(rejb.strip() or 0)}
-    stop("b", f"ctl-z{tag}")
-    stop("c", imp)
     stop("b", f"fdb2{tag}")
-    t_back = ts("c")
     start("c", "n-c1", node_cmd("c1"))
     time.sleep(10)
-    if same_ca:
-        rc, o, e = admin(f"node rejoin --node {cid} --yes")
-        ev["rejoin"] = {"rc": rc, "out": redact(o + e).strip().splitlines()}
-        time.sleep(10)
     state, _ = node_state(cid)
+    ev["c1_state_on_return"] = state
+    if state == "quarantined":
+        # A quarantined node rejoins only without members
+        # (crates/metadata/src/ops/node_lifecycle.rs:344-375): its slots
+        # are rebuilt in domain c first (onto c0), then it rejoins.
+        ev["replace"] = {}
+        for g in c1_groups:
+            idx = status()["groups"][g]["members"].index(cid)
+            rc, o, e = admin(f"replace-member --group {g} --index {idx} --yes", timeout=120)
+            ev["replace"][g] = {"rc": rc, "out": redact(o + e).strip()[-300:]}
+        t1 = time.time()
+        while time.time() - t1 < 900:
+            st = status()
+            if all(st["groups"][g]["state"] == "Active" and cid not in st["groups"][g]["members"] for g in c1_groups):
+                ev["replaced_after_s"] = round(time.time() - t1, 1)
+                break
+            time.sleep(5)
+        st = status()
+        ev["members_after_replace"] = {g: [st["nodes"][m]["name"] for m in st["groups"][g]["members"]]
+                                       for g in c1_groups}
+        rc, o, e = admin(f"node rejoin --node {cid} --yes")
+        ev["rejoin"] = {"rc": rc, "out": [l for l in redact(o + e).strip().splitlines() if not l.startswith("20")]}
+        time.sleep(10)
+        state, _ = node_state(cid)
     ev["c1_state_after"] = state
     ev["quarantined_after_s"] = quarantined_after
     q_ = wait_queue_empty(300)
     sc = scrub(c1_groups)
+    rc_c, chk = group_check()
     v = verify(f"{phase}-verify")
     viol = [r for r in recs if r["outcome"] == "VIOLATION"]
     late_bad = [r for r in recs if r["t0"] >= t_imp + 10 and r["t1"] <= t_end and r["outcome"] in BAD]
     ev.update({"window_s": round(t_end - t_imp, 1), "ops": counts(recs), "acked_puts_in_window": len(keys),
-               "chunk_groups_of_acked": placed, "acked_with_chunk_in_c1_groups": on_c1, "unreadable": unread,
+               "chunk_groups_not_whole_of_acked": {k: g for k, g in placed.items() if g},
+               "acked_with_chunk_in_c1_groups": on_c1, "unreadable": unread,
                "errors_from_10s": samples(late_bad), "violations": len(viol), "repair_queue_after": q_[0],
-               "scrub_c1_groups": sc, "verify": v})
-    ok = (adopted is not None and keys and not on_c1 and not unread and imp_live == 0 and not viol
+               "scrub_c1_groups": sc, "group_check_rc": rc_c, "verify": v})
+    ok = (adopted is not None and keys and not on_c1 and not unread and imp_entries == 0 and not viol
           and not late_bad and q_[0] and q_[0]["unrecoverable"] == 0 and q_[0]["failed"] == 0
-          and damage_free(sc) and v["ok"] and state == "active")
+          and damage_free(sc) and rc_c == 0 and v["ok"] and state == "active")
     if same_ca:
-        rj = ev.get("main_rejoin_check_while_impostor", {})
+        rj = ev["main_rejoin_check_while_impostor"]
+        st = status()
         ok = (ok and quarantined_after is not None and quarantined_after <= 60
+              and any("another identity token" in l for l in ev["main_node_status_while_impostor"])
               and sum(ev["refusal_log_lines"]["impostor+gw-c"]) + ev["refusal_log_lines"]["gw-b"] > 0
-              and rj.get("rc", 0) != 0 and any("another cluster" in l or "another registration" in l
-                                               for l in rj.get("out", []))
+              and rj["rc"] != 0 and any("another cluster" in l for l in rj["out"])
+              and ev.get("replaced_after_s") is not None
+              and all(sorted(st["nodes"][m]["host"] for m in st["groups"][g]["members"]) == ["a", "b", "c"]
+                      for g in c1_groups)
               and ev["rejoin"]["rc"] == 0)
     else:
-        ok = ok and (ev["impostor_handshake_failures"] or 0) > 0
+        ok = ok and quarantined_after is None and (ev["impostor_handshake_failures"] or 0) > 0
     return result(step, "PASS" if ok else "FAIL", ev,
-                  "the impostor adopts the second cluster's identity (strict); no PUT acked while it runs has a "
-                  "chunk in c1's groups; the impostor stores 0 shards; 0 errors from 10 s after its start; "
-                  + ("the leader quarantines c1's id within 60 s, rejoin --check refuses while the impostor runs, "
-                     "rejoin --yes after c1's return; refusals logged; " if same_ca else
-                     "the impostor counts TLS handshake failures; ")
-                  + "c1 active again, queue drains, scrub of c1's groups 0 damage, verify clean")
+                  "the impostor adopts the second cluster's identity (strict) at another port, then answers at "
+                  "c1's address; no PUT acked while it runs has a chunk in c1's groups (verify-object with nothing "
+                  "at the address); it stores 0 shards; 0 errors from 10 s after its start; "
+                  + ("the leader quarantines c1's id within 60 s for another identity token, rejoin --check refuses "
+                     "naming another cluster's disk, refusals logged; after c1's return its slots are replaced in "
+                     "domain c and rejoin --yes makes it active; " if same_ca else
+                     "the impostor counts TLS handshake failures and c1 is not quarantined; ")
+                  + "queue drains, scrub of c1's groups 0 damage, group check exit 0, verify clean")
 
 
 def step8a():
@@ -1432,8 +1487,10 @@ def step8c():
     st = status()
     new = sorted(set(st["groups"]) - set(st0["groups"]))
     hosts = {i: n["host"] for i, n in st["nodes"].items()}
-    groups_ok = (len(new) == 2 and all(
-        st["groups"][g]["state"] == "Active" and nid in st["groups"][g]["members"]
+    # Members: the fewest groups per host, then the lowest id (c1, which
+    # rejoined without members in 8b, before c2 for the first group).
+    groups_ok = (len(new) == 2 and any(nid in st["groups"][g]["members"] for g in new) and all(
+        st["groups"][g]["state"] == "Active"
         and sorted(hosts[m] for m in st["groups"][g]["members"]) == ["a", "b", "c"]
         and st["domains"].get(g) == {"label": "host", "source": "created"} for g in new))
     rc_c, chk = group_check()
@@ -1455,7 +1512,7 @@ def step8c():
                                       "domain": st["domains"].get(g)} for g in new},
                    "group_check_rc": rc_c, "status_after_load": s_after.splitlines(), "live_shards": live,
                    "ops": counts(recs), "bad_samples": samples(bad), "scrub_new_groups": sc, "verify": v},
-                  "c2 acknowledged and strict within 60 s; 2 new Active groups each with c2, one member per host, "
+                  "c2 acknowledged and strict within 60 s; 2 new Active groups, one member per host, c2 in at least one, "
                   "domain host (created); group check exit 0; c2 holds shards after a 40 s load; scrub 0 damage; "
                   "0 client errors; verify clean")
 
@@ -1737,10 +1794,13 @@ def u8():
         t_end = ts("c")
     rc, o, e = admin(f"node rejoin --node {cid} --check")
     ev["rejoin_check_0.1.0"] = {"rc": rc, "out": redact(o + e).strip().splitlines()}
+    # Stopped: a chunk counted on the 0.1.0 node would show as not whole.
+    stop("c", "n-c1")
     recs2 = ledger("u8-old-node")
     keys = acked_in(recs2, t_old, t_end)
     placed, on_c1, unread = no_chunk_on(keys, c1_groups)
-    restart_with("c", "n-c1", lambda: node_cmd("c1"), BIN)
+    BINS["n-c1"] = BIN
+    start("c", "n-c1", node_cmd("c1"))
     time.sleep(10)
     rc2, o2, e2 = admin(f"node rejoin --node {cid} --yes")
     ev["rejoin"] = {"rc": rc2, "out": redact(o2 + e2).strip().splitlines()}
