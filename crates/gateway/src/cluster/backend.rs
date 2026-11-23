@@ -1371,6 +1371,21 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     }
 }
 
+/// The answer to creating a bucket that exists, from the lookup of its
+/// record: its owner's request is `BucketAlreadyOwnedByYou`, another
+/// principal's (or a bucket deleted since) `BucketAlreadyExists`; a failed
+/// lookup is the metadata error, not a 409.
+fn bucket_exists_error(
+    lookup: Result<arca_lake_metadata::records::BucketRecord, MetaError>,
+    requester: &str,
+) -> s3s::S3Error {
+    match lookup {
+        Ok(b) if b.owner == requester => s3_error!(BucketAlreadyOwnedByYou),
+        Ok(_) | Err(MetaError::NoSuchBucket) => s3_error!(BucketAlreadyExists),
+        Err(e) => meta_err(e),
+    }
+}
+
 pub(super) fn meta_err(e: MetaError) -> s3s::S3Error {
     match e {
         MetaError::NoSuchBucket => s3_error!(NoSuchBucket),
@@ -1705,12 +1720,10 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             Ok(_) => Ok(S3Response::new(CreateBucketOutput::default())),
             // The requester's own bucket is `BucketAlreadyOwnedByYou`, as
             // AWS answers outside us-east-1 (RFC-007 §5.1.1).
-            Err(MetaError::BucketAlreadyExists) => {
-                match bucket::get_bucket(self.meta.as_ref(), &req.input.bucket).await {
-                    Ok(b) if b.owner == owner => Err(s3_error!(BucketAlreadyOwnedByYou)),
-                    _ => Err(s3_error!(BucketAlreadyExists)),
-                }
-            }
+            Err(MetaError::BucketAlreadyExists) => Err(bucket_exists_error(
+                bucket::get_bucket(self.meta.as_ref(), &req.input.bucket).await,
+                &owner,
+            )),
             Err(e) => Err(meta_err(e)),
         }
     }
@@ -2947,5 +2960,51 @@ mod tiering_watch {
             w.access_recording_required_at(t0, 2_000),
             "a confirmation of another incarnation kept recording off"
         );
+    }
+}
+
+#[cfg(test)]
+mod bucket_exists {
+    use arca_lake_metadata::KvError;
+    use arca_lake_metadata::records::BucketRecord;
+    use s3s::S3ErrorCode;
+
+    use super::*;
+
+    fn record(owner: &str) -> BucketRecord {
+        BucketRecord {
+            id: 1,
+            name: "b".into(),
+            versioning: Versioning::Disabled,
+            created_ms: 0,
+            owner: owner.into(),
+            policy: None,
+        }
+    }
+
+    #[test]
+    fn the_owner_is_told_it_owns_the_bucket() {
+        let code = |lookup, who| bucket_exists_error(lookup, who).code().clone();
+        assert_eq!(
+            code(Ok(record("a")), "a"),
+            S3ErrorCode::BucketAlreadyOwnedByYou
+        );
+        assert_eq!(code(Ok(record("a")), "b"), S3ErrorCode::BucketAlreadyExists);
+        // Deleted between the refused create and the lookup.
+        assert_eq!(
+            code(Err(MetaError::NoSuchBucket), "a"),
+            S3ErrorCode::BucketAlreadyExists
+        );
+    }
+
+    #[test]
+    fn a_failed_owner_lookup_is_not_a_409() {
+        let e = bucket_exists_error(
+            Err(MetaError::Kv(KvError::ClusterState("locked".into()))),
+            "a",
+        );
+        assert_eq!(*e.code(), S3ErrorCode::ServiceUnavailable);
+        let e = bucket_exists_error(Err(MetaError::TooManyRetries), "a");
+        assert_eq!(*e.code(), S3ErrorCode::SlowDown);
     }
 }
