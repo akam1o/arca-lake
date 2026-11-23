@@ -786,7 +786,8 @@ async fn a_new_leader_never_reopens_a_nodes_own_generation_after_a_restore() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::many_single_char_names)]
 async fn a_restore_with_every_procedural_safeguard_skipped_loses_nothing() {
-    use arca_lake_controller::process::{ControllerConfig, spawn};
+    use arca_lake_controller::process::{ControllerConfig, RpcFaultHook, spawn};
+    use arca_lake_protocol::client::{FaultAction, Rpc};
     let mut c = cluster().await;
     let kept = put(&c, "kept", 11).await;
     leader_pass(&c, 50).await;
@@ -805,6 +806,24 @@ async fn a_restore_with_every_procedural_safeguard_skipped_loses_nothing() {
     cfg.gc_grace = Duration::ZERO;
     cfg.reconcile_interval = Duration::from_secs(3600);
     cfg.failure_domain = "host".into();
+    // The controller's pushes reach one reachable node late (a slow link):
+    // the hold is recorded, and the other nodes closed, before that node
+    // is told. It still holds the restored-over generation open, and
+    // applies deletes decided under it until the push arrives (or its
+    // rejoin lease lapses; the test's is an hour): the window of a restore
+    // without `admin delete-fence close`, where only deferred reclamation
+    // protects the data (R-94(b); this test's nodes keep no retention).
+    let late = c.nodes[1].addr.to_string();
+    cfg.rpc_fault_hook = Some(RpcFaultHook({
+        let late = late.clone();
+        Arc::new(move |ctx| {
+            if ctx.rpc == Rpc::Health && ctx.addr == late {
+                FaultAction::DelayBefore(Duration::from_millis(1500))
+            } else {
+                FaultAction::None
+            }
+        })
+    }));
     let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
     let t = Instant::now();
     let held = loop {
@@ -824,6 +843,20 @@ async fn a_restore_with_every_procedural_safeguard_skipped_loses_nothing() {
         "{held:?}"
     );
     let addr0 = c.nodes[0].addr.to_string();
+    // Deletes are refused once the controller has closed the fence on the
+    // node, not once it has recorded the close: wait for every reachable
+    // node (the late one included) to hold the closed generation.
+    let t = Instant::now();
+    for n in c.nodes.iter().filter(|n| n.addr.to_string() != addr0) {
+        loop {
+            let h = c.clients.health(&n.addr.to_string()).await.unwrap();
+            if h.delete_fence_generation >= held.generation && h.delete_fence_hold {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(20), "{h:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
     let (on0, reachable): (Vec<_>, Vec<_>) = deletes.iter().cloned().partition(|d| d.0 == addr0);
     let d = deliver(&old, &reachable).await;
     assert_eq!(d.applied, 0, "{d:?}");
