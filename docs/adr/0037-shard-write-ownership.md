@@ -96,11 +96,18 @@ if the writer knows it):
 | --- | --- | --- | --- |
 | its identity | taken | refused | strict: refused; else taken, counted |
 | no identity, a node certificate (mTLS) | taken if the certificate names that node | refused | as above |
-| no identity and no node certificate, or a damaged identity file | strict: refused; else taken, counted | refused if the certificate names another | as above |
+| no identity and no node certificate | taken, counted (in every mode) | taken, counted | as above |
+| a damaged identity file | strict: refused; else taken, counted | refused if the certificate names another | as above |
 
 In a cluster the controller's first health pass gives the node its
-identity in the same request as the incarnation and the floor, so a
-strict node holds one; the testkit harness and tests do the same.
+identity in the same request as the incarnation and the floor, so every
+node a controller reached holds one (or serves a node certificate). A
+node holding neither cannot check the name and takes the write, counted
+(`writes_unproven`): that is a node no controller ran, such as a test
+cluster's; refusing there would test nothing more and stop such
+clusters. The testkit harness gives strict clusters' nodes the
+incarnation and the floor; tests that check the target give identities
+as a controller does.
 
 Refusals are `FAILED_PRECONDITION` with a message starting
 `incarnation rejected` or `node rejected`, which writers treat as a
@@ -172,6 +179,23 @@ the window, refused once strict). `upgrade finalize` to schema 5 makes
 every node strict. A 0.1.0 node in the window behaves as 0.1.0 (it is
 reported, §4).
 
+Nodes turn strict **before** the schema is raised: the finalize pushes
+the target schema to every node first and raises the stored schema only
+once all hold it (`controller/src/upgrade.rs`). From that push on, a
+writer that still sends no incarnation or names no node (a 0.1.0 CLI
+tool or `nodebench`, any process the finalize's heartbeat check did not
+see because it does not heartbeat or started after the check) has every
+shard write refused, which its users see as failed writes (503 through a
+gateway). This costs availability, not safety: nothing unproven is
+stored. Stop or upgrade such tools before `upgrade finalize`.
+
+Restoring onto strict nodes: the schema floor survives a restore. A
+backup taken at schema 4 restored onto nodes already told schema 5 keeps
+them strict; 0.1.0 writers started on the restored metadata then have
+their shard writes refused (as their deletes are refused by the rejoin
+fence floor), and 0.1.0 processes cannot be relied on after a restore
+that crosses the finalize. Restore with 0.2.0 processes only.
+
 ### Peers refused
 
 - Another cluster's writer, whatever the CA: its incarnation differs
@@ -201,12 +225,24 @@ reported, §4).
 
 ## 5. What it guarantees, and what still relies on one trust domain
 
+**When it takes effect.** The checks that do not depend on the schema
+(another incarnation, a new disk without one, another node named, the
+fence guard) apply as soon as a node runs 0.2.0. Strict mode needs
+schema 5, which a normal 0.2.0 build cannot reach until the coordinated
+schema-5 change (the upgrade stream, ADR-0039) raises `SCHEMA_VERSION`:
+until then every 0.2.0 cluster is in the mixed window, and unproven
+writes are taken and counted. A `version-bump` build already reports
+schema 5, so its clusters are strict from initialisation; CI's
+all-features test step is such a build and runs the whole testkit suite
+(including `write_ownership`) with strict nodes.
+
 Guaranteed by the node, whatever the CA and trust domain: a write
 misdirected from another cluster (a reused address, a repeated node id,
 a shared CA) is never stored on a node of this cluster that adopted an
 incarnation, nor on a new disk; a write for another node of the same
 cluster is never stored on a node that holds its identity (or serves its
-node certificate), so it is never counted written; once strict, a write
+node certificate), which every node a controller reached does, so it is
+never counted written; once strict, a write
 that does not carry the node's incarnation and name the node is never
 stored.
 
@@ -218,8 +254,24 @@ write. Gateways name the node id without its token: a write for node N
 reaching another disk that also holds node N's id (a disk replaced
 under the same id, `node rejoin --fresh-identity`, while the old one
 answers somewhere) is taken; controller writes carry the token and are
-refused. In the mixed window a node without an identity and without a
-node certificate takes writes for any node (counted).
+refused. A node without an identity and without a node certificate (one no
+controller reached, as in test clusters) takes writes naming any node,
+counted, in every mode.
+
+Smaller residuals (review):
+
+- Identity adoption and incarnation adoption are taken under the fence
+  guard; the `writes_unproven` counter counts a write when it passes the
+  check after its body, also if the store write then fails, so it can
+  over-count (it is a signal, not an exact tally).
+- `put_shard` and `put_shard_as` (tests, tools) name the node the pool
+  noted for the address, not a placement member; only `put_shard_to`
+  names the member, and every product writer uses it. A tool writing
+  with no node noted names none (counted, refused once strict).
+- A disk counts as holding earlier data by its live records at start: a
+  0.1.0 disk whose records were all deleted before the upgrade is taken
+  for a new one and refuses writes until its controller reaches it
+  (availability only).
 
 ## 6. Alternatives rejected
 

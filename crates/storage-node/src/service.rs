@@ -666,9 +666,10 @@ impl StorageNodeService {
     /// writer maps to the member (an address reused, a stale map).
     ///
     /// Strict ([`pb::WRITE_OWNERSHIP_SCHEMA`]), a write naming no node, and
-    /// one this node cannot check (no identity held and no node
-    /// certificate, or a damaged identity file), are refused too; before
-    /// it they are accepted (`true`: counted by the caller).
+    /// any write to a disk whose identity file is damaged, are refused too;
+    /// before it they are accepted (`true`: counted by the caller). A disk
+    /// that holds no identity and serves no node certificate cannot check
+    /// the name: its writes are accepted and counted in every mode.
     fn check_write_target(&self, node_id: u64, token: &[u8]) -> Result<bool, tonic::Status> {
         let strict = self.write_ownership_strict();
         let (held, damaged) = {
@@ -699,13 +700,19 @@ impl StorageNodeService {
             Some(h) if token.len() == 16 && h.token[..] != token[..] => {
                 other("this disk holds another identity token of that node".to_string())
             }
-            None if damaged || self.certificate_node_id().is_none() => {
+            None if damaged => {
                 if strict {
-                    other("this disk holds no identity to check it against".to_string())
+                    other("this disk's identity file is damaged".to_string())
                 } else {
                     Ok(true)
                 }
             }
+            // No identity yet and no node certificate: nothing to check
+            // the name against. Taken, counted, in every mode: a node its
+            // controller reached holds an identity (the health pass gives
+            // it with the incarnation), so this is a node no controller
+            // ran (test clusters), reported by its count.
+            None if self.certificate_node_id().is_none() => Ok(true),
             // Its identity, or (none held) its certificate, names the node.
             Some(_) | None => Ok(false),
         }
@@ -1638,6 +1645,25 @@ impl StorageNode for StorageNodeService {
         let cert_node = self.certificate_node_id();
         let cert_conflict =
             req.node_identity.len() == 16 && cert_node.is_some_and(|c| c != req.node_id);
+        // Adopting an identity (a disk that holds none) changes which
+        // writes the node takes as its own (ADR-0037): taken under the
+        // exclusive guard, so that it is acknowledged only once no write
+        // checked against the disk without one can still be stored. A
+        // request that only compares holds no guard.
+        let adopting = !cert_conflict
+            && req.adopt_identity
+            && req.node_identity.len() == 16
+            && self
+                .identity
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .held()
+                .is_none();
+        let mut adoption_guard = if adopting {
+            Some(Arc::clone(&self.fence).write_owned().await)
+        } else {
+            None
+        };
         let identity = if cert_conflict {
             tracing::warn!(
                 node_id = req.node_id,
@@ -1708,10 +1734,13 @@ impl StorageNode for StorageNodeService {
         let mut exclusive =
             needs_exclusive(&self.cluster.lock().unwrap_or_else(PoisonError::into_inner));
         let _fence = if identity_mismatch {
+            drop(adoption_guard.take());
             None
         } else {
             loop {
-                let guard = if exclusive {
+                let guard = if let Some(g) = adoption_guard.take() {
+                    Some(g)
+                } else if exclusive {
                     Some(Arc::clone(&self.fence).write_owned().await)
                 } else {
                     None

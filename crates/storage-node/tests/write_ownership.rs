@@ -339,3 +339,80 @@ async fn a_write_for_another_node_is_refused() {
         .unwrap();
     n.shutdown().await;
 }
+
+/// A disk adopting its identity while a write checked without one is in
+/// the store (review L3): the adoption is acknowledged only once that
+/// write is stored, so no write is taken against the disk's previous
+/// (lack of) identity after the node reports the new one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_identity_is_acknowledged_only_after_writes_checked_without_it() {
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let addr = n.local_addr.to_string();
+    let c = writer(&addr);
+    // The incarnation only (no identity yet), not strict.
+    c.health_with(
+        &addr,
+        HealthRequest {
+            incarnation: Bytes::from_static(&[7; 16]),
+            incarnation_changed_ms: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    c.set_incarnation(Some([7; 16]));
+    let armed = Arc::new(AtomicBool::new(true));
+    let written = Arc::new(std::sync::Mutex::new(None::<Instant>));
+    let (arm, wrote) = (Arc::clone(&armed), Arc::clone(&written));
+    faults::set_io_hook(Some(Arc::new(move |op: &IoOp| {
+        if matches!(op, IoOp::Write { .. }) && arm.swap(false, Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(800));
+            *wrote.lock().unwrap() = Some(Instant::now());
+        }
+        FaultOutcome::None
+    })));
+    let (c2, addr2) = (c.clone(), addr.clone());
+    let put = tokio::spawn(async move { c2.put_shard(&addr2, shard(5), 0, data(5), 1024).await });
+    let waiting = Instant::now();
+    while armed.load(Ordering::SeqCst) {
+        assert!(
+            waiting.elapsed() < Duration::from_secs(10),
+            "the write never reached the store"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The controller gives the disk its identity: node 2.
+    let h = c
+        .health_with(
+            &addr,
+            HealthRequest {
+                node_id: 2,
+                node_identity: Bytes::from_static(&[0x22; 16]),
+                adopt_identity: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let adopted = Instant::now();
+    assert_eq!(h.identity_node_id, 2);
+    let r = put.await.unwrap();
+    faults::set_io_hook(None);
+    let stored = written.lock().unwrap().expect("the record was written");
+    assert!(
+        stored <= adopted,
+        "the identity was acknowledged while a write checked without it was still in the store"
+    );
+    r.unwrap();
+    // From the acknowledgement, writes for node 1 are refused.
+    let e = c
+        .put_shard(&addr, shard(6), 0, data(6), 1024)
+        .await
+        .unwrap_err();
+    assert!(e.message().starts_with("node rejected"), "{e}");
+    n.shutdown().await;
+}

@@ -274,3 +274,71 @@ async fn a_strict_cluster_keeps_its_own_writes_restarts_and_repairs() {
     assert_eq!(c.node_service(new).writes_unproven(), 0);
     c.shutdown().await;
 }
+
+/// A cluster initialised at the strict schema (a `version-bump` build
+/// reports schema 5 today; a normal build once the schema-5 change lands)
+/// is strict from its first write: every node, given its facts as a
+/// controller's first health pass does, refuses unproven writes, and the
+/// gateway's writes go through. A normal build is not strict (ADR-0037
+/// §5). CI's all-features step is a `version-bump` build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cluster_initialised_at_the_strict_schema_is_strict_from_its_first_write() {
+    use arca_lake_protocol::storage::v1 as pb;
+    let c = cluster().await;
+    // The identities a controller's first pass gives with the facts.
+    c.acknowledge_identities().await;
+    let strict = arca_lake_metadata::keys::SCHEMA_VERSION >= pb::WRITE_OWNERSHIP_SCHEMA;
+    for (i, n) in c.nodes.iter().enumerate() {
+        assert_eq!(
+            c.node_service(i).write_ownership_strict(),
+            strict,
+            "node {}",
+            n.id
+        );
+    }
+    let data = payload(200 << 10, 9);
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "first",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(s3::get(&c.backend, BUCKET, "first").await.unwrap().0, data);
+    let unnamed = NodeClients::new(Duration::from_secs(5));
+    unnamed.set_incarnation(Some(c.incarnation()));
+    let g = c.groups().await.remove(0);
+    let r = unnamed
+        .put_shard(
+            &c.nodes[0].addr.to_string(),
+            arca_lake_protocol::client::ShardRef {
+                group_id: g.id,
+                chunk_id: [0x55; 16],
+                shard_index: 0,
+            },
+            g.epoch,
+            payload(4096, 1),
+            1024,
+        )
+        .await;
+    if strict {
+        assert!(
+            r.unwrap_err().message().starts_with("node rejected"),
+            "an unnamed write"
+        );
+    } else {
+        r.unwrap();
+    }
+    if strict {
+        // Nothing unproven was taken anywhere.
+        for i in 0..c.nodes.len() {
+            assert_eq!(c.node_service(i).writes_unproven(), 0, "node {i}");
+        }
+    } else {
+        // Not strict: the unnamed write was taken, counted.
+        assert_eq!(c.node_service(0).writes_unproven(), 1);
+    }
+    c.shutdown().await;
+}

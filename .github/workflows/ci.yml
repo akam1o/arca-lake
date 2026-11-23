@@ -139,8 +139,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features
       # No doc tests: the workspace has none, and compiling the empty
       # doctest harness of every crate took one to two and a half minutes.
+      # `--all-features` includes `version-bump`: this is a schema-5 build,
+      # whose test clusters run strict storage nodes (ADR-0037).
       - name: test (all features)
         run: cargo nextest run --workspace --all-features --no-fail-fast
+      # Strict shard write ownership end to end, named so that a change of
+      # the step above cannot drop it silently (same features: no rebuild).
+      - name: strict write ownership (version-bump build)
+        run: cargo nextest run --workspace --all-features --no-fail-fast -E 'test(/write_ownership/)'
       - run: cargo doc --workspace --no-deps --all-features
       - name: save compiled dependencies (pushes to main)
         if: success() && github.event_name == 'push'

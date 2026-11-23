@@ -23,7 +23,12 @@ break compatibility).
   identity refuses it: a write reaching another node of the same cluster
   is never stored or counted written. Once the cluster is finalized to
   metadata schema 5, nodes also refuse shard writes carrying no
-  incarnation or naming no node. Before that (during
+  incarnation or naming no node. This strict mode takes effect only
+  with the schema-5 change (ADR-0039); until then 0.2.0 clusters accept
+  such writes and count them. Nodes turn strict when `upgrade finalize`
+  pushes schema 5, before the schema is raised: stop or upgrade tools
+  that write shards without an incarnation (0.1.0 `nodebench`) first,
+  or their writes fail. Before that (during
   an upgrade from 0.1.0) such writes are still taken, and are counted:
   new metrics `arca_node_writes_unproven_total`,
   `arca_node_write_ownership_strict` and
