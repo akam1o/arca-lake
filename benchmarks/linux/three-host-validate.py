@@ -163,7 +163,8 @@ def proc_env(name):
 
 def start(h, name, cmd, env=None):
     env = proc_env(name) if env is None else env
-    ssh(h, f"cd {R} && {{ nohup env {env} {cmd} > {R}/logs/{name}.log 2>&1 < /dev/null & echo $! > {R}/{name}.pid; }}",
+    ssh(h, f"cd {R} && {{ echo \"=== start $(date -u +%FT%TZ): {cmd.split()[0].rsplit('/', 1)[-1]}\" >> {R}/logs/{name}.log; "
+           f"nohup env {env} {cmd} >> {R}/logs/{name}.log 2>&1 < /dev/null & echo $! > {R}/{name}.pid; }}",
         check=True)
 
 
@@ -1318,6 +1319,33 @@ def second_cluster(tag, ca, admin_cert, ctl_cert, imp_cert):
     return adm2, cf
 
 
+def replace_and_rejoin(nid, groups, ev):
+    """A quarantined node rejoins only without members
+    (crates/metadata/src/ops/node_lifecycle.rs:344-375): its slots are
+    rebuilt in their domain first, then it rejoins. Returns its state."""
+    ev["replace"] = {}
+    for g in groups:
+        idx = status()["groups"][g]["members"].index(nid)
+        rc, o, e = admin(f"replace-member --group {g} --index {idx} --yes", timeout=120)
+        ev["replace"][g] = {"rc": rc, "out": redact(o + e).strip()[-300:]}
+    ev["replaced_after_s"] = None
+    t1 = time.time()
+    while time.time() - t1 < 900:
+        st = status()
+        if all(st["groups"][g]["state"] == "Active" and nid not in st["groups"][g]["members"] for g in groups):
+            ev["replaced_after_s"] = round(time.time() - t1, 1)
+            break
+        time.sleep(5)
+    st = status()
+    ev["members_after_replace"] = {g: [st["nodes"][m]["name"] for m in st["groups"][g]["members"]] for g in groups}
+    ev["one_member_per_host_after_replace"] = all(
+        sorted(st["nodes"][m]["host"] for m in st["groups"][g]["members"]) == ["a", "b", "c"] for g in groups)
+    rc, o, e = admin(f"node rejoin --node {nid} --yes")
+    ev["rejoin"] = {"rc": rc, "out": [l for l in redact(o + e).strip().splitlines() if not l.startswith("20")]}
+    time.sleep(10)
+    return node_state(nid)[0]
+
+
 IMP_ADOPT_PORT = 9614  # where the impostor adopts the second cluster's identity
 
 
@@ -1392,28 +1420,7 @@ def r117_step(step, tag, same_ca):
     state, _ = node_state(cid)
     ev["c1_state_on_return"] = state
     if state == "quarantined":
-        # A quarantined node rejoins only without members
-        # (crates/metadata/src/ops/node_lifecycle.rs:344-375): its slots
-        # are rebuilt in domain c first (onto c0), then it rejoins.
-        ev["replace"] = {}
-        for g in c1_groups:
-            idx = status()["groups"][g]["members"].index(cid)
-            rc, o, e = admin(f"replace-member --group {g} --index {idx} --yes", timeout=120)
-            ev["replace"][g] = {"rc": rc, "out": redact(o + e).strip()[-300:]}
-        t1 = time.time()
-        while time.time() - t1 < 900:
-            st = status()
-            if all(st["groups"][g]["state"] == "Active" and cid not in st["groups"][g]["members"] for g in c1_groups):
-                ev["replaced_after_s"] = round(time.time() - t1, 1)
-                break
-            time.sleep(5)
-        st = status()
-        ev["members_after_replace"] = {g: [st["nodes"][m]["name"] for m in st["groups"][g]["members"]]
-                                       for g in c1_groups}
-        rc, o, e = admin(f"node rejoin --node {cid} --yes")
-        ev["rejoin"] = {"rc": rc, "out": [l for l in redact(o + e).strip().splitlines() if not l.startswith("20")]}
-        time.sleep(10)
-        state, _ = node_state(cid)
+        state = replace_and_rejoin(cid, c1_groups, ev)
     ev["c1_state_after"] = state
     ev["quarantined_after_s"] = quarantined_after
     q_ = wait_queue_empty(300)
@@ -1432,14 +1439,11 @@ def r117_step(step, tag, same_ca):
           and damage_free(sc) and rc_c == 0 and v["ok"] and state == "active")
     if same_ca:
         rj = ev["main_rejoin_check_while_impostor"]
-        st = status()
         ok = (ok and quarantined_after is not None and quarantined_after <= 60
               and any("another identity token" in l for l in ev["main_node_status_while_impostor"])
               and sum(ev["refusal_log_lines"]["impostor+gw-c"]) + ev["refusal_log_lines"]["gw-b"] > 0
               and rj["rc"] != 0 and any("another cluster" in l for l in rj["out"])
-              and ev.get("replaced_after_s") is not None
-              and all(sorted(st["nodes"][m]["host"] for m in st["groups"][g]["members"]) == ["a", "b", "c"]
-                      for g in c1_groups)
+              and ev.get("replaced_after_s") is not None and ev["one_member_per_host_after_replace"]
               and ev["rejoin"]["rc"] == 0)
     else:
         ok = ok and quarantined_after is None and (ev["impostor_handshake_failures"] or 0) > 0
@@ -1614,10 +1618,18 @@ def u3():
         for cid in (follower, lead):
             other = next(c for c in CONTROLLERS if c != cid)
             t = restart_with(CONTROLLERS[cid], cid, lambda cid=cid: ctl_cmd(cid), BIN)
-            took = takeover(cid, other, t) if cid == lead else None
+            # A leader again (either controller: the restarted one may take
+            # the lease back first) with a lease running past now.
+            took = None
+            while ts("a") - t < 30:
+                st = status()
+                if st["leader"] and st["leader"]["lease_until_ms"] / 1000 > ts("a"):
+                    took = ts("a") - t
+                    break
+                time.sleep(1)
             time.sleep(10)
             st = status()
-            cycles.append({"upgraded": cid, "was_leader": cid == lead, "takeover_s": took and round(took, 2),
+            cycles.append({"upgraded": cid, "was_leader": cid == lead, "leader_within_s": took and round(took, 2),
                            "leader_after": st["leader"] and st["leader"]["holder"], "alive": alive(CONTROLLERS[cid], cid)})
     ADMIN["bin"] = BIN
     recs = ledger(phase)
@@ -1625,12 +1637,13 @@ def u3():
     rc, chk = group_check()
     v = verify("u3-verify")
     ok = (all(c["alive"] and c["leader_after"] in CONTROLLERS for c in cycles)
-          and cycles[1]["takeover_s"] is not None and cycles[1]["takeover_s"] <= 20
+          and all(c["leader_within_s"] is not None and c["leader_within_s"] <= 20 for c in cycles)
           and not bad and rc == 1 and "no recorded failure domain" in chk and "degraded" in chk and v["ok"])
     return result("U3-controllers", "PASS" if ok else "FAIL",
                   {"cycles": cycles, "ops": counts(recs), "bad_samples": samples(bad), "group_check_rc": rc,
                    "group_check": chk.splitlines(), "verify": v},
-                  "follower then leader on 0.2.0; the other takes over within 20 s; 0 client errors; group check "
+                  "follower then leader on 0.2.0; after each restart a controller holds a running lease within 20 s; "
+                  "0 client errors; group check "
                   "exit 1 with `no recorded failure domain` and `degraded`; verify clean")
 
 
@@ -1802,10 +1815,7 @@ def u8():
     BINS["n-c1"] = BIN
     start("c", "n-c1", node_cmd("c1"))
     time.sleep(10)
-    rc2, o2, e2 = admin(f"node rejoin --node {cid} --yes")
-    ev["rejoin"] = {"rc": rc2, "out": redact(o2 + e2).strip().splitlines()}
-    time.sleep(5)
-    state, _ = node_state(cid)
+    state = replace_and_rejoin(cid, c1_groups, ev)
     v = verify("u8-verify")
     viol2 = [r for r in recs2 if r["outcome"] == "VIOLATION"]
     ev.update({"verify_all_before": v0, "load": counts(recs), "bad_samples": samples(bad),
@@ -1815,12 +1825,14 @@ def u8():
                "c1_state_after": state, "verify": v, "client": c})
     ok = (v0["ok"] and not bad and mp["ok"] and set(exited) == {"ctl-old", "gw-old"}
           and q_after is not None and keys and not on_c1 and not unread and not viol2
-          and rc != 0 and "schema" in " ".join(ev["rejoin_check_0.1.0"]["out"]) and rc2 == 0
-          and state == "active" and v["ok"])
+          and rc != 0 and "schema" in " ".join(ev["rejoin_check_0.1.0"]["out"])
+          and ev["replaced_after_s"] is not None and ev["one_member_per_host_after_replace"]
+          and ev["rejoin"]["rc"] == 0 and state == "active" and v["ok"])
     return result("U8-after-finalize", "PASS" if ok else "FAIL", ev,
                   "every key reads back; 300-op load 0 errors; multipart exact; 0.1.0 controller and gateway exit "
                   "within 30 s; a 0.1.0 node at c1 quarantined within 60 s and no PUT acked meanwhile has a chunk "
-                  "in c1's groups; rejoin --check refuses it naming the schema; after 0.2.0 rejoin --yes, active")
+                  "in c1's groups; rejoin --check refuses it naming the schema; on 0.2.0 again its slots are replaced in "
+                  "their domain, then rejoin --yes makes it active")
 
 
 def u9():
