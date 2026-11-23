@@ -1485,6 +1485,21 @@ impl StorageNode for StorageNodeService {
             keys.push((k, e.location.payload_len, Some(e)));
         }
         keys.sort_by_key(|a| a.0);
+        // Retirement of each listed record (ADR-0028), at the sequence the
+        // index holds now (a corrupt record is reported without one): the
+        // controller tells a record kept for reclaim from an orphan.
+        let retired: Vec<bool> = {
+            let d = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+            keys.iter()
+                .map(|(k, _, q)| {
+                    let sequence = q
+                        .as_ref()
+                        .map(|q| q.location.sequence)
+                        .or_else(|| self.store.locate(k).map(|l| l.sequence));
+                    d.retired(k).is_some_and(|r| Some(r.sequence) == sequence)
+                })
+                .collect()
+        };
         let store = Arc::clone(&self.store);
         let _slot = self
             .scrub_slot
@@ -1497,7 +1512,7 @@ impl StorageNode for StorageNodeService {
             let mut out = Vec::with_capacity(keys.len());
             let mut stopped_early = false;
             let total = keys.len();
-            for (n, (key, len, q)) in keys.into_iter().enumerate() {
+            for (n, ((key, len, q), retired)) in keys.into_iter().zip(retired).enumerate() {
                 let pb_key = Some(Self::pb_key(&key));
                 if let Some(q) = q {
                     out.push(pb::ShardScrub {
@@ -1507,6 +1522,7 @@ impl StorageNode for StorageNodeService {
                         sequence: q.location.sequence,
                         status: pb::ShardStatus::Quarantined as i32,
                         reason: q.reason.to_string(),
+                        retired,
                     });
                 } else {
                     out.push(match store.verify(&key) {
@@ -1519,6 +1535,7 @@ impl StorageNode for StorageNodeService {
                                 sequence: v.sequence,
                                 status: pb::ShardStatus::Ok as i32,
                                 reason: String::new(),
+                                retired,
                             }
                         }
                         Err(StorageError::Corrupt { reason, .. }) => {
@@ -1535,6 +1552,7 @@ impl StorageNode for StorageNodeService {
                                 sequence: 0,
                                 status: status as i32,
                                 reason: reason.to_string(),
+                                retired,
                             }
                         }
                         Err(StorageError::NotFound) => pb::ShardScrub {
@@ -1544,6 +1562,7 @@ impl StorageNode for StorageNodeService {
                             sequence: 0,
                             status: pb::ShardStatus::Quarantined as i32,
                             reason: "quarantined during scrub".into(),
+                            retired,
                         },
                         Err(e) => pb::ShardScrub {
                             key: pb_key,
@@ -1552,6 +1571,7 @@ impl StorageNode for StorageNodeService {
                             sequence: 0,
                             status: pb::ShardStatus::IoError as i32,
                             reason: e.to_string(),
+                            retired,
                         },
                     });
                 }
@@ -1585,6 +1605,7 @@ impl StorageNode for StorageNodeService {
             next,
             more,
             bytes_read,
+            retirement_reported: true,
         }))
     }
 

@@ -303,6 +303,12 @@ pub struct Metrics {
     pub integrity_findings_total: [AtomicU64; 8],
     /// Open repair tasks by class: distinct stripes unresolved now (R-56).
     pub integrity_findings_open: [AtomicU64; 8],
+    /// Scrubbed shards that are not findings of their own, by class
+    /// ([`SCRUB_SHARD_CLASSES`] order, 0.2.0): kept for reclaim, kept for
+    /// reclaim but damaged (also counted under its damage class), held by
+    /// an operation in progress, and not classified (information missing
+    /// or racing; also counted as a scrub error).
+    pub scrub_shard_classes_total: [AtomicU64; 4],
     /// Durable groups rebuilding a member whose former node does not
     /// answer: one shard of redundancy short until the rebuild ends (R-65).
     pub groups_reduced_redundancy: AtomicU64,
@@ -470,6 +476,15 @@ pub const FINDING_LABELS: [&str; 8] = [
     "stale_placement_epoch",
     "metadata_data_mismatch",
     "unrecoverable_stripe",
+];
+
+/// Metric label of each scrub shard class of
+/// [`Metrics::scrub_shard_classes_total`].
+pub const SCRUB_SHARD_CLASSES: [&str; 4] = [
+    "retained_for_reclaim",
+    "retained_damaged",
+    "in_flight",
+    "unclassified",
 ];
 
 impl Metrics {
@@ -846,6 +861,17 @@ impl Metrics {
             let _ = writeln!(
                 out,
                 "arca_controller_integrity_findings_open{{class=\"{label}\"}} {}",
+                v.load(Ordering::Relaxed)
+            );
+        }
+        out += "# TYPE arca_controller_scrub_shard_classes_total counter\n";
+        for (label, v) in SCRUB_SHARD_CLASSES
+            .iter()
+            .zip(&self.scrub_shard_classes_total)
+        {
+            let _ = writeln!(
+                out,
+                "arca_controller_scrub_shard_classes_total{{class=\"{label}\"}} {}",
                 v.load(Ordering::Relaxed)
             );
         }

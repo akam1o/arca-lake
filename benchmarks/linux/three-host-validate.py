@@ -270,6 +270,12 @@ def scrub(groups):
         f = [int(x) for x in m.group(3).split(",")]
         res[g] = {"verified": int(m.group(1)), "bytes": int(m.group(2)),
                   "findings": dict(zip(DAMAGE, f)), "enqueued": int(m.group(4)), "errors": int(m.group(5))}
+        # 0.2.0 binaries also print the shards held legitimately or not
+        # classified (the latter are counted in errors too).
+        h = re.search(r"retained (\d+) retained_damaged (\d+) in_flight (\d+) unclassified (\d+)", out)
+        if h:
+            res[g]["held"] = dict(zip(("retained", "retained_damaged", "in_flight", "unclassified"),
+                                      (int(x) for x in h.groups())))
     return res
 
 

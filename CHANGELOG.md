@@ -11,6 +11,31 @@ break compatibility).
 
 ## [Unreleased]
 
+- Scrub: each listed shard is classified from its own evidence (chunk
+  record in the group, the node's retirement flag, generation state,
+  migration intent; ADR-0036). Records deleted and kept for reclaim are
+  reported as `retained`, no longer as unexpected shards; damaged ones
+  are still findings of their damage class (`retained_damaged`), not
+  queued; shards held by an operation in progress are `in_flight`;
+  shards that cannot be classified (0.1.0 storage nodes, which do not
+  report retirement, or records changing during the pass) are
+  `unclassified` and counted as scrub errors. `admin integrity scrub`
+  appends `retained … retained_damaged … in_flight … unclassified …` to
+  its line (the `findings [8]` array keeps its length and order); new
+  metric `arca_controller_scrub_shard_classes_total{class}`. Additive
+  protobuf fields `ShardScrub.retired` and
+  `ScrubShardsResponse.retirement_reported`; protocol and metadata
+  versions unchanged, no metadata record changed.
+- Repair (R-120): a task for a damaged shard of a migration's target
+  found before the placement switch is kept while the migration intent
+  targets the group and repaired after the switch (it was dropped, and
+  the stripe stayed one shard short with an empty queue until a degraded
+  read or the next scrub pass). Such a waiting task does not hold
+  tiering or rebalancing.
+- R-110 harness: the scrub parser reads both line formats; the judge's
+  count rule for unexpected shards applies only to timelines of earlier
+  binaries; unclassified shards make C5 Inconclusive.
+
 ### Security
 
 - Shard write ownership (R-117, ADR-0037): a storage node that has
@@ -28,9 +53,8 @@ break compatibility).
   such writes and count them. Nodes turn strict when `upgrade finalize`
   pushes schema 5, before the schema is raised: stop or upgrade tools
   that write shards without an incarnation (0.1.0 `nodebench`) first,
-  or their writes fail. Before that (during
-  an upgrade from 0.1.0) such writes are still taken, and are counted:
-  new metrics `arca_node_writes_unproven_total`,
+  or their writes fail. Accepted unproven writes are counted and
+  reported: new metrics `arca_node_writes_unproven_total`,
   `arca_node_write_ownership_strict` and
   `arca_controller_nodes_write_ownership_lenient`, `HealthResponse`
   fields 47–49 (a capability; no protocol version change), and

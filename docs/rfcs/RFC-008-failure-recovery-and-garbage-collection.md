@@ -727,13 +727,22 @@ controller failover and node restarts (nodes keep no scrub state).
 | Checksum Mismatch | a payload block CRC fails on the node | node read / scrub | node quarantines; repair task |
 | Truncated Shard | the record extends past the segment's valid length, or `payload_len` disagrees with the record | node read / scrub / open | node quarantines; repair task |
 | Invalid Header | record magic, version, key, sequence or header CRC fails | node read / scrub / open (hole) | node quarantines (or the hole is skipped); the key is then Missing |
-| Unexpected Shard | the node holds a valid shard that no live generation references, or on a group where the chunk record places it elsewhere | scrub L3; reconciliation | counted by scrub; deleted by reconciliation after the minimum age (§6.3), never by scrub (I16) |
+| Unexpected Shard | the node holds a valid shard that no generation references, no operation in progress holds, and no delete retired (an orphan; since 0.2.0 confirmed by a listing of that key read after the metadata), or a copy at another member's index | scrub L3; reconciliation | counted by scrub; deleted by reconciliation after the minimum age (§6.3), never by scrub (I16) |
 | Stale Placement Epoch | the chunk record's placement epoch is newer than the group record's epoch (metadata ahead of the group: a restore, RFC-015), or the shard sits on a former member | scrub L3 | counted and logged; repair refuses the group until the epoch is reconciled (RFC-015 §5.4); former-member copies go to reconciliation |
 | Metadata / Data Mismatch | the shard verifies at L1–L2 but its length is not the layout's shard length, or the assembled chunk's CRC differs from the chunk record (some shard carries wrong bytes with a valid CRC: a misdirected write or a stale record) | scrub L3; repair / read L4 | treated as a corrupt shard: repair finds a verifying `k`-subset (bounded search over the candidates) and rewrites the shards outside it; if no subset verifies → Unrecoverable |
 | Unrecoverable Stripe | fewer than `k` shards verify for a live chunk | repair classify; read | task state `Unrecoverable { have, need }`, metric, log, admin listing; GET returns the integrity error, never bytes (I15); re-checked on every scrub pass and every read report; cleared when `k` good shards are found (a returning node, a restored device) |
 
 "Live" means the generation is `Pending` or `Committed` (RFC-008 §6.3);
 chunks of retiring generations are left to GC.
+
+Shards that are not findings of their own (0.2.0, ADR-0036), each from
+that record's evidence, never from counts:
+
+| Class | Condition | Response |
+| --- | --- | --- |
+| Retained for reclaim | unreferenced, and the node reports the record retired by a delete (ADR-0028) | counted (`retained`); a damaged one is also a finding of its damage class (`retained_damaged`), not queued |
+| In flight | no live record here, but a migration intent younger than its TTL targets the group, a pending generation with the chunk's prefix may still record it here, or a collected generation still records it here (a shard with no generation at all is not in flight) | counted (`in_flight`); damage is a finding and queued (the task waits for the record, §8.5) |
+| Unclassified | the node does not report retirement (0.1.0), the metadata did not decode, or the record changed between the reads | counted (`unclassified`) and as a scrub error; never healthy |
 
 ### 8.5 Stripe repair state machine
 
@@ -830,6 +839,7 @@ label is the class (eight values, §8.4).
 | `arca_controller_scrub_passes_total`, `_scrub_shards_verified_total`, `_scrub_bytes_total`, `_scrub_errors_total` | counter | scheduler progress and node/metadata errors during scrub |
 | `arca_controller_scrub_groups_in_progress`, `_scrub_groups_overdue` | gauge | groups being scrubbed / past the interval |
 | `arca_controller_integrity_findings_total{class}` | counter | findings by class (8 classes) |
+| `arca_controller_scrub_shard_classes_total{class}` | counter | scrubbed shards that are not findings: `retained_for_reclaim`, `retained_damaged` (also a finding), `in_flight`, `unclassified` (also a scrub error) (0.2.0) |
 | `arca_controller_repair_queue_depth`, `_repair_tasks_unrecoverable`, `_repair_tasks_failed` | gauge | stripe repair queue state |
 | `arca_controller_stripe_repairs_succeeded_total`, `_failed_total`, `_shards_rewritten_total`, `_repair_bytes_total` | counter | stripe repair outcomes |
 | `arca_controller_data_integrity_status` | gauge | 0 = no open findings; 1 = repairs pending or failed; 2 = unrecoverable stripes present |

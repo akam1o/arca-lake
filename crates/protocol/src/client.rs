@@ -139,6 +139,17 @@ pub struct ShardScrub {
     pub status: ShardStatus,
     /// Node-side reason for a non-OK status.
     pub reason: String,
+    /// Whether the record is retired and kept for reclaim (ADR-0028);
+    /// `None` from a node that does not report it (0.1.0).
+    pub retired: Option<bool>,
+}
+
+/// A scrubbed record's retirement as the controller may use it: `None`
+/// unless the node reports retirement (a 0.1.0 node sends neither field,
+/// which decodes as `false`, `false`).
+#[must_use]
+pub fn retirement(reported: bool, retired: bool) -> Option<bool> {
+    reported.then_some(retired)
 }
 
 /// One page of scrubbed shards.
@@ -1918,6 +1929,7 @@ impl NodeClients {
                     max_bytes,
                 };
                 let resp = client.scrub_shards(req).await?.into_inner();
+                let reported = resp.retirement_reported;
                 Ok(ScrubPage {
                     shards: resp
                         .shards
@@ -1930,6 +1942,7 @@ impl NodeClients {
                                 sequence: v.sequence,
                                 status: ShardStatus::from_pb(v.status),
                                 reason: v.reason,
+                                retired: retirement(reported, v.retired),
                             })
                         })
                         .collect(),
@@ -2092,5 +2105,41 @@ impl NodeClients {
                 || status.message().starts_with("protocol version")
                 || status.message().starts_with("incarnation rejected")
                 || status.message().starts_with("node rejected"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message as _;
+
+    /// A 0.1.0 node's scrub page (fields 1 to 6 of `ShardScrub`, 1 to 4 of
+    /// the response) decodes without retirement: its records are never
+    /// taken as kept for reclaim.
+    #[test]
+    fn a_scrub_page_without_retirement_reports_none() {
+        let old = pb::ScrubShardsResponse {
+            shards: vec![pb::ShardScrub {
+                key: None,
+                payload_len: 1,
+                crc32c: 2,
+                sequence: 3,
+                status: pb::ShardStatus::Ok as i32,
+                reason: String::new(),
+                retired: false,
+            }],
+            next: None,
+            more: false,
+            bytes_read: 1,
+            retirement_reported: false,
+        };
+        let back = pb::ScrubShardsResponse::decode(old.encode_to_vec().as_slice()).unwrap();
+        assert!(!back.retirement_reported);
+        assert_eq!(
+            retirement(back.retirement_reported, back.shards[0].retired),
+            None
+        );
+        assert_eq!(retirement(true, false), Some(false));
+        assert_eq!(retirement(true, true), Some(true));
     }
 }

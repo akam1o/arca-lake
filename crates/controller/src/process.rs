@@ -3595,7 +3595,7 @@ async fn tiering_pass<S: KvStore>(
     if crate::repair_liveness::holding_group(&groups, &statuses).is_some() {
         return Ok(());
     }
-    if arca_lake_metadata::ops::integrity::any_actionable(meta).await? {
+    if arca_lake_metadata::ops::integrity::any_actionable(meta, now).await? {
         return Ok(());
     }
     metrics.tiering_active.store(true, Ordering::Relaxed);
