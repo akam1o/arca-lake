@@ -23,6 +23,7 @@ arca-lake-storage.workspace = true
 arca-lake-tiering.workspace = true
 tracing.workspace = true
 s3s.workspace = true
+urlencoding.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true

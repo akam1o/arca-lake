@@ -176,7 +176,10 @@ impl S3 for MemoryBackend {
             md5.update(&chunk);
             buf.extend_from_slice(&chunk);
         }
-        let etag = hex(md5.finalize().as_ref());
+        let digest = md5.finalize();
+        let content_md5 = crate::checksum::content_md5(input.content_md5.as_deref())?;
+        crate::checksum::verify_content_md5(content_md5.as_ref(), digest.as_ref())?;
+        let etag = hex(digest.as_ref());
 
         let mut buckets = self.buckets.write().unwrap_or_else(PoisonError::into_inner);
         let Some(bucket) = buckets.get_mut(&input.bucket) else {

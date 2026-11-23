@@ -53,6 +53,8 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 futures = "0.3"
 s3s = "0.17"
+# The path decoding of s3s (same crate and version), mirrored by the gateway.
+urlencoding = "2"
 http = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "std"] }

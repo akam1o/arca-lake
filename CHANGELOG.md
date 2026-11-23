@@ -115,6 +115,13 @@ break compatibility).
 
 ### Fixed
 
+- `Content-MD5` is verified. Before, a body that did not match it was
+  stored and answered `200` (a false success for a client that asked for
+  the check). PutObject and UploadPart (plain and `aws-chunked`, any
+  size) and the XML bodies of DeleteObjects, CompleteMultipartUpload,
+  PutBucketPolicy, PutBucketVersioning and CreateBucket now answer `400
+  BadDigest` on a mismatch and `400 InvalidDigest` for a malformed value;
+  nothing is committed (RFC-007 §5.7).
 - A signed PUT or UploadPart whose body does not match its
   `x-amz-content-sha256` is answered `400 XAmzContentSHA256Mismatch`, as
   AWS, instead of `500 InternalError`, which SDKs retried as a server

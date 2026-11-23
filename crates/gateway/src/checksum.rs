@@ -93,6 +93,42 @@ pub fn decode_b64(algorithm: ChecksumAlgorithm, s: &str) -> Option<Vec<u8>> {
     (v.len() == algorithm.byte_len()).then_some(v)
 }
 
+/// The digest of a `Content-MD5` header (RFC 1864: base64 of the 16-byte
+/// MD5 of the body); `InvalidDigest` if it is not one.
+///
+/// # Errors
+///
+/// `400 InvalidDigest` for a malformed value.
+pub fn content_md5(header: Option<&str>) -> Result<Option<[u8; 16]>, s3s::S3Error> {
+    let Some(s) = header else {
+        return Ok(None);
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .ok()
+        .and_then(|v| <[u8; 16]>::try_from(v).ok())
+        .map(Some)
+        .ok_or_else(|| s3s::s3_error!(InvalidDigest, "the Content-MD5 you specified is not valid"))
+}
+
+/// `400 BadDigest` unless `computed` (the body's MD5) is `expected`.
+///
+/// # Errors
+///
+/// `BadDigest` on a mismatch.
+pub fn verify_content_md5(
+    expected: Option<&[u8; 16]>,
+    computed: &[u8],
+) -> Result<(), s3s::S3Error> {
+    match expected {
+        Some(e) if e.as_slice() != computed => Err(s3s::s3_error!(
+            BadDigest,
+            "the Content-MD5 you specified did not match what was received"
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Header value of a stored checksum (`base64`, or `base64-N` for a
 /// composite checksum).
 #[must_use]
