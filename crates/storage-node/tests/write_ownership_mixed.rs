@@ -26,13 +26,28 @@ fn data(i: u8) -> Bytes {
     Bytes::from(vec![i; 4096])
 }
 
+/// What a controller's health pass gives node 1: its identity (token
+/// [`TOKEN`]), the incarnation and the schema floor.
 fn facts(incarnation: u8, changed_ms: u64, schema_floor: u64) -> HealthRequest {
     HealthRequest {
         incarnation: Bytes::copy_from_slice(&[incarnation; 16]),
         incarnation_changed_ms: changed_ms,
         schema_floor,
+        node_id: 1,
+        node_identity: Bytes::from_static(&TOKEN),
+        adopt_identity: true,
         ..Default::default()
     }
+}
+
+/// The identity token node 1 acknowledged.
+const TOKEN: [u8; 16] = [0x11; 16];
+
+/// A pool that writes for node 1 at `addr` (the placement member).
+fn writer(addr: &str) -> NodeClients {
+    let c = NodeClients::new(Duration::from_secs(10));
+    c.note_node_id(addr, 1);
+    c
 }
 
 fn refused(e: &tonic::Status) -> bool {
@@ -50,7 +65,7 @@ async fn unproven_writes_are_counted_and_reported_until_strict() {
         .await
         .unwrap();
     let addr = n.local_addr.to_string();
-    let c = NodeClients::new(Duration::from_secs(5));
+    let c = writer(&addr);
     let h = c
         .health_with(&addr, facts(7, 1, WRITE_OWNERSHIP_SCHEMA - 1))
         .await
@@ -117,7 +132,7 @@ async fn an_earlier_disk_without_an_incarnation_takes_writes_only_until_strict()
         .await
         .unwrap();
     let addr = n.local_addr.to_string();
-    let c = NodeClients::new(Duration::from_secs(5));
+    let c = writer(&addr);
     c.put_shard(&addr, shard(2), 0, data(2), 1024)
         .await
         .unwrap();

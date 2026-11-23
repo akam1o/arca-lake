@@ -17,8 +17,13 @@ break compatibility).
   adopted no incarnation yet (a new disk its controller has not reached)
   refuses every shard write, so another cluster's gateway at a reused
   address can no longer have its shards stored there and counted
-  written. Once the cluster is finalized to metadata schema 5, nodes
-  also refuse shard writes carrying no incarnation. Before that (during
+  written. Every shard write now names the node it is for (the
+  placement member; `PutShardHeader` fields 7–8, the node id and, from
+  the controller, the identity token), and a node holding another
+  identity refuses it: a write reaching another node of the same cluster
+  is never stored or counted written. Once the cluster is finalized to
+  metadata schema 5, nodes also refuse shard writes carrying no
+  incarnation or naming no node. Before that (during
   an upgrade from 0.1.0) such writes are still taken, and are counted:
   new metrics `arca_node_writes_unproven_total`,
   `arca_node_write_ownership_strict` and

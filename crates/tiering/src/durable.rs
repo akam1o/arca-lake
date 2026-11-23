@@ -376,8 +376,9 @@ pub async fn write_coded(
         let expected = arca_lake_storage::format::crc32c(&shards[i]);
         let resp = match clients
             // Only cache copies are written this way (Phase 3.6 class).
-            .put_shard_as(
+            .put_shard_to(
                 &addr,
+                member.node_id,
                 shard,
                 group.epoch,
                 shards[i].clone(),

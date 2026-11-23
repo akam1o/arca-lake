@@ -818,8 +818,9 @@ async fn reconstruct_member<S: KvStore>(
                         Ok(Some((bytes, _))) => Some((
                             arca_lake_storage::format::crc32c(bytes),
                             clients
-                                .put_shard_as(
+                                .put_shard_to(
                                     target_addr,
+                                    group.members[index].node_id,
                                     ShardRef {
                                         group_id: group.id,
                                         chunk_id: chunk.chunk_id,

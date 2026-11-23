@@ -242,6 +242,7 @@ async fn a_write_that_ends_early_holds_nothing_and_a_restart_starts_clean() {
             payload_len: 8 * MIB,
             write_class: pb::WriteClass::Client.into(),
             incarnation: Bytes::from_static(&INCARNATION),
+            ..Default::default()
         })),
     })
     .await

@@ -32,13 +32,28 @@ fn data(i: u8) -> Bytes {
     Bytes::from(vec![i; 4096])
 }
 
+/// What a controller's health pass gives node 1: its identity (token
+/// [`TOKEN`]), the incarnation and the schema floor.
 fn facts(incarnation: u8, changed_ms: u64, schema_floor: u64) -> HealthRequest {
     HealthRequest {
         incarnation: Bytes::copy_from_slice(&[incarnation; 16]),
         incarnation_changed_ms: changed_ms,
         schema_floor,
+        node_id: 1,
+        node_identity: Bytes::from_static(&TOKEN),
+        adopt_identity: true,
         ..Default::default()
     }
+}
+
+/// The identity token node 1 acknowledged.
+const TOKEN: [u8; 16] = [0x11; 16];
+
+/// A pool that writes for node 1 at `addr` (the placement member).
+fn writer(addr: &str) -> NodeClients {
+    let c = NodeClients::new(Duration::from_secs(10));
+    c.note_node_id(addr, 1);
+    c
 }
 
 fn refused(e: &tonic::Status) -> bool {
@@ -58,7 +73,7 @@ async fn a_node_that_adopted_no_incarnation_refuses_every_write() {
         .await
         .unwrap();
     let addr = n.local_addr.to_string();
-    let c = NodeClients::new(Duration::from_secs(5));
+    let c = writer(&addr);
     for inc in [Some([9; 16]), None] {
         c.set_incarnation(inc);
         let e = c
@@ -103,7 +118,7 @@ async fn a_strict_node_refuses_writes_without_its_incarnation() {
         .unwrap();
     let listen = n.local_addr;
     let addr = listen.to_string();
-    let c = NodeClients::new(Duration::from_secs(5));
+    let c = writer(&addr);
     c.health_with(&addr, facts(7, 1, STRICT_SCHEMA))
         .await
         .unwrap();
@@ -148,7 +163,7 @@ async fn a_new_incarnation_is_acknowledged_only_after_writes_past_the_old_one() 
         .await
         .unwrap();
     let addr = n.local_addr.to_string();
-    let c = NodeClients::new(Duration::from_secs(10));
+    let c = writer(&addr);
     c.health_with(&addr, facts(7, 1, 0)).await.unwrap();
     c.set_incarnation(Some([7; 16]));
     // The first record write the put does sleeps in the store.
@@ -212,6 +227,7 @@ async fn a_new_incarnation_is_acknowledged_only_after_writes_past_the_old_one() 
                     payload_len: 4096,
                     write_class: 0,
                     incarnation: Bytes::copy_from_slice(&[8; 16]),
+                    ..Default::default()
                 },
             ),
         ),
@@ -243,5 +259,83 @@ async fn a_new_incarnation_is_acknowledged_only_after_writes_past_the_old_one() 
         c.get_shard(&addr, shard(7), 0, 0).await.unwrap_err().code(),
         tonic::Code::NotFound
     );
+    n.shutdown().await;
+}
+
+/// A write names the node it is for (the placement member): another node
+/// of the same cluster at the address the writer maps to that member (an
+/// address reused within the cluster, a stale map) refuses it, also when
+/// only its identity token differs (another disk of that node id), and
+/// stores nothing. Strict, a write naming no node is refused too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_for_another_node_is_refused() {
+    let _serial = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let addr = n.local_addr.to_string();
+    let admin = NodeClients::new(Duration::from_secs(5));
+    // Node 1 of the cluster of incarnation 7 (as its controller made it).
+    admin.health_with(&addr, facts(7, 1, 4)).await.unwrap();
+    let for_node = |id: u64, token: Option<[u8; 16]>| {
+        let c = NodeClients::new(Duration::from_secs(5));
+        c.set_incarnation(Some([7; 16]));
+        c.note_node_id(&addr, id);
+        c.note_identity(&addr, token.map(|t| (id, t)));
+        c
+    };
+    for (who, c) in [
+        ("node 2", for_node(2, None)),
+        ("node 2 with a token", for_node(2, Some([0x22; 16]))),
+        ("node 1, another disk", for_node(1, Some([0x99; 16]))),
+    ] {
+        let e = c
+            .put_shard(&addr, shard(1), 0, data(1), 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code(), tonic::Code::FailedPrecondition, "{who}: {e}");
+        assert!(e.message().starts_with("node rejected"), "{who}: {e}");
+    }
+    assert_eq!(
+        admin
+            .get_shard(&addr, shard(1), 0, 0)
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::NotFound,
+        "a write for another node was stored"
+    );
+    // Its own writers: named with or without its token.
+    for_node(1, Some(TOKEN))
+        .put_shard(&addr, shard(1), 0, data(1), 1024)
+        .await
+        .unwrap();
+    for_node(1, None)
+        .put_shard(&addr, shard(2), 0, data(2), 1024)
+        .await
+        .unwrap();
+    // Strict: a write that names no node (an earlier release's writer).
+    admin
+        .health_with(
+            &addr,
+            HealthRequest {
+                schema_floor: STRICT_SCHEMA,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let unnamed = NodeClients::new(Duration::from_secs(5));
+    unnamed.set_incarnation(Some([7; 16]));
+    let e = unnamed
+        .put_shard(&addr, shard(3), 0, data(3), 1024)
+        .await
+        .unwrap_err();
+    assert!(e.message().starts_with("node rejected"), "{e}");
+    for_node(1, None)
+        .put_shard(&addr, shard(3), 0, data(3), 1024)
+        .await
+        .unwrap();
     n.shutdown().await;
 }

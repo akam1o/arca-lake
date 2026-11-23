@@ -4,9 +4,12 @@ Status: **accepted** (0.2.0 preparation, R-117). Concerns which `PutShard`
 a storage node takes. Reuses the cluster incarnation (RFC-015 §5.3,
 ADR-0016), the schema floor nodes already learn from their controller
 (ADR-0024) and the node's fence guard (Phase 3.5 audit SEC-6); no new
-signing, token or certificate. No protocol version, metadata schema,
-record or segment format change: three fields are added to
-`HealthResponse` (a capability, proto3, ignored by 0.1.0 readers).
+signing, token or certificate; the target node is named with the
+node identity deletes already carry (Phase 3.11, R-100). No protocol
+version, metadata schema, record or segment format change: two fields
+are added to `PutShardHeader` (7 `node_id`, 8 `node_identity`) and three
+to `HealthResponse` (47–49, a capability); proto3, ignored by 0.1.0
+readers.
 
 ## 1. Problem
 
@@ -24,7 +27,12 @@ writer's incarnation and a node that adopted another one refuses it
    node IDs (small integers) repeat across clusters, so mutual TLS does
    not tell them apart.
 
-A fifth, smaller gap: the re-check after the body was not ordered with
+5. a write reaching **another node of the same cluster** (an address
+   reused within the cluster, a node moved, a gateway's stale map) was
+   stored and counted written: writes were not bound to the target node,
+   as deletes are.
+
+A sixth, smaller gap: the re-check after the body was not ordered with
 the store write, so an incarnation adopted between the two could be
 acknowledged while a write of the previous one was still being stored.
 
@@ -32,7 +40,15 @@ acknowledged while a write of the previous one was still being stored.
 
 Every `PutShard` goes through `NodeClients::put_shard_raw`
 (`crates/protocol/src/client.rs`), which stamps the pool's incarnation
-(`set_incarnation`). The pools:
+(`set_incarnation`) and, since this ADR, the target node. Every product
+writer now calls `put_shard_to` with the placement member it writes
+(`member.node_id`: the gateway's group member, repair's replacement
+member, the integrity task's target member, the tiering and migration
+target group's member); the pool adds the identity token that node
+acknowledged when it knows it for that address (`note_identity`, which
+the controller's health pass maintains for deletes; the gateway does not
+hold tokens and names the node id only). `put_shard`/`put_shard_as` name
+the node noted for the address (`note_node_id`), if any. The pools:
 
 | Writer | Pool | Incarnation |
 | --- | --- | --- |
@@ -72,9 +88,23 @@ A node takes a `PutShard` only as follows (`service.rs`
 | Adopted none, held data at start, not strict (an earlier release's disk never reached by a controller) | taken, counted | taken, counted | taken, counted |
 | Adopted none, strict | refused | refused | refused |
 
+**Target node** (`check_write_target`, before and after the body, after
+the incarnation check). A write names a node (`node_id`, and the token
+if the writer knows it):
+
+| Node holds | Names this node (token absent or equal) | Names another node, or this id with another token | Names none |
+| --- | --- | --- | --- |
+| its identity | taken | refused | strict: refused; else taken, counted |
+| no identity, a node certificate (mTLS) | taken if the certificate names that node | refused | as above |
+| no identity and no node certificate, or a damaged identity file | strict: refused; else taken, counted | refused if the certificate names another | as above |
+
+In a cluster the controller's first health pass gives the node its
+identity in the same request as the incarnation and the floor, so a
+strict node holds one; the testkit harness and tests do the same.
+
 Refusals are `FAILED_PRECONDITION` with a message starting
-`incarnation rejected`, which writers already treat as a failed write of
-that member (`NodeClients::is_incompatible`; the gateway places
+`incarnation rejected` or `node rejected`, which writers treat as a
+failed write of that member (`NodeClients::is_incompatible`; the gateway places
 elsewhere or answers 503, repair and migration retry).
 
 **Strict** means the node was told the schema
@@ -91,8 +121,11 @@ to be reconciled with that change's constant).
 
 **Not strict** is the mixed window of an upgrade from 0.1.0. What a
 0.1.0 peer relies on is kept and made visible: a write carrying no
-incarnation, and writes to an earlier release's disk that never adopted
-an incarnation, are taken and counted (`writes_unproven`). The bound and
+incarnation or naming no node (every 0.1.0 writer names none), writes
+to an earlier release's disk that never adopted an incarnation, and
+writes to a node that cannot check the node named, are taken and
+counted (`writes_unproven`). A write naming another node than the one
+the node is, is refused in every mode: only 0.2.0 writers name one. The bound and
 the end condition: these exceptions exist only below schema 5, and end
 for good on each node when it is told schema 5 (the floor never goes
 down, also after a restore).
@@ -131,8 +164,9 @@ second check.
 ### Update order (0.1.0 to 0.2.0)
 
 Any order, as for 0.1.0 releases: 0.2.0 writers stamp the incarnation as
-0.1.0 writers do; 0.2.0 nodes keep taking what 0.1.0 writers send (they
-always carry it). Upgraded nodes hold the incarnation they adopted under
+0.1.0 writers do and also name the target node, which 0.1.0 nodes
+ignore; 0.2.0 nodes keep taking what 0.1.0 writers send (the
+incarnation, no node: counted). Upgraded nodes hold the incarnation they adopted under
 0.1.0. Replace `nodebench` binaries of 0.1.0 (they send none: counted in
 the window, refused once strict). `upgrade finalize` to schema 5 makes
 every node strict. A 0.1.0 node in the window behaves as 0.1.0 (it is
@@ -145,13 +179,19 @@ reported, §4).
 - Any writer to a new disk before its controller reached it, and to
   any node before an incarnation once strict.
 - A writer holding no incarnation, once strict.
-- An earlier-release node of this cluster is not protected (it takes
-  what 0.1.0 takes).
+- A write for another node of this cluster (named by the writer, from
+  the placement member), whatever the address, once the node holds its
+  identity or serves a node certificate; and once strict, a write
+  naming no node.
+- An earlier-release node of this cluster is not protected (it ignores
+  the fields and takes what 0.1.0 takes; reported by the capability
+  bit).
 
 ## 4. Reporting
 
-- `HealthResponse.write_ownership_supported` (capability bit; false
-  from 0.1.0), `write_ownership_strict`, `writes_unproven` (since start);
+- `HealthResponse.write_ownership_supported` (capability bit: the node
+  enforces the incarnation and target-node rules; false from 0.1.0, which
+  ignores the target node), `write_ownership_strict`, `writes_unproven` (since start);
   `NodeCaps::write_ownership`.
 - Node metrics `arca_node_write_ownership_strict`,
   `arca_node_writes_unproven_total`; controller gauge
@@ -164,18 +204,22 @@ reported, §4).
 Guaranteed by the node, whatever the CA and trust domain: a write
 misdirected from another cluster (a reused address, a repeated node id,
 a shared CA) is never stored on a node of this cluster that adopted an
-incarnation, nor on a new disk; once strict, a write that does not
-carry the node's incarnation is never stored.
+incarnation, nor on a new disk; a write for another node of the same
+cluster is never stored on a node that holds its identity (or serves its
+node certificate), so it is never counted written; once strict, a write
+that does not carry the node's incarnation and name the node is never
+stored.
 
 Not guaranteed (still relies on mutual TLS with one CA or trust domain
 per cluster): the incarnation is not a secret (a node reports it in
 `Health` to any authorised caller), so a malicious process holding a
 valid certificate of the same CA and trust domain can learn it and
-write. Writes within one cluster to the wrong node of that cluster (two
-of its nodes' addresses swapped) are not bound to the node identity, as
-deletes are; that needs the identity on `PutShard` (a new header field)
-and is left to R-117's open part. Plaintext deployments have only the
-incarnation check.
+write. Gateways name the node id without its token: a write for node N
+reaching another disk that also holds node N's id (a disk replaced
+under the same id, `node rejoin --fresh-identity`, while the old one
+answers somewhere) is taken; controller writes carry the token and are
+refused. In the mixed window a node without an identity and without a
+node certificate takes writes for any node (counted).
 
 ## 6. Alternatives rejected
 
@@ -183,9 +227,13 @@ incarnation check.
   without one at once** (no mixed window): a 0.1.0 tool's writes, and
   an earlier disk never reached by a controller, would stop before the
   cluster could finish its upgrade. Kept for schema 5 instead.
-- **Bind writes to the node identity token** (as deletes): needs a new
-  `PutShardHeader` field that 0.1.0 nodes drop silently, and does not
-  separate clusters (tokens are per node); the incarnation does.
+- **Bind writes to the node identity token only** (no incarnation
+  check): tokens are per node, the incarnation is what separates
+  clusters; both are used.
+- **The gateway loading identity tokens**: acknowledging an identity
+  does not move the cluster map version, so a gateway would stamp stale
+  tokens (refusing a rejoined disk's writes) until its next map change;
+  the node id is enough to tell two nodes of one cluster apart.
 - **Adopt the first writer's incarnation** (trust on first use): the
   first writer of a new disk at a reused address may be the other
   cluster's.
@@ -194,9 +242,11 @@ incarnation check.
 
 ## 7. Tests
 
-Real RPC (`crates/storage-node/tests/write_ownership.rs`,
+Real RPC (`crates/storage-node/tests/write_ownership.rs`, including
+`a_write_for_another_node_is_refused`,
 `write_ownership_mixed.rs`, `delete_fence.rs`, `mtls.rs`) and end to end
-through the gateway (`crates/testkit/tests/it/write_ownership.rs`); the
+through the gateway (`crates/testkit/tests/it/write_ownership.rs`,
+including another node of the same cluster at a member's address); the
 before/after runs are in the PR. Normal paths (first writes, restart,
 a node added, repair, migration, tiering, restore then rejoin) are the
 existing testkit suite, whose harness now gives nodes the incarnation as

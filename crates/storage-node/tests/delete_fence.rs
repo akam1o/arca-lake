@@ -144,7 +144,8 @@ async fn writes_of_another_incarnation_are_refused() {
         "the shard was stored"
     );
     // This cluster's writer, and one that holds no incarnation: taken
-    // while the node is not strict (ADR-0037, the mixed window), counted.
+    // while the node is not strict (ADR-0037, the mixed window), counted
+    // (both: they name no node, and the node holds no identity).
     c.set_incarnation(Some([7; 16]));
     c.put_shard(&addr, shard(5), 0, data.clone(), 1024)
         .await
@@ -153,7 +154,7 @@ async fn writes_of_another_incarnation_are_refused() {
     c.put_shard(&addr, shard(6), 0, data.clone(), 1024)
         .await
         .unwrap();
-    assert_eq!(n.service().writes_unproven(), 1);
+    assert_eq!(n.service().writes_unproven(), 2);
     assert_eq!(c.get_shard(&addr, shard(5), 0, 0).await.unwrap(), data);
     n.shutdown().await;
 }

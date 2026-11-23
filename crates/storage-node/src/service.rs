@@ -647,6 +647,70 @@ impl StorageNodeService {
         }
     }
 
+    /// The node id this node's own certificate names (Phase 3.13, R-105),
+    /// if it serves mutual TLS with a node identity.
+    fn certificate_node_id(&self) -> Option<u64> {
+        self.tls.as_ref().and_then(|t| {
+            let own = t.identity();
+            (own.role == arca_lake_protocol::tls::Role::Node)
+                .then(|| own.name.parse::<u64>().ok())
+                .flatten()
+        })
+    }
+
+    /// Refuse a write for another node than this one (ADR-0037): the
+    /// writer named the placement member it writes (`node_id`, and the
+    /// identity token that node acknowledged, if the writer knows it), and
+    /// this disk holds another identity, or its certificate names another
+    /// node: another node of the same cluster answers at the address the
+    /// writer maps to the member (an address reused, a stale map).
+    ///
+    /// Strict ([`pb::WRITE_OWNERSHIP_SCHEMA`]), a write naming no node, and
+    /// one this node cannot check (no identity held and no node
+    /// certificate, or a damaged identity file), are refused too; before
+    /// it they are accepted (`true`: counted by the caller).
+    fn check_write_target(&self, node_id: u64, token: &[u8]) -> Result<bool, tonic::Status> {
+        let strict = self.write_ownership_strict();
+        let (held, damaged) = {
+            let id = self.identity.lock().unwrap_or_else(PoisonError::into_inner);
+            (id.held(), id.damaged())
+        };
+        let other = |what: String| {
+            Err(tonic::Status::failed_precondition(format!(
+                "node rejected: the write is for node {node_id}, {what}"
+            )))
+        };
+        if node_id == 0 {
+            return if strict {
+                Err(tonic::Status::failed_precondition(
+                    "node rejected: the write names no node",
+                ))
+            } else {
+                Ok(true)
+            };
+        }
+        if let Some(c) = self.certificate_node_id()
+            && c != node_id
+        {
+            return other(format!("this node's certificate names node {c}"));
+        }
+        match held {
+            Some(h) if h.node_id != node_id => other(format!("this disk is node {}", h.node_id)),
+            Some(h) if token.len() == 16 && h.token[..] != token[..] => {
+                other("this disk holds another identity token of that node".to_string())
+            }
+            Some(_) => Ok(false),
+            None if damaged || self.certificate_node_id().is_none() => {
+                if strict {
+                    other("this disk holds no identity to check it against".to_string())
+                } else {
+                    Ok(true)
+                }
+            }
+            None => Ok(false),
+        }
+    }
+
     /// Shard writes accepted since start without proof of this node's
     /// cluster (no incarnation carried, or none adopted; never in strict
     /// mode).
@@ -772,6 +836,7 @@ impl StorageNode for StorageNodeService {
         };
         Self::check_version(header.protocol_version)?;
         self.check_write_incarnation(&header.incarnation)?;
+        self.check_write_target(header.node_id, &header.node_identity)?;
         let key = Self::key(header.key)?;
         self.check_epoch(key.group_id, header.group_epoch)?;
         let expected = usize::try_from(header.payload_len)
@@ -835,7 +900,8 @@ impl StorageNode for StorageNodeService {
         // still be stored.
         let fence = Arc::clone(&self.fence).read_owned().await;
         self.check_epoch(key.group_id, header.group_epoch)?;
-        if self.check_write_incarnation(&header.incarnation)? {
+        let unproven = self.check_write_incarnation(&header.incarnation)?;
+        if self.check_write_target(header.node_id, &header.node_identity)? || unproven {
             self.writes_unproven.fetch_add(1, Ordering::Relaxed);
         }
         self.stats.put_recv.observe(started.elapsed());
@@ -1569,12 +1635,7 @@ impl StorageNode for StorageNodeService {
         // The node's own certificate names its node id (Phase 3.13,
         // R-105): a request for another id is not this node's, whatever
         // its disk holds, and adopts nothing.
-        let cert_node = self.tls.as_ref().and_then(|t| {
-            let own = t.identity();
-            (own.role == arca_lake_protocol::tls::Role::Node)
-                .then(|| own.name.parse::<u64>().ok())
-                .flatten()
-        });
+        let cert_node = self.certificate_node_id();
         let cert_conflict =
             req.node_identity.len() == 16 && cert_node.is_some_and(|c| c != req.node_id);
         let identity = if cert_conflict {

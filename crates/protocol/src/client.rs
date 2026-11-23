@@ -1139,14 +1139,61 @@ impl NodeClients {
         frame_bytes: usize,
         class: pb::WriteClass,
     ) -> Result<pb::PutShardResponse, tonic::Status> {
+        let node_id = self
+            .node_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(addr)
+            .copied()
+            .unwrap_or(0);
+        self.put_shard_to(addr, node_id, shard, epoch, data, frame_bytes, class)
+            .await
+    }
+
+    /// [`Self::put_shard_as`] for the placement member `node_id` (ADR-0037):
+    /// the write names that node, and the identity token it acknowledged
+    /// if this pool knows it for `addr` ([`Self::note_identity`]), so that
+    /// another node at `addr` (an address reused within the cluster, a
+    /// stale map) refuses it instead of storing it. `node_id` 0 names none
+    /// ([`Self::put_shard_as`] names the node noted for `addr`, if any).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::put_shard`]; a node of another identity answers
+    /// `FAILED_PRECONDITION` (`node rejected`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_shard_to(
+        &self,
+        addr: &str,
+        node_id: u64,
+        shard: ShardRef,
+        epoch: u64,
+        data: Bytes,
+        frame_bytes: usize,
+        class: pb::WriteClass,
+    ) -> Result<pb::PutShardResponse, tonic::Status> {
         let ctx = RpcContext {
             addr,
             rpc: Rpc::PutShard,
             shard: Some(shard),
             group_id: Some(shard.group_id),
         };
+        let token = self
+            .identity_of(addr)
+            .filter(|i| node_id != 0 && i.0 == node_id)
+            .map(|i| i.1);
+        let target = (node_id, token);
         self.with_retry(ctx, |fault| {
-            self.put_shard_raw(addr, shard, epoch, data.clone(), frame_bytes, class, fault)
+            self.put_shard_raw(
+                addr,
+                target,
+                shard,
+                epoch,
+                data.clone(),
+                frame_bytes,
+                class,
+                fault,
+            )
         })
         .await
     }
@@ -1161,6 +1208,7 @@ impl NodeClients {
     async fn put_shard_raw(
         &self,
         addr: &str,
+        target: (u64, Option<[u8; 16]>),
         shard: ShardRef,
         epoch: u64,
         data: Bytes,
@@ -1184,6 +1232,11 @@ impl NodeClients {
                     .map(|i| i.to_vec())
                     .unwrap_or_default()
                     .into(),
+                node_id: target.0,
+                node_identity: target
+                    .1
+                    .map(|t| Bytes::copy_from_slice(&t))
+                    .unwrap_or_default(),
             })),
         };
         let frame = frame_bytes.max(1);
@@ -2030,12 +2083,14 @@ impl NodeClients {
         Ok(resp)
     }
 
-    /// Whether a status is a node's protocol or incarnation refusal.
+    /// Whether a status is a node's protocol, incarnation or write target
+    /// refusal.
     #[must_use]
     pub fn is_incompatible(status: &tonic::Status) -> bool {
         status.code() == tonic::Code::FailedPrecondition
             && (status.message().starts_with("incompatible protocol")
                 || status.message().starts_with("protocol version")
-                || status.message().starts_with("incarnation rejected"))
+                || status.message().starts_with("incarnation rejected")
+                || status.message().starts_with("node rejected"))
     }
 }

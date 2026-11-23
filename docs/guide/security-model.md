@@ -24,10 +24,14 @@ Summary of [RFC-012](../rfcs/RFC-012-security-architecture.md), the
   ADR-0037): a write carrying another incarnation is refused (a writer
   of another cluster at a reused address, whatever the CA), and a new
   disk takes no write before its controller gave it the incarnation.
-  Once the cluster is finalized to schema 5 a write carrying no
-  incarnation is refused too; before that (an upgrade from 0.1.0 not
-  finalized) such writes, and writes to an earlier release's disk that
-  never adopted an incarnation, are taken as 0.1.0 does and counted
+  A write also names the node it is for (the placement member), and a
+  node holding another identity refuses it: a write reaching another
+  node of the same cluster (an address reused, a stale map) is never
+  stored or counted written. Once the cluster is finalized to schema 5 a
+  write carrying no incarnation or naming no node is refused too;
+  before that (an upgrade from 0.1.0 not finalized) such writes, and
+  writes to an earlier release's disk that never adopted an
+  incarnation, are taken as 0.1.0 does and counted
   (`arca_node_writes_unproven_total`; nodes not yet strict:
   `arca_controller_nodes_write_ownership_lenient`, `admin node show`).
 - **One trust domain per cluster.** The handshake pins a node's SPIFFE ID,

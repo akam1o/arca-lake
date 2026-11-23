@@ -1,8 +1,10 @@
 //! Shard write ownership end to end (R-117, ADR-0037): a gateway that still
 //! maps a node to an address now served by a node of another cluster never
 //! has its shards stored there, whether that node adopted its own cluster's
-//! incarnation or none yet; this cluster's own paths (first writes,
-//! restart, a new node and a repair onto it) keep working, also strict.
+//! incarnation or none yet, nor on another node of the same cluster
+//! answering at a member's address; this cluster's own paths (first
+//! writes, restart, a new node and a repair onto it) keep working, also
+//! strict.
 
 use std::time::Duration;
 
@@ -119,6 +121,73 @@ async fn a_gateway_put_to_a_node_that_adopted_nothing_at_a_reused_address_is_ref
     put_against_a_foreign_node_at_a_reused_address(None).await;
 }
 
+/// Member 0's address now serves another node of the same cluster (its
+/// disk moved there, or the address went to another node while the
+/// gateway's map still names the member there): a PUT through the gateway
+/// names the member, the node there refuses it, and nothing is stored or
+/// counted written on it. 0.1.0 stored the shard (same incarnation).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gateway_put_to_another_node_of_the_same_cluster_at_a_members_address_is_refused() {
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(4, 2, 1, 1 << 20, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    // As a controller's first pass: every node holds its identity.
+    c.acknowledge_identities().await;
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "before",
+        payload(64 << 10, 1),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let group = c.groups().await.remove(0);
+    let member = c.node_index(&group.members[0]).unwrap();
+    let spare = (0..c.nodes.len())
+        .find(|i| !group.members.iter().any(|m| m.node_id == c.nodes[*i].id))
+        .unwrap();
+    let addr = c.stop_node_releasing_address(member).await;
+    c.stop_node(spare).await;
+    let dir = c.nodes[spare].dir.clone();
+    let mut started = None;
+    for _ in 0..50 {
+        match serve(NodeConfig::new(addr, &dir)).await {
+            Ok(h) => {
+                started = Some(h);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    let other = started.expect("the released address could not be bound");
+    let data = payload(256 << 10, 2);
+    let put = s3::put(
+        &c.backend,
+        BUCKET,
+        "after",
+        data.clone(),
+        &PutOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        other.service().stats().put_store.count,
+        0,
+        "a shard for node {} was stored on node {}",
+        c.nodes[member].id,
+        c.nodes[spare].id
+    );
+    if put.is_ok() {
+        let (got, _) = s3::get(&c.backend, BUCKET, "after").await.unwrap();
+        assert_eq!(got, data);
+    }
+    other.shutdown().await;
+    c.shutdown().await;
+}
+
 /// A strict cluster (every node told the strict schema) keeps its own
 /// paths: writes, a node restart, a new node registered and given the
 /// cluster's facts, and a repair onto it; a writer holding no incarnation
@@ -127,6 +196,8 @@ async fn a_gateway_put_to_a_node_that_adopted_nothing_at_a_reused_address_is_ref
 async fn a_strict_cluster_keeps_its_own_writes_restarts_and_repairs() {
     use arca_lake_protocol::storage::v1 as pb;
     let mut c = cluster().await;
+    // As a controller's first pass: identities, then the strict schema.
+    c.acknowledge_identities().await;
     for n in &c.nodes {
         let h = c
             .clients
@@ -187,6 +258,7 @@ async fn a_strict_cluster_keeps_its_own_writes_restarts_and_repairs() {
     }
     // A new node, then a repair of member 2 onto it.
     let new = c.add_node().await;
+    c.acknowledge_identities().await;
     let g = c.groups().await[0].clone();
     c.stop_node(2).await;
     let report = c.repair(g.id, 2, new).await;
