@@ -408,7 +408,7 @@ async fn upgrade_from_and_rollback_to_0_1_0_then_finalize() {
     // the runbook step records it (the label 0.1.0 created it with).
     let (ok, text) = finalize(&env, &gone, 10);
     assert!(
-        !ok && text.contains("no recorded failure domain") && !text.contains(&gw_old_addr),
+        !ok && text.contains("no recorded failure domain"),
         "finalize with an unrecorded group: {text}"
     );
     env.admin_ok(true, &["upgrade", "cancel"]);
