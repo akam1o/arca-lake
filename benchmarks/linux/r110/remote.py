@@ -142,6 +142,30 @@ print(json.dumps(proc.stop_identified(rec, common.Clock(), term_wait=wait, kill_
 '''
 
 
+# The host's boot: its boot ID (Linux: changes at every boot), uptime and
+# wall time, one JSON line; written to ARGV[2] too when given (setup's
+# record, ``host-boot.json`` in the run directory).
+BOOT = r'''# r110:boot
+import json, os, sys, time
+out = {"wall_ms": time.time_ns() // 1000000}
+try:
+    out["boot_id"] = open(sys.argv[1]).read().strip() or None
+except OSError:
+    out["boot_id"] = None
+try:
+    out["uptime_s"] = float(open("/proc/uptime").read().split()[0])
+except (OSError, ValueError, IndexError):
+    out["uptime_s"] = None
+if len(sys.argv) > 2:
+    with open(sys.argv[2] + ".tmp", "w") as f:
+        json.dump(out, f); f.flush(); os.fsync(f.fileno())
+    os.replace(sys.argv[2] + ".tmp", sys.argv[2])
+print(json.dumps(out))
+'''
+
+REACH_ATTEMPTS, REACH_WAIT_S = 3, 20.0
+
+
 def ssh_runner(target, command, stdin=None, timeout=120):
     r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
                         target, command], input=stdin, capture_output=True, text=True, timeout=timeout)
@@ -196,6 +220,8 @@ class SshCluster:
         self.tools_src = tools_dir or os.path.dirname(os.path.abspath(__file__))
         self.step_n = 0
         self.clock = clock
+        self.boot_id_path = "/proc/sys/kernel/random/boot_id"
+        self.sleep = time.sleep
 
     # -- plumbing --------------------------------------------------------------
 
@@ -333,6 +359,9 @@ class SshCluster:
         # every final stop must account for the services it started
         # (started.list); a leftover directory of the same id is never taken.
         self.setup_started = True
+        # The boot the run starts on: a later "gone" is told apart from a
+        # stop when the host has booted since.
+        self.py(BOOT, self.boot_id_path, f"{self.run_dir}/host-boot.json")
         for f in TOOLS_FILES:
             with open(os.path.join(self.tools_src, f)) as fh:
                 self.ssh(f"cat > {Q(self.tools)}/r110/{f}", stdin=fh.read())
@@ -731,8 +760,49 @@ class SshCluster:
         self.last_scrub_held = held
         return total
 
-    def collect_logs(self):
-        return self.ssh(f"tail -c 2000000 {Q(self.run_dir)}/logs/*.log 2>/dev/null || true", check=False, timeout=600)
+    # -- the host's evidence ---------------------------------------------------
+
+    def reach(self, attempts=REACH_ATTEMPTS, wait_s=REACH_WAIT_S):
+        """Whether the load host answers: ``attempts`` tries, ``wait_s``
+        apart (a bounded reconnect)."""
+        errors = []
+        for i in range(attempts):
+            try:
+                rc, out, err = self.runner(self.cfg["hosts"][self.host], "echo r110-reach", None, 30)
+                if rc == 0 and "r110-reach" in out:
+                    return {"ok": True, "attempts": i + 1}
+                errors.append(f"rc {rc}: {err.strip()[-200:]}")
+            except Exception as e:  # noqa: BLE001 - a timeout or a failing ssh: not reached
+                errors.append(f"{type(e).__name__}: {e}"[:200])
+            if i + 1 < attempts:
+                self.sleep(wait_s)
+        return {"ok": False, "attempts": attempts, "errors": errors}
+
+    def boot_check(self):
+        """The host's boot now against the one the run started on
+        (``host-boot.json``): ``rebooted`` True, False, or None when either
+        boot ID is unknown."""
+        now = json.loads(self.py(BOOT, self.boot_id_path, timeout=30).strip().splitlines()[-1])
+        setup = self._json(f"{self.run_dir}/host-boot.json")
+        a, b = (setup or {}).get("boot_id"), now.get("boot_id")
+        return {"setup": setup, "now": now, "rebooted": (a != b) if a and b else None}
+
+    def evidence_roots(self):
+        """What is collected: the run directory without the node stores,
+        the test FoundationDB's directory without its data (its trace logs
+        and marker)."""
+        return [["run", self.run_dir, r"d[0-9]+"], ["fdb", self.fdb_data, r"d"]]
+
+    def _evidence_call(self, script, *args, timeout=120):
+        return self.py(script, *args, timeout=timeout)
+
+    def collect_evidence(self, dest, meta=None, **kw):
+        """The host's evidence saved under ``dest`` and verified
+        (``evidence.collect``): the manifest."""
+        from . import evidence
+        meta = dict(meta or {}, binary_sha256=self.cfg["binary"]["sha256"],
+                    binary_commit=self.cfg["binary"]["commit"])
+        return evidence.collect(self._evidence_call, self.evidence_roots(), dest, self.cfg["run_id"], meta=meta, **kw)
 
     def stop_load(self):
         """The main guard, then its load by its own record (confirmed), and
@@ -818,24 +888,62 @@ class SshCluster:
 
     # -- teardown --------------------------------------------------------------
 
-    def teardown(self):
-        """Stop every recorded test process by identity, then remove the
-        run's two directories, only when every stop was confirmed, the
-        liveness check held (``ALIVE``) and their markers name this run.
-        Anything else keeps everything, with the verdicts as evidence."""
+    def teardown(self, evidence_dir=None, **collect_kw):
+        """Stop every recorded test process by identity, save the host's
+        evidence under ``evidence_dir`` (the run's evidence directory), then
+        remove the run's two directories only when (1) every stop was
+        confirmed and the liveness check held (``ALIVE``), (2) the evidence
+        was saved complete and verified (the saved copies read back, the
+        host's files unchanged since) and (3) their markers name this run.
+        Anything else keeps everything, with the reason; a teardown can be
+        run again. The stops never wait for the collection (it comes after
+        them); an unreachable host is neither stopped, collected nor
+        touched. A process found gone after the host booted again is
+        recorded as ended by the reboot, never as stopped."""
         rid = self.cfg["run_id"]
         out = {"stopped": {}, "removed": []}
+        out["reach"] = self.reach()
+        if not out["reach"]["ok"]:
+            out["kept"] = "the host is unreachable: nothing stopped, collected or removed (run the teardown again)"
+            return self._teardown_record(evidence_dir, out)
+        try:
+            boot = out["host_boot"] = self.boot_check()
+        except Exception as e:  # noqa: BLE001 - unknown, not "no reboot"
+            boot = out["host_boot"] = {"rebooted": None, "error": f"{type(e).__name__}: {e}"[:300]}
         names = self.ssh(f"ls {Q(self.run_dir)}/services 2>/dev/null || true", check=False).split()
         order = sorted((n for n in names if n.endswith(".json")),
                        key=lambda n: (not n.startswith("guard"), not n.startswith("load"), not n.startswith("sentinel"),
                                       n.startswith("fdb"), n.startswith("sampler")))
         for n in order:
             out["stopped"][n] = self._stop(n, GUARD_STOP_S if n.startswith("guard") else 30)
+        gone = sorted(n for n, v in out["stopped"].items() if v.get("verdict") == "gone")
+        if gone and boot.get("rebooted") is not False:
+            # Gone with the boot, not by any stop: whether the guard stopped
+            # the load before is only in its own result (collected below).
+            cause = "host-reboot" if boot.get("rebooted") else "unknown (the host's boot could not be compared)"
+            for n in gone:
+                out["stopped"][n] = dict(out["stopped"][n], cause=cause)
+            out["gone_at_reboot" if boot.get("rebooted") else "gone_boot_unknown"] = gone
         unconfirmed = {n: v for n, v in out["stopped"].items()
                        if v.get("verdict") not in ("stopped", "gone", "not-started")}
+        if evidence_dir is None:
+            out["kept"] = "no evidence directory: nothing is removed before the host's evidence is saved"
+            return out
+        from . import evidence
+        man = self.collect_evidence(evidence_dir, meta={"host_boot": boot}, **collect_kw)
+        out["evidence"] = {"complete": man["complete"], "attempt": man["attempt"], "files": len(man["files"]),
+                           "incomplete": man["incomplete"], "errors": man["errors"][:20]}
+        out["guard_result"] = gr = self._saved_json(evidence_dir, "run/load/guard.json", man)
+        if boot.get("rebooted"):
+            rec = gr.get("record") if isinstance(gr.get("record"), dict) else None
+            out["reboot_note"] = (
+                "the host booted again after the run started: the processes found gone ended with that boot, "
+                "not by a stop of this teardown or the guard; " + (
+                    f"the guard's own result says reason {rec.get('reason')!r}, group_empty {rec.get('group_empty')!r}"
+                    if rec else "no result of the guard was saved: whether it stopped the load before is not known"))
         if unconfirmed:
             out["kept"] = f"stop not confirmed: {sorted(unconfirmed)}"
-            return out
+            return self._teardown_record(evidence_dir, out)
         # Nothing is removed unless this check ran to its end and found no
         # process of the run: an unreadable record or a failed check keeps
         # everything.
@@ -844,13 +952,71 @@ class SshCluster:
         lines = alive.strip().splitlines()
         if rc != 0 or not lines or not lines[-1].startswith("checked ") or len(lines) > 1:
             out["kept"] = f"still running or not checked (rc {rc}): {alive.strip()[-300:]} {err.strip()[-200:]}"
+            return self._teardown_record(evidence_dir, out)
+        if not man["complete"]:
+            out["kept"] = f"the host's evidence is not saved complete: {man['incomplete']}"
+            return self._teardown_record(evidence_dir, out)
+        bad = evidence.verify_local(evidence_dir, man)
+        if not bad:
+            try:
+                bad = evidence.changed_since(man, evidence.inventory(
+                    self._evidence_call, self.evidence_roots(),
+                    timeout=collect_kw.get("inventory_s", evidence.INVENTORY_S)))
+            except evidence.Failed as e:
+                bad = [str(e)]
+        if bad:
+            out["kept"] = f"the saved evidence no longer matches: {bad[:10]}"
+            return self._teardown_record(evidence_dir, out)
+        out["removing"] = True
+        if "record_error" in self._teardown_record(evidence_dir, out):
+            out.pop("removing")
+            out["kept"] = f"the teardown's own record could not be saved: {out['record_error']}"
             return out
-        for d in (self.run_dir, self.fdb_data):
-            r = self.ssh(f"[ \"$(cat {Q(d)}/{MARK} 2>/dev/null)\" = {Q(rid)} ] && rm -rf -- {Q(d)} && echo removed || "
-                         f"echo kept", check=False).strip()
-            out["removed" if r == "removed" else "kept_dirs"] = out.get("removed" if r == "removed" else "kept_dirs", []) + [d]
+        # The run directory last: it holds the tools and the services'
+        # records the liveness check reads, so a teardown cut short between
+        # the two can be run again to the end.
+        # A directory already gone (an earlier teardown removed it) is
+        # "absent"; one whose marker does not name this run, or whose removal
+        # failed, is kept and fails the teardown.
+        for d in (self.fdb_data, self.run_dir):
+            r = self.ssh(f"if [ ! -e {Q(d)} ] && [ ! -L {Q(d)} ]; then echo absent; "
+                         f"elif [ \"$(cat {Q(d)}/{MARK} 2>/dev/null)\" = {Q(rid)} ] && rm -rf -- {Q(d)}; "
+                         f"then echo removed; else echo kept; fi", check=False).strip()
+            key = {"removed": "removed", "absent": "absent"}.get(r, "kept_dirs")
+            out[key] = out.get(key, []) + [d]
         parent = os.path.dirname(self.run_dir)
         if not out.get("kept_dirs") and parent == os.path.dirname(self.fdb_data) and parent.endswith(rid):
             # Their common parent, named by the run, only if now empty.
-            self.ssh(f"rmdir -- {Q(parent)} 2>/dev/null || true", check=False)
+            out["parent"] = self.ssh(f"rmdir -- {Q(parent)} 2>/dev/null && echo removed || echo kept",
+                                     check=False).strip() or "kept"
+        if out.get("kept_dirs"):
+            out["kept"] = (f"left on the host: {out['kept_dirs']} (a marker not naming this run, or the removal "
+                           "failed; plan §6.2: removing a directory left without its marker)")
+        out.pop("removing")
+        return self._teardown_record(evidence_dir, out)
+
+    def _teardown_record(self, evidence_dir, out):
+        """The teardown's result kept with the run's evidence (private: it
+        names the host's directories), one file per attempt."""
+        if evidence_dir is None:
+            return out
+        d = os.path.join(evidence_dir, "private", "teardown")
+        try:
+            os.makedirs(d, exist_ok=True)
+            n = out.setdefault("attempt", len([x for x in os.listdir(d) if x.endswith(".json")]) + 1)
+            common.atomic_write_json(os.path.join(d, f"{n:03d}.json"), out)
+            out.pop("record_error", None)
+        except OSError as e:
+            out["record_error"] = f"{type(e).__name__}: {e}"[:300]
         return out
+
+    @staticmethod
+    def _saved_json(evidence_dir, rel, man):
+        """A record as saved by the collection, or why there is none."""
+        if not any(f["path"] == rel for f in man["files"]):
+            missing = any(m["path"] == rel for m in man["missing"])
+            return {"saved": False, "why": "absent on the host" if missing else "not saved"}
+        try:
+            return {"saved": True, "record": common.read_json(os.path.join(evidence_dir, "private", "host", rel))}
+        except (OSError, ValueError) as e:
+            return {"saved": True, "unreadable": f"{type(e).__name__}"}
