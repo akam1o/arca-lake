@@ -15,6 +15,8 @@ test, as in Phase 4.1); host C the generator and checker (`contend`).
   HOST_A=... HOST_B=... HOST_C=... [CAMPAIGN=id] [OUT=dir] hot-key-ab.py run
   HOST_A=... HOST_B=... HOST_C=... hot-key-ab.py teardown <run id>
   HOST_A=... HOST_B=... HOST_C=... hot-key-ab.py smoke <arm> <scenario>   (one uncounted run)
+  CONTROL=1 ...  build | run          (plan §10: the PR head build only,
+                                         arms queue-off and queue-on; 2.5 h)
   hot-key-ab.py schedule                 (the rotated order; no host)
   hot-key-ab.py summarize <out dir>      (summary from the run files; no host)
 
@@ -59,7 +61,19 @@ PERF = ("unv", "ver", "retry", "unv16")
 CORRECTNESS = ("fdbstall", "gwkill")
 MIN_VALID = {"perf": 3, "correctness": 2}
 MAX_EXTRA_PER_CELL = 2
-TOTAL_BUDGET_S = int(os.environ.get("TOTAL_BUDGET_S", 5 * 3600))
+# The control of plan §10 (CONTROL=1): one binary, the queue off against on.
+CONTROL = os.environ.get("CONTROL") == "1"
+if CONTROL:
+    ARMS = ("off", "on")
+    ARM_LABEL = {"off": "queue-off (the PR head build, gateways with --commit-queue off)",
+                 "on": "queue-on (the same binary, default gateways)"}
+    PERF = ("unv", "ver", "unv16")
+    CORRECTNESS = ()
+# The build each arm runs.
+BUILD_OF = {"tag": "tag", "candidate": "candidate", "off": "candidate", "on": "candidate"}
+BUILDS = tuple(dict.fromkeys(BUILD_OF[a] for a in ARMS))
+BASE, TEST = ARMS
+TOTAL_BUDGET_S = int(os.environ.get("TOTAL_BUDGET_S", (2.5 if CONTROL else 5) * 3600))
 RUN_BOUND_S = int(os.environ.get("RUN_BOUND_S", 1800))
 EST_RUN_S = {"perf": 600, "correctness": 1100}
 WRITERS, READERS, DURATION_S, SIZE = 64, 8, 60, 4096
@@ -114,14 +128,14 @@ def schedule(rounds=3, correctness_rounds=2):
         order = PERF[r % len(PERF):] + PERF[:r % len(PERF)]
         arms = ARMS if r % 2 == 0 else ARMS[::-1]
         out += [{"round": r + 1, "scenario": s, "arm": a} for s in order for a in arms]
-        if r < correctness_rounds:
+        if r < correctness_rounds and CORRECTNESS:
             c = CORRECTNESS[r % len(CORRECTNESS):] + CORRECTNESS[:r % len(CORRECTNESS)]
-            out += [{"round": r + 1, "scenario": s, "arm": "candidate"} for s in c]
+            out += [{"round": r + 1, "scenario": s, "arm": TEST} for s in c]
     return out
 
 
 def cells():
-    return [(a, s) for s in PERF for a in ARMS] + [("candidate", s) for s in CORRECTNESS]
+    return [(a, s) for s in PERF for a in ARMS] + [(TEST, s) for s in CORRECTNESS]
 
 
 def reruns_needed(records, extra_done):
@@ -379,10 +393,12 @@ def judge(records):
         return all(cm[k]["valid_runs"] >= MIN_VALID[kind(k.split("/")[1])] for k in keys)
 
     def cmp(name, scen, key, rel):
-        T, C = cm[f"tag/{scen}"], cm[f"candidate/{scen}"]
-        if not enough(f"tag/{scen}", f"candidate/{scen}") or T[key] is None or C[key] is None:
-            return t(name, scen, "missing", {"tag": T[key], "candidate": C[key]})
-        t(name, scen, "met" if rel(T[key], C[key]) else "not met", {"tag": T[key], "candidate": C[key]})
+        if scen not in PERF:
+            return None
+        T, C = cm[f"{BASE}/{scen}"], cm[f"{TEST}/{scen}"]
+        if not enough(f"{BASE}/{scen}", f"{TEST}/{scen}") or T[key] is None or C[key] is None:
+            return t(name, scen, "missing", {BASE: T[key], TEST: C[key]})
+        return t(name, scen, "met" if rel(T[key], C[key]) else "not met", {BASE: T[key], TEST: C[key]})
 
     for s in ("unv", "ver"):
         cmp("SlowDown share ≤ half the tag rebuild's and ≤ 25 %", s, "slowdown_share",
@@ -393,17 +409,21 @@ def judge(records):
     cmp("SlowDown share ≤ tag rebuild's + 0.5 points", "unv16", "slowdown_share", lambda T, C: C <= T + 0.005)
     cmp("acknowledged p99 ≤ 1.5 ×", "unv16", "ack_p99_ms", lambda T, C: C <= 1.5 * T)
     cmp("SlowDown after 3 retries ≤ tag rebuild's", "retry", "slowdown_share", lambda T, C: C <= T)
+    # The control (plan §10) asks it of every run, the main plan of the
+    # candidate's fault-free runs.
+    judged = ARMS if CONTROL else (TEST,)
     for s in PERF:
-        rs = [r for r in records if r["arm"] == "candidate" and r["scenario"] == s and not r["invalid"]]
+        rs = [r for r in records if r["arm"] in judged and r["scenario"] == s and not r["invalid"]]
         unk = sum(r["metrics"].get("unknown") or 0 for r in rs)
-        t("unknown outcomes 0", s, "met" if enough(f"candidate/{s}") and unk == 0
-          else ("missing" if not enough(f"candidate/{s}") else "not met"), {"candidate_unknown": unk})
+        full = all(enough(f"{a}/{s}") for a in judged)
+        t("unknown outcomes 0", s, "met" if full and unk == 0 else ("missing" if not full else "not met"),
+          {"unknown": unk, "arms": list(judged)})
     bad = [r["run_id"] for r in records if not r["invalid"] and not r["correct"]]
     t("violations, definite failures visible, scrub findings: 0 in every valid run", "all",
       "met" if not bad else "not met", {"runs": bad})
     for s in CORRECTNESS:
-        t("correctness runs", s, "met" if enough(f"candidate/{s}") else "missing",
-          {"valid": cm[f"candidate/{s}"]["valid_runs"]})
+        t("correctness runs", s, "met" if enough(f"{TEST}/{s}") else "missing",
+          {"valid": cm[f"{TEST}/{s}"]["valid_runs"]})
     results = {x["result"] for x in targets}
     verdict = "not adopted" if "not met" in results else ("inconclusive" if "missing" in results else "adopt")
     return {"verdict": verdict, "targets": targets, "cells": cm}
@@ -411,7 +431,7 @@ def judge(records):
 
 def summary_md(j, meta):
     lines = [f"# Hot-key A/B {meta.get('campaign')}", "",
-             f"Arms: tag = {ARM_LABEL['tag']}; candidate = {ARM_LABEL['candidate']}.", "",
+             f"Arms: {BASE} = {ARM_LABEL[BASE]}; {TEST} = {ARM_LABEL[TEST]}.", "",
              f"Verdict: **{j['verdict']}**", "", "| Cell | valid | invalid | SlowDown % | ack/s | attempts/ack |"
              " ack p50/p95/p99 ms | all p99 ms | unknown |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
 
@@ -531,7 +551,7 @@ def clock_offsets():
 
 
 def binpath(h, arm):
-    return f"{AREA[h]}/bin/arca-lake-{arm}"
+    return f"{AREA[h]}/bin/arca-lake-{BUILD_OF.get(arm, arm)}"
 
 
 def contend_path():
@@ -572,7 +592,7 @@ def build():
     if int(free) < BUILD_FREE_MIN:
         raise RuntimeError(f"host B: {int(free) >> 30} GiB free for the builds, {BUILD_FREE_MIN >> 30} needed")
     record = {"arms": {}, "built": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-    for arm, commit in (("tag", tag), ("candidate", head)):
+    for arm, commit in [(b_, {"tag": tag, "candidate": head}[b_]) for b_ in BUILDS]:
         src = f"{b}/src-{arm}"
         ssh("b", f"rm -rf {src} && mkdir -p {src}", check=True)
         # From the repository's root: run in a subdirectory, `git archive`
@@ -615,7 +635,7 @@ def build():
     _, csha, _ = ssh("b", f"sha256sum {b}/bin/contend | cut -c1-64", check=True)
     record["contend_sha256"] = csha.strip()
     # Copies: host A both arms (controller, admin); host C contend.
-    copies = [("a", binpath("b", a), binpath("a", a), record["arms"][a]["sha256"]) for a in ARMS]
+    copies = [("a", binpath("b", a), binpath("a", a), record["arms"][a]["sha256"]) for a in BUILDS]
     copies.append(("c", f"{b}/bin/contend", contend_path(), record["contend_sha256"]))
     for h, src, dst, sha in copies:
         # Remote commands quoted for this machine's shell: $HOME expands on
@@ -632,7 +652,7 @@ def build():
         ssh(h, f"cat > {AREA[h]}/build-record.json", stdin=text, check=True)
     save("build-record.json", text)
     log("build done: " + ", ".join(f"{a} {record['arms'][a]['commit'][:12]} {record['arms'][a]['sha256'][:16]}"
-                                   for a in ARMS))
+                                   for a in BUILDS))
     return record
 
 
@@ -657,7 +677,7 @@ def low_filesystems():
 
 def binaries_match(rec):
     ok = True
-    for h, path, sha in ([(h, binpath(h, a), rec["arms"][a]["sha256"]) for h in "ab" for a in ARMS]
+    for h, path, sha in ([(h, binpath(h, a), rec["arms"][a]["sha256"]) for h in "ab" for a in BUILDS]
                          + [("c", contend_path(), rec["contend_sha256"])]):
         _, got, _ = ssh(h, f"sha256sum {path} | cut -c1-64")
         ok = ok and got.strip() == sha
@@ -764,7 +784,8 @@ class Run:
     def gw_cmd(self, i):
         return (f"{self.bin('b')} gateway --backend cluster --cluster-file {self.R['b']}/fdb.cluster "
                 f"--allow-anonymous --listen {ADDR['b']}:{GW_PORT + i} --metrics-listen 127.0.0.1:{GW_METRICS + i} "
-                "--k 2 --m 1 --chunk-bytes 4194304 --small-threshold 65536 --failure-domain node --lease-secs 300")
+                "--k 2 --m 1 --chunk-bytes 4194304 --small-threshold 65536 --failure-domain node --lease-secs 300"
+                + (" --commit-queue off" if self.arm == "off" else ""))
 
     def start_gateway(self, i):
         self.start("b", f"gw{i}", self.gw_cmd(i))
@@ -963,7 +984,8 @@ class Run:
         """Setup, measure, settle, check, scrub, teardown. Every step
         bounded; the record carries what the invalid-run rules need."""
         rec = {"run_id": self.id, "arm": self.arm, "label": ARM_LABEL[self.arm], "scenario": self.scenario,
-               "commit": rec_build["arms"][self.arm]["commit"], "sha256": rec_build["arms"][self.arm]["sha256"],
+               "commit": rec_build["arms"][BUILD_OF[self.arm]]["commit"],
+               "sha256": rec_build["arms"][BUILD_OF[self.arm]]["sha256"],
                "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
         deadline = time.time() + RUN_BOUND_S
         try:
@@ -1065,7 +1087,7 @@ def campaign():
     save("build-record.json", json.dumps(rec_build, indent=1, sort_keys=True))
     meta = {"campaign": CAMPAIGN, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "budget_s": TOTAL_BUDGET_S,
             "run_bound_s": RUN_BOUND_S, "plan": "docs/verification/0.2.0-hot-key-plan.md",
-            "arms": {a: {**rec_build["arms"][a]} for a in ARMS}}
+            "control": CONTROL, "arms": {a: {**rec_build["arms"][BUILD_OF[a]], "label": ARM_LABEL[a]} for a in ARMS}}
     t0 = time.time()
     deadline = t0 + TOTAL_BUDGET_S
     records = load_records(OUT)
@@ -1149,7 +1171,7 @@ def main():
                                                                   if not isinstance(v, dict)}}, indent=1))
     elif cmd == "teardown" and len(sys.argv) > 2:
         addresses()
-        r = Run(sys.argv[2], "candidate", "unv")
+        r = Run(sys.argv[2], TEST, "unv")
         r.teardown()
     else:
         sys.exit(__doc__)

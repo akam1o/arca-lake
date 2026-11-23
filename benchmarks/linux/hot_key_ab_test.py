@@ -460,6 +460,59 @@ class DryRun(unittest.TestCase):
         self.assertTrue(any("SHA-256" in w for w in r["invalid_reasons"]), r["invalid_reasons"])
 
 
+def load_control():
+    """A second instance of the driver with CONTROL=1 (plan §10)."""
+    import os
+    os.environ["CONTROL"] = "1"
+    try:
+        spec = importlib.util.spec_from_file_location("hot_key_ab_control",
+                                                      Path(__file__).resolve().parent / "hot-key-ab.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+    finally:
+        del os.environ["CONTROL"]
+
+
+class Control(unittest.TestCase):
+    cb = load_control()
+
+    def test_arms_scenarios_order_and_budget(self):
+        cb = self.cb
+        self.assertEqual((cb.ARMS, cb.PERF, cb.CORRECTNESS, cb.BUILDS), (("off", "on"), ("unv", "ver", "unv16"), (),
+                                                                         ("candidate",)))
+        self.assertEqual(cb.TOTAL_BUDGET_S, 9000)
+        s = cb.schedule()
+        self.assertEqual(len(s), 3 * 3 * 2)
+        self.assertEqual([(x["scenario"], x["arm"]) for x in s[:2]], [("unv", "off"), ("unv", "on")])
+        self.assertEqual([(x["scenario"], x["arm"]) for x in s[6:8]], [("ver", "on"), ("ver", "off")])
+        for a, sc in cb.cells():
+            self.assertEqual(sum(1 for x in s if (x["arm"], x["scenario"]) == (a, sc)), 3)
+
+    def test_one_binary_and_the_flag(self):
+        cb = self.cb
+        self.assertEqual(cb.binpath("b", "off"), cb.binpath("b", "on"))
+        cb.ADDR.update({"a": "192.0.2.1", "b": "192.0.2.2", "c": "192.0.2.3"})
+        self.assertTrue(cb.Run("x", "off", "unv").gw_cmd(0).endswith("--commit-queue off"))
+        self.assertNotIn("--commit-queue", cb.Run("x", "on", "unv").gw_cmd(0))
+
+    def test_targets_read_as_on_against_off(self):
+        cb = self.cb
+        recs = []
+        for s in cb.PERF:
+            off = runs("off", s, 3)
+            on = runs("on", s, 3, slowdown_share=0.05, acked_per_s=120.0, attempts_per_ack=8.0, ack_p99_ms=900.0)
+            if s == "unv16":
+                off = runs("off", s, 3, slowdown_share=0.0005, acked_per_s=490.0, ack_p99_ms=250.0)
+                on = runs("on", s, 3, slowdown_share=0.0, acked_per_s=480.0, ack_p99_ms=300.0)
+            recs += off + on
+        j = cb.judge(recs)
+        self.assertEqual(j["verdict"], "adopt", [t for t in j["targets"] if t["result"] != "met"])
+        self.assertFalse([t for t in j["targets"] if t["scenario"] in ("retry", "fdbstall", "gwkill")])
+        recs[0]["metrics"]["unknown"] = 1  # an off run: the control judges every run
+        self.assertEqual(cb.judge(recs)["verdict"], "not adopted")
+
+
 class Redaction(unittest.TestCase):
     def test_hosts_addresses_and_home_paths(self):
         # Built from parts: the source itself names no account, host or path.
