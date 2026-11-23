@@ -482,7 +482,7 @@ impl Sim {
                                 if !self.start(g, usize::from(j), prior, true, &also) {
                                     let s = repair_liveness::no_new_target(
                                         &self.obs(g),
-                                        false,
+                                        RepairReason::AwaitingNodes,
                                         "none".into(),
                                     );
                                     self.groups[g].status = Some(s);
@@ -492,8 +492,11 @@ impl Sim {
                         Decision::Retarget(_) => {
                             let prior = Some(repair_liveness::current(&obs));
                             if !self.start(g, index, prior, false, &[]) {
-                                let mut s =
-                                    repair_liveness::no_new_target(&obs, false, "none".into());
+                                let mut s = repair_liveness::no_new_target(
+                                    &obs,
+                                    RepairReason::AwaitingNodes,
+                                    "none".into(),
+                                );
                                 if obs.target_candidate {
                                     s.failures = 0;
                                 }
@@ -503,7 +506,11 @@ impl Sim {
                         Decision::ReplaceOther(j) => {
                             let prior = self.groups[g].status.clone();
                             if !self.start(g, usize::from(j), prior, true, &[]) {
-                                let s = repair_liveness::no_new_target(&obs, false, "none".into());
+                                let s = repair_liveness::no_new_target(
+                                    &obs,
+                                    RepairReason::AwaitingNodes,
+                                    "none".into(),
+                                );
                                 self.groups[g].status = Some(s);
                             }
                         }
