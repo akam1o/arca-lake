@@ -289,7 +289,37 @@ where
     D: Send + Sync,
     F: for<'a> FnMut(&'a mut S::Tx, &'a D) -> TxFuture<'a, T>,
 {
-    transact_inner(store, env, body, false).await
+    transact_inner(store, env, body, false, None).await
+}
+
+/// What a transaction loop does between a conflict and its next attempt
+/// (ADR-0041): the caller's wait, typically a jittered backoff, so that
+/// writers contending for one key do not retry in lockstep.
+pub trait ConflictBackoff: Send + Sync {
+    /// Called after the `conflicts`-th conflict (1-based) of one
+    /// transaction, before the next attempt (never after the last).
+    fn after_conflict(&self, conflicts: u32) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
+/// [`transact`], waiting on `backoff` (if any) between a conflict and the
+/// next attempt. The bound on attempts and the errors are those of
+/// [`transact`].
+///
+/// # Errors
+///
+/// As [`transact`].
+pub async fn transact_with_backoff<S, D, T, F>(
+    store: &S,
+    env: D,
+    body: F,
+    backoff: Option<&dyn ConflictBackoff>,
+) -> Result<T, MetaError>
+where
+    S: KvStore,
+    D: Send + Sync,
+    F: for<'a> FnMut(&'a mut S::Tx, &'a D) -> TxFuture<'a, T>,
+{
+    transact_inner(store, env, body, false, backoff).await
 }
 
 /// Unknown-outcome retries allowed by [`transact_idempotent`].
@@ -313,7 +343,7 @@ where
     D: Send + Sync,
     F: for<'a> FnMut(&'a mut S::Tx, &'a D) -> TxFuture<'a, T>,
 {
-    transact_inner(store, env, body, true).await
+    transact_inner(store, env, body, true, None).await
 }
 
 /// Process-wide counters of [`transact`] outcomes (hot-key analysis).
@@ -366,6 +396,7 @@ async fn transact_inner<S, D, T, F>(
     env: D,
     mut body: F,
     retry_unknown: bool,
+    backoff: Option<&dyn ConflictBackoff>,
 ) -> Result<T, MetaError>
 where
     S: KvStore,
@@ -374,27 +405,34 @@ where
 {
     use std::sync::atomic::Ordering::Relaxed;
     let mut unknown = 0;
-    for _ in 0..MAX_ATTEMPTS {
+    let mut conflicts = 0u32;
+    for attempt in 1..=MAX_ATTEMPTS {
         TRANSACT_STATS.attempts.fetch_add(1, Relaxed);
         let mut tx = store.begin().await?;
-        match body(&mut tx, &env).await {
+        let conflicted = match body(&mut tx, &env).await {
             Ok(value) => match tx.commit().await {
                 Ok(_) => return Ok(value),
-                Err(KvError::Conflict) => {
-                    TRANSACT_STATS.conflicts.fetch_add(1, Relaxed);
-                }
+                Err(KvError::Conflict) => true,
                 Err(KvError::CommitUnknown(_))
                     if retry_unknown && unknown < MAX_UNKNOWN_RETRIES =>
                 {
                     unknown += 1;
                     TRANSACT_STATS.unknown_retries.fetch_add(1, Relaxed);
+                    false
                 }
                 Err(e) => return Err(e.into()),
             },
-            Err(MetaError::Kv(KvError::Conflict)) => {
-                TRANSACT_STATS.conflicts.fetch_add(1, Relaxed);
-            }
+            Err(MetaError::Kv(KvError::Conflict)) => true,
             Err(e) => return Err(e),
+        };
+        if conflicted {
+            TRANSACT_STATS.conflicts.fetch_add(1, Relaxed);
+            conflicts += 1;
+            if let Some(b) = backoff
+                && attempt < MAX_ATTEMPTS
+            {
+                b.after_conflict(conflicts).await;
+            }
         }
     }
     TRANSACT_STATS.exhausted.fetch_add(1, Relaxed);
@@ -411,6 +449,51 @@ mod tests {
         assert_eq!(strinc(b"ab\xff"), b"ac");
         assert_eq!(strinc(b"\xff\xff"), vec![0xFF, 0xFF, 0xFF]);
         assert_eq!(strinc(b""), vec![0xFF]);
+    }
+
+    struct Counting(std::sync::Mutex<Vec<u32>>);
+
+    impl ConflictBackoff for Counting {
+        fn after_conflict(&self, conflicts: u32) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.0.lock().unwrap().push(conflicts);
+            Box::pin(async {})
+        }
+    }
+
+    #[test]
+    fn backoff_runs_between_conflicts_and_not_after_the_last() {
+        let store = crate::mem::MemKv::default();
+        let backoff = Counting(std::sync::Mutex::new(Vec::new()));
+        let r: Result<(), _> = futures::executor::block_on(transact_with_backoff(
+            &store,
+            (),
+            |_, ()| Box::pin(async { Err(MetaError::Kv(KvError::Conflict)) }),
+            Some(&backoff),
+        ));
+        assert!(matches!(r, Err(MetaError::TooManyRetries)), "{r:?}");
+        let calls = backoff.0.into_inner().unwrap();
+        let expected: Vec<u32> = (1..u32::try_from(MAX_ATTEMPTS).unwrap()).collect();
+        assert_eq!(calls, expected);
+
+        let backoff = Counting(std::sync::Mutex::new(Vec::new()));
+        let mut first = true;
+        let r = futures::executor::block_on(transact_with_backoff(
+            &store,
+            (),
+            move |_, ()| {
+                let conflict = std::mem::replace(&mut first, false);
+                Box::pin(async move {
+                    if conflict {
+                        Err(MetaError::Kv(KvError::Conflict))
+                    } else {
+                        Ok(7)
+                    }
+                })
+            },
+            Some(&backoff),
+        ));
+        assert_eq!(r.unwrap(), 7);
+        assert_eq!(backoff.0.into_inner().unwrap(), vec![1]);
     }
 
     #[test]

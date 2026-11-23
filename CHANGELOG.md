@@ -11,6 +11,19 @@ break compatibility).
 
 ## [Unreleased]
 
+### Changed
+
+- Concurrent writes to one key through a gateway take turns (R-112,
+  [ADR-0041](docs/adr/0041-hot-key-commit-queue.md)): PUT, DELETE and
+  CompleteMultipartUpload on a key wait for the commit ahead of them
+  instead of conflicting until refused, and conflicts with other gateways
+  back off with jitter. A wait beyond `--commit-queue-wait-ms` (2 s) or
+  more than `--commit-queue-max-waiters` (256) waiting writes is answered
+  `503 SlowDown` before any commit attempt (nothing applied).
+  `--commit-queue off` restores the previous behaviour. Proposed; its
+  measured effect is pending
+  ([plan](docs/verification/0.2.0-hot-key-plan.md)). No format change.
+
 ### Fixed
 
 - Automatic tiering no longer consumes a generation's access record

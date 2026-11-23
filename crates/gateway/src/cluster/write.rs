@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use arca_lake_common::chunk_id;
+use arca_lake_metadata::kv::ConflictBackoff;
 use arca_lake_metadata::ops::multipart::{self, PartInfo};
 use arca_lake_metadata::ops::object::{self, CommitInfo, CommitOutcome, Precondition};
 use arca_lake_metadata::records::{
@@ -243,7 +244,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 checksum: stored.clone(),
             };
             let t = std::time::Instant::now();
+            // Held until the outcome is decided; a refusal comes before any
+            // commit attempt, and the generation is aborted (ADR-0041).
+            let turn = self.commit_turn(bucket, key).await?;
             let version_id = self.commit_resolving(generation, &info, pre).await?;
+            drop(turn);
             self.put_stats.commit.observe(t.elapsed());
             if self.take_fault(FaultPoint::AfterCommit) {
                 return Err(WriteFailure {
@@ -367,10 +372,20 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     ) -> Result<String, WriteFailure> {
         const MAX_COMMIT_ATTEMPTS: usize = 4;
         let meta = self.meta.as_ref();
+        let backoff = self.commit_queue.backoff();
         let mut reason = String::new();
         let mut unknown = false;
         for attempt in 1..=MAX_COMMIT_ATTEMPTS {
-            match object::commit_put(meta, &generation, info, pre, now_ms()).await {
+            match object::commit_put_with(
+                meta,
+                &generation,
+                info,
+                pre,
+                now_ms(),
+                backoff.as_ref().map(|b| b as &dyn ConflictBackoff),
+            )
+            .await
+            {
                 Ok(c) => return Ok(c.version_id),
                 Err(MetaError::Kv(KvError::CommitUnknown(r))) => {
                     reason = r;

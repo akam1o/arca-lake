@@ -133,6 +133,8 @@ pub struct ClusterOptions {
     pub write_pipeline: usize,
     /// Gateway access records for tiering (`ClusterConfig::record_access`).
     pub record_access: bool,
+    /// Per-key commit queue (`ClusterConfig::commit_queue`, ADR-0041).
+    pub commit_queue: arca_lake_gateway::cluster::commit_queue::CommitQueueConfig,
     /// How they are recorded (`ClusterConfig::access`); test clusters
     /// flush every 100 ms.
     pub access: arca_lake_gateway::cluster::access::AccessConfig,
@@ -225,6 +227,7 @@ impl ClusterOptions {
             populations_per_node: 4,
             write_pipeline: 2,
             record_access: true,
+            commit_queue: arca_lake_gateway::cluster::commit_queue::CommitQueueConfig::default(),
             access: arca_lake_gateway::cluster::access::AccessConfig {
                 flush_interval: Duration::from_millis(100),
                 ..Default::default()
@@ -425,6 +428,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             admission_without_controller: true,
             record_access: opts.record_access,
             access: opts.access.clone(),
+            commit_queue: opts.commit_queue.clone(),
         };
         let backend = ClusterBackend::new(Arc::clone(&meta), cluster_cfg.clone())
             .await

@@ -15,7 +15,7 @@
 use std::ops::Range;
 
 use crate::error::Result;
-use crate::kv::{KvStore, Txn};
+use crate::kv::{ConflictBackoff, KvStore, Txn, transact_with_backoff};
 use crate::ops::{bucket_by_id, bucket_by_name, current_pointer, generation_header, read, write};
 use crate::records::{
     Checksum, ChunkRecord, CurrentPointer, GenId, GenKind, GenState, GenerationHeader,
@@ -413,9 +413,26 @@ pub async fn commit_put<S: KvStore>(
     pre: &Precondition,
     now_ms: u64,
 ) -> Result<Committed> {
+    commit_put_with(store, generation, info, pre, now_ms, None).await
+}
+
+/// [`commit_put`], waiting on `backoff` between a conflict and the next
+/// attempt (ADR-0041).
+///
+/// # Errors
+///
+/// As [`commit_put`].
+pub async fn commit_put_with<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    info: &CommitInfo,
+    pre: &Precondition,
+    now_ms: u64,
+    backoff: Option<&dyn ConflictBackoff>,
+) -> Result<Committed> {
     // Chosen once so that retries of the same commit publish the same ID.
     let fresh_version_id = new_version_id();
-    transact(
+    transact_with_backoff(
         store,
         (*generation, info, pre, now_ms, fresh_version_id.as_str()),
         |tx, env| {
@@ -471,6 +488,7 @@ pub async fn commit_put<S: KvStore>(
                 })
             })
         },
+        backoff,
     )
     .await
 }
@@ -941,7 +959,25 @@ pub async fn delete_object_as<S: KvStore>(
     fresh_version_id: &str,
     now_ms: u64,
 ) -> Result<Deleted> {
-    transact(
+    delete_object_as_with(store, bucket, key, pre, fresh_version_id, now_ms, None).await
+}
+
+/// [`delete_object_as`], waiting on `backoff` between a conflict and the
+/// next attempt (ADR-0041).
+///
+/// # Errors
+///
+/// As [`delete_object_if`].
+pub async fn delete_object_as_with<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+    pre: &Precondition,
+    fresh_version_id: &str,
+    now_ms: u64,
+    backoff: Option<&dyn ConflictBackoff>,
+) -> Result<Deleted> {
+    transact_with_backoff(
         store,
         (bucket, key, pre, now_ms, fresh_version_id),
         |tx, env| {
@@ -990,6 +1026,7 @@ pub async fn delete_object_as<S: KvStore>(
                 }
             })
         },
+        backoff,
     )
     .await
 }
