@@ -13,9 +13,10 @@
 //! its maximum of waiters, is refused before any commit attempt was made:
 //! the caller answers `SlowDown` (not applied) and aborts its pending
 //! generation. The table is bounded: when it holds its maximum of keys, a
-//! commit for another key proceeds without a turn (the behaviour without
-//! the queue). An entry is removed when nobody holds or waits for it;
-//! dropping a waiting or holding future (a client gone) releases its place.
+//! commit for another key proceeds without a turn (its transactions still
+//! back off after conflicts). An entry is removed when nobody holds or
+//! waits for it; dropping a waiting or holding future (a client gone)
+//! releases its place.
 
 use std::collections::HashMap;
 use std::future::Future;

@@ -15,7 +15,9 @@
 use std::ops::Range;
 
 use crate::error::Result;
-use crate::kv::{ConflictBackoff, KvStore, Txn, transact_with_backoff};
+use crate::kv::{
+    ConflictBackoff, KvStore, Txn, transact_idempotent_with_backoff, transact_with_backoff,
+};
 use crate::ops::{bucket_by_id, bucket_by_name, current_pointer, generation_header, read, write};
 use crate::records::{
     Checksum, ChunkRecord, CurrentPointer, GenId, GenKind, GenState, GenerationHeader,
@@ -1051,13 +1053,30 @@ pub struct DeletedVersion {
 /// # Errors
 ///
 /// [`MetaError::NoSuchBucket`].
-#[allow(clippy::too_many_lines)]
 pub async fn delete_version<S: KvStore>(
     store: &S,
     bucket: &str,
     key: &str,
     version_id: &str,
     now_ms: u64,
+) -> Result<DeletedVersion> {
+    delete_version_with(store, bucket, key, version_id, now_ms, None).await
+}
+
+/// [`delete_version`], waiting on `backoff` between a conflict and the
+/// next attempt of the deletion (ADR-0041; the pinning read is read-only).
+///
+/// # Errors
+///
+/// As [`delete_version`].
+#[allow(clippy::too_many_lines)]
+pub async fn delete_version_with<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+    version_id: &str,
+    now_ms: u64,
+    backoff: Option<&dyn ConflictBackoff>,
 ) -> Result<DeletedVersion> {
     // The version is pinned to the generation it names now; the deletion
     // then removes the version only while it still names that generation,
@@ -1088,7 +1107,7 @@ pub async fn delete_version<S: KvStore>(
             existed: false,
         });
     };
-    transact_idempotent(
+    transact_idempotent_with_backoff(
         store,
         (bucket, key, version_id, now_ms, pinned),
         |tx, env| {
@@ -1177,6 +1196,7 @@ pub async fn delete_version<S: KvStore>(
                 })
             })
         },
+        backoff,
     )
     .await
 }

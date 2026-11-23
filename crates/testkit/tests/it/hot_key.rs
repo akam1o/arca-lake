@@ -575,3 +575,99 @@ async fn unknown_outcomes_are_resolved_under_the_turn() {
         c.shutdown().await;
     }
 }
+
+/// Every DELETE form waits on the queue's backoff after a conflict, as a
+/// single DELETE does: a version-specific DELETE, and both kinds of
+/// DeleteObjects entry (review of ADR-0041). One injected conflict each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_delete_form_backs_off_after_a_conflict() {
+    use s3s::dto::{Delete, DeleteObjectInput, DeleteObjectsInput, ObjectIdentifier};
+    let c: TestCluster<FaultKv<MemKv>> = TestCluster::start_with(
+        Arc::new(FaultKv::new(MemKv::default())),
+        ClusterOptions::rs(3, 2, 1, MIB, 0),
+    )
+    .await;
+    let s3 = &c.backend;
+    s3::create_bucket(s3, BUCKET).await.unwrap();
+    enable_versioning(s3).await;
+    let b = arca_lake_metadata::ops::bucket::get_bucket(c.meta.as_ref(), BUCKET)
+        .await
+        .unwrap();
+    let current = keys::object_current(b.id, KEY);
+    let put = |n| async move {
+        s3.put_object(request(PutObjectInput {
+            bucket: BUCKET.into(),
+            key: KEY.into(),
+            body: Some(StreamingBlob::from_bytes(body(n))),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .output
+        .version_id
+        .unwrap()
+    };
+    let conflicts = || c.backend.commit_queue_stats().conflicts;
+    let entries = |version_id: Option<String>| {
+        let mut i = DeleteObjectsInput::builder();
+        i.set_bucket(BUCKET.into());
+        i.set_delete(Delete {
+            objects: vec![ObjectIdentifier {
+                key: KEY.into(),
+                version_id,
+                ..Default::default()
+            }],
+            quiet: None,
+        });
+        i.build().unwrap()
+    };
+
+    // A version-specific DELETE of the current version.
+    let v = put(1).await;
+    c.meta
+        .inject_on_key(current.clone(), CommitFault::Conflict, 1);
+    let before = conflicts();
+    s3.delete_object(request(DeleteObjectInput {
+        bucket: BUCKET.into(),
+        key: KEY.into(),
+        version_id: Some(v),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    assert_eq!(conflicts() - before, 1, "DELETE with a version id");
+
+    // DeleteObjects: an entry with a version id, then one without.
+    let v = put(2).await;
+    c.meta
+        .inject_on_key(current.clone(), CommitFault::Conflict, 1);
+    let before = conflicts();
+    let out = s3
+        .delete_objects(request(entries(Some(v))))
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(out.errors.unwrap_or_default(), [] as [s3s::dto::Error; 0]);
+    assert_eq!(
+        conflicts() - before,
+        1,
+        "DeleteObjects entry with a version id"
+    );
+
+    put(3).await;
+    c.meta.inject_on_key(current, CommitFault::Conflict, 1);
+    let before = conflicts();
+    let out = s3
+        .delete_objects(request(entries(None)))
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(out.errors.unwrap_or_default(), [] as [s3s::dto::Error; 0]);
+    assert_eq!(
+        conflicts() - before,
+        1,
+        "DeleteObjects entry without a version id"
+    );
+    assert_eq!(c.meta.fired().len(), 3);
+    c.shutdown().await;
+}

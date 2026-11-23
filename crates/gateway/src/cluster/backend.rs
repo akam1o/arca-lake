@@ -1937,10 +1937,16 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         let backoff = self.commit_queue.backoff();
         let backoff = backoff.as_ref().map(|b| b as &dyn ConflictBackoff);
         if let Some(v) = &input.version_id {
-            let d =
-                object::delete_version(self.meta.as_ref(), &input.bucket, &input.key, v, now_ms())
-                    .await
-                    .map_err(meta_err)?;
+            let d = object::delete_version_with(
+                self.meta.as_ref(),
+                &input.bucket,
+                &input.key,
+                v,
+                now_ms(),
+                backoff,
+            )
+            .await
+            .map_err(meta_err)?;
             drop(turn);
             return Ok(S3Response::new(DeleteObjectOutput {
                 delete_marker: d.was_delete_marker.then_some(true),
@@ -2003,13 +2009,16 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                     return Err(s3_error!(AccessDenied));
                 }
                 let _turn = self.commit_turn(&input.bucket, &o.key).await?;
+                let backoff = self.commit_queue.backoff();
+                let backoff = backoff.as_ref().map(|b| b as &dyn ConflictBackoff);
                 if let Some(v) = &o.version_id {
-                    let d = object::delete_version(
+                    let d = object::delete_version_with(
                         self.meta.as_ref(),
                         &input.bucket,
                         &o.key,
                         v,
                         now_ms(),
+                        backoff,
                     )
                     .await
                     .map_err(meta_err)?;
@@ -2020,10 +2029,17 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                         delete_marker_version_id: None,
                     })
                 } else {
-                    let d =
-                        object::delete_object(self.meta.as_ref(), &input.bucket, &o.key, now_ms())
-                            .await
-                            .map_err(meta_err)?;
+                    let d = object::delete_object_as_with(
+                        self.meta.as_ref(),
+                        &input.bucket,
+                        &o.key,
+                        &Precondition::default(),
+                        &arca_lake_metadata::records::new_version_id(),
+                        now_ms(),
+                        backoff,
+                    )
+                    .await
+                    .map_err(meta_err)?;
                     Ok(DeletedObject {
                         key: Some(o.key.clone()),
                         version_id: None,

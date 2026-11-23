@@ -346,6 +346,26 @@ where
     transact_inner(store, env, body, true, None).await
 }
 
+/// [`transact_idempotent`], waiting on `backoff` (if any) between a
+/// conflict and the next attempt (ADR-0041).
+///
+/// # Errors
+///
+/// As [`transact_idempotent`].
+pub async fn transact_idempotent_with_backoff<S, D, T, F>(
+    store: &S,
+    env: D,
+    body: F,
+    backoff: Option<&dyn ConflictBackoff>,
+) -> Result<T, MetaError>
+where
+    S: KvStore,
+    D: Send + Sync,
+    F: for<'a> FnMut(&'a mut S::Tx, &'a D) -> TxFuture<'a, T>,
+{
+    transact_inner(store, env, body, true, backoff).await
+}
+
 /// Process-wide counters of [`transact`] outcomes (hot-key analysis).
 #[derive(Debug, Default)]
 pub struct TransactStats {
