@@ -365,6 +365,22 @@ and the watchdog has not fired; anything else ends the run.
 | 6 Steady churn | C3a passed | 1 PUT of a new key and 1 DELETE of the oldest per second for 90 min, the live set within ±5 % of L1 | C3b judged over the whole stage, C4 on its last 60 min | 100 min |
 | 7 Integrity and evidence | 6 ended | verify (§8 C5); v3: then wait, with no load, until at least the controller's orphan age and two reconcile intervals (900 + 2 × 300 s) after stage 6's end, the GC backlog 0 and no record pending reclaim on any node (fresh samples), at most until 15 min before the stage's end; then `admin integrity verify-manifests` and a scrub of every group (findings recorded by class); evidence saved; teardown only after review | C5 judged | 60 min |
 
+Stage 7 with a 0.2.0 binary (ADR-0036; the criteria above unchanged):
+the scrub classifies records kept for reclaim as `retained`, not as
+unexpected shards, so the C5 count rule of v3 no longer applies to it
+(`judge.py` applies it only to timelines without `scrub_held`).
+Unexpected shards are then orphans only, and some orphans are
+legitimate for a while: shards of a write diverted to another group, and
+shards of a `begin_put` that is still being retried (no generation yet),
+which reconciliation removes only once they are older than the
+controller's minimum orphan age (`controller/src/gc.rs`,
+`reconcile_node`). The scrub does not excuse them. What removes them
+before the C5 scrub is stage 7's settle wait: the orphan age and two
+reconcile intervals after stage 6's last write. A scrub read before the
+settle (`settled_ms` null) can therefore fail C5 on such orphans; that
+is the intended reading (the run's evidence shows whether the settle was
+reached).
+
 ## 8. Judgement (fixed before the run)
 
 Proposed values; the approved ones are recorded with the run and not

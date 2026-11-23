@@ -731,7 +731,13 @@ class SshCluster:
         # evidence; the order of FindingClass: missing, checksum, truncated,
         # header, unexpected shard, stale epoch, metadata/data, unrecoverable).
         self.last_scrub_classes = None
+        # 0.2.0: the shards the scrub holds legitimately or could not
+        # classify, summed over the groups (None from a binary that does
+        # not print them: its unexpected shards include the records kept
+        # for reclaim). Unclassified shards are also counted in `errors`.
+        self.last_scrub_held = None
         classes = None
+        held = None
         out = self.ssh(f"{admin} status 2>&1 | grep '^group '", check=False)
         groups = re.findall(r"^group (\d+)", out, re.M)
         if not groups:
@@ -739,12 +745,19 @@ class SshCluster:
         for g in groups:
             o = self.ssh(f"{admin} integrity scrub --group {g} --wait 2>&1", check=False, timeout=3600)
             m = re.search(r"findings \[([\d, ]*)\] enqueued \d+ errors (\d+)", o)
+            h = re.search(r"retained (\d+) retained_damaged (\d+) in_flight (\d+) unclassified (\d+)", o)
+            if h:
+                row_h = dict(zip(("retained", "retained_damaged", "in_flight", "unclassified"),
+                                 (int(x) for x in h.groups())))
+                held = row_h if held is None else {k: held[k] + v for k, v in row_h.items()}
+                self.last_scrub_held = held
             if not m or int(m.group(2)) > 0:
                 return None
             row = [int(x) for x in m.group(1).split(",") if x.strip()]
             classes = row if classes is None else [a + b for a, b in zip(classes, row)]
             total += sum(row)
         self.last_scrub_classes = classes
+        self.last_scrub_held = held
         return total
 
     # -- the host's evidence ---------------------------------------------------

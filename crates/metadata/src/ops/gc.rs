@@ -538,6 +538,134 @@ async fn attribute_one<X: Txn>(
     Ok(ShardAttribution::Unreferenced)
 }
 
+/// What metadata says about a shard the scrub found at its member index
+/// (RFC-008 §8.4, 0.2.0): finer than [`ShardAttribution`], from one
+/// transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScrubAttribution {
+    /// A live generation's chunk record places the chunk in this group.
+    Placed(ChunkRecord),
+    /// Held by an operation in progress, with no live record here: a
+    /// fresh migration intent targets this group (a copy before the
+    /// switch), a pending generation with the prefix may still record it
+    /// here, or a generation being collected still records it here. A
+    /// shard with no generation at all (one whose `begin_put` is still
+    /// being retried, or a write diverted elsewhere) is not in flight: it
+    /// is `Unreferenced`.
+    InFlight {
+        /// A migration intent targets this group.
+        migration: bool,
+    },
+    /// Nothing references it here (no generation with the prefix, or none
+    /// that places, may place or is copying the chunk here).
+    Unreferenced,
+}
+
+/// Classify a shard for the scrub at `now_ms`, in one transaction. A
+/// migration intent older than
+/// [`crate::ops::object::MIGRATION_INTENT_TTL_MS`] can no longer switch:
+/// it does not hold the target's shards.
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn scrub_attribution<S: KvStore>(
+    store: &S,
+    prefix: &[u8; 12],
+    index: u32,
+    group_id: u64,
+    now_ms: u64,
+) -> Result<ScrubAttribution> {
+    transact(store, (*prefix, index, group_id, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (prefix, index, group_id, now_ms) = *env;
+            let gens = generations_with_prefix(tx, &prefix).await?;
+            if gens.is_empty() {
+                return Ok(ScrubAttribution::Unreferenced);
+            }
+            let mut in_flight = false;
+            for (generation, header) in &gens {
+                if is_pending(header.as_ref()) {
+                    in_flight = true;
+                }
+                if let Some(v) = tx.get(&keys::gen_chunk(generation, index)).await? {
+                    let record: ChunkRecord = decode(&v)?;
+                    if record.placement.group_id == group_id {
+                        if is_live(header.as_ref()) {
+                            return Ok(ScrubAttribution::Placed(record));
+                        }
+                        in_flight = true;
+                    }
+                }
+            }
+            let intent: Option<crate::ops::object::MigrationIntent> =
+                crate::ops::read(tx, &keys::migration(&chunk_id_of(&prefix, index))).await?;
+            if intent.is_some_and(|i| {
+                i.target_group == group_id
+                    && now_ms
+                        < i.since_ms
+                            .saturating_add(crate::ops::object::MIGRATION_INTENT_TTL_MS)
+            }) {
+                return Ok(ScrubAttribution::InFlight { migration: true });
+            }
+            Ok(if in_flight {
+                ScrubAttribution::InFlight { migration: false }
+            } else {
+                ScrubAttribution::Unreferenced
+            })
+        })
+    })
+    .await
+}
+
+/// Whether a chunk record of any generation with `prefix` places chunk
+/// `index` in `group_id`, read in `tx`.
+pub(crate) async fn recorded_in_group<X: Txn>(
+    tx: &mut X,
+    prefix: &[u8; 12],
+    index: u32,
+    group_id: u64,
+) -> Result<bool> {
+    for (generation, _) in generations_with_prefix(tx, prefix).await? {
+        if let Some(v) = tx.get(&keys::gen_chunk(&generation, index)).await?
+            && decode::<ChunkRecord>(&v)?.placement.group_id == group_id
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether a fresh migration intent (younger than
+/// [`crate::ops::object::MIGRATION_INTENT_TTL_MS`] at `now_ms`) copies
+/// chunk `chunk_id` into `group_id`: its target shards are not referenced
+/// yet, and become the chunk's placement if it switches.
+///
+/// # Errors
+///
+/// Backend or codec errors.
+pub async fn migrating_into<S: KvStore>(
+    store: &S,
+    chunk_id: &[u8; 16],
+    group_id: u64,
+    now_ms: u64,
+) -> Result<bool> {
+    transact(store, (*chunk_id, group_id, now_ms), |tx, env| {
+        Box::pin(async move {
+            let (chunk_id, group_id, now_ms) = *env;
+            let intent: Option<crate::ops::object::MigrationIntent> =
+                crate::ops::read(tx, &keys::migration(&chunk_id)).await?;
+            Ok(intent.is_some_and(|i| {
+                i.target_group == group_id
+                    && now_ms
+                        < i.since_ms
+                            .saturating_add(crate::ops::object::MIGRATION_INTENT_TTL_MS)
+            }))
+        })
+    })
+    .await
+}
+
 /// Whether a pending generation with `prefix` exists: its chunk records
 /// may still be appended (a committed generation's are all written).
 ///
