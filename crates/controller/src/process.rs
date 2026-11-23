@@ -430,10 +430,9 @@ async fn run<S: KvStore + 'static>(
         // Leader: fenced store, scheduler tasks, renewal loop.
         let fenced = Arc::new(FencedKv::new(Arc::clone(&meta), leadership.clone()));
         let (stop_tx, stop_rx) = watch::channel(false);
-        // The node schema shard writes need (ADR-0039) before the first
-        // health pass sets it (a state that admits repair but not the
-        // health pass, such as RecoveryRequired, has only this one);
-        // unknown (the read failed) refuses every write until then.
+        // The node schema shard writes need (ADR-0039) until the first
+        // health pass or repair pass reads it again; unknown (the read
+        // failed) refuses every write until then.
         let node_schema = compat::gate(meta.as_ref())
             .await
             .map_or(u64::MAX, |g| compat::required_node_schema(g.schema_write));
@@ -1931,6 +1930,7 @@ async fn repair_pass<S: KvStore>(
     if token == 0 || metrics.health_seen_term.load(Ordering::Relaxed) != token {
         return Ok(());
     }
+    crate::integrity::refresh_required_node_schema(meta, clients).await?;
     let nodes: HashMap<u64, NodeRecord> = cluster::list_nodes(meta)
         .await?
         .into_iter()

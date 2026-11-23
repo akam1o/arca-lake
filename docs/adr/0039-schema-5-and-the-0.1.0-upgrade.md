@@ -154,7 +154,10 @@ print `protections degraded` or `protections mandatory`.
     writes).** `NodeClients::set_required_node_schema` is set to
     `schema_write` once it is 5 or later, at start and with every
     cluster-state refresh (gateway: every 2 s; leader: every health
-    pass). Before a shard write the node's reported schema is checked,
+    pass, and at the start of every repair, stripe repair and scrub
+    pass, so that a `schema_write` raised mid-term by finalize step 3 or
+    by a restore's `restore_floors` applies before the next repair
+    write). Before a shard write the node's reported schema is checked,
     from a `Health` answer at most 2 s old and asked again after any
     connection failure. The write's own acknowledgement must also carry
     it (`PutShardResponse.schema_max`, 0 from 0.1.0). A node below

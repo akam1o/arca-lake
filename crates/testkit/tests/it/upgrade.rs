@@ -965,6 +965,107 @@ fn no_node_schema_is_required_before_schema_5() {
     assert_eq!(compat::required_node_schema(Some(6)), 6);
 }
 
+/// ADR-0039: a repair pass reads `schema_write` again before it writes.
+/// Raised mid-term (here after the writer's last read, as finalize step 3
+/// or a restore's `restore_floors` does), it applies before any health
+/// pass: the rebuilt shard is not counted on a node reporting schema 0,
+/// and is once the node reports this release's schema.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repair_pass_applies_a_schema_write_raised_mid_term() {
+    use arca_lake_controller::integrity::{
+        RepairWorkerOptions, ScrubOptions, coders, repair_pass, scrub_group_now,
+    };
+    use arca_lake_protocol::client::NodeClients;
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(3, 2, 1, 1 << 20, 0)
+    })
+    .await;
+    s3::create_bucket(&c.backend, BUCKET).await.unwrap();
+    // A store upgraded from 0.1.0, before the cut-off.
+    transact(c.meta.as_ref(), (), |tx, ()| {
+        Box::pin(async move {
+            let v4 = (keys::SCHEMA_V5 - 1).to_le_bytes();
+            tx.set(&keys::schema_version(), &v4);
+            tx.set(&keys::schema_write(), &v4);
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    s3::put(
+        &c.backend,
+        BUCKET,
+        "obj",
+        Bytes::from(random_bytes(3 << 19, 5)),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let chunk = c.manifest(BUCKET, "obj").await.chunks[0].1.clone();
+    let group = c.groups().await.remove(0);
+    let victim = c.node_index(&group.members[1]).unwrap();
+    assert_eq!(c.corrupt_chunk_on_node(victim, group.id, chunk.chunk_id), 1);
+    let scrub = ScrubOptions {
+        interval_ms: 1,
+        ..ScrubOptions::default()
+    };
+    let r = scrub_group_now(
+        c.meta.as_ref(),
+        &c.clients,
+        &coders(),
+        group.id,
+        &scrub,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.enqueued, 1, "{r:?}");
+    // The writer last read schema_write 4: nothing required.
+    let writer = NodeClients::new(Duration::from_secs(2));
+    writer.set_required_node_schema(compat::required_node_schema(Some(keys::SCHEMA_V5 - 1)));
+    assert_eq!(writer.required_node_schema(), 0);
+    compat::raise_version(
+        c.meta.as_ref(),
+        compat::VersionKey::SchemaWrite,
+        keys::SCHEMA_V5,
+    )
+    .await
+    .unwrap();
+    c.stop_node(victim).await;
+    c.start_node_reporting(victim, 0).await;
+    let worker = RepairWorkerOptions {
+        tasks_per_pass: 64,
+        max_attempts: 3,
+        recheck_ms: 1000,
+        ..RepairWorkerOptions::default()
+    };
+    let meta = Arc::clone(&c.meta);
+    let pass = async |now: u64| {
+        repair_pass(meta.as_ref(), &writer, &coders(), &worker, None, None, now)
+            .await
+            .unwrap()
+    };
+    let r = pass(now_ms()).await;
+    assert_eq!(
+        (r.succeeded, r.shards_rewritten),
+        (0, 0),
+        "a rebuilt shard counted on a node reporting schema 0: {r:?}"
+    );
+    let tasks = arca_lake_metadata::ops::integrity::tasks(c.meta.as_ref(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1, "{tasks:?}");
+    assert_eq!(writer.required_node_schema(), keys::SCHEMA_V5);
+    // The node back on this release: the task completes.
+    c.stop_node(victim).await;
+    c.start_node_quiet(victim).await;
+    writer.forget_caps(&c.nodes[victim].addr.to_string());
+    let r = pass(now_ms() + 120_000).await;
+    assert_eq!((r.succeeded, r.shards_rewritten), (1, 1), "{r:?}");
+    c.shutdown().await;
+}
+
 /// ADR-0039: after the finalize, the leader asks a node facts-free before
 /// pushing anything; a node of an earlier release (here one reporting
 /// schema 4 restarted at a member's address) is quarantined and never
