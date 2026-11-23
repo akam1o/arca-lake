@@ -96,18 +96,21 @@ if the writer knows it):
 | --- | --- | --- | --- |
 | its identity | taken | refused | strict: refused; else taken, counted |
 | no identity, a node certificate (mTLS) | taken if the certificate names that node | refused | as above |
-| no identity and no node certificate | taken, counted (in every mode) | taken, counted | as above |
-| a damaged identity file | strict: refused; else taken, counted | refused if the certificate names another | as above |
+| no identity (or a damaged one) and no node certificate naming a node | strict: refused; else taken, counted | strict: refused; else taken, counted | as above |
 
-In a cluster the controller's first health pass gives the node its
-identity in the same request as the incarnation and the floor, so every
-node a controller reached holds one (or serves a node certificate). A
-node holding neither cannot check the name and takes the write, counted
-(`writes_unproven`): that is a node no controller ran, such as a test
-cluster's; refusing there would test nothing more and stop such
-clusters. The testkit harness gives strict clusters' nodes the
-incarnation and the floor; tests that check the target give identities
-as a controller does.
+The controller's health pass gives a node that holds no identity one in
+the same request as the incarnation and the floor, but not every node
+holds one: a disk whose identity file was removed keeps its facts and
+incarnation, and the controller then pushes no adoption (it reports the
+disk and waits for `admin node rejoin --fresh-identity`); a damaged
+file is not replaced either. Nor does every node serve a usable node
+certificate: plaintext clusters have none, and a node certificate whose
+SPIFFE name is not a numeric node id (`spiffe://<td>/node/<name>`) names
+no node. Such a node cannot check the name, so it refuses named writes
+once strict, and before that takes them, counted (`writes_unproven`).
+The testkit harness gives strict clusters' nodes their identity with the
+facts, as a controller does; tests of nodes without identities build
+them explicitly (`ClusterOptions::node_identities`).
 
 Refusals are `FAILED_PRECONDITION` with a message starting
 `incarnation rejected` or `node rejected`, which writers treat as a
@@ -240,11 +243,11 @@ Guaranteed by the node, whatever the CA and trust domain: a write
 misdirected from another cluster (a reused address, a repeated node id,
 a shared CA) is never stored on a node of this cluster that adopted an
 incarnation, nor on a new disk; a write for another node of the same
-cluster is never stored on a node that holds its identity (or serves its
-node certificate), which every node a controller reached does, so it is
-never counted written; once strict, a write
-that does not carry the node's incarnation and name the node is never
-stored.
+cluster is never stored on a node that holds its identity (or serves a
+node certificate naming its node id), so it is never counted written;
+once strict, a write that does not carry the node's incarnation and name
+the node, or that the node cannot check against an identity or a
+certificate, is never stored.
 
 Not guaranteed (still relies on mutual TLS with one CA or trust domain
 per cluster): the incarnation is not a secret (a node reports it in
@@ -254,9 +257,10 @@ write. Gateways name the node id without its token: a write for node N
 reaching another disk that also holds node N's id (a disk replaced
 under the same id, `node rejoin --fresh-identity`, while the old one
 answers somewhere) is taken; controller writes carry the token and are
-refused. A node without an identity and without a node certificate (one no
-controller reached, as in test clusters) takes writes naming any node,
-counted, in every mode.
+refused. Before strict mode, a node without an identity and without a
+node certificate naming its node (a removed or damaged identity file, a
+plaintext cluster's node before its controller gave one, a non-numeric
+SPIFFE node name) takes writes naming any node, counted.
 
 Smaller residuals (review):
 
@@ -268,6 +272,20 @@ Smaller residuals (review):
   noted for the address, not a placement member; only `put_shard_to`
   names the member, and every product writer uses it. A tool writing
   with no node noted names none (counted, refused once strict).
+- Store writes hold the fence guard shared from the check after the
+  body to the end of the store write (L2): an epoch raise, a fence change
+  and the adoption of an incarnation or an identity wait for the slowest
+  PUT then in flight to finish storing, and new PUTs and deletes queue
+  behind the waiting change (the lock is fair). A slow device therefore
+  delays these pushes, and every write and delete behind them, by up to
+  one store write (not by the network transfer, which happens before the
+  guard is taken).
+- After `admin node rejoin --fresh-identity` the controller keeps
+  stamping the old identity token for that address until its next
+  health pass acknowledges the new one (L4): repair, migration and
+  integrity writes to the node are refused (`node rejected`) and retried
+  by their tasks meanwhile; gateway writes, which name the node id only,
+  are taken.
 - A disk counts as holding earlier data by its live records at start: a
   0.1.0 disk whose records were all deleted before the upgrade is taken
   for a new one and refuses writes until its controller reaches it

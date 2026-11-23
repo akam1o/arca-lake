@@ -666,10 +666,9 @@ impl StorageNodeService {
     /// writer maps to the member (an address reused, a stale map).
     ///
     /// Strict ([`pb::WRITE_OWNERSHIP_SCHEMA`]), a write naming no node, and
-    /// any write to a disk whose identity file is damaged, are refused too;
-    /// before it they are accepted (`true`: counted by the caller). A disk
-    /// that holds no identity and serves no node certificate cannot check
-    /// the name: its writes are accepted and counted in every mode.
+    /// one this node cannot check (no identity held, or a damaged one, and
+    /// no node certificate naming a node), are refused too; before it they
+    /// are accepted (`true`: counted by the caller).
     fn check_write_target(&self, node_id: u64, token: &[u8]) -> Result<bool, tonic::Status> {
         let strict = self.write_ownership_strict();
         let (held, damaged) = {
@@ -700,19 +699,17 @@ impl StorageNodeService {
             Some(h) if token.len() == 16 && h.token[..] != token[..] => {
                 other("this disk holds another identity token of that node".to_string())
             }
-            None if damaged => {
+            // No identity (none adopted yet, the file removed) or a damaged
+            // one, and no node certificate naming a node: nothing to check
+            // the name against. Refused once strict; before, taken and
+            // counted.
+            None if damaged || self.certificate_node_id().is_none() => {
                 if strict {
-                    other("this disk's identity file is damaged".to_string())
+                    other("this disk holds no identity to check it against".to_string())
                 } else {
                     Ok(true)
                 }
             }
-            // No identity yet and no node certificate: nothing to check
-            // the name against. Taken, counted, in every mode: a node its
-            // controller reached holds an identity (the health pass gives
-            // it with the incarnation), so this is a node no controller
-            // ran (test clusters), reported by its count.
-            None if self.certificate_node_id().is_none() => Ok(true),
             // Its identity, or (none held) its certificate, names the node.
             Some(_) | None => Ok(false),
         }

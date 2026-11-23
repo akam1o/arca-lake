@@ -416,3 +416,80 @@ async fn an_identity_is_acknowledged_only_after_writes_checked_without_it() {
     assert!(e.message().starts_with("node rejected"), "{e}");
     n.shutdown().await;
 }
+
+/// A strict node that holds the cluster's incarnation but no identity
+/// cannot check the node a write names, and refuses it (re-review of
+/// ADR-0037): a disk whose identity file was removed (it keeps its facts
+/// and incarnation; the controller then pushes no adoption), and a
+/// plaintext node never given one. Not strict, the same write is taken and
+/// counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_strict_node_without_an_identity_refuses_named_writes() {
+    let _serial = faults::serial();
+    // The identity file removed.
+    let dir = tempfile::tempdir().unwrap();
+    let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+        .await
+        .unwrap();
+    let listen = n.local_addr;
+    let addr = listen.to_string();
+    let c = writer(&addr);
+    c.set_incarnation(Some([7; 16]));
+    c.health_with(&addr, facts(7, 1, STRICT_SCHEMA))
+        .await
+        .unwrap();
+    c.put_shard(&addr, shard(1), 0, data(1), 1024)
+        .await
+        .unwrap();
+    n.shutdown().await;
+    std::fs::remove_file(dir.path().join("node-identity.txt")).unwrap();
+    let n = serve(NodeConfig::new(listen, dir.path())).await.unwrap();
+    c.forget(&addr);
+    let health = c.health(&addr).await.unwrap();
+    assert_eq!(
+        (health.identity_node_id, health.incarnation.as_ref()),
+        (0, &[7u8; 16][..])
+    );
+    assert!(health.write_ownership_strict);
+    let e = c
+        .put_shard(&addr, shard(2), 0, data(2), 1024)
+        .await
+        .unwrap_err();
+    assert!(e.message().starts_with("node rejected"), "{e}");
+    n.shutdown().await;
+
+    // A plaintext node given the incarnation and the strict schema but no
+    // identity; not strict, the same write is taken, counted.
+    for (floor, taken) in [(STRICT_SCHEMA, false), (4, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let n = serve(NodeConfig::new("127.0.0.1:0".parse().unwrap(), dir.path()))
+            .await
+            .unwrap();
+        let addr = n.local_addr.to_string();
+        let c = writer(&addr);
+        c.set_incarnation(Some([7; 16]));
+        c.health_with(
+            &addr,
+            HealthRequest {
+                incarnation: Bytes::from_static(&[7; 16]),
+                incarnation_changed_ms: 1,
+                schema_floor: floor,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let put = c.put_shard(&addr, shard(3), 0, data(3), 1024).await;
+        if taken {
+            put.unwrap();
+            assert_eq!(n.service().writes_unproven(), 1);
+        } else {
+            let e = put.unwrap_err();
+            assert!(
+                e.message().starts_with("node rejected"),
+                "floor {floor}: {e}"
+            );
+        }
+        n.shutdown().await;
+    }
+}

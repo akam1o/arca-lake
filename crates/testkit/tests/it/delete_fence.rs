@@ -79,13 +79,33 @@ async fn decided_deletes(c: &TestCluster, key: &str) -> Vec<(String, ShardRef, u
     out
 }
 
-/// A controller process as it was when it decided: its incarnation and
-/// delete fence (a separate client state, unaffected by later changes).
-fn frozen_controller(c: &TestCluster) -> NodeClients {
+/// A controller process as it was when it decided: its incarnation,
+/// delete fence and the identities the nodes acknowledged, stamped on its
+/// deletes as a leader's are (a separate client state, unaffected by later
+/// changes).
+async fn frozen_controller(c: &TestCluster) -> NodeClients {
     let old = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
     old.set_incarnation(c.clients.incarnation());
     old.set_delete_fence(c.clients.delete_fence());
+    stamp_acknowledged_identities(c, &old).await;
     old
+}
+
+/// Stamp `clients` with the identities the nodes acknowledged (none in a
+/// test cluster no controller ran, unless the cluster gave them: strict
+/// clusters, ADR-0037), as a leader stamps its deletes.
+async fn stamp_acknowledged_identities(c: &TestCluster, clients: &NodeClients) {
+    let ids = arca_lake_metadata::ops::node_lifecycle::identities(c.meta.as_ref())
+        .await
+        .unwrap();
+    for n in &c.nodes {
+        clients.note_identity(
+            &n.addr.to_string(),
+            ids.get(&n.id)
+                .filter(|i| i.acknowledged)
+                .map(|i| (n.id, i.token)),
+        );
+    }
 }
 
 /// What the nodes did with delivered deletes.
@@ -265,7 +285,7 @@ async fn a_delete_decided_before_a_restore_never_removes_what_the_restored_metad
     let deletes = decided_deletes(&c, "kept").await;
     // After the backup point the object is deleted and GC decides.
     s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
-    let old = frozen_controller(&c);
+    let old = frozen_controller(&c).await;
     // Runbook: close the fence everywhere, then restore.
     let closed = close_and_push(
         c.meta.as_ref(),
@@ -334,7 +354,7 @@ async fn without_closing_the_fence_first_the_restored_object_loses_its_shards() 
     let backup = snapshot(c.meta.as_ref()).await;
     let deletes = decided_deletes(&c, "lost").await;
     s3::delete(&c.backend, BUCKET, "lost").await.unwrap();
-    let old = frozen_controller(&c);
+    let old = frozen_controller(&c).await;
     restore(c.meta.as_ref(), &backup).await;
     assert_eq!(deliver(&old, &deletes).await.applied, deletes.len());
     // `recovery begin`'s check sees nodes whose fence was still open.
@@ -354,7 +374,7 @@ async fn deletes_decided_before_a_phase_change_are_refused_after_it() {
     let c = cluster().await;
     put(&c, "a", 3).await;
     let deletes = decided_deletes(&c, "a").await;
-    let old = frozen_controller(&c);
+    let old = frozen_controller(&c).await;
     compat::transition(
         c.meta.as_ref(),
         ClusterPhase::Active,
@@ -398,7 +418,7 @@ async fn deletes_decided_before_a_phase_change_are_refused_after_it() {
         );
     }
     // Decided under the new generation: applied.
-    let fresh = frozen_controller(&c);
+    let fresh = frozen_controller(&c).await;
     assert_eq!(deliver(&fresh, &deletes).await.applied, deletes.len());
     c.shutdown().await;
 }
@@ -412,7 +432,7 @@ async fn a_former_leaders_late_deletes_are_refused() {
     put(&c, "x", 4).await;
     put(&c, "y", 5).await;
     let first = leader_pass(&c, 10).await;
-    let former = frozen_controller(&c);
+    let former = frozen_controller(&c).await;
     let x = decided_deletes(&c, "x").await;
     let y = decided_deletes(&c, "y").await;
     // The former leader's delete of one shard, twice (a retry): the second
@@ -454,7 +474,7 @@ async fn a_node_that_missed_the_close_is_reported_and_closed_once_back() {
     let mut c = cluster().await;
     put(&c, "p", 6).await;
     let deletes = decided_deletes(&c, "p").await;
-    let old = frozen_controller(&c);
+    let old = frozen_controller(&c).await;
     c.stop_node(2).await;
     let closed = close_and_push(c.meta.as_ref(), &c.clients, "maintenance", true, now_ms())
         .await
@@ -507,7 +527,7 @@ async fn a_node_that_missed_the_close_is_reported_and_closed_once_back() {
     .unwrap();
     assert_eq!(held, Vec::<u64>::new());
     assert!(leader_pass(&c, 3).await.open);
-    let fresh = frozen_controller(&c);
+    let fresh = frozen_controller(&c).await;
     let d = deliver(&fresh, &deletes[..1]).await;
     assert_eq!(d.applied, 1, "{d:?}");
     assert_eq!(
@@ -604,7 +624,7 @@ async fn a_leader_killed_while_pushing_its_fence_is_superseded_cleanly() {
     let c = cluster().await;
     put(&c, "k", 8).await;
     let first = leader_pass(&c, 20).await;
-    let before = frozen_controller(&c);
+    let before = frozen_controller(&c).await;
     let deletes = decided_deletes(&c, "k").await;
     // The killed leader: record written, pushed to node 0 only.
     let inc = compat::cluster_state(c.meta.as_ref())
@@ -647,6 +667,7 @@ async fn a_leader_killed_while_pushing_its_fence_is_superseded_cleanly() {
     let killed_leader = NodeClients::new(Duration::from_secs(5)).with_tls(c.clients.tls().cloned());
     killed_leader.set_incarnation(c.clients.incarnation());
     killed_leader.set_delete_fence(Some(killed.generation));
+    stamp_acknowledged_identities(&c, &killed_leader).await;
     for who in [&before, &killed_leader] {
         let d = deliver(who, &deletes).await;
         assert_eq!(d.fenced, deletes.len(), "{d:?}");
@@ -692,7 +713,7 @@ async fn a_new_leader_never_reopens_a_nodes_own_generation_after_a_restore() {
     leader_pass(&c, 40).await;
     let backup = snapshot(c.meta.as_ref()).await;
     let g = leader_pass(&c, 41).await.generation;
-    let old = frozen_controller(&c);
+    let old = frozen_controller(&c).await;
     let deletes = decided_deletes(&c, "r").await;
     s3::delete(&c.backend, BUCKET, "r").await.unwrap();
     // No close: the restore brings back an older record.
@@ -771,7 +792,7 @@ async fn a_restore_with_every_procedural_safeguard_skipped_loses_nothing() {
     leader_pass(&c, 50).await;
     let backup = snapshot(c.meta.as_ref()).await;
     let g = leader_pass(&c, 51).await.generation;
-    let old = frozen_controller(&c);
+    let old = frozen_controller(&c).await;
     let deletes = decided_deletes(&c, "kept").await;
     s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
     // No close; restore; one node down.
@@ -852,7 +873,7 @@ async fn a_clock_going_back_between_restores_does_not_reorder_incarnations() {
         .await
         .unwrap()
         .unwrap();
-    let first = frozen_controller(&c);
+    let first = frozen_controller(&c).await;
     // The second restore goes back to the first backup, marked by a clock
     // an hour behind.
     restore(c.meta.as_ref(), &first_backup).await;
@@ -1003,7 +1024,7 @@ async fn a_restored_open_fence_is_never_renewed_by_a_new_controller() {
     let kept = put(&c, "kept", 14).await;
     let g = leader_pass(&c, 51).await.generation;
     let backup = snapshot(c.meta.as_ref()).await;
-    let old = frozen_controller(&c);
+    let old = frozen_controller(&c).await;
     let deletes = decided_deletes(&c, "kept").await;
     s3::delete(&c.backend, BUCKET, "kept").await.unwrap();
     restore(c.meta.as_ref(), &backup).await;
@@ -1098,7 +1119,7 @@ async fn a_restore_under_a_running_leader_closes_its_fence() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     // Deletes the leader decided (taken with its fence) before the restore.
-    let old = frozen_controller(&c);
+    let old = frozen_controller(&c).await;
     old.set_delete_fence(Some(opened.generation));
     let deletes = decided_deletes(&c, "kept").await;
     restore(c.meta.as_ref(), &backup).await;

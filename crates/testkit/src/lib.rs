@@ -98,10 +98,13 @@ pub struct TestCluster<S: KvStore + 'static = MemKv> {
     /// The development CA of a TLS cluster.
     pub pki: Option<Arc<pki::TestPki>>,
     tmp: tempfile::TempDir,
+    /// See [`ClusterOptions::node_identities`].
+    pub node_identities: bool,
 }
 
 /// Options for [`TestCluster::start`].
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ClusterOptions {
     /// Number of storage nodes (each one device, its own host label).
     pub nodes: usize,
@@ -157,6 +160,13 @@ pub struct ClusterOptions {
     /// (a file-backed store for rotation tests); the cluster's generated
     /// `credentials` are then not registered anywhere.
     pub credential_store: Option<Arc<CredentialStore>>,
+    /// In a cluster initialised at the strict schema (ADR-0037; a
+    /// `version-bump` build's), every node is given its identity with the
+    /// cluster facts, as a controller's first health pass does (default).
+    /// Off: nodes hold no identity until a test gives one, and the cluster
+    /// is not made strict either (a strict node without an identity takes
+    /// no write): for tests of nodes without identities.
+    pub node_identities: bool,
 }
 
 /// Allotment every test node starts with (`--capacity-bytes`): the
@@ -236,6 +246,7 @@ impl ClusterOptions {
             reclaim_retention: Duration::ZERO,
             tls: false,
             credential_store: None,
+            node_identities: true,
         }
     }
 }
@@ -245,17 +256,34 @@ impl ClusterOptions {
 /// push incarnations ordered by change time, which a sequence held would
 /// override). From the strict schema on (ADR-0037: a cluster initialised
 /// there is strict from its first write, which a `version-bump` build's
-/// clusters are) also the schema floor, and `clients` learn the node id
-/// at `addr`, so that the test's own writes name their node. Identities
-/// stay as test clusters always ran them (given by a test or a
-/// controller), the floor and the format below the strict schema too.
-async fn push_cluster_facts<S: KvStore>(meta: &S, clients: &NodeClients, addr: &str, node_id: u64) {
+/// clusters are), with `identities`, also what that pass gives with it:
+/// the schema floor and the node's identity, acknowledged and stamped on
+/// `clients` with the node id (the test's own writes and deletes name the
+/// node and carry its token, as a leader's do). Otherwise the floor, the
+/// format and identities stay as test clusters always ran them.
+async fn push_cluster_facts<S: KvStore>(
+    meta: &S,
+    clients: &NodeClients,
+    addr: &str,
+    node_id: u64,
+    identities: bool,
+) {
+    use arca_lake_metadata::ops::node_lifecycle;
     use arca_lake_protocol::storage::v1 as pb;
     let gate = arca_lake_metadata::ops::compat::gate(meta).await.unwrap();
     let Some(state) = gate.cluster else {
         return;
     };
-    let strict = gate.schema.is_some_and(|s| s >= pb::WRITE_OWNERSHIP_SCHEMA);
+    let strict = identities && gate.schema.is_some_and(|s| s >= pb::WRITE_OWNERSHIP_SCHEMA);
+    let identity = if strict {
+        Some(
+            node_lifecycle::ensure_identity(meta, node_id)
+                .await
+                .unwrap(),
+        )
+    } else {
+        None
+    };
     clients
         .health_with(
             addr,
@@ -263,13 +291,25 @@ async fn push_cluster_facts<S: KvStore>(meta: &S, clients: &NodeClients, addr: &
                 incarnation: bytes::Bytes::copy_from_slice(&state.incarnation),
                 incarnation_changed_ms: state.changed_ms,
                 schema_floor: if strict { gate.schema.unwrap_or(0) } else { 0 },
+                node_id: identity.as_ref().map_or(0, |_| node_id),
+                node_identity: identity
+                    .as_ref()
+                    .map(|i| bytes::Bytes::copy_from_slice(&i.token))
+                    .unwrap_or_default(),
+                adopt_identity: identity.as_ref().is_some_and(|i| !i.acknowledged),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-    if strict {
+    if let Some(i) = identity {
+        if !i.acknowledged {
+            node_lifecycle::acknowledge_identity(meta, node_id, i.token)
+                .await
+                .unwrap();
+        }
         clients.note_node_id(addr, node_id);
+        clients.note_identity(addr, Some((node_id, i.token)));
     }
 }
 
@@ -466,7 +506,14 @@ impl<S: KvStore + 'static> TestCluster<S> {
         // health pass would give every node (a node that has adopted no
         // incarnation takes no shard write, ADR-0037).
         for n in &nodes {
-            push_cluster_facts(meta.as_ref(), &clients, &n.addr.to_string(), n.id).await;
+            push_cluster_facts(
+                meta.as_ref(),
+                &clients,
+                &n.addr.to_string(),
+                n.id,
+                opts.node_identities,
+            )
+            .await;
         }
         // A test cluster runs no controller: the fence a leader would open
         // (ADR-0023), so that deletes go through (the gateway takes it
@@ -557,6 +604,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             tmp,
             fence_lease: TEST_FENCE_LEASE,
             reclaim_retention: opts.reclaim_retention,
+            node_identities: opts.node_identities,
         }
     }
 
@@ -1187,8 +1235,9 @@ impl<S: KvStore + 'static> TestCluster<S> {
     }
 
     /// Push the cluster facts to node `i` as a controller's health pass
-    /// does (the incarnation; from the strict schema on also the floor):
-    /// a node that has adopted no incarnation takes no shard write
+    /// does (the incarnation; from the strict schema on also the floor and
+    /// the node's identity, unless [`ClusterOptions::node_identities`] is
+    /// off): a node that has adopted no incarnation takes no shard write
     /// (ADR-0037).
     pub async fn push_cluster_facts(&self, i: usize) {
         push_cluster_facts(
@@ -1196,6 +1245,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             &self.clients,
             &self.nodes[i].addr.to_string(),
             self.nodes[i].id,
+            self.node_identities,
         )
         .await;
     }

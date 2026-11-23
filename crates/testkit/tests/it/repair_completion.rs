@@ -214,6 +214,16 @@ async fn delete_decided_under_an_old_epoch_is_rejected_after_a_fence() {
     let clients = NodeClients::new(std::time::Duration::from_secs(5));
     clients.set_delete_fence(c.clients.delete_fence());
     clients.set_incarnation(c.clients.incarnation());
+    // Stamped with the identity the node acknowledged, if any (a strict
+    // cluster's nodes hold one, ADR-0037), as a leader's deletes are.
+    if let Some(i) =
+        arca_lake_metadata::ops::node_lifecycle::identity(c.meta.as_ref(), c.nodes[node].id)
+            .await
+            .unwrap()
+            .filter(|i| i.acknowledged)
+    {
+        clients.note_identity(&addr, Some((c.nodes[node].id, i.token)));
+    }
     assert_eq!(clients.update_epoch(&addr, group.id, 2).await.unwrap(), 2);
     let err = clients
         .delete_shard(&addr, shard, group.epoch)
