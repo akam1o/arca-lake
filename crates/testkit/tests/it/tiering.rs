@@ -1385,3 +1385,273 @@ pub(crate) async fn a_move_already_in_flight_resets_no_access_record_on<
     );
     c.shutdown().await;
 }
+
+/// A fenced pass at `at` with `hook` before every switch (R-118).
+async fn pass_with<S: arca_lake_metadata::KvStore + 'static>(
+    c: &TestCluster<S>,
+    fence: arca_lake_controller::tiering::PolicyFence,
+    at: u64,
+    hook: Option<std::sync::Arc<arca_lake_controller::tiering::BeforeSwitch>>,
+) -> arca_lake_controller::tiering::TieringReport {
+    arca_lake_controller::tiering::run_once_bounded_fenced_with(
+        c.meta.as_ref(),
+        &c.clients,
+        &fenced_policy(),
+        at,
+        0,
+        Some(fence),
+        hook,
+    )
+    .await
+    .unwrap()
+}
+
+/// A hook running `f` on the metadata store once, before the first switch.
+fn once_before_switch<S, F>(
+    meta: std::sync::Arc<S>,
+    f: F,
+) -> std::sync::Arc<arca_lake_controller::tiering::BeforeSwitch>
+where
+    S: arca_lake_metadata::KvStore + 'static,
+    F: Fn(std::sync::Arc<S>) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>>
+        + Send
+        + Sync
+        + 'static,
+{
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    std::sync::Arc::new(move |_, _| {
+        if done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            Box::pin(std::future::ready(()))
+        } else {
+            f(meta.clone())
+        }
+    })
+}
+
+/// Put `key` with `chunks` chunks, record 9 reads of it at `t0` and enable
+/// tiering before them: the next pass promotes it.
+async fn hot_object<S: arca_lake_metadata::KvStore + 'static>(
+    c: &TestCluster<S>,
+    key: &str,
+    chunks: u64,
+    t0: u64,
+) -> (object::Manifest, arca_lake_controller::tiering::PolicyFence) {
+    let len = usize::try_from(chunks * MIB - MIB / 2).unwrap();
+    s3::put(
+        &c.backend,
+        BUCKET,
+        key,
+        payload(len, 118),
+        &PutOptions::default(),
+    )
+    .await
+    .unwrap();
+    let manifest = c.manifest(BUCKET, key).await;
+    assert_eq!(manifest.chunks.len(), usize::try_from(chunks).unwrap());
+    let fence = enabled_record(c, t0 - 10_000, 0).await;
+    object::record_access(c.meta.as_ref(), &manifest.pointer.generation, t0, 9)
+        .await
+        .unwrap();
+    (manifest, fence)
+}
+
+async fn placements<S: arca_lake_metadata::KvStore + 'static>(
+    c: &TestCluster<S>,
+    key: &str,
+) -> Vec<u64> {
+    c.manifest(BUCKET, key)
+        .await
+        .chunks
+        .iter()
+        .map(|(_, r)| r.placement.group_id)
+        .collect()
+}
+
+async fn access<S: arca_lake_metadata::KvStore + 'static>(
+    c: &TestCluster<S>,
+    m: &object::Manifest,
+) -> Option<object::AccessRecord> {
+    object::access_of(c.meta.as_ref(), &m.pointer.generation)
+        .await
+        .unwrap()
+}
+
+/// R-118: a switch refused because the target group's epoch changed
+/// between the copy and the switch moved nothing; the pass keeps the
+/// generation's access record, and the next pass promotes it.
+#[tokio::test]
+async fn a_switch_refused_by_a_target_epoch_change_resets_no_access_record() {
+    let (c, fast) = cluster().await;
+    let t0 = now_ms();
+    let (m, fence) = hot_object(&c, "o", 1, t0).await;
+    let source = m.chunks[0].1.placement.group_id;
+    let target = fast.id;
+    let hook = once_before_switch(c.meta.clone(), move |meta| {
+        Box::pin(async move {
+            cluster::update_group(meta.as_ref(), target, |g| {
+                g.epoch += 1;
+                true
+            })
+            .await
+            .unwrap();
+        })
+    });
+    let report = pass_with(&c, fence, t0 + 1_000, Some(hook)).await;
+    assert_eq!(report.promoted_chunks, 0, "{report:?}");
+    assert_eq!(placements(&c, "o").await, vec![source]);
+    assert_eq!(
+        access(&c, &m).await,
+        Some(object::AccessRecord {
+            last_ms: t0,
+            count: 9
+        }),
+        "a refused switch reset the access record"
+    );
+    let report = pass_with(&c, fence, t0 + 2_000, None).await;
+    assert_eq!(report.promoted_chunks, 1, "{report:?}");
+    assert_eq!(placements(&c, "o").await, vec![fast.id]);
+    assert_eq!(
+        access(&c, &m).await,
+        Some(object::AccessRecord {
+            last_ms: t0 + 2_000,
+            count: 0
+        })
+    );
+    c.shutdown().await;
+}
+
+/// R-118: a switch refused because the attempt's intent expired and was
+/// removed before it (`Skipped`) moved nothing; the access record is kept
+/// and the next pass promotes the generation.
+#[tokio::test]
+async fn a_switch_skipped_after_its_intent_expired_resets_no_access_record() {
+    let (c, fast) = cluster().await;
+    let t0 = now_ms();
+    let (m, fence) = hot_object(&c, "o", 1, t0).await;
+    let source = m.chunks[0].1.placement.group_id;
+    let hook = once_before_switch(c.meta.clone(), |meta| {
+        Box::pin(async move {
+            let later = now_ms() + object::MIGRATION_INTENT_TTL_MS + 1;
+            assert_eq!(
+                object::expire_migrations(meta.as_ref(), later)
+                    .await
+                    .unwrap(),
+                1
+            );
+        })
+    });
+    let report = pass_with(&c, fence, t0 + 1_000, Some(hook)).await;
+    assert_eq!(report.promoted_chunks, 0, "{report:?}");
+    assert_eq!(placements(&c, "o").await, vec![source]);
+    assert_eq!(
+        access(&c, &m).await.map(|r| r.count),
+        Some(9),
+        "a skipped switch reset the access record"
+    );
+    let report = pass_with(&c, fence, t0 + 2_000, None).await;
+    assert_eq!(report.promoted_chunks, 1, "{report:?}");
+    assert_eq!(placements(&c, "o").await, vec![fast.id]);
+    assert_eq!(access(&c, &m).await.map(|r| r.count), Some(0));
+    c.shutdown().await;
+}
+
+/// R-118: a two-chunk generation whose second chunk another migration
+/// holds is moved in part; its access record is kept, and the next pass
+/// (judging the generation by its chunk left behind) moves that chunk and
+/// only then resets the record.
+#[tokio::test]
+async fn a_partly_moved_generation_keeps_its_access_record_and_is_finished_later() {
+    let (c, fast) = cluster().await;
+    let t0 = now_ms();
+    let (m, fence) = hot_object(&c, "o", 2, t0).await;
+    let source = m.chunks[1].1.placement.group_id;
+    let other = arca_lake_metadata::records::new_gen_id();
+    let chunk = m.chunks[1].1.chunk_id;
+    assert!(
+        object::begin_migration(c.meta.as_ref(), &chunk, fast.id, &other, t0)
+            .await
+            .unwrap()
+    );
+    let report = pass_with(&c, fence, t0 + 1_000, None).await;
+    assert_eq!(report.promoted_chunks, 1, "{report:?}");
+    assert_eq!(placements(&c, "o").await, vec![fast.id, source]);
+    assert_eq!(
+        access(&c, &m).await.map(|r| r.count),
+        Some(9),
+        "a partly moved generation had its access record reset"
+    );
+    object::end_migration(c.meta.as_ref(), &chunk, &other)
+        .await
+        .unwrap();
+    let report = pass_with(&c, fence, t0 + 2_000, None).await;
+    assert_eq!(report.promoted_chunks, 1, "{report:?}");
+    assert_eq!(placements(&c, "o").await, vec![fast.id, fast.id]);
+    assert_eq!(access(&c, &m).await.map(|r| r.count), Some(0));
+    // Nothing left to move: a third pass changes nothing.
+    let report = pass_with(&c, fence, t0 + 3_000, None).await;
+    assert_eq!(
+        (report.promoted_chunks, report.demoted_chunks),
+        (0, 0),
+        "{report:?}"
+    );
+    c.shutdown().await;
+}
+
+/// R-118: a two-chunk generation whose second chunk cannot be read (two of
+/// its three shards damaged) is moved in part; its access record is kept.
+#[tokio::test]
+async fn a_generation_with_a_failed_chunk_keeps_its_access_record() {
+    let (c, fast) = cluster().await;
+    let t0 = now_ms();
+    let (m, fence) = hot_object(&c, "o", 2, t0).await;
+    let (_, record) = &m.chunks[1];
+    let source = c
+        .groups()
+        .await
+        .into_iter()
+        .find(|g| g.id == record.placement.group_id)
+        .unwrap();
+    for member in source.members.iter().take(2) {
+        let i = c.node_index(member).unwrap();
+        assert_eq!(c.corrupt_chunk_on_node(i, source.id, record.chunk_id), 1);
+    }
+    let report = pass_with(&c, fence, t0 + 1_000, None).await;
+    assert_eq!(report.promoted_chunks, 1, "{report:?}");
+    assert_eq!(placements(&c, "o").await, vec![fast.id, source.id]);
+    assert_eq!(
+        access(&c, &m).await.map(|r| r.count),
+        Some(9),
+        "a generation with a failed chunk had its access record reset"
+    );
+    c.shutdown().await;
+}
+
+/// R-118: reads recorded while a pass moves a generation are not erased
+/// by the pass's reset: the record keeps them (and their time), only the
+/// reads the pass decided on are consumed.
+#[tokio::test]
+async fn reads_recorded_during_a_pass_survive_its_reset() {
+    let (c, fast) = cluster().await;
+    let t0 = now_ms();
+    let (m, fence) = hot_object(&c, "o", 1, t0).await;
+    let generation = m.pointer.generation;
+    let hook = once_before_switch(c.meta.clone(), move |meta| {
+        Box::pin(async move {
+            object::record_access(meta.as_ref(), &generation, t0 + 1_500, 4)
+                .await
+                .unwrap();
+        })
+    });
+    let report = pass_with(&c, fence, t0 + 1_000, Some(hook)).await;
+    assert_eq!(report.promoted_chunks, 1, "{report:?}");
+    assert_eq!(placements(&c, "o").await, vec![fast.id]);
+    assert_eq!(
+        access(&c, &m).await,
+        Some(object::AccessRecord {
+            last_ms: t0 + 1_500,
+            count: 4
+        }),
+        "the reads recorded during the pass were reset"
+    );
+    c.shutdown().await;
+}

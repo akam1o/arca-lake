@@ -1890,6 +1890,56 @@ pub async fn reset_access_fenced<S: KvStore>(
     .await
 }
 
+/// [`reset_access_fenced`] consuming only the `seen` reads a pass decided
+/// on (R-118, ADR-0040): reads recorded since it read the record are kept,
+/// the count becoming `count - seen` and `last_ms` the later of `now_ms`
+/// and the record's. `false`, nothing written, as for
+/// [`reset_access_fenced`].
+///
+/// # Errors
+///
+/// Backend and codec errors.
+pub async fn reset_access_seen<S: KvStore>(
+    store: &S,
+    generation: &GenId,
+    now_ms: u64,
+    policy_generation: Option<u64>,
+    seen: u64,
+) -> Result<bool> {
+    transact(
+        store,
+        (*generation, now_ms, policy_generation, seen),
+        |tx, env| {
+            Box::pin(async move {
+                let (generation, now_ms, policy_generation, seen) = *env;
+                if let Some(g) = policy_generation {
+                    let t: Option<crate::ops::tiering::TieringRecord> =
+                        read(tx, &keys::tiering()).await?;
+                    if t.is_none_or(|t| !t.enabled || t.generation != g) {
+                        return Ok(false);
+                    }
+                }
+                if tx.get(&keys::gen_header(&generation)).await?.is_none() {
+                    return Ok(true);
+                }
+                let current: AccessRecord = read(tx, &keys::access(&generation))
+                    .await?
+                    .unwrap_or_default();
+                write(
+                    tx,
+                    &keys::access(&generation),
+                    &AccessRecord {
+                        last_ms: now_ms.max(current.last_ms),
+                        count: current.count.saturating_sub(seen),
+                    },
+                )?;
+                Ok(true)
+            })
+        },
+    )
+    .await
+}
+
 /// Generations in ID order after `after`, with their headers, at most
 /// `limit` (one transaction; jumps over each generation's subspace).
 ///

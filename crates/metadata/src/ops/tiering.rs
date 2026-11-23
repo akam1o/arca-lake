@@ -593,6 +593,77 @@ mod tests {
         });
     }
 
+    /// A pass's reset consumes only the reads it decided on (R-118,
+    /// ADR-0040): reads recorded since are kept with their time; the
+    /// policy fence and a finished generation are handled as by
+    /// `reset_access_fenced`.
+    #[test]
+    fn a_reset_by_a_pass_keeps_the_reads_recorded_since() {
+        futures::executor::block_on(async {
+            use crate::ops::object::{self, AccessRecord};
+            let kv = MemKv::default();
+            let g = [6u8; 16];
+            let mut tx = kv.begin().await.unwrap();
+            tx.set(&keys::gen_header(&g), b"h");
+            tx.commit().await.unwrap();
+            seed_if_absent(&kv, &policy(1800), 1).await.unwrap();
+            object::record_access(&kv, &g, 10, 7).await.unwrap();
+            // Nothing recorded since: the record is reset.
+            assert!(
+                object::reset_access_seen(&kv, &g, 20, Some(1), 7)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                object::access_of(&kv, &g).await.unwrap(),
+                Some(AccessRecord {
+                    last_ms: 20,
+                    count: 0
+                })
+            );
+            // 4 reads during the next pass, which saw none.
+            object::record_access(&kv, &g, 35, 4).await.unwrap();
+            assert!(
+                object::reset_access_seen(&kv, &g, 30, Some(1), 0)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                object::access_of(&kv, &g).await.unwrap(),
+                Some(AccessRecord {
+                    last_ms: 35,
+                    count: 4
+                })
+            );
+            // A pass that saw more than is left consumes what is left.
+            assert!(
+                object::reset_access_seen(&kv, &g, 40, Some(1), 9)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(object::access_of(&kv, &g).await.unwrap().unwrap().count, 0);
+            // A pass of an earlier policy writes nothing.
+            object::record_access(&kv, &g, 45, 2).await.unwrap();
+            admin_change(&kv, &AdminChange::SetPolicy(policy(600)), 50)
+                .await
+                .unwrap();
+            assert!(
+                !object::reset_access_seen(&kv, &g, 60, Some(1), 2)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(object::access_of(&kv, &g).await.unwrap().unwrap().count, 2);
+            // A generation that is gone gets no record.
+            let gone = [7u8; 16];
+            assert!(
+                object::reset_access_seen(&kv, &gone, 60, None, 0)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(object::access_of(&kv, &gone).await.unwrap(), None);
+        });
+    }
+
     /// The gate names the schema this build introduced (a later schema
     /// step must not leave it pointing elsewhere).
     #[test]

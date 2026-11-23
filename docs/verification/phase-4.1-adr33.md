@@ -275,8 +275,7 @@ interval after the previous one ended, so passes do not accumulate.
   three awaits approval (not run). *Note (2026-11-22): plan version 1 was
   since run twice on 2026-11-21, both runs Inconclusive
   ([results](phase-4.1-r110-retest-results.md)); plan version 2 (C1 split
-  into C1a and C1b) is being prepared.* *Note (2026-11-23): versions 2
-  and 3 were run on 2026-11-22 ([results](phase-4.1-r110-retest-results-2.md)).*
+  into C1a and C1b) is being prepared.*
 - The slice-cancellation path of the parallel pairs (a fatal error while
   other pairs of its slice run) is covered by code analysis and the
   reviews, not by a test.
