@@ -115,6 +115,15 @@ break compatibility).
 
 ### Fixed
 
+- A signed PUT or UploadPart whose body does not match its
+  `x-amz-content-sha256` is answered `400 XAmzContentSHA256Mismatch`, as
+  AWS, instead of `500 InternalError`, which SDKs retried as a server
+  fault; other body verification failures are client errors too
+  (`IncompleteBody`, `SignatureDoesNotMatch` for an `aws-chunked` chunk
+  signature, `EntityTooLarge`). Nothing was or is stored. Re-creating a
+  bucket one owns is `409 BucketAlreadyOwnedByYou` instead of `409
+  BucketAlreadyExists` (still answered for another principal's bucket);
+  us-east-1's legacy `200 OK` is not emulated (RFC-007 §5.1.1).
 - A group's failure domain is recorded and kept by every member move
   (R-119, [ADR-0038](docs/adr/0038-group-failure-domain-record.md)):
   new groups record their label at creation (new metadata key

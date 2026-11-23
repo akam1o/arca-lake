@@ -1693,7 +1693,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
     ) -> S3Result<S3Response<CreateBucketOutput>> {
         self.admit_write()?;
         let owner = principal_of(&req);
-        bucket::create_bucket_owned(
+        match bucket::create_bucket_owned(
             self.meta.as_ref(),
             &req.input.bucket,
             Versioning::Disabled,
@@ -1701,8 +1701,18 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             now_ms(),
         )
         .await
-        .map_err(meta_err)?;
-        Ok(S3Response::new(CreateBucketOutput::default()))
+        {
+            Ok(_) => Ok(S3Response::new(CreateBucketOutput::default())),
+            // The requester's own bucket is `BucketAlreadyOwnedByYou`, as
+            // AWS answers outside us-east-1 (RFC-007 §5.1.1).
+            Err(MetaError::BucketAlreadyExists) => {
+                match bucket::get_bucket(self.meta.as_ref(), &req.input.bucket).await {
+                    Ok(b) if b.owner == owner => Err(s3_error!(BucketAlreadyOwnedByYou)),
+                    _ => Err(s3_error!(BucketAlreadyExists)),
+                }
+            }
+            Err(e) => Err(meta_err(e)),
+        }
     }
 
     async fn delete_bucket(
