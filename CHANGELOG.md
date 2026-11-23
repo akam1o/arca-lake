@@ -1,6 +1,7 @@
 # Changelog
 
-0.1.0 is the first experimental release (candidate; not yet published).
+0.1.0 is the first experimental release (published 2026-11-23, marked
+pre-release).
 This page summarizes what it contains and the changes that affect users
 and operators. Detailed implementation history is preserved in the
 [development archive](docs/archive/README.md). The format follows
@@ -10,9 +11,9 @@ break compatibility).
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased (candidate)
+## [0.1.0] - 2026-11-23
 
-The date is set at publication. First experimental release, for
+First experimental release (tag `v0.1.0`; [0.1.0 release](https://github.com/akam1o/arca-lake/releases/tag/v0.1.0)), for
 evaluation and development; **not production-ready**.
 
 - Artifacts: a Linux x86_64 (glibc) binary built with

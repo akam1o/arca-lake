@@ -6,7 +6,7 @@ an append-only storage engine, erasure coding or replication, and native
 multi-tier storage.
 
 > **Status: experimental, not production-ready.** 0.1.0 is the first
-> experimental release (candidate; not yet published), for evaluation
+> experimental release ([0.1.0 release](https://github.com/akam1o/arca-lake/releases/tag/v0.1.0)), for evaluation
 > and development. The code is under active development; it has been verified by
 > automated tests and short, dense load and fault-injection runs on
 > virtual machines, **not** by long-duration operation or on physical

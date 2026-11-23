@@ -7,7 +7,7 @@ Every example here uses plaintext on loopback: for local evaluation only.
 
 ## From the 0.1.0 binary archive
 
-0.1.0 is the first experimental release (candidate; not yet published).
+0.1.0 is the first experimental release.
 Its archive holds a Linux x86_64 (glibc) binary built with the `fdb`
 feature ([Supported platforms](supported-platforms.md)). The binary links
 the FoundationDB 7.3 client library dynamically, so install it first,

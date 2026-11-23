@@ -20,7 +20,7 @@ disclosure timeline, and credit you if you wish.
 
 ## Supported versions
 
-0.1.0 is the first experimental release (candidate; not yet published).
+0.1.0 is the first experimental release.
 
 | Version | Status |
 | --- | --- |

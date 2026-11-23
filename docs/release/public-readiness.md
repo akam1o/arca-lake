@@ -7,8 +7,8 @@ repository-publication work; it does not declare a release.
 
 Status: **the repository was made public on 2026-11-19** as an
 experimental project ([publication record](#publication-record-2026-11-19)).
-0.1.0 is the first experimental release (candidate; not yet published);
-no tag exists yet.
+0.1.0 is the first experimental release (tag `v0.1.0`, 2026-11-23;
+[0.1.0 release](https://github.com/akam1o/arca-lake/releases/tag/v0.1.0)).
 
 ## Publication record (2026-11-19)
 
