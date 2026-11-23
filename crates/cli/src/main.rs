@@ -1141,8 +1141,10 @@ enum GroupCommand {
     /// release that did not record it (0.1.0): until then no member of the
     /// group is moved. Never inferred from the nodes: name the label the
     /// group was created with. Moves nothing. Lists the groups first;
-    /// refuses (writing nothing) a label that no member's node of one of
-    /// them carries, unless `--force`. Exits 0 when recorded, 2 when
+    /// refuses (writing nothing; a dry run too) a group that does not
+    /// exist, a different recorded label without `--change`, and a label
+    /// that no member's node of one of them carries, unless `--force`; a
+    /// failure part way names the groups recorded before it. Exits 0 when recorded, 2 when
     /// recorded with warnings (members that break the label or lack it,
     /// also shown by `admin group check`), 1 when refused.
     SetFailureDomain {
@@ -3470,6 +3472,24 @@ async fn set_failure_domain<S: arca_lake_metadata::KvStore>(
         println!("no group without a recorded failure domain");
         return ExitCode::SUCCESS;
     }
+    // Refusals the write would make, checked for every group first (and
+    // by a dry run): nothing is written when one applies.
+    if let Some(g) = targets.iter().find(|t| !groups.iter().any(|g| g.id == **t)) {
+        return fail(format!("group {g} does not exist: nothing recorded"));
+    }
+    if !change
+        && let Some(d) = targets
+            .iter()
+            .filter_map(|t| domains.get(t))
+            .find(|d| d.label != label)
+    {
+        return fail(format!(
+            "group {} has failure domain '{}' recorded ({}): pass --change to replace it; nothing recorded",
+            d.group,
+            d.label,
+            d.source.as_str()
+        ));
+    }
     // A label no member's node carries is most likely a typo: refused for
     // every group before anything is written.
     let unknown: Vec<u64> = groups
@@ -3500,6 +3520,7 @@ async fn set_failure_domain<S: arca_lake_metadata::KvStore>(
         }
         return ExitCode::SUCCESS;
     }
+    let mut written = Vec::new();
     for g in &targets {
         match group_domain::set(meta, *g, label, change, now).await {
             Ok(group_domain::Set::Recorded { previous }) => println!(
@@ -3509,8 +3530,18 @@ async fn set_failure_domain<S: arca_lake_metadata::KvStore>(
             Ok(group_domain::Set::Unchanged) => {
                 println!("group {g}: failure domain '{label}' already recorded");
             }
-            Err(e) => return fail(e),
+            Err(e) => {
+                return fail(format!(
+                    "group {g}: {e}; recorded before the failure: {written:?}; not attempted: {:?}",
+                    targets
+                        .iter()
+                        .skip_while(|t| *t != g)
+                        .skip(1)
+                        .collect::<Vec<_>>()
+                ));
+            }
         }
+        written.push(*g);
     }
     // What the members look like under it (nothing is moved).
     let mut warned = !unknown.is_empty();
@@ -6378,7 +6409,7 @@ mod set_failure_domain_cli {
     use arca_lake_metadata::ops::{cluster, group_domain};
     use arca_lake_metadata::records::{GroupMember, GroupRecord, GroupRole, GroupState};
 
-    async fn run(meta: &MemKv, args: &[&str]) -> ExitCode {
+    async fn run<S: arca_lake_metadata::KvStore>(meta: &S, args: &[&str]) -> ExitCode {
         let line = ["arca-lake", "admin", "--cluster-file", "/none", "group"]
             .into_iter()
             .chain(args.iter().copied());
@@ -6481,6 +6512,54 @@ mod set_failure_domain_cli {
             ExitCode::from(2)
         );
         assert_eq!(label(&kv, clean).await.as_deref(), Some("hots"));
+    }
+
+    /// A dry run refuses what the write would refuse; a group that does
+    /// not exist is an error either way.
+    #[tokio::test]
+    async fn a_dry_run_refuses_what_the_write_would() {
+        let (kv, clean, _) = store().await;
+        let g = clean.to_string();
+        let set = |l| ["set-failure-domain", "--group", g.as_str(), "--label", l];
+        assert_eq!(run(&kv, &set("host")).await, ExitCode::SUCCESS);
+        let dry = |l| [&set(l)[..], &["--dry-run"]].concat();
+        assert_eq!(run(&kv, &dry("rack")).await, ExitCode::from(1));
+        assert_eq!(
+            run(&kv, &[&dry("rack")[..], &["--change"]].concat()).await,
+            ExitCode::SUCCESS
+        );
+        assert_eq!(label(&kv, clean).await.as_deref(), Some("host"));
+        let none = ["set-failure-domain", "--group", "99", "--label", "host"];
+        assert_eq!(run(&kv, &none).await, ExitCode::from(1));
+        assert_eq!(
+            run(&kv, &[&none[..], &["--dry-run"]].concat()).await,
+            ExitCode::from(1)
+        );
+        assert_eq!(
+            run(&kv, &[&none[..], &["--force"]].concat()).await,
+            ExitCode::from(1)
+        );
+    }
+
+    /// A run that fails part way keeps what it recorded (and says so); a
+    /// second run records the rest.
+    #[tokio::test]
+    async fn a_failure_part_way_keeps_the_groups_recorded_before_it() {
+        use arca_lake_metadata::fault::{CommitFault, FaultKv};
+        let (kv, clean, shared) = store().await;
+        let kv = FaultKv::new(kv);
+        kv.inject_on_key(
+            arca_lake_metadata::keys::group_domain(shared),
+            CommitFault::Locked,
+            1,
+        );
+        let all = ["set-failure-domain", "--all-unrecorded", "--label", "host"];
+        assert_eq!(run(&kv, &all).await, ExitCode::from(1));
+        assert_eq!(label(kv.inner(), clean).await.as_deref(), Some("host"));
+        assert_eq!(label(kv.inner(), shared).await, None);
+        // The rest (`shared` breaks `host`: recorded with a warning).
+        assert_eq!(run(&kv, &all).await, ExitCode::from(2));
+        assert_eq!(label(kv.inner(), shared).await.as_deref(), Some("host"));
     }
 
     #[tokio::test]

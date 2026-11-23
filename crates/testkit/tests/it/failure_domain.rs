@@ -712,7 +712,8 @@ async fn a_drain_and_the_planner_are_blocked_by_an_unrecorded_group() {
 /// A `Repairing` group without a record (a move a 0.1.0 leader
 /// committed) whose target fails: the retarget is refused only for the
 /// missing record, which its repair status says (not "awaiting nodes"),
-/// the at-risk gauge and the audit count; once recorded, it goes on.
+/// the at-risk gauge and the audit count; once recorded, it goes on at
+/// once (not after the backoff).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unrecorded_repair_awaits_its_failure_domain() {
     use arca_lake_metadata::ops::repair_status::{self, RepairReason};
@@ -762,10 +763,12 @@ async fn an_unrecorded_repair_awaits_its_failure_domain() {
     c.stop_node(spare).await;
     let mut cfg = fast("ctl-await", "host");
     cfg.auto_repair = true;
+    // A backoff longer than the test: the repair goes on once the domain
+    // is recorded only because that ends the wait at once.
     cfg.repair_pacing = arca_lake_controller::repair_liveness::Pacing {
-        backoff_base_ms: 100,
-        backoff_max_ms: 400,
-        unrecoverable_retry_ms: 500,
+        backoff_base_ms: 120_000,
+        backoff_max_ms: 120_000,
+        unrecoverable_retry_ms: 120_000,
     };
     let ctl = spawn(Arc::clone(&c.meta), cfg).await.unwrap();
     wait_until(

@@ -2530,6 +2530,7 @@ async fn repair_one<S: KvStore>(
                 status: prior.cloned(),
                 now_ms: now,
                 pacing: cfg.repair_pacing,
+                domain_recorded: !intents.unrecorded(g),
             };
             let current = repair_liveness::current(&obs);
             // The node the member left, when an intent names it, and the
@@ -3218,6 +3219,9 @@ async fn attempt<S: KvStore>(
         status: prior.cloned(),
         now_ms: now_ms(),
         pacing: cfg.repair_pacing,
+        // Only `decide` reads it, never on this observation (a status
+        // after an attempt).
+        domain_recorded: true,
     };
     let second = repair_liveness::second_failure(&obs, &outcome);
     if let Some(s) = repair_liveness::after(&obs, &outcome) {

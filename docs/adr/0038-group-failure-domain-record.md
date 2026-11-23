@@ -105,7 +105,17 @@ read by 0.1.0, which fails to decode an enum variant it does not know
 (and with it its whole status listing): the reason is stored as
 `AwaitingNodes` with the detail prefixed `awaiting-failure-domain: `,
 and reported as the new reason by this release's reads. 0.1.0 shows it
-as `awaiting-nodes` with that detail.
+as `awaiting-nodes` with that detail. Recording the domain ends the
+wait at once (the next leader pass), not after the repair's backoff.
+
+A recorded group whose move is refused because a member's node lacks
+the label (its domain is unknown) keeps `awaiting-nodes` (or
+`awaiting-capacity`), with the refusal ("member node N has no 'L'
+label") as the detail. Not a reason of its own: the fix is a node's
+re-registration with the label, the same kind of operator action on a
+node as for `awaiting-nodes`, and a further reason would need the same
+stored encoding for a case the audit already reports by node
+(`admin group check`, `arca_controller_groups_failure_domain_violations`).
 
 ### 2.3 Repair that does not change membership
 

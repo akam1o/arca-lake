@@ -282,6 +282,7 @@ impl Sim {
             status: grp.status.clone(),
             now_ms: self.now,
             pacing: self.pacing,
+            domain_recorded: true,
         }
     }
 
