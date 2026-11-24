@@ -52,7 +52,8 @@ release with a supported upgrade predecessor: 0.1.0.
   about 200 → 450 ms, p99 about 0.8 → 1.7 s); 16 keys within 3–6 %
   ([results](docs/verification/0.2.0-hot-key-results.md); measured
   against the 0.1.0 tag, so the gain is of all 0.2.0 changes, the queue
-  being its cause by mechanism; an on/off control is pending). Every
+  being its cause by mechanism; an on/off control in one binary confirms
+  it: SlowDown 54 % → 0.5–2.6 %, acknowledged PUT/s 1.34–1.59 ×). Every
   DELETE form (single, version-specific, DeleteObjects entries) takes
   the same turn and backoff. No format change.
 - Gateway deletes of its own partial cache copies (a population that
@@ -147,6 +148,19 @@ release with a supported upgrade predecessor: 0.1.0.
 
 ### Fixed
 
+- A write torn by a crash or a failed write (a full device, an I/O error)
+  could make the storage node report a segment as corrupt
+  (`corrupt_segments`, "record truncated", at every open from then on)
+  instead of discarding the torn bytes; affects 0.1.0. It happened when
+  a compaction had published its output under a number above the segment
+  being written, or when the store went on after the failed write in a new
+  segment. No acknowledged record was lost and the node started; the
+  segment was no longer appended to. The segment being written now
+  always has the highest number, and a failed write is cut off before its
+  segment is sealed. A segment 0.1.0 already reported this way stays
+  reported until it is compacted (recovery cannot tell it from a damaged
+  segment); its records before the torn bytes are intact. No format
+  change (RFC-005 §5.3, §5.5).
 - `x-amz-checksum-*` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) of the XML
   bodies of DeleteObjects, PutBucketPolicy, PutBucketVersioning and
   CreateBucket is verified. Before, it was ignored: a corrupted body was

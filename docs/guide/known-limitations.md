@@ -126,6 +126,12 @@ entry in the [risk register](../architecture/risks.md).
   minimum orphan age; a scrub before that reports them.
 - `admin integrity verify-manifests` checks multipart uploads' manifests
   only; a store without multipart uploads has nothing for it to check.
+- A storage node upgraded from 0.1.0 may keep reporting a segment as
+  corrupt at open ("storage open found damaged records",
+  `corrupt_segments` with "record truncated") if 0.1.0 left a torn write
+  at the end of a sealed segment. Its records before the torn bytes are
+  read normally; the report ends when the segment is compacted, which
+  happens once enough of its records are dead (RFC-005 §5.5).
 
 - Under capacity pressure writes are throttled and then refused with
   `503 SlowDown`; small devices fill faster than one evaluation

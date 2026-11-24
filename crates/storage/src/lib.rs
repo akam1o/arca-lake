@@ -22,7 +22,7 @@ pub use error::StorageError;
 pub use format::ShardKey;
 pub use index::{IndexSizes, Location, QuarantineEntry, ReleaseCause};
 pub use store::{
-    CompactionReport, CompactionStep, OpenReport, ScrubReport, SegmentStats, Store, StoreConfig,
-    StoreStats, StoreTimings, StoreTimingsSnapshot, SyncPolicy, Verified, WrittenBytes,
-    clamp_format_write, default_format_write,
+    CompactionPass, CompactionReport, CompactionStep, OpenReport, ScrubReport, SegmentStats, Store,
+    StoreConfig, StoreStats, StoreTimings, StoreTimingsSnapshot, SyncPolicy, Verified,
+    WrittenBytes, clamp_format_write, default_format_write,
 };

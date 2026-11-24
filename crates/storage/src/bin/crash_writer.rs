@@ -78,8 +78,10 @@ fn main() {
             writeln!(out, "over {} {i}", i - 10).unwrap();
         }
         if i % 97 == 96 {
-            for seg in store.compaction_candidates(0.3).expect("candidates") {
-                store.compact(seg).expect("compact");
+            let candidates = store.compaction_candidates(0.3).expect("candidates");
+            let mut pass = store.compaction_pass(candidates.len());
+            for seg in candidates {
+                pass.compact(seg).expect("compact");
                 writeln!(out, "compact {seg}").unwrap();
             }
         }

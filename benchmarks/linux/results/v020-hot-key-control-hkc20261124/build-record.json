@@ -1,0 +1,16 @@
+{
+ "arms": {
+  "candidate": {
+   "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+   "commit": "d7df11062b7ceeb0e3ce7c659de7bffc09d57778",
+   "features": "fdb",
+   "label": "build of d7df11062b7ceeb0e3ce7c659de7bffc09d57778",
+   "locked": true,
+   "profile": "release",
+   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+   "sha256": "738eba64c6976800792838ab53f920f908ac2bea7fb0bf6f2c1d46086b2f922b"
+  }
+ },
+ "built": "2026-11-24T07:22:45+0900",
+ "contend_sha256": "abd26799f5c4be513890a262f468de101a4b9cf5b3bb8cfcc78d56cda7846789"
+}

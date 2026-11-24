@@ -1,0 +1,369 @@
+{
+ "arm": "on",
+ "binaries_match": true,
+ "check": {
+  "definite_failures_visible": 0,
+  "first_definite_failures_visible": [],
+  "first_violations": [],
+  "gets": 66485,
+  "mode": "check",
+  "notes": [],
+  "put_attempts": 6761,
+  "put_outcomes": {
+   "acknowledged": 6754,
+   "definite failure (503 SlowDown metadata transaction conflicts; retry)": 3,
+   "definite failure (503 SlowDown the writes to this key ahead of this one took too long; retry)": 4
+  },
+  "puts": 6761,
+  "rc": 0,
+  "violations": 0
+ },
+ "clock_offsets": {
+  "a": {
+   "offset_s": 0.20009064674377441,
+   "rtt_s": 0.3455162048339844
+  },
+  "b": {
+   "offset_s": 0.2149949073791504,
+   "rtt_s": 0.37381720542907715
+  },
+  "c": {
+   "offset_s": 0.1971428394317627,
+   "rtt_s": 0.33734607696533203
+  }
+ },
+ "commit": "d7df11062b7ceeb0e3ce7c659de7bffc09d57778",
+ "correct": true,
+ "exited_after_load": [],
+ "exited_at_end": [],
+ "fdb_after": {
+  "available": true,
+  "commit_latency_probe_s": 0.00530601,
+  "healthy": true,
+  "reads": 686267,
+  "tx_committed": 23386,
+  "tx_conflicted": 7423,
+  "tx_rejected": 0,
+  "tx_started": 177446,
+  "writes": 109112
+ },
+ "fdb_before": {
+  "available": true,
+  "commit_latency_probe_s": 0.00209022,
+  "healthy": true,
+  "reads": 605,
+  "tx_committed": 67,
+  "tx_conflicted": 4,
+  "tx_rejected": 0,
+  "tx_started": 256,
+  "writes": 138
+ },
+ "final_records": {
+  "gc_backlog": 0.0,
+  "live": 3.0,
+  "pending": 0.0
+ },
+ "finished": "2026-11-24T07:37:09+0900",
+ "hosts": {
+  "a": {
+   "cpu_busy_s": 0,
+   "foreign_heavy": {},
+   "mem_avail_min": 7526563840,
+   "roles": {
+    "controller": {
+     "cpu_cores_mean": 0.10143569998971963,
+     "rss_max": 90902528
+    },
+    "fdbserver": {
+     "cpu_cores_mean": 0.7359884574968375,
+     "rss_max": 137617408
+    },
+    "other": {
+     "cpu_cores_mean": 0.00796994785633512,
+     "rss_max": 17817600
+    }
+   },
+   "root_free_min": 4471619584,
+   "span_s": 69.00923442840576
+  },
+  "b": {
+   "cpu_busy_s": 0,
+   "foreign_heavy": {},
+   "mem_avail_min": 7519174656,
+   "roles": {
+    "gateway": {
+     "cpu_cores_mean": 1.9335042798086712,
+     "rss_max": 49700864
+    },
+    "other": {
+     "cpu_cores_mean": 0.007825019194309257,
+     "rss_max": 17731584
+    },
+    "storage-node": {
+     "cpu_cores_mean": 0.3802379697382864,
+     "rss_max": 33480704
+    }
+   },
+   "root_free_min": 10980786176,
+   "span_s": 69.0094153881073
+  },
+  "c": {
+   "cpu_busy_s": 0,
+   "foreign_heavy": {},
+   "mem_avail_min": 7577767936,
+   "roles": {
+    "contend": {
+     "cpu_cores_mean": 0.2396764187796276,
+     "rss_max": 15368192
+    },
+    "other": {
+     "cpu_cores_mean": 0.006665728696410443,
+     "rss_max": 17707008
+    }
+   },
+   "root_free_min": 21391405056,
+   "span_s": 69.00970935821533
+  }
+ },
+ "invalid": false,
+ "invalid_reasons": [],
+ "label": "queue-on (the same binary, default gateways)",
+ "load_rc": 0,
+ "metrics": {
+  "ack_p50_ms": 456.3,
+  "ack_p95_ms": 1487.317,
+  "ack_p99_ms": 1782.781,
+  "acked": 6754,
+  "acked_per_s": 112.0630887646848,
+  "all_p95_ms": 1492.169,
+  "all_p99_ms": 1794.734,
+  "attempts_per_ack": 24.915605567071363,
+  "duration_s": 60.27,
+  "fdb": {
+   "reads": 685662,
+   "tx_committed": 23319,
+   "tx_conflicted": 7419,
+   "tx_rejected": 0,
+   "tx_started": 177190,
+   "writes": 108974
+  },
+  "fdb_conflicted_per_ack": 1.098460171750074,
+  "gateway": {
+   "arca_gateway_commit_queue_backoff_us_total": 93278753.0,
+   "arca_gateway_commit_queue_bypassed_total": 0.0,
+   "arca_gateway_commit_queue_conflicts_total": 7383.0,
+   "arca_gateway_commit_queue_refused_full_total": 0.0,
+   "arca_gateway_commit_queue_refused_wait_total": 4.0,
+   "arca_gateway_commit_queue_turns_total": 6757.0,
+   "arca_gateway_commit_queue_wait_us_total": 3484598263.0,
+   "arca_gateway_commit_queue_waited_total": 6309.0,
+   "arca_gateway_meta_txn_attempts_total": 168280.0,
+   "arca_gateway_meta_txn_conflicts_total": 7417.0,
+   "arca_gateway_meta_txn_exhausted_total": 3.0,
+   "arca_gateway_meta_txn_unknown_retries_total": 0.0
+  },
+  "gets": {
+   "ok": 66391,
+   "total": 66485
+  },
+  "put_attempts": 6761,
+  "puts": 6761,
+  "slowdown": 7,
+  "slowdown_share": 0.0010353498003253957,
+  "unknown": 0,
+  "unknown_by_cause": {}
+ },
+ "processes_exited": [],
+ "round": 1,
+ "run_id": "hkc20261124-02-unv-on",
+ "run_window": [
+  1795473176.644959,
+  1795473236.921945
+ ],
+ "scenario": "unv",
+ "scrub": {
+  "1": {
+   "ChecksumMismatch": 0,
+   "InvalidHeader": 0,
+   "MetadataDataMismatch": 0,
+   "MissingShard": 0,
+   "StalePlacementEpoch": 0,
+   "TruncatedShard": 0,
+   "UnexpectedShard": 0,
+   "UnrecoverableStripe": 0,
+   "held": {
+    "in_flight": 0,
+    "retained": 0,
+    "retained_damaged": 0,
+    "unclassified": 0
+   }
+  },
+  "2": {
+   "ChecksumMismatch": 0,
+   "InvalidHeader": 0,
+   "MetadataDataMismatch": 0,
+   "MissingShard": 0,
+   "StalePlacementEpoch": 0,
+   "TruncatedShard": 0,
+   "UnexpectedShard": 0,
+   "UnrecoverableStripe": 0,
+   "held": {
+    "in_flight": 0,
+    "retained": 0,
+    "retained_damaged": 0,
+    "unclassified": 0
+   }
+  },
+  "3": {
+   "ChecksumMismatch": 0,
+   "InvalidHeader": 0,
+   "MetadataDataMismatch": 0,
+   "MissingShard": 0,
+   "StalePlacementEpoch": 0,
+   "TruncatedShard": 0,
+   "UnexpectedShard": 0,
+   "UnrecoverableStripe": 0,
+   "held": {
+    "in_flight": 0,
+    "retained": 0,
+    "retained_damaged": 0,
+    "unclassified": 0
+   }
+  },
+  "4": {
+   "ChecksumMismatch": 0,
+   "InvalidHeader": 0,
+   "MetadataDataMismatch": 0,
+   "MissingShard": 0,
+   "StalePlacementEpoch": 0,
+   "TruncatedShard": 0,
+   "UnexpectedShard": 0,
+   "UnrecoverableStripe": 0,
+   "held": {
+    "in_flight": 0,
+    "retained": 0,
+    "retained_damaged": 0,
+    "unclassified": 0
+   }
+  },
+  "5": {
+   "ChecksumMismatch": 0,
+   "InvalidHeader": 0,
+   "MetadataDataMismatch": 0,
+   "MissingShard": 0,
+   "StalePlacementEpoch": 0,
+   "TruncatedShard": 0,
+   "UnexpectedShard": 0,
+   "UnrecoverableStripe": 0,
+   "held": {
+    "in_flight": 0,
+    "retained": 0,
+    "retained_damaged": 0,
+    "unclassified": 0
+   }
+  },
+  "6": {
+   "ChecksumMismatch": 0,
+   "InvalidHeader": 0,
+   "MetadataDataMismatch": 0,
+   "MissingShard": 0,
+   "StalePlacementEpoch": 0,
+   "TruncatedShard": 0,
+   "UnexpectedShard": 0,
+   "UnrecoverableStripe": 0,
+   "held": {
+    "in_flight": 0,
+    "retained": 0,
+    "retained_damaged": 0,
+    "unclassified": 0
+   }
+  },
+  "7": {
+   "ChecksumMismatch": 0,
+   "InvalidHeader": 0,
+   "MetadataDataMismatch": 0,
+   "MissingShard": 0,
+   "StalePlacementEpoch": 0,
+   "TruncatedShard": 0,
+   "UnexpectedShard": 0,
+   "UnrecoverableStripe": 0,
+   "held": {
+    "in_flight": 0,
+    "retained": 0,
+    "retained_damaged": 0,
+    "unclassified": 0
+   }
+  },
+  "8": {
+   "ChecksumMismatch": 0,
+   "InvalidHeader": 0,
+   "MetadataDataMismatch": 0,
+   "MissingShard": 0,
+   "StalePlacementEpoch": 0,
+   "TruncatedShard": 0,
+   "UnexpectedShard": 0,
+   "UnrecoverableStripe": 0,
+   "held": {
+    "in_flight": 0,
+    "retained": 0,
+    "retained_damaged": 0,
+    "unclassified": 0
+   }
+  }
+ },
+ "scrub_clean": true,
+ "scrub_complete": true,
+ "settle": [
+  {
+   "gc_backlog": 1791.0,
+   "live": 19003.0,
+   "pending": 12905.0,
+   "t": 0.9
+  },
+  {
+   "gc_backlog": 675.0,
+   "live": 20295.0,
+   "pending": 18267.0,
+   "t": 21.7
+  },
+  {
+   "gc_backlog": 0.0,
+   "live": 20283.0,
+   "pending": 16638.0,
+   "t": 42.6
+  },
+  {
+   "gc_backlog": 0.0,
+   "live": 12618.0,
+   "pending": 7245.0,
+   "t": 63.9
+  },
+  {
+   "gc_backlog": 0.0,
+   "live": 12618.0,
+   "pending": 2025.0,
+   "t": 84.8
+  },
+  {
+   "gc_backlog": 0.0,
+   "live": 3.0,
+   "pending": 0.0,
+   "t": 105.7
+  },
+  {
+   "gc_backlog": 0.0,
+   "live": 3.0,
+   "pending": 0.0,
+   "t": 126.9
+  },
+  {
+   "gc_backlog": 0.0,
+   "live": 3.0,
+   "pending": 0.0,
+   "t": 147.7
+  }
+ ],
+ "settled": true,
+ "sha256": "738eba64c6976800792838ab53f920f908ac2bea7fb0bf6f2c1d46086b2f922b",
+ "started": "2026-11-24T07:32:23+0900"
+}

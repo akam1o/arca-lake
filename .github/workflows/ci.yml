@@ -1022,6 +1022,8 @@ jobs:
         run: python3 -I -W ignore::ResourceWarning -m unittest discover -s r110/tests -t . -v
       - name: hot-key A/B driver tests (local only, no host)
         run: python3 -I benchmarks/linux/hot_key_ab_test.py -v
+      - name: three-host validation driver tests (local only, no host)
+        run: python3 -I benchmarks/linux/three_host_test.py -v
       - name: check Signed-off-by trailers
         env:
           EVENT: ${{ github.event_name }}

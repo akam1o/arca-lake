@@ -44,7 +44,7 @@ earlier versions.
 | --- | --- | --- |
 | R1 | No acknowledged record is lost on process crash | *Verified*: SIGKILL test, 60 iterations, 3,422 acknowledged operations |
 | R2 | No corrupt record is ever returned as valid | *Verified*: randomized bit flips (40), truncations (40), live corruption test |
-| R3 | A torn tail is recovered by truncation; corruption in the middle is reported, not silently skipped | *Verified*: truncation test; scan distinguishes a torn tail from a hole by probing for later valid records |
+| R3 | A torn tail is recovered by truncation; corruption in the middle is reported, not silently skipped | *Verified*: truncation test; scan distinguishes a torn tail from a hole by probing for later valid records. Only the last segment can have a torn tail: the active segment is always the last one (§5.3) and a failed append is cut off before its segment is sealed. Up to 0.1.0 neither held, and a torn append could be reported as a corrupt segment (§5.5) |
 | R4 | Recovery is idempotent | *Verified*: second open changes nothing in every crash test |
 | R5 | Interrupted compaction never loses or resurrects data | *Verified*: fault injection at every step |
 | R6 | Reads concurrent with compaction never fail or see wrong data | *Verified*: 4 reader threads during repeated compaction |
@@ -81,7 +81,22 @@ rebuild because new sequences are strictly increasing.
 
 - `put`/`delete` append one record under the writer lock. The active segment
   rolls over when it reaches the configured size; the old segment is synced
-  before the new one is created.
+  before the new one is created. The active segment is always the
+  highest-numbered one: a compaction output, whose number is reserved
+  when the compaction starts, gets its segment name only after the active
+  segment has rolled over past it (under the writer lock, so no append is
+  half-written meanwhile). A compaction pass (`Store::compaction_pass`,
+  used by the node's compactor) reserves the ids of all its outputs at
+  once, so the active segment rolls over once per pass, not once per
+  output. A rollover after a failed append first cuts
+  the segment back to its last good record and syncs it; if that fails,
+  appends keep failing until it succeeds. The sequence bound is written
+  before the new segment is created, and any failed rollover leaves the
+  writer failed, so that the next append rolls over before it writes:
+  a new segment the failure left behind is never above a segment that
+  takes appends. An active segment that holds no
+  record is removed at rollover instead of sealed (an empty sealed
+  segment that could not be removed is removed by its compaction).
 - `SyncPolicy::Always`: `fdatasync` under the writer lock, then acknowledge.
 - `SyncPolicy::Group` (default): after appending, the caller waits for a sync
   covering its `(segment, end)` position. If no sync is in progress it
@@ -116,7 +131,19 @@ torn tail: it is truncated if it is in the last segment and otherwise
 reported. If a valid record exists later, the region is a hole (corruption):
 the valid prefix is indexed and the segment is reported and excluded from
 appends. A last segment shorter than its header (crash during creation) is
-deleted. The index is rebuilt by the sequence rule.
+deleted. The index is rebuilt by the sequence rule: the record (or
+tombstone) with the highest sequence wins, whatever the segment numbers,
+so a compaction output numbered below a newer record never wins over it.
+
+Up to 0.1.0 the active segment could be below a compaction output, and a
+failed append stayed at the end of the segment it sealed: a torn append
+then read as a sealed segment ending in a record that runs past the end
+of the file, reported in `corrupt_segments` at every open (no record was
+lost: the torn one was never acknowledged, every earlier one is
+indexed). Recovery keeps reporting such a segment, because the same
+bytes are what a sealed segment truncated by damage looks like, and the
+two cannot be told apart from the files. The report ends when the
+segment is compacted (once enough of its records are dead).
 
 ### 5.6 Compaction
 
@@ -228,7 +255,7 @@ refuses every delete until an operator removes it (ADR-0027).
 
 | Scenario | Behaviour | Evidence |
 | --- | --- | --- |
-| Process killed mid-append | Torn tail truncated; acknowledged records intact; unacknowledged ones present only if complete | SIGKILL test |
+| Process killed mid-append | Torn tail truncated; acknowledged records intact; unacknowledged ones present only if complete | SIGKILL test; `io_faults::a_torn_append_after_a_compaction_is_a_torn_tail_not_a_corrupt_segment` (reported a corrupt segment up to 0.1.0) |
 | Power loss after acknowledgment | Data was `fdatasync`ed before the ack; on reopen it is present | Truncation model; hardware verification pending (R8) |
 | Bit rot in payload | Block CRC mismatch on read or scrub → corrupt, quarantined | Bit-flip test |
 | Bit rot in header | Header CRC mismatch → record invalid; if last, torn tail; else corruption reported | Bit-flip test |
@@ -237,7 +264,7 @@ refuses every delete until an operator removes it (ADR-0027).
 | Crash during compaction after unlink | Only the output exists; index rebuilt from it | Fault-injection test |
 | Crash during segment creation | Short last file deleted on open | Test in `crash.rs` |
 | Segment from another device copied in | Rejected at open (device ID mismatch) | Test in `crash.rs` |
-| Full disk | Append returns an I/O error; nothing acknowledged; the partial record is a torn tail on reopen | By construction; test pending |
+| Full disk | Append returns an I/O error; nothing acknowledged; the partial record is cut off at the next rollover, or is a torn tail on reopen | `io_faults::a_torn_append_is_cut_off_before_its_segment_is_sealed`, `a_failed_cut_keeps_the_writer_failed_until_one_succeeds` |
 
 ## 8. Consistency and durability guarantees
 
@@ -248,6 +275,12 @@ refuses every delete until an operator removes it (ADR-0027).
   the key, or an explicit error.
 - Not guaranteed: `SyncPolicy::Never`; anything after an I/O error that the
   caller ignored.
+- An operation that failed is not acknowledged, but it may still take
+  effect: a `put` or `delete` whose sync failed was written whole, is
+  not visible while the store runs, and is there after a restart (the
+  rollover that follows the failure keeps every whole record). Callers
+  treat a failed operation as unknown, as after a timeout
+  (`io_faults::a_put_or_delete_whose_sync_failed_may_take_effect_after_a_restart`).
 
 **Deferred reclamation (Phase 3.12, ADR-0028).** A delete of a durable
 shard on a node with a retention does not write a tombstone: the record
