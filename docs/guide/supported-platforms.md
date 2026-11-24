@@ -5,7 +5,7 @@ validation hosts, not a support commitment.
 
 | Component | Status |
 | --- | --- |
-| Linux x86_64 (glibc) | Built and tested in CI (GitHub-hosted `ubuntu-24.04` runners); validation VMs for load and fault-injection runs. The 0.1.0 binary is built with `cargo build --release --locked -p arca-lake --features fdb` ([building](../release/building.md)) and needs at least the glibc its `BUILD-INFO.txt` names (2.39 for the 0.1.0 candidate) |
+| Linux x86_64 (glibc) | Built and tested in CI (GitHub-hosted `ubuntu-24.04` runners); validation VMs for load and fault-injection runs. The release binary is built with `cargo build --release --locked -p arca-lake --features fdb` ([building](../release/building.md)) and needs at least the glibc its `BUILD-INFO.txt` names (2.39 for 0.1.0) |
 | Linux aarch64 | Not verified (builds are expected to work; no CI, no binary) |
 | macOS (arm64) | Development only: the workspace builds and the tests run with the in-memory metadata backend; no FoundationDB backend in CI on macOS; no binary |
 | Windows | Not supported |

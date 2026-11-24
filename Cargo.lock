@@ -104,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-common",
  "arca-lake-controller",
@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-arcabench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-protocol",
  "bytes",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-controller"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-common",
  "arca-lake-ec",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-ec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-gateway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-common",
  "arca-lake-ec",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-metabench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-metadata",
  "clap",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-metadata"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-common",
  "foundationdb",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-placement"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "thiserror",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-common",
  "bytes",
@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-s3load"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "clap",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-soakload"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aws-credential-types",
  "aws-sdk-s3",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-common",
  "crc32c",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-storage-node"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-common",
  "arca-lake-protocol",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-testkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-common",
  "arca-lake-controller",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-tiering"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-common",
  "arca-lake-ec",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "arca-lake-transfer-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arca-lake-protocol",
  "bytes",

@@ -1,15 +1,41 @@
 # Changelog
 
-0.1.0 is the first experimental release (published 2026-11-23, marked
-pre-release).
-This page summarizes what it contains and the changes that affect users
+0.2.0 is the second experimental release (in preparation; to be marked
+pre-release). 0.1.0, the first, was published on 2026-11-23.
+This page summarizes what each release contains and the changes that affect users
 and operators. Detailed implementation history is preserved in the
 [development archive](docs/archive/README.md). The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/) (0.x: any minor version may
 break compatibility).
 
-## [Unreleased]
+## [0.2.0] - TBD
+
+Second experimental release, for evaluation and development; **not
+production-ready**. It closes the misdirected-write and failure-domain
+gaps found in the 0.1.0 validation (R-117, R-119), makes scrub tell
+retained, in-flight and unclassified shards apart (ADR-0036), fixes the
+tiering access reset (R-118) and a repair task dropped during a
+migration (R-120), makes concurrent writes to one key take turns
+(R-112), verifies `Content-MD5` and the checksums of XML request bodies,
+and gives body verification failures S3 client errors. It is the first
+release with a supported upgrade predecessor: 0.1.0.
+
+- Artifacts: as for 0.1.0, a Linux x86_64 (glibc) binary built with
+  `cargo build --release --locked -p arca-lake --features fdb`, and the
+  source; it needs the FoundationDB 7.3 client library on every host
+  that runs it ([supported platforms](docs/guide/supported-platforms.md)).
+- Compatibility axes: metadata schema 5 (reads 4–5; a new store starts
+  at 5, an upgraded one stays at 4 until `admin upgrade finalize`); wire
+  protocol 4 (accepts 3), metadata record version 2, segment format 2
+  (reads 1–2) and storage record version 1, all unchanged from 0.1.0.
+  New protobuf fields are additive and ignored by 0.1.0
+  ([versions and compatibility](docs/guide/operations.md#versions-and-compatibility)).
+- Upgrade: from 0.1.0 only (stores of schema 3 or below go through 0.1.0
+  first); storage nodes, then controllers, then the groups' failure
+  domains recorded, then gateways, then the one-way finalize
+  ([upgrading from 0.1.0](docs/guide/operations.md#upgrading-from-010-to-020)).
+- Contents: the Changed, Security, Fixed and Limitations entries below.
 
 ### Changed
 
@@ -66,7 +92,21 @@ break compatibility).
   tiering or rebalancing.
 - R-110 harness: the scrub parser reads both line formats; the judge's
   count rule for unexpected shards applies only to timelines of earlier
-  binaries; unclassified shards make C5 Inconclusive.
+  binaries; unclassified shards make C5 Inconclusive. A run's files on
+  the host (logs, guard and sentinel records, the ledger; not the node
+  stores) are saved, checked by sha256 and listed in a manifest before
+  any teardown may remove them; an incomplete collection is an evidence
+  failure, never a pass, and a process lost to a host reboot (boot id
+  changed) is recorded as such, never as stopped. The teardown removes
+  nothing unless every stop is confirmed and the collection is complete.
+- Three-host validation for 0.2.0
+  ([plan and rehearsal](docs/verification/0.2.0-three-host-validation.md)):
+  mutual TLS for node RPCs and TLS to FoundationDB, SigV4-signed S3
+  requests, new steps for multipart uploads, R-117, R-119, the scrub
+  classes and a new node joining, and a separate upgrade scenario from
+  the published 0.1.0 archive through the finalize. The hot-key driver
+  runs the on/off control in one binary and stops a campaign when a host
+  is unreachable.
 - Metadata schema 5
   ([ADR-0039](docs/adr/0039-schema-5-and-the-0.1.0-upgrade.md)). 0.2.0
   reads schemas 4 and 5 and initialises new stores at 5. A cluster
@@ -198,6 +238,24 @@ break compatibility).
   record is reset only once every chunk of the generation is in the
   target tier, a generation moved in part is finished by a later pass,
   and reads recorded while the pass ran are kept. No format change.
+- Tests: races and environment assumptions fixed in the restore, node
+  lifecycle, delete-fence, capacity (allotments that fit on tmpfs),
+  S3 error, hot-key, membership isolation (it waits for the other group's
+  move by progress, not a fixed 30 s) and R-110 baseline-probe tests; no assertion was
+  removed. The CI upgrade job runs against the published 0.1.0 archive
+  (its sha256 and `BUILD-INFO.txt` commit pinned).
+- Documentation: corrections to the 0.1.0 record (its readiness tracker,
+  the roadmap and an ADR-0033 note); the 0.1.0 Release text was
+  corrected to match it.
+
+### Limitations
+
+This remains experimental. Not verified for 0.2.0 at the time of
+writing: the final three-host validation and an R-110 run (its 0.2.0
+plan is under review). A segment that 0.1.0 reported as corrupt after a
+torn write stays reported until it is compacted (see Fixed). See the [0.2.0 readiness](docs/release/0.2.0-readiness.md),
+[known limitations](docs/guide/known-limitations.md) and the
+[risk register](docs/architecture/risks.md).
 
 ## [0.1.0] - 2026-11-23
 
