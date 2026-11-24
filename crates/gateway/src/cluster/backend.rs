@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use arca_lake_common::EcProfile;
 use arca_lake_common::timing::{Histogram, HistogramSnapshot};
 use arca_lake_metadata::guard::{GuardedKv, OpClass};
+use arca_lake_metadata::kv::ConflictBackoff;
 use arca_lake_metadata::ops::compat;
 use arca_lake_metadata::ops::object::Precondition;
 use arca_lake_metadata::ops::{bucket, list, multipart, object};
@@ -83,6 +84,11 @@ pub struct ClusterConfig {
     /// Chunk placements of one PUT in flight at once (bounded memory:
     /// that many chunks plus their shards per PUT).
     pub write_pipeline: usize,
+    /// The longest a failed PUT or UploadPart waits for its chunk
+    /// placements in flight before it aborts them and answers (also at
+    /// most a third of `lease`); [`super::write::FAILED_WRITE_SETTLE`] by
+    /// default.
+    pub failed_write_settle: Duration,
     /// Minimum size of every multipart part but the last (AWS: 5 MiB;
     /// smaller values are a documented non-AWS extension for labs).
     pub multipart_min_part_bytes: u64,
@@ -104,6 +110,8 @@ pub struct ClusterConfig {
     pub record_access: bool,
     /// How reads are recorded when `record_access` is on (ADR-0034).
     pub access: super::access::AccessConfig,
+    /// Per-key commit queue and conflict backoff (ADR-0041).
+    pub commit_queue: super::commit_queue::CommitQueueConfig,
 }
 
 /// Fault-injection points in the write path (tests only).
@@ -146,6 +154,8 @@ pub struct ClusterBackend<S> {
     pub(super) put_stats: Arc<PutStats>,
     pub(super) pop_queue: Arc<PopulationQueue>,
     pub(super) integrity: Arc<IntegrityState>,
+    /// Turns of commits to one key (ADR-0041).
+    pub(super) commit_queue: Arc<super::commit_queue::CommitQueue>,
 }
 
 /// Tell the node clients which node serves each address: over TLS a node
@@ -525,6 +535,9 @@ pub struct PutStats {
     pub total: Histogram,
     /// PUTs currently in progress.
     pub in_flight: std::sync::atomic::AtomicU64,
+    /// Failed writes whose placements in flight outlasted the settle
+    /// deadline and were aborted.
+    pub settle_timeouts: std::sync::atomic::AtomicU64,
 }
 
 /// A copy of [`PutStats`].
@@ -546,6 +559,8 @@ pub struct PutStatsSnapshot {
     pub total: HistogramSnapshot,
     /// See [`PutStats::in_flight`].
     pub in_flight: u64,
+    /// See [`PutStats::settle_timeouts`].
+    pub settle_timeouts: u64,
 }
 
 impl PutStats {
@@ -561,6 +576,9 @@ impl PutStats {
             commit: self.commit.snapshot(),
             total: self.total.snapshot(),
             in_flight: self.in_flight.load(std::sync::atomic::Ordering::Relaxed),
+            settle_timeouts: self
+                .settle_timeouts
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
@@ -815,6 +833,7 @@ impl<S> Clone for ClusterBackend<S> {
         Self {
             put_stats: Arc::clone(&self.put_stats),
             pop_queue: Arc::clone(&self.pop_queue),
+            commit_queue: Arc::clone(&self.commit_queue),
             integrity: Arc::clone(&self.integrity),
             meta: Arc::clone(&self.meta),
             meta_repair: Arc::clone(&self.meta_repair),
@@ -982,6 +1001,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 Arc::downgrade(&cluster),
             );
         }
+        let cfg_commit_queue = cfg.commit_queue.clone();
         Ok(Self {
             meta,
             meta_repair,
@@ -997,6 +1017,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             put_stats: Arc::new(PutStats::default()),
             cache_state: Arc::new(CacheState::with_population_permits(permits)),
             access: access_table,
+            commit_queue: Arc::new(super::commit_queue::CommitQueue::new(cfg_commit_queue)),
         })
     }
 
@@ -1214,6 +1235,12 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         self.integrity.snapshot()
     }
 
+    /// Counters of the per-key commit queue (ADR-0041).
+    #[must_use]
+    pub fn commit_queue_stats(&self) -> super::commit_queue::CommitQueueStatsSnapshot {
+        self.commit_queue.stats()
+    }
+
     /// Counters of the population queue.
     #[must_use]
     pub fn population_queue_stats(&self) -> PopQueueStatsSnapshot {
@@ -1240,6 +1267,28 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
 }
 
 impl<S: KvStore + 'static> ClusterBackend<S> {
+    /// The turn to commit to `key` (ADR-0041). A refusal is `SlowDown`:
+    /// no commit attempt was made, so nothing is applied.
+    pub(super) async fn commit_turn(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<super::commit_queue::Turn, S3Error> {
+        use super::commit_queue::Refused;
+        self.commit_queue
+            .turn(bucket, key)
+            .await
+            .map_err(|r| match r {
+                Refused::Full => {
+                    s3_error!(SlowDown, "too many writes to this key are waiting; retry")
+                }
+                Refused::WaitBound => s3_error!(
+                    SlowDown,
+                    "the writes to this key ahead of this one took too long; retry"
+                ),
+            })
+    }
+
     /// DeleteObject without a client precondition. Every attempt is pinned
     /// to the version it was decided on (the pointer moved since the pin:
     /// pin again), and the delete marker's version id is chosen once, so
@@ -1254,6 +1303,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         &self,
         bucket: &str,
         key: &str,
+        backoff: Option<&dyn ConflictBackoff>,
     ) -> Result<object::Deleted, MetaError> {
         let meta = self.meta.as_ref();
         let marker = arca_lake_metadata::records::new_version_id();
@@ -1264,16 +1314,27 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 if_current: Some(pin),
                 ..object::Precondition::default()
             };
-            match object::delete_object_as(meta, bucket, key, &pinned, &marker, now_ms()).await {
+            match object::delete_object_as_with(
+                meta,
+                bucket,
+                key,
+                &pinned,
+                &marker,
+                now_ms(),
+                backoff,
+            )
+            .await
+            {
                 Err(MetaError::PreconditionFailed) if moved < 4 => moved += 1,
                 Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r))) => {
-                    return match object::delete_object_as(
+                    return match object::delete_object_as_with(
                         meta,
                         bucket,
                         key,
                         &pinned,
                         &marker,
                         now_ms(),
+                        backoff,
                     )
                     .await
                     {
@@ -1320,6 +1381,21 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 other => return other,
             }
         }
+    }
+}
+
+/// The answer to creating a bucket that exists, from the lookup of its
+/// record: its owner's request is `BucketAlreadyOwnedByYou`, another
+/// principal's (or a bucket deleted since) `BucketAlreadyExists`; a failed
+/// lookup is the metadata error, not a 409.
+fn bucket_exists_error(
+    lookup: Result<arca_lake_metadata::records::BucketRecord, MetaError>,
+    requester: &str,
+) -> s3s::S3Error {
+    match lookup {
+        Ok(b) if b.owner == requester => s3_error!(BucketAlreadyOwnedByYou),
+        Ok(_) | Err(MetaError::NoSuchBucket) => s3_error!(BucketAlreadyExists),
+        Err(e) => meta_err(e),
     }
 }
 
@@ -1598,10 +1674,20 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         upload_id: &UploadId,
         req: &multipart::CompleteRequest<'_>,
     ) -> S3Result<multipart::Completed> {
+        let _turn = self.commit_turn(bucket, key).await?;
+        let backoff = self.commit_queue.backoff();
         let mut last = None;
         for _ in 0..4 {
-            match multipart::complete(self.meta.as_ref(), bucket, key, upload_id, req, now_ms())
-                .await
+            match multipart::complete_with(
+                self.meta.as_ref(),
+                bucket,
+                key,
+                upload_id,
+                req,
+                now_ms(),
+                backoff.as_ref().map(|b| b as &dyn ConflictBackoff),
+            )
+            .await
             {
                 Ok(c) => return Ok(c),
                 Err(MetaError::Kv(arca_lake_metadata::KvError::CommitUnknown(r))) => last = Some(r),
@@ -1635,7 +1721,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
     ) -> S3Result<S3Response<CreateBucketOutput>> {
         self.admit_write()?;
         let owner = principal_of(&req);
-        bucket::create_bucket_owned(
+        match bucket::create_bucket_owned(
             self.meta.as_ref(),
             &req.input.bucket,
             Versioning::Disabled,
@@ -1643,8 +1729,16 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             now_ms(),
         )
         .await
-        .map_err(meta_err)?;
-        Ok(S3Response::new(CreateBucketOutput::default()))
+        {
+            Ok(_) => Ok(S3Response::new(CreateBucketOutput::default())),
+            // The requester's own bucket is `BucketAlreadyOwnedByYou`, as
+            // AWS answers outside us-east-1 (RFC-007 §5.1.1).
+            Err(MetaError::BucketAlreadyExists) => Err(bucket_exists_error(
+                bucket::get_bucket(self.meta.as_ref(), &req.input.bucket).await,
+                &owner,
+            )),
+            Err(e) => Err(meta_err(e)),
+        }
     }
 
     async fn delete_bucket(
@@ -1813,7 +1907,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             return Err(s3_error!(IncompleteBody));
         };
         let pre = precondition(input.if_match.as_ref(), input.if_none_match.as_ref())?;
-        let checksum = request_checksum(
+        let mut checksum = request_checksum(
             input.checksum_algorithm.as_ref(),
             input.checksum_crc32.as_deref(),
             input.checksum_crc32c.as_deref(),
@@ -1827,6 +1921,12 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                 || input.checksum_xxhash128.is_some(),
             trailing,
         )?;
+        // Refused before the body is read: drain it so that the client
+        // sees the answer.
+        checksum.content_md5 = match checksum::content_md5(input.content_md5.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return Err(refuse_after_body(Some(body), e).await),
+        };
         let committed = self
             .write_object(
                 &input.bucket,
@@ -1875,11 +1975,21 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
     ) -> S3Result<S3Response<DeleteObjectOutput>> {
         self.admit_write()?;
         let input = req.input;
+        let turn = self.commit_turn(&input.bucket, &input.key).await?;
+        let backoff = self.commit_queue.backoff();
+        let backoff = backoff.as_ref().map(|b| b as &dyn ConflictBackoff);
         if let Some(v) = &input.version_id {
-            let d =
-                object::delete_version(self.meta.as_ref(), &input.bucket, &input.key, v, now_ms())
-                    .await
-                    .map_err(meta_err)?;
+            let d = object::delete_version_with(
+                self.meta.as_ref(),
+                &input.bucket,
+                &input.key,
+                v,
+                now_ms(),
+                backoff,
+            )
+            .await
+            .map_err(meta_err)?;
+            drop(turn);
             return Ok(S3Response::new(DeleteObjectOutput {
                 delete_marker: d.was_delete_marker.then_some(true),
                 version_id: Some(v.clone()),
@@ -1888,21 +1998,25 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
         }
         let pre = precondition(input.if_match.as_ref(), None)?;
         let result = if pre.is_empty() {
-            self.delete_unconditional(&input.bucket, &input.key).await
+            self.delete_unconditional(&input.bucket, &input.key, backoff)
+                .await
         } else {
             // With a client precondition an unknown outcome is not re-run:
             // after an applied delete the re-run would answer 412 or 404
             // for a delete that succeeded; it is reported instead (503,
             // R-72).
-            object::delete_object_if(
+            object::delete_object_as_with(
                 self.meta.as_ref(),
                 &input.bucket,
                 &input.key,
                 &pre,
+                &arca_lake_metadata::records::new_version_id(),
                 now_ms(),
+                backoff,
             )
             .await
         };
+        drop(turn);
         let d = result.map_err(meta_err)?;
         Ok(S3Response::new(DeleteObjectOutput {
             delete_marker: d.delete_marker_version.is_some().then_some(true),
@@ -1936,13 +2050,17 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                 {
                     return Err(s3_error!(AccessDenied));
                 }
+                let _turn = self.commit_turn(&input.bucket, &o.key).await?;
+                let backoff = self.commit_queue.backoff();
+                let backoff = backoff.as_ref().map(|b| b as &dyn ConflictBackoff);
                 if let Some(v) = &o.version_id {
-                    let d = object::delete_version(
+                    let d = object::delete_version_with(
                         self.meta.as_ref(),
                         &input.bucket,
                         &o.key,
                         v,
                         now_ms(),
+                        backoff,
                     )
                     .await
                     .map_err(meta_err)?;
@@ -1953,10 +2071,17 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                         delete_marker_version_id: None,
                     })
                 } else {
-                    let d =
-                        object::delete_object(self.meta.as_ref(), &input.bucket, &o.key, now_ms())
-                            .await
-                            .map_err(meta_err)?;
+                    let d = object::delete_object_as_with(
+                        self.meta.as_ref(),
+                        &input.bucket,
+                        &o.key,
+                        &Precondition::default(),
+                        &arca_lake_metadata::records::new_version_id(),
+                        now_ms(),
+                        backoff,
+                    )
+                    .await
+                    .map_err(meta_err)?;
                     Ok(DeletedObject {
                         key: Some(o.key.clone()),
                         version_id: None,
@@ -2076,6 +2201,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             algorithm,
             expected: None,
             trailing: None,
+            content_md5: None,
         };
         let map = self.map_up_to_date().await.map_err(meta_err)?;
         self.note_access(src_manifest.pointer.generation);
@@ -2315,7 +2441,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             .ok()
             .filter(|n| (1..=multipart::MAX_PART_NUMBER).contains(n))
             .ok_or_else(|| s3_error!(InvalidArgument, "part number must be between 1 and 10000"))?;
-        let checksum = request_checksum(
+        let mut checksum = request_checksum(
             input.checksum_algorithm.as_ref(),
             input.checksum_crc32.as_deref(),
             input.checksum_crc32c.as_deref(),
@@ -2329,6 +2455,12 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
                 || input.checksum_xxhash128.is_some(),
             trailing,
         )?;
+        // Refused before the body is read: drain it so that the client
+        // sees the answer.
+        checksum.content_md5 = match checksum::content_md5(input.content_md5.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return Err(refuse_after_body(Some(body), e).await),
+        };
         let sealed = self
             .write_part(
                 &input.bucket,
@@ -2422,6 +2554,7 @@ impl<S: KvStore + 'static> S3 for ClusterBackend<S> {
             algorithm: upload.checksum_algorithm,
             expected: None,
             trailing: None,
+            content_md5: None,
         };
         let map = self.map_up_to_date().await.map_err(meta_err)?;
         let body = self.stream_range(map, &m, start, end);
@@ -2854,5 +2987,51 @@ mod tiering_watch {
             w.access_recording_required_at(t0, 2_000),
             "a confirmation of another incarnation kept recording off"
         );
+    }
+}
+
+#[cfg(test)]
+mod bucket_exists {
+    use arca_lake_metadata::KvError;
+    use arca_lake_metadata::records::BucketRecord;
+    use s3s::S3ErrorCode;
+
+    use super::*;
+
+    fn record(owner: &str) -> BucketRecord {
+        BucketRecord {
+            id: 1,
+            name: "b".into(),
+            versioning: Versioning::Disabled,
+            created_ms: 0,
+            owner: owner.into(),
+            policy: None,
+        }
+    }
+
+    #[test]
+    fn the_owner_is_told_it_owns_the_bucket() {
+        let code = |lookup, who| bucket_exists_error(lookup, who).code().clone();
+        assert_eq!(
+            code(Ok(record("a")), "a"),
+            S3ErrorCode::BucketAlreadyOwnedByYou
+        );
+        assert_eq!(code(Ok(record("a")), "b"), S3ErrorCode::BucketAlreadyExists);
+        // Deleted between the refused create and the lookup.
+        assert_eq!(
+            code(Err(MetaError::NoSuchBucket), "a"),
+            S3ErrorCode::BucketAlreadyExists
+        );
+    }
+
+    #[test]
+    fn a_failed_owner_lookup_is_not_a_409() {
+        let e = bucket_exists_error(
+            Err(MetaError::Kv(KvError::ClusterState("locked".into()))),
+            "a",
+        );
+        assert_eq!(*e.code(), S3ErrorCode::ServiceUnavailable);
+        let e = bucket_exists_error(Err(MetaError::TooManyRetries), "a");
+        assert_eq!(*e.code(), S3ErrorCode::SlowDown);
     }
 }

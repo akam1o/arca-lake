@@ -7,11 +7,13 @@
 //! the distributed write and read protocols over `arca-lake-metadata`,
 //! `arca-lake-ec`, and storage nodes (RFC-003, RFC-004).
 
+mod body;
 pub mod cluster;
 pub mod memory;
 pub mod requests;
 mod server;
 pub mod verify;
+mod xml_digest;
 
 pub use server::{AllowAll, GatewayConfig, ServerHandle, serve, serve_with_access};
 

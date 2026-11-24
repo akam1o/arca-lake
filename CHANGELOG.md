@@ -11,6 +11,25 @@ break compatibility).
 
 ## [Unreleased]
 
+### Changed
+
+- Concurrent writes to one key through a gateway take turns (R-112,
+  [ADR-0041](docs/adr/0041-hot-key-commit-queue.md)): PUT, DELETE and
+  CompleteMultipartUpload on a key wait for the commit ahead of them
+  instead of conflicting until refused, and conflicts with other gateways
+  back off with jitter. A wait beyond `--commit-queue-wait-ms` (2 s) or
+  more than `--commit-queue-max-waiters` (256) waiting writes is answered
+  `503 SlowDown` before any commit attempt (nothing applied).
+  `--commit-queue off` restores the previous behaviour. Measured with 64
+  writers on one key through four gateways: SlowDown 55 % → under 1 %,
+  acknowledged PUT/s 1.6–1.7 ×, acknowledged PUT latency higher (p50
+  about 200 → 450 ms, p99 about 0.8 → 1.7 s); 16 keys within 3–6 %
+  ([results](docs/verification/0.2.0-hot-key-results.md); measured
+  against the 0.1.0 tag, so the gain is of all 0.2.0 changes, the queue
+  being its cause by mechanism; an on/off control in one binary confirms
+  it: SlowDown 54 % → 0.5–2.6 %, acknowledged PUT/s 1.34–1.59 ×). Every
+  DELETE form (single, version-specific, DeleteObjects entries) takes
+  the same turn and backoff. No format change.
 - Gateway deletes of its own partial cache copies (a population that
   could not write every member) now carry the identity token each node
   acknowledged, read with the cluster state every 2 s, so nodes holding
@@ -97,6 +116,41 @@ break compatibility).
 
 ### Fixed
 
+- `x-amz-checksum-*` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) of the XML
+  bodies of DeleteObjects, PutBucketPolicy, PutBucketVersioning and
+  CreateBucket is verified. Before, it was ignored: a corrupted body was
+  applied and answered `200` (current SDKs send CRC32 on DeleteObjects
+  instead of `Content-MD5`). A mismatch is now `400 BadDigest`; a
+  malformed value, several or repeated checksum headers, an algorithm
+  header without its value or naming another algorithm, or an
+  `aws-chunked` body on these operations `400 InvalidRequest`; the
+  operation is not applied (RFC-007 §5.7).
+- A PUT or UploadPart that fails while its body is streamed (a refused
+  body, a failed chunk) waits for its chunk placements in flight before
+  it is answered, instead of cancelling them: a shard already sent could
+  be stored after the error reply, after the write's abort and GC. Such
+  shards are still reclaimed by node reconciliation; none appears after
+  the reply now. The wait is bounded (5 s, or a third of the lease if
+  smaller); past it the placements are aborted as before and counted in
+  `arca_gateway_refused_write_settle_timeouts_total`. A request dropped
+  by its client now also aborts the placement it was waiting for, which
+  kept running before.
+- `Content-MD5` is verified. Before, a body that did not match it was
+  stored and answered `200` (a false success for a client that asked for
+  the check). PutObject and UploadPart (plain and `aws-chunked`, any
+  size) and the XML bodies of DeleteObjects, CompleteMultipartUpload,
+  PutBucketPolicy, PutBucketVersioning and CreateBucket now answer `400
+  BadDigest` on a mismatch and `400 InvalidDigest` for a malformed value;
+  nothing is committed (RFC-007 §5.7).
+- A signed PUT or UploadPart whose body does not match its
+  `x-amz-content-sha256` is answered `400 XAmzContentSHA256Mismatch`, as
+  AWS, instead of `500 InternalError`, which SDKs retried as a server
+  fault; other body verification failures are client errors too
+  (`IncompleteBody`, `SignatureDoesNotMatch` for an `aws-chunked` chunk
+  signature, `EntityTooLarge`). Nothing was or is stored. Re-creating a
+  bucket one owns is `409 BucketAlreadyOwnedByYou` instead of `409
+  BucketAlreadyExists` (still answered for another principal's bucket);
+  us-east-1's legacy `200 OK` is not emulated (RFC-007 §5.1.1).
 - A group's failure domain is recorded and kept by every member move
   (R-119, [ADR-0038](docs/adr/0038-group-failure-domain-record.md)):
   new groups record their label at creation (new metadata key

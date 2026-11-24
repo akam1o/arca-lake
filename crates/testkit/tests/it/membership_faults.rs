@@ -682,15 +682,19 @@ async fn mem_capacity_pause_and_resume() {
 
 #[tokio::test]
 async fn mem_decommission_across_groups() {
-    decommission_across_groups_survives_a_controller_restart(
+    // Boxed: the cluster's state makes the future large (clippy).
+    Box::pin(decommission_across_groups_survives_a_controller_restart(
         TestCluster::start(opts(5, 3, 3)).await,
-    )
+    ))
     .await;
 }
 
 #[tokio::test]
 async fn mem_direct_copy() {
-    direct_copy_moves_verified_shards(TestCluster::start(opts(5, 1, 0)).await).await;
+    Box::pin(direct_copy_moves_verified_shards(
+        TestCluster::start(opts(5, 1, 0)).await,
+    ))
+    .await;
 }
 
 #[cfg(feature = "fdb")]
@@ -731,7 +735,7 @@ mod fdb {
         let Some(c) = start(opts(5, 1, 0)).await else {
             return;
         };
-        direct_copy_moves_verified_shards(c).await;
+        Box::pin(direct_copy_moves_verified_shards(c)).await;
     }
 
     #[tokio::test]
@@ -739,7 +743,7 @@ mod fdb {
         let Some(c) = start(opts(5, 3, 3)).await else {
             return;
         };
-        decommission_across_groups_survives_a_controller_restart(c).await;
+        Box::pin(decommission_across_groups_survives_a_controller_restart(c)).await;
     }
 }
 

@@ -34,6 +34,8 @@ struct StoredObject {
 #[derive(Debug)]
 struct StoredBucket {
     created: SystemTime,
+    /// The creating principal (empty without an authorizer).
+    owner: String,
     objects: BTreeMap<String, StoredObject>,
 }
 
@@ -82,14 +84,24 @@ impl S3 for MemoryBackend {
         &self,
         req: S3Request<CreateBucketInput>,
     ) -> S3Result<S3Response<CreateBucketOutput>> {
+        let owner = req
+            .extensions
+            .get::<crate::auth::Principal>()
+            .map(|p| p.0.clone())
+            .unwrap_or_default();
         let mut buckets = self.buckets.write().unwrap_or_else(PoisonError::into_inner);
-        if buckets.contains_key(&req.input.bucket) {
-            return Err(s3_error!(BucketAlreadyExists));
+        if let Some(b) = buckets.get(&req.input.bucket) {
+            return Err(if b.owner == owner {
+                s3_error!(BucketAlreadyOwnedByYou)
+            } else {
+                s3_error!(BucketAlreadyExists)
+            });
         }
         buckets.insert(
             req.input.bucket,
             StoredBucket {
                 created: SystemTime::now(),
+                owner,
                 objects: BTreeMap::new(),
             },
         );
@@ -159,12 +171,15 @@ impl S3 for MemoryBackend {
         while let Some(chunk) = body
             .try_next()
             .await
-            .map_err(|e| s3_error!(InternalError, "body read failed: {e}"))?
+            .map_err(|e| crate::body::body_error(&e))?
         {
             md5.update(&chunk);
             buf.extend_from_slice(&chunk);
         }
-        let etag = hex(md5.finalize().as_ref());
+        let digest = md5.finalize();
+        let content_md5 = crate::checksum::content_md5(input.content_md5.as_deref())?;
+        crate::checksum::verify_content_md5(content_md5.as_ref(), digest.as_ref())?;
+        let etag = hex(digest.as_ref());
 
         let mut buckets = self.buckets.write().unwrap_or_else(PoisonError::into_inner);
         let Some(bucket) = buckets.get_mut(&input.bucket) else {

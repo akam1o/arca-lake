@@ -271,11 +271,33 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
             .unwrap_or(0);
         req.extensions_mut().insert(record.clone());
         let started = Instant::now();
-        let fut = hyper::service::Service::call(&self.inner, req);
+        let expected = crate::xml_digest::checked_here(req.method(), req.uri())
+            .and_then(|scope| crate::xml_digest::Expected::from_headers(req.headers(), scope));
+        let digest_outcome = Arc::new(std::sync::OnceLock::new());
+        let fut = if let Some(expected) = expected {
+            let outcome = Arc::clone(&digest_outcome);
+            let req = req.map(move |b| {
+                let checked: s3s::stream::DynByteStream = Box::pin(
+                    crate::xml_digest::DigestChecked::new(s3s::Body::from(b), expected, outcome),
+                );
+                s3s::Body::from(checked)
+            });
+            let inner = self.inner.clone();
+            Box::pin(async move { inner.call(req).await })
+        } else {
+            hyper::service::Service::call(&self.inner, req)
+        };
         let audit = self.audit;
         let s3_stats = self.stats.clone();
         Box::pin(async move {
             let mut res = fut.await;
+            // A refused digest fails the body read, which `s3s` answers
+            // `500`: answer the digest error instead.
+            if let Some(r) = digest_outcome.get()
+                && let Ok(refused) = r.error().to_http_response()
+            {
+                res = Ok(refused);
+            }
             let status = match &res {
                 Ok(r) => r.status().as_u16(),
                 Err(_) => 500,

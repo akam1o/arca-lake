@@ -51,6 +51,21 @@ owner/policy checks. `--authorize none` allows every authenticated request;
 the memory backend cannot enable `owner-policy`. See
 [Security model](security-model.md).
 
+### Commits to one key
+
+Commits to one key through a gateway take turns (ADR-0041): fewer
+metadata conflicts when many clients write the same key. A write refused
+here is answered `503 SlowDown` before any commit attempt: it was not
+applied and may be retried.
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--commit-queue` | `on` | `off` commits every write at once with immediate conflict retries (0.1.0 behaviour). |
+| `--commit-queue-wait-ms` | `2000` | Longest wait for a commit's turn; a longer wait is refused. |
+| `--commit-queue-max-waiters` | `256` | Writes waiting for one key at most; one more is refused. |
+
+See [ADR-0041](../adr/0041-hot-key-commit-queue.md).
+
 ### Read access records
 
 Access records inform automatic tiering. They are not required for data

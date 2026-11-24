@@ -106,6 +106,8 @@ full AWS S3 compatibility: this table is the claim.
 | Ranged GET with `checksum-mode` | no checksum headers (checksums describe whole objects or parts) | same for composite; full-object checksums are omitted for ranges as well |
 | `ListObjectVersions` with a version marker whose key no longer exists | resumes after the key | undefined |
 | Object ACLs | `NotImplemented` | supported |
+| DeleteObjects without `Content-MD5` or `x-amz-checksum-*` | accepted (either is verified when sent) | `400 InvalidRequest` (one of them is required) |
+| `CreateBucket` of a bucket the requester owns | `409 BucketAlreadyOwnedByYou` in every region (another principal's bucket: `409 BucketAlreadyExists`) | `409 BucketAlreadyOwnedByYou`, except in us-east-1, where it is `200 OK` for legacy compatibility |
 | Multipart upload expiry | controller sweep after `--multipart-expiry` (7 days by default) | lifecycle rule only |
 
 ### 5.2 Object model recap (RFC-002) and generation kinds
@@ -464,6 +466,56 @@ beyond the standard CRC combination step below).
   InternalError`, never a published copy).
 - ETag stays MD5 (single) / composite MD5 (multipart) and is never a
   checksum value; clients that need a content hash use checksums.
+- **`Content-MD5`** (RFC 1864): a value that is not base64 of 16 bytes →
+  `400 InvalidDigest`; a value that differs from the MD5 of the body →
+  `400 BadDigest`. PutObject and UploadPart compare it with the MD5 the
+  gateway computes anyway for the ETag, over the decoded body as it is
+  streamed (multi-chunk and `aws-chunked` bodies included, no extra
+  buffering), before commit: the pending generation is aborted, a part is
+  not recorded, nothing is published. The XML bodies that `s3s` reads in
+  full (DeleteObjects, CompleteMultipartUpload, PutBucketPolicy,
+  PutBucketVersioning, CreateBucket) are checked by the server wrapper on
+  the bytes as `s3s` reads them, after authentication and authorization;
+  the operation does not run. Both a mismatch and a malformed value are
+  answered at the end of the body (bounded by `s3s`'s XML body limit),
+  so the client reads the `400`. The wrapper recognizes those operations
+  as `s3s` routes them: the percent-decoded path-style path (a PUT only on
+  a bucket path; an object PUT is the backend's, whatever its query or
+  path encoding) and decoded query names (`?%64elete`). An `aws-chunked`
+  body on these operations is refused with `400 InvalidRequest` (its wire
+  bytes are not the content, and AWS documents `aws-chunked` for PutObject
+  and UploadPart only), so a digest of it is never left unchecked.
+  Virtual-hosted-style addressing, not served today,
+  would need this matching revisited. Surrounding whitespace is ignored;
+  unpadded base64 is malformed. DeleteObjects is authorized per entry
+  (RFC-012), after its body is read: an anonymous one with a wrong digest
+  is answered `BadDigest`, with the right one `200` with every entry
+  `AccessDenied`; other operations answer `AccessDenied` before the body
+  is read.
+- **`x-amz-checksum-*` of an XML body** (DeleteObjects, PutBucketPolicy,
+  PutBucketVersioning, CreateBucket; current SDKs send CRC32 there instead
+  of `Content-MD5`): the same server wrapper computes the named algorithm
+  (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) over the body as `s3s` reads it
+  and answers as PutObject does: mismatch → `400 BadDigest`, a value that
+  is not base64 of the algorithm's length, more than one checksum header,
+  or a value or `Content-MD5` header repeated → `400 InvalidRequest`, an
+  algorithm the gateway does not implement → `501 NotImplemented`;
+  `x-amz-sdk-checksum-algorithm` or `x-amz-checksum-algorithm` without its
+  value header, naming another algorithm than it, or naming none known →
+  `400 InvalidRequest` (as AWS; the SDKs send the pair consistently). The
+  operation does not run. With `Content-MD5` as well, both must match. On CompleteMultipartUpload the header is the
+  object's checksum (above), not the body's, and is left to the backend.
+- **Signed payload and body framing** (PUT and UploadPart): `s3s`
+  verifies the body against the signed `x-amz-content-sha256` and the
+  declared length while the gateway reads it, and the chunk signatures
+  and framing of `aws-chunked` bodies. A failed check is the client's
+  request and answers as AWS: payload hash → `400
+  XAmzContentSHA256Mismatch`, length or framing → `400 IncompleteBody`,
+  chunk signature → `403 SignatureDoesNotMatch`, oversized chunk → `400
+  EntityTooLarge`. The pending generation is aborted and nothing is
+  published; shards placed before the end of the body are collected by
+  GC and node reconciliation (RFC-004 §5.10). Only a failure of the
+  connection itself stays `500 InternalError`.
 
 ### 5.8 DeleteObjects
 
@@ -553,6 +605,21 @@ measured in Phase 3.1).
 - Should the gateway accept `x-amz-tagging` on PUT and return it
   (proposal: yes, stored in the header, no policy conditions on tags).
 - CRC64NVME combination availability.
+- Follow-up (0.2.0 review of the body error mapping): when a PUT or
+  UploadPart fails before its end (a refused body, an I/O error), shards
+  already placed for chunks not yet recorded in the generation are
+  reclaimed by node reconciliation (RFC-004 §5.10), not by the abort.
+  Deleting them at abort time would free the space sooner; no change
+  for now. Such a write waits for its placements in flight before it is
+  answered (as a successful one does), so that none of its shards is
+  stored after the reply, for at most 5 s or a third of the lease
+  (whichever is smaller: no renewal runs meanwhile, and streaming renews
+  every third, so the lease cannot expire while it waits). A refusal the
+  client caused is so not held for long by a slow node; past the deadline
+  the placements left are aborted, as before, and counted
+  (`arca_gateway_refused_write_settle_timeouts_total`); what they store
+  is reconciliation's. A placement is aborted when its task handle is
+  dropped, also while awaited, so a dropped request stops its writes.
 
 ## 11. Acceptance criteria
 
@@ -582,3 +649,6 @@ phase report.
 | A15 | Property-based and model-based tests of the versioned key state machine | Implemented, Verified (`version_model.rs`: random PUT / DELETE / DELETE-version / Enable / Suspend sequences against a reference model, 400 cases; it found and fixed a duplicated `null` version record after a version delete restored the null version). The generation model (`model.rs`) and the policy monotonicity property (`policy.rs`) also exist |
 | A16 | The compatibility matrix is generated from the conformance suite's list of exercised operations | Not Implemented (maintained by hand; §5.1) |
 | A17 | Performance regression with multipart PUT added | see the Phase 3.1 report (`benchmarks/linux/results`) |
+| A18 | A signed PUT or UploadPart whose body does not match its `x-amz-content-sha256` is `400 XAmzContentSHA256Mismatch` and changes nothing; re-creating one's own bucket is `409 BucketAlreadyOwnedByYou`, another principal's `409 BucketAlreadyExists` | Verified (`s3_errors.rs`, cluster and memory backends, AWS SDK for Rust; body stream error mapping unit tests in `gateway/src/body.rs`) |
+| A19 | `Content-MD5`: malformed → `400 InvalidDigest`, mismatch → `400 BadDigest`, nothing committed, on PutObject (single and multi-chunk, plain and `aws-chunked`) and UploadPart, and on the DeleteObjects and PutBucketPolicy bodies | Verified (`s3_content_md5.rs`, cluster and memory backends, AWS SDK for Rust; `gateway/src/xml_digest.rs` unit tests) |
+| A20 | `x-amz-checksum-*` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) of the DeleteObjects, PutBucketPolicy, PutBucketVersioning and CreateBucket bodies: mismatch → `400 BadDigest`, malformed, repeated or inconsistent headers and `aws-chunked` bodies → `400 InvalidRequest`, an unimplemented algorithm → `501 NotImplemented`, the operation not applied; the SDK's own checksums accepted; CompleteMultipartUpload's header stays the object's checksum | Verified (`s3_xml_checksums.rs`, AWS SDK for Rust; `gateway/src/xml_digest.rs` unit tests) |

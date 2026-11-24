@@ -204,6 +204,7 @@ dependencies = [
  "tokio-stream",
  "toml",
  "tracing",
+ "urlencoding",
  "uuid",
 ]
 

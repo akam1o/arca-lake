@@ -18,7 +18,7 @@
 //! root's reference) in the same transaction; see `retire_part_if_unreferenced`.
 
 use crate::error::Result;
-use crate::kv::{KvStore, Txn};
+use crate::kv::{ConflictBackoff, KvStore, Txn, transact_with_backoff};
 use crate::ops::object::{
     PendingGeneration, Precondition, Publish, check_preconditions, publish_version,
     require_pending, retire, version_records,
@@ -504,7 +504,6 @@ pub struct Completed {
 /// [`MetaError::InvalidPartOrder`], [`MetaError::EntityTooSmall`],
 /// [`MetaError::PreconditionFailed`], [`MetaError::InvalidArgument`]
 /// (checksum mismatch, reported as `BadDigest` by the gateway).
-#[allow(clippy::too_many_lines)]
 pub async fn complete<S: KvStore>(
     store: &S,
     bucket: &str,
@@ -512,6 +511,25 @@ pub async fn complete<S: KvStore>(
     upload_id: &UploadId,
     req: &CompleteRequest<'_>,
     now_ms: u64,
+) -> Result<Completed> {
+    complete_with(store, bucket, key, upload_id, req, now_ms, None).await
+}
+
+/// [`complete`], waiting on `backoff` between a conflict and the next
+/// attempt (ADR-0041).
+///
+/// # Errors
+///
+/// As [`complete`].
+#[allow(clippy::too_many_lines)]
+pub async fn complete_with<S: KvStore>(
+    store: &S,
+    bucket: &str,
+    key: &str,
+    upload_id: &UploadId,
+    req: &CompleteRequest<'_>,
+    now_ms: u64,
+    backoff: Option<&dyn ConflictBackoff>,
 ) -> Result<Completed> {
     if req.parts.is_empty() {
         return Err(MetaError::InvalidArgument("no parts listed".into()));
@@ -522,7 +540,7 @@ pub async fn complete<S: KvStore>(
         }
     }
     let fresh_version_id = new_version_id();
-    transact(
+    transact_with_backoff(
         store,
         (
             bucket,
@@ -698,6 +716,7 @@ pub async fn complete<S: KvStore>(
                 })
             })
         },
+        backoff,
     )
     .await
 }

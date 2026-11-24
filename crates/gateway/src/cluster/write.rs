@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use arca_lake_common::chunk_id;
+use arca_lake_metadata::kv::ConflictBackoff;
 use arca_lake_metadata::ops::multipart::{self, PartInfo};
 use arca_lake_metadata::ops::object::{self, CommitInfo, CommitOutcome, Precondition};
 use arca_lake_metadata::records::{
@@ -68,6 +69,8 @@ pub struct RequestChecksum {
     pub expected: Option<Vec<u8>>,
     /// Trailing headers of an `aws-chunked` body.
     pub trailing: Option<s3s::TrailingHeaders>,
+    /// The `Content-MD5` digest of the (decoded) body, if sent.
+    pub content_md5: Option<[u8; 16]>,
 }
 
 impl RequestChecksum {
@@ -127,35 +130,35 @@ struct Placed {
 }
 
 /// Chunk placements in flight: `(index, started, task)` in chunk order.
-type Pipeline = std::collections::VecDeque<(
-    u32,
-    std::time::Instant,
-    tokio::task::JoinHandle<Result<Placed, S3Error>>,
-)>;
+/// Dropped (on an early return, or with the request's future), each is
+/// aborted, and a cancelled shard stream stores nothing (ADR-0011).
+type Pipeline = std::collections::VecDeque<(u32, std::time::Instant, Placement)>;
 
-/// Owns the pipeline and aborts whatever is still in flight on drop.
-struct PipelineGuard(Pipeline);
+/// A chunk placement task, aborted when dropped, also while it is being
+/// awaited (a dropped `JoinHandle` would detach the task and let it keep
+/// writing shards).
+struct Placement(tokio::task::JoinHandle<Result<Placed, S3Error>>);
 
-impl Drop for PipelineGuard {
+impl Drop for Placement {
     fn drop(&mut self) {
-        for (_, _, h) in &self.0 {
-            h.abort();
-        }
+        self.0.abort();
     }
 }
 
-impl std::ops::Deref for PipelineGuard {
-    type Target = Pipeline;
-    fn deref(&self) -> &Pipeline {
-        &self.0
+impl Future for Placement {
+    type Output = Result<Result<Placed, S3Error>, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
     }
 }
 
-impl std::ops::DerefMut for PipelineGuard {
-    fn deref_mut(&mut self) -> &mut Pipeline {
-        &mut self.0
-    }
-}
+/// The longest a failed write waits for its placements in flight before
+/// it aborts them and answers (see [`ClusterBackend::stream_generation`]).
+pub const FAILED_WRITE_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Decrements a gauge when dropped (PUTs in flight).
 struct InFlightGuard<'a>(&'a std::sync::atomic::AtomicU64);
@@ -166,12 +169,17 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
-/// Verify the streamed checksum against the client's expectation and build
-/// the stored record. A mismatch is `BadDigest`; nothing is published.
+/// Verify the streamed `Content-MD5` and checksum against the client's
+/// expectation and build the stored record. A mismatch is `BadDigest`;
+/// nothing is published.
 fn verify_checksum(
     streamed: &Streamed,
     req: &RequestChecksum,
 ) -> Result<Option<Checksum>, S3Error> {
+    checksum::verify_content_md5(
+        req.content_md5.as_ref(),
+        &checksum::unhex(&streamed.etag).unwrap_or_default(),
+    )?;
     let Some((algo, value)) = &streamed.checksum else {
         return Ok(None);
     };
@@ -243,7 +251,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 checksum: stored.clone(),
             };
             let t = std::time::Instant::now();
+            // Held until the outcome is decided; a refusal comes before any
+            // commit attempt, and the generation is aborted (ADR-0041).
+            let turn = self.commit_turn(bucket, key).await?;
             let version_id = self.commit_resolving(generation, &info, pre).await?;
+            drop(turn);
             self.put_stats.commit.observe(t.elapsed());
             if self.take_fault(FaultPoint::AfterCommit) {
                 return Err(WriteFailure {
@@ -367,10 +379,20 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     ) -> Result<String, WriteFailure> {
         const MAX_COMMIT_ATTEMPTS: usize = 4;
         let meta = self.meta.as_ref();
+        let backoff = self.commit_queue.backoff();
         let mut reason = String::new();
         let mut unknown = false;
         for attempt in 1..=MAX_COMMIT_ATTEMPTS {
-            match object::commit_put(meta, &generation, info, pre, now_ms()).await {
+            match object::commit_put_with(
+                meta,
+                &generation,
+                info,
+                pre,
+                now_ms(),
+                backoff.as_ref().map(|b| b as &dyn ConflictBackoff),
+            )
+            .await
+            {
                 Ok(c) => return Ok(c.version_id),
                 Err(MetaError::Kv(KvError::CommitUnknown(r))) => {
                     reason = r;
@@ -585,12 +607,51 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// Stream `body` into chunks of `generation`: encode, place, append
     /// manifest entries; compute MD5 and the requested checksum in the same
     /// pass. Does not commit.
-    #[allow(clippy::too_many_lines)]
     async fn stream_generation(
         &self,
         generation: GenId,
         body: &mut StreamingBlob,
         algorithm: Option<ChecksumAlgorithm>,
+    ) -> Result<Streamed, WriteFailure> {
+        let mut pipeline = Pipeline::new();
+        let result = self
+            .stream_into(generation, body, algorithm, &mut pipeline)
+            .await;
+        if result.is_err() && !pipeline.is_empty() {
+            // A failed write (a refused body, a failed chunk) lets the
+            // placements in flight finish before it is answered, as a
+            // successful one waits for them: aborted, a shard stream already
+            // sent can still be stored after the reply and after the
+            // caller's abort and GC, an orphan only node reconciliation
+            // finds (RFC-004 §5.10). Bounded: a refusal the client caused
+            // is not held by a slow node. The bound is at most a third of
+            // the lease, which no renewal extends meanwhile: streaming
+            // renews it every third, so it cannot expire while settling.
+            let deadline = self.cfg.failed_write_settle.min(self.cfg.lease / 3);
+            let settle = async {
+                while let Some((_, _, p)) = pipeline.pop_front() {
+                    let _ = p.await;
+                }
+            };
+            if tokio::time::timeout(deadline, settle).await.is_err() {
+                // What is left is aborted as it is dropped (the old
+                // behaviour); reconciliation reclaims what it stored.
+                self.put_stats
+                    .settle_timeouts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
+    /// The body of [`Self::stream_generation`], placing into `pipeline`.
+    #[allow(clippy::too_many_lines)]
+    async fn stream_into(
+        &self,
+        generation: GenId,
+        body: &mut StreamingBlob,
+        algorithm: Option<ChecksumAlgorithm>,
+        pipeline: &mut Pipeline,
     ) -> Result<Streamed, WriteFailure> {
         let max_chunk = usize::try_from(self.cfg.profile.max_chunk_bytes).unwrap_or(usize::MAX);
         let mut md5 = Md5::new();
@@ -601,10 +662,6 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let mut batch: Vec<(u32, ChunkRecord)> = Vec::new();
         let mut buf = BytesMut::with_capacity(max_chunk.min(8 << 20));
         let mut finished = false;
-        // Placements in flight; dropped (on any early return or if this
-        // future is dropped) they are aborted, and a cancelled shard stream
-        // stores nothing (ADR-0011).
-        let mut pipeline = PipelineGuard(std::collections::VecDeque::new());
 
         // Read the first chunk to learn whether this is a small object.
         let mut first = true;
@@ -616,7 +673,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
                 let next = body
                     .try_next()
                     .await
-                    .map_err(|e| s3_error!(InternalError, "body read failed: {e}"))?;
+                    .map_err(|e| crate::body::body_error(&e))?;
                 let Some(b) = next else {
                     finished = true;
                     break;
@@ -670,18 +727,18 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             let placing = {
                 let backend = self.clone();
                 let offset = size;
-                tokio::spawn(async move {
+                Placement(tokio::spawn(async move {
                     backend
                         .place_chunk(generation, index, chunk, offset, small)
                         .await
-                })
+                }))
             };
             pipeline.push_back((index, std::time::Instant::now(), placing));
             size += chunk_len as u64;
             index += 1;
             if pipeline.len() >= self.cfg.write_pipeline.max(1) {
                 self.collect_placement(
-                    &mut pipeline,
+                    pipeline,
                     &mut batch,
                     generation,
                     lease_ms,
@@ -709,7 +766,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }
         while !pipeline.is_empty() {
             self.collect_placement(
-                &mut pipeline,
+                pipeline,
                 &mut batch,
                 generation,
                 lease_ms,
