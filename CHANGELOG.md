@@ -99,6 +99,14 @@ release with a supported upgrade predecessor: 0.1.0.
   failure, never a pass, and a process lost to a host reboot (boot id
   changed) is recorded as such, never as stopped. The teardown removes
   nothing unless every stop is confirmed and the collection is complete.
+- Three-host validation for 0.2.0
+  ([plan and rehearsal](docs/verification/0.2.0-three-host-validation.md)):
+  mutual TLS for node RPCs and TLS to FoundationDB, SigV4-signed S3
+  requests, new steps for multipart uploads, R-117, R-119, the scrub
+  classes and a new node joining, and a separate upgrade scenario from
+  the published 0.1.0 archive through the finalize. The hot-key driver
+  runs the on/off control in one binary and stops a campaign when a host
+  is unreachable.
 - Metadata schema 5
   ([ADR-0039](docs/adr/0039-schema-5-and-the-0.1.0-upgrade.md)). 0.2.0
   reads schemas 4 and 5 and initialises new stores at 5. A cluster
@@ -232,7 +240,8 @@ release with a supported upgrade predecessor: 0.1.0.
   and reads recorded while the pass ran are kept. No format change.
 - Tests: races and environment assumptions fixed in the restore, node
   lifecycle, delete-fence, capacity (allotments that fit on tmpfs),
-  S3 error, hot-key and R-110 baseline-probe tests; no assertion was
+  S3 error, hot-key, membership isolation (it waits for the other group's
+  move by progress, not a fixed 30 s) and R-110 baseline-probe tests; no assertion was
   removed. The CI upgrade job runs against the published 0.1.0 archive
   (its sha256 and `BUILD-INFO.txt` commit pinned).
 - Documentation: corrections to the 0.1.0 record (its readiness tracker,
@@ -242,9 +251,9 @@ release with a supported upgrade predecessor: 0.1.0.
 ### Limitations
 
 This remains experimental. Not verified for 0.2.0 at the time of
-writing: the final three-host validation, an R-110 run, and the hot-key
-gain attributed to the commit queue alone (the on/off control is
-pending). See the [0.2.0 readiness](docs/release/0.2.0-readiness.md),
+writing: the final three-host validation and an R-110 run (its 0.2.0
+plan is under review). A segment that 0.1.0 reported as corrupt after a
+torn write stays reported until it is compacted (see Fixed). See the [0.2.0 readiness](docs/release/0.2.0-readiness.md),
 [known limitations](docs/guide/known-limitations.md) and the
 [risk register](docs/architecture/risks.md).
 
