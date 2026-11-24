@@ -43,6 +43,34 @@ async fn wait_until(what: &str, timeout: Duration, mut cond: impl AsyncFnMut() -
     }
 }
 
+/// Wait for `cond` as long as `progress` keeps changing: fails if it stays
+/// the same for `stall`, or if the whole wait exceeds `limit`. For work
+/// whose duration depends on how much there is and on the runner's speed.
+async fn wait_while_progressing<P: PartialEq + std::fmt::Debug>(
+    what: &str,
+    stall: Duration,
+    limit: Duration,
+    mut progress: impl AsyncFnMut() -> P,
+    mut cond: impl AsyncFnMut() -> bool,
+) {
+    let start = std::time::Instant::now();
+    let mut last = progress().await;
+    let mut since = std::time::Instant::now();
+    while !cond().await {
+        let now = progress().await;
+        if now != last {
+            last = now;
+            since = std::time::Instant::now();
+        }
+        assert!(
+            since.elapsed() < stall,
+            "{what}: no progress for {stall:?} (at {last:?})"
+        );
+        assert!(start.elapsed() < limit, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn group(c: &TestCluster, id: u64) -> GroupRecord {
     cluster::get_group(c.meta.as_ref(), id).await.unwrap()
 }
@@ -415,9 +443,31 @@ async fn a_group_that_cannot_finish_its_repair_does_not_stop_the_others() {
     membership::request_replace(c.meta.as_ref(), other.id, 0, None, "admin", now_ms())
         .await
         .unwrap();
-    wait_until(
+    // The other group's move also takes one chunk a second (the budget is
+    // the controller's): its duration is its chunk count, on a slow runner
+    // more (CI, 3bcf22d: a fixed 30 s ran out). It must keep advancing,
+    // a pass at a time, and finish within a bound from its chunk count.
+    let mut other_chunks = 0u32;
+    for i in 0..40 {
+        other_chunks += u32::try_from(
+            c.manifest(BUCKET, &format!("o{i}"))
+                .await
+                .chunks
+                .iter()
+                .filter(|(_, ch)| ch.placement.group_id == other.id)
+                .count(),
+        )
+        .unwrap();
+    }
+    assert!(other_chunks > 0, "set-up: the other group holds chunks");
+    wait_while_progressing(
         "the other group's move",
-        Duration::from_secs(30),
+        Duration::from_secs(20),
+        Duration::from_secs(30) + Duration::from_secs(3) * other_chunks,
+        async || {
+            let g = group(&c, other.id).await;
+            (g.state, g.repair_cursor, g.members[0].node_id)
+        },
         async || {
             let g = group(&c, other.id).await;
             g.state == GroupState::Active && g.members[0] != other.members[0]
