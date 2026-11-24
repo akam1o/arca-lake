@@ -85,9 +85,16 @@ rebuild because new sequences are strictly increasing.
   highest-numbered one: a compaction output, whose number is reserved
   when the compaction starts, gets its segment name only after the active
   segment has rolled over past it (under the writer lock, so no append is
-  half-written meanwhile). A rollover after a failed append first cuts
+  half-written meanwhile). A compaction pass (`Store::compaction_pass`,
+  used by the node's compactor) reserves the ids of all its outputs at
+  once, so the active segment rolls over once per pass, not once per
+  output. A rollover after a failed append first cuts
   the segment back to its last good record and syncs it; if that fails,
-  appends keep failing until it succeeds. An active segment that holds no
+  appends keep failing until it succeeds. The sequence bound is written
+  before the new segment is created, and any failed rollover leaves the
+  writer failed, so that the next append rolls over before it writes:
+  a new segment the failure left behind is never above a segment that
+  takes appends. An active segment that holds no
   record is removed at rollover instead of sealed (an empty sealed
   segment that could not be removed is removed by its compaction).
 - `SyncPolicy::Always`: `fdatasync` under the writer lock, then acknowledge.
@@ -268,6 +275,12 @@ refuses every delete until an operator removes it (ADR-0027).
   the key, or an explicit error.
 - Not guaranteed: `SyncPolicy::Never`; anything after an I/O error that the
   caller ignored.
+- An operation that failed is not acknowledged, but it may still take
+  effect: a `put` or `delete` whose sync failed was written whole, is
+  not visible while the store runs, and is there after a restart (the
+  rollover that follows the failure keeps every whole record). Callers
+  treat a failed operation as unknown, as after a timeout
+  (`io_faults::a_put_or_delete_whose_sync_failed_may_take_effect_after_a_restart`).
 
 **Deferred reclamation (Phase 3.12, ADR-0028).** A delete of a durable
 shard on a node with a retention does not write a tombstone: the record

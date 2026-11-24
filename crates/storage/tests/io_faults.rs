@@ -971,3 +971,181 @@ fn compactions_in_a_row_leave_no_empty_segment() {
         reopen_and_check(dir.path(), SyncPolicy::Always, &expect);
     }
 }
+
+/// Fill the active segment up to its size limit: the next append rolls
+/// over.
+fn fill_active(store: &Store, from: u8) -> u8 {
+    let mut i = from;
+    loop {
+        let active = store
+            .segment_stats()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.active)
+            .unwrap();
+        if active.file_bytes >= 1 << 20 {
+            return i;
+        }
+        store.put(key(i), &payload(i, 30_000)).unwrap();
+        i += 1;
+    }
+}
+
+/// Review of #64 (M1): a rollover that failed after creating its new
+/// segment (here: the sequence bound could not be written, in the
+/// rollover before a compaction output is published) left that segment
+/// above the active one, which went on taking appends; a torn append then
+/// read as a corrupt segment. The bound is now written before the segment
+/// exists, and a failed rollover leaves the writer poisoned, so the next
+/// append rolls over first.
+#[test]
+fn a_failed_rollover_never_leaves_a_segment_above_the_active_one() {
+    let _s = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let expect = {
+        let (store, _) = Store::open(config(dir.path(), SyncPolicy::Always)).unwrap();
+        let (first, expect) = half_dead_segment(&store);
+        let segments = segment_ids(dir.path());
+        set_io_hook(Some(fail_times(
+            |op| matches!(op, IoOp::SideFile { .. }),
+            ErrorKind::Other,
+            1,
+        )));
+        let e = store.compact(first).unwrap_err();
+        assert!(is_io(&e, ErrorKind::Other), "{e}");
+        set_io_hook(None);
+        assert_eq!(segment_ids(dir.path()), segments, "no new segment left");
+        torn_put(&store, key(250));
+        expect
+    };
+    reopen_and_check(dir.path(), SyncPolicy::Always, &expect);
+}
+
+/// Review of #64: a failed sync is not an acknowledgment, but the record
+/// was written whole; the cut at the next rollover keeps it, so it is
+/// there after a restart (RFC-005 §8: an unacknowledged operation may
+/// take effect). A delete whose sync failed likewise takes effect after a
+/// restart.
+#[test]
+fn a_put_or_delete_whose_sync_failed_may_take_effect_after_a_restart() {
+    let _s = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let (store, _) = Store::open(config(dir.path(), SyncPolicy::Always)).unwrap();
+        store.put(key(1), &payload(1, 1000)).unwrap();
+        for op in 0..2 {
+            set_io_hook(Some(fail_times(
+                |op| matches!(op, IoOp::SyncData { .. }),
+                ErrorKind::Other,
+                1,
+            )));
+            let r = if op == 0 {
+                store.put(key(2), &payload(2, 1000))
+            } else {
+                store.delete(key(1))
+            };
+            assert!(r.is_err());
+            set_io_hook(None);
+        }
+        // Neither is visible before the restart.
+        assert!(matches!(
+            store.get(&key(2), None),
+            Err(StorageError::NotFound)
+        ));
+        assert_eq!(store.get(&key(1), None).unwrap(), payload(1, 1000));
+        store.put(key(3), &payload(3, 1000)).unwrap();
+    }
+    reopen_and_check(
+        dir.path(),
+        SyncPolicy::Always,
+        &[(key(2), payload(2, 1000)), (key(3), payload(3, 1000))],
+    );
+}
+
+/// Review of #64: the process dies after the active segment rolled over
+/// past the output and before the output got its name. The output is a
+/// temporary file, removed at open; the source holds every record, and a
+/// torn append to the new active segment is a torn tail.
+#[test]
+fn a_crash_between_the_rollover_and_the_publish_loses_nothing() {
+    let _s = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let expect = {
+        let (store, _) = Store::open(config(dir.path(), SyncPolicy::Group)).unwrap();
+        let (first, expect) = half_dead_segment(&store);
+        let r = store.compact_with_hooks(first, &mut |step| {
+            if step == CompactionStep::BeforePublish {
+                return Err(StorageError::Io(std::io::Error::other("crash")));
+            }
+            Ok(())
+        });
+        assert!(r.is_err());
+        assert!(segment_ids(dir.path()).contains(&first));
+        torn_put(&store, key(250));
+        expect
+    };
+    let (_, report) = Store::open(config(dir.path(), SyncPolicy::Group)).unwrap();
+    assert!(report.corrupt_segments.is_empty(), "{report:?}");
+    assert!(report.truncated_bytes > 0, "{report:?}");
+    let tmp = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .count();
+    assert_eq!(tmp, 0);
+    reopen_and_check(dir.path(), SyncPolicy::Group, &expect);
+}
+
+/// Review of #64 (M2/M3): a pass reserves its output ids together, so the
+/// active segment rolls over once for the pass, not once per output; it
+/// stays the last segment, and a torn append after the pass is a torn
+/// tail.
+#[test]
+fn a_compaction_pass_rolls_the_active_segment_over_once() {
+    let _s = faults::serial();
+    let dir = tempfile::tempdir().unwrap();
+    let mut expect = {
+        let (store, _) = Store::open(config(dir.path(), SyncPolicy::Always)).unwrap();
+        let (first, mut expect) = half_dead_segment(&store);
+        let n = fill_active(&store, 100);
+        for i in 100..n {
+            expect.push((key(i), payload(i, 30_000)));
+        }
+        store.put(key(n), &payload(n, 30_000)).unwrap();
+        expect.push((key(n), payload(n, 30_000)));
+        let second = store.locate(&key(39)).unwrap().segment_id;
+        for i in [37u8, 39] {
+            store.put(key(i), &payload(i + 50, 30_000)).unwrap();
+            expect[usize::from(i)].1 = payload(i + 50, 30_000);
+        }
+        let candidates = store.compaction_candidates(0.0).unwrap();
+        assert!(
+            candidates.contains(&first) && candidates.contains(&second),
+            "{candidates:?}"
+        );
+        let rollovers = store.timings().rollover.count;
+        let mut outputs = Vec::new();
+        let mut pass = store.compaction_pass(candidates.len());
+        for seg in candidates {
+            if let Some(o) = pass.compact(seg).unwrap().output_segment_id {
+                outputs.push(o);
+            }
+        }
+        assert!(outputs.len() >= 2, "{outputs:?}");
+        assert_eq!(store.timings().rollover.count, rollovers + 1);
+        let active = store
+            .segment_stats()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.active)
+            .unwrap()
+            .segment_id;
+        assert_eq!(*segment_ids(dir.path()).last().unwrap(), active);
+        torn_put(&store, key(250));
+        expect
+    };
+    let (_, report) = Store::open(config(dir.path(), SyncPolicy::Always)).unwrap();
+    assert!(report.corrupt_segments.is_empty(), "{report:?}");
+    expect.sort_by_key(|(k, _)| k.chunk_id);
+    reopen_and_check(dir.path(), SyncPolicy::Always, &expect);
+}
