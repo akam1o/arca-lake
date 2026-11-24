@@ -5,6 +5,7 @@ standing for the load and its children); resource readings are simulated,
 nothing is exhausted. No host is contacted: the watchdog's ssh is a fake.
 """
 
+import io
 import json
 import os
 import signal
@@ -606,6 +607,46 @@ class RealSsh(unittest.TestCase):
         self.assertEqual((rc, out.strip(), json.load(open(stop))["reason"]), (0, "written", "memory"))
         rc, out = watchdog.ssh_runner("t", watchdog.WRITE_STOP, [stop, json.dumps({"reason": "load"})])
         self.assertEqual((out.strip(), json.load(open(stop))["reason"]), ("exists", "memory"))
+
+
+class ProcTable(unittest.TestCase):
+    """The Linux process table read from a simulated ``/proc``, on every
+    platform (the real-thread test above runs on Linux only): a member whose
+    main thread exited while another thread runs is alive (mutation H1)."""
+
+    def table(self, tasks):
+        files = {"/proc/123/stat": "123 (py) Z 1 777 777", "/proc/456/stat": "456 (sh) S 1 888 888"}
+        files.update({f"/proc/123/task/{t}/stat": f"{t} (py) {st} 1 777 777" for t, st in tasks.items()})
+        dirs = {"/proc": ["123", "456", "self"], "/proc/123/task": list(tasks)}
+
+        def listdir(p):
+            if p not in dirs:
+                raise FileNotFoundError(p)
+            return dirs[p]
+
+        def fake_open(p, *a, **k):
+            if p not in files:
+                raise FileNotFoundError(p)
+            return io.StringIO(files[p])
+
+        return [mock.patch.object(proc, "LINUX", True), mock.patch.object(proc.os, "listdir", listdir),
+                mock.patch("builtins.open", fake_open)]
+
+    def state(self, tasks):
+        ps = self.table(tasks)
+        for p in ps:
+            p.start()
+        try:
+            return proc.members(777), proc.group_state(777)
+        finally:
+            for p in reversed(ps):
+                p.stop()
+
+    def test_a_member_whose_main_thread_exited_is_alive_while_a_thread_runs(self):
+        self.assertEqual(self.state({"123": "Z", "124": "S"}), ([(123, "T*")], "alive"))
+
+    def test_a_member_whose_threads_all_exited_is_a_zombie(self):
+        self.assertEqual(self.state({"123": "Z", "124": "X"}), ([(123, "Z")], "empty"))
 
 
 class Watchdogs(unittest.TestCase):

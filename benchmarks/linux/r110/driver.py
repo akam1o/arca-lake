@@ -3,7 +3,7 @@
 and only with an approval runs the stages, keeps the evidence and judges.
 
   driver.py check CONFIG                      (the default: local only)
-  driver.py preflight CONFIG --approval FILE --execute
+  driver.py preflight CONFIG --approval FILE --execute --evidence DIR
   driver.py run CONFIG --approval FILE --execute --evidence DIR
   driver.py collect CONFIG --approval FILE --execute --evidence DIR
   driver.py teardown CONFIG --approval FILE --execute --evidence DIR
@@ -22,8 +22,10 @@ configuration voids the approval), ``scope`` (``preflight``, ``run``,
 UTC; the command is refused outside), ``approved_by``; for a preflight or
 a run of the 0.2.0 campaign (docs/verification/0.2.0-r110-plan.md §3,
 §6) also ``campaign``, ``campaign_run``, ``candidate`` and, from the
-second main run, ``rerun``. The example configuration in this directory
-is not approved.
+second main run, ``rerun``. ``--evidence`` is the campaign's evidence
+root: its ledger of main runs (``campaign_ledger``) and the preflight's
+record (``<run id>.preflight.json``, every host's boot ID) that a run
+needs. The example configuration in this directory is not approved.
 
 Evidence before teardown (``evidence.py``): at a run's end, after the
 safe stops, every file of the run on the host is saved under
@@ -135,6 +137,8 @@ def validate(cfg, execute=False, legacy=False):
             raise ConfigError(f"campaign: {CAMPAIGN!r} for a run ID of the 0.2.0 campaign")
         if not re.fullmatch(r"[0-9a-f]{64}", str(cfg["binary"].get("archive_sha256", ""))):
             raise ConfigError("binary.archive_sha256: the candidate archive the binary was extracted from")
+        # 0.2.0 plan §5: the preflight extracts it on the load host.
+        check_path("archive_path", cfg["remote"].get("archive_path"))
     if cfg["load_host"] not in cfg["hosts"]:
         raise ConfigError("load_host not among the hosts")
     r = cfg["remote"]
@@ -194,9 +198,10 @@ def validate(cfg, execute=False, legacy=False):
     rr = cfg.get("retained_record")
     if n is not None:
         # 0.2.0 plan §5: the retained directories of every host, each host
-        # named (an empty record: none there, as listed at the preflight).
+        # named (an empty record: none there; the preflight fails if it finds
+        # one the record does not name).
         if not isinstance(rr, dict) or set(rr) != set(cfg["hosts"]) or not all(
-                listing_record(v) for v in rr.values()) or not any(rr.values()):
+                listing_record(v) for v in rr.values()):
             raise ConfigError("retained_record: every host -> {absolute directory -> sha256 of its listing} "
                               "(0.2.0 plan §5)")
     elif not rr or not listing_record(rr):
@@ -237,30 +242,96 @@ def load_config(path, execute=False, legacy=False):
     return validate(json.loads(raw), execute, legacy), hashlib.sha256(raw).hexdigest()
 
 
-def check_campaign_approval(a, run_n):
-    """The 0.2.0 campaign's part of an approval for main run ``run_n``: of
-    this campaign and this run; for a later run, the previous run's cause,
-    the change and the hypothesis, recorded before it; the last run only on
-    the final candidate (0.2.0 plan §3)."""
+def campaign_ledger(root):
+    """The campaign's main runs with evidence under ``root`` (0.2.0 plan
+    §3): run number -> [{"run_id", "connected", "candidate",
+    "archive_sha256"}]. An attempt is connected once its ``events.jsonl``
+    exists (the driver writes it before its first contact with a host);
+    the candidate and the archive are read from its saved approval (None:
+    unreadable)."""
+    out = {}
+    try:
+        names = sorted(os.listdir(root))
+    except FileNotFoundError:
+        return out
+    for name in names:
+        n, p = campaign_run(name), os.path.join(root, name)
+        if n is None or not os.path.isdir(p):
+            continue
+        try:
+            a = common.read_json(os.path.join(p, "approval.json"))
+        except (OSError, ValueError):
+            a = {}
+        a = a if isinstance(a, dict) else {}
+        out.setdefault(n, []).append({"run_id": name, "connected": os.path.exists(os.path.join(p, "events.jsonl")),
+                                      "candidate": a.get("candidate"), "archive_sha256": a.get("archive_sha256")})
+    return out
+
+
+def check_campaign_approval(a, cfg, ledger, root):
+    """The 0.2.0 campaign's part of an approval (0.2.0 plan §3): of this
+    campaign, this main run, this candidate archive; main run n not made
+    yet (no connected attempt in ``ledger``); from run 2 on, run n − 1 made,
+    and its cause, change and hypothesis recorded with its evidence
+    (``<root>/<previous run>/rerun-record.json``) and in the approval, the
+    same; ``interim`` refused for the last run and after any final run."""
+    run_n = campaign_run(cfg["run_id"])
     if a.get("campaign") != CAMPAIGN or a.get("campaign_run") != run_n:
         raise NotApproved(f"the approval is not for main run {run_n} of the {CAMPAIGN} campaign")
+    if a.get("archive_sha256") != cfg["binary"]["archive_sha256"]:
+        raise NotApproved("archive_sha256: the approval names another candidate archive")
     if a.get("candidate") not in CANDIDATES:
         raise NotApproved(f"candidate: one of {CANDIDATES}")
-    if run_n == CAMPAIGN_RUNS and a["candidate"] != "final":
-        raise NotApproved(f"main run {run_n} is kept for the final candidate")
+    made = [x["run_id"] for x in ledger.get(run_n, []) if x["connected"] and x["run_id"] != cfg["run_id"]]
+    if made:
+        raise NotApproved(f"main run {run_n} was already made ({', '.join(made)}): the next is {run_n + 1}")
+    earlier = [x for k in range(1, run_n) for x in ledger.get(k, []) if x["connected"]]
+    if a["candidate"] == "interim":
+        if run_n == CAMPAIGN_RUNS:
+            raise NotApproved(f"main run {run_n} is the last: kept for the final candidate")
+        if any(x["candidate"] != "interim" for x in earlier):
+            raise NotApproved("an earlier main run was on the final candidate (or its approval is unreadable): "
+                              "no interim run after it")
     if run_n > 1:
         r = a.get("rerun")
         if not isinstance(r, dict) or not all(isinstance(r.get(k), str) and r[k].strip() for k in RERUN_FIELDS):
             raise NotApproved(f"rerun: {', '.join(RERUN_FIELDS)} of the previous run, recorded before this one")
-        if campaign_run(r["previous_run_id"]) != run_n - 1:
-            raise NotApproved(f"rerun.previous_run_id: main run {run_n - 1} of the campaign")
+        prev = [x["run_id"] for x in ledger.get(run_n - 1, []) if x["connected"]]
+        if r["previous_run_id"] not in prev:
+            raise NotApproved(f"rerun.previous_run_id: a made main run {run_n - 1} with its evidence in {root} "
+                              f"(found: {prev})")
+        try:
+            rec = common.read_json(os.path.join(root, r["previous_run_id"], "rerun-record.json"))
+        except (OSError, ValueError) as e:
+            raise NotApproved(f"the rerun record of {r['previous_run_id']} not in its evidence: {e}") from None
+        if not isinstance(rec, dict) or any(rec.get(k) != r[k] for k in RERUN_FIELDS):
+            raise NotApproved("the rerun record in the previous run's evidence differs from the approval's")
 
 
-def check_approval(path, config_sha, scope, now, duration_s=0, run_n=None):
+def preflight_record_path(root, cfg):
+    return os.path.join(root, cfg["run_id"] + ".preflight.json")
+
+
+def preflight_boot_ids(root, cfg):
+    """Every host's boot ID from this run's preflight record (0.2.0 plan
+    §4.5): the watchdog's first reference, so that a reboot between the
+    preflight and its first round is seen. Raises ``NotApproved`` without
+    a record naming every host's."""
+    try:
+        rec = common.read_json(preflight_record_path(root, cfg))
+        ids = {h: rec["checks"][f"host {h}"]["boot_id"] for h in cfg["hosts"]}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise NotApproved(f"no preflight record with every host's boot ID for {cfg['run_id']}: {e!r}") from None
+    if rec.get("run_id") != cfg["run_id"] or not all(isinstance(v, str) and v for v in ids.values()):
+        raise NotApproved("the preflight record names another run or lacks a boot ID")
+    return ids
+
+
+def check_approval(path, config_sha, scope, now, duration_s=0, campaign=None):
     """Raise ``NotApproved`` unless the approval names this configuration,
     this scope and a window containing ``now`` (an aware datetime).
-    ``run_n``: a preflight or run of the 0.2.0 campaign's main run ``run_n``
-    (``check_campaign_approval``)."""
+    ``campaign``: ``(cfg, evidence root)`` of a preflight or run of the
+    0.2.0 campaign (``check_campaign_approval``)."""
     if not path:
         raise NotApproved("no approval file")
     try:
@@ -276,8 +347,8 @@ def check_approval(path, config_sha, scope, now, duration_s=0, run_n=None):
         raise NotApproved(f"the approval does not cover {scope}")
     if not a.get("approved_by"):
         raise NotApproved("approved_by missing")
-    if run_n is not None:
-        check_campaign_approval(a, run_n)
+    if campaign is not None:
+        check_campaign_approval(a, campaign[0], campaign_ledger(campaign[1]), campaign[1])
     try:
         w0 = datetime.datetime.fromisoformat(a["window_start"])
         w1 = datetime.datetime.fromisoformat(a["window_end"])
@@ -839,6 +910,7 @@ class Run:
         tl7["scrub_held"] = getattr(self.c, "last_scrub_held", None)
         tl7["scrub_errors"] = getattr(self.c, "last_scrub_errors", None)
         tl7["scrub_unread_groups"] = getattr(self.c, "last_scrub_unread", None)
+        tl7["scrub_groups_without_classes"] = getattr(self.c, "last_scrub_unclassed", None)
         if self._stopped("7"):
             return False
         self.run_step({"kind": "finish", "stage": "7"}, deadline)
@@ -846,6 +918,9 @@ class Run:
 
     def execute(self):
         bodies = {"1": self.s1, "2": self.s2, "3": self.s3, "4": self.s4, "5": self.s5, "6": self.s6, "7": self.s7}
+        # Before the first contact with a host: from here on the attempt
+        # counts as made (0.2.0 plan §3, ``campaign_ledger``).
+        self.ev.event(self.clock.wall_ms(), "contact")
         try:
             for st in stages(self.cfg):
                 if self._stopped(st["stage"]):
@@ -1082,12 +1157,19 @@ def main(argv=None, now=None, cluster_factory=None):
     if not a.execute:
         print(f"{a.command} contacts the hosts: --execute and an approval are required", file=sys.stderr)
         return 2
+    if not a.evidence:
+        print(f"{a.command} needs --evidence (the evidence root: the campaign's runs and preflights are read and "
+              f"saved there; the host's evidence under <root>/{cfg['run_id']} before anything on the host is "
+              "removed)", file=sys.stderr)
+        return 2
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    campaign = a.command in ("preflight", "run") and campaign_run(cfg["run_id"]) is not None
     try:
         # A run must end inside the window: its time and the drain's.
         duration = (min(RUN_MAX_S, cfg["limits"]["run_seconds"]) + DRAIN_OBSERVE_S) if a.command == "run" else 0
-        check_approval(a.approval, sha, a.command, now, duration,
-                       run_n=campaign_run(cfg["run_id"]) if a.command in ("preflight", "run") else None)
+        approval = check_approval(a.approval, sha, a.command, now, duration,
+                                  campaign=(cfg, a.evidence) if campaign else None)
+        seed = preflight_boot_ids(a.evidence, cfg) if campaign and a.command == "run" else None
     except NotApproved as e:
         print(f"not approved: {e}", file=sys.stderr)
         return 2
@@ -1095,13 +1177,18 @@ def main(argv=None, now=None, cluster_factory=None):
         from . import remote
         cluster_factory = remote.SshCluster
     cluster = cluster_factory(cfg)
+    if seed is not None:
+        # 0.2.0 plan §4.5: the watchdog starts from the preflight's boot IDs.
+        cluster.boot_seed = seed
     if a.command == "preflight":
-        print(json.dumps(cluster.preflight(), indent=1))
+        res = cluster.preflight()
+        if campaign:
+            if not os.path.isdir(a.evidence):
+                os.makedirs(a.evidence)
+            common.atomic_write_json(preflight_record_path(a.evidence, cfg), {
+                "run_id": cfg["run_id"], "config_sha256": sha, "at": now.isoformat(), "checks": res})
+        print(json.dumps(res, indent=1))
         return 0
-    if not a.evidence:
-        print(f"{a.command} needs --evidence (the evidence root: the host's evidence is saved under "
-              f"<root>/{cfg['run_id']} before anything on the host is removed)", file=sys.stderr)
-        return 2
     if a.command in ("collect", "teardown"):
         d = os.path.join(a.evidence, cfg["run_id"])
         os.makedirs(d, exist_ok=True)
@@ -1111,6 +1198,8 @@ def main(argv=None, now=None, cluster_factory=None):
         return 0 if (res.get("complete") if a.command == "collect" else "kept" not in res) else 1
     ev = Evidence(a.evidence, cfg["run_id"])
     ev.save("config.json", {"config": cfg, "config_sha256": sha})
+    # The campaign's ledger reads the candidate and the archive from here.
+    ev.save("approval.json", approval)
     res = Run(cfg, cluster, ev, collect=collect_kw).execute()
     print(json.dumps({"outcome": res["outcome"], "evidence": ev.dir}))
     return 0 if res["outcome"] == judge.PASSED else 1

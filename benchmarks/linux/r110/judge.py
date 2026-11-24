@@ -607,8 +607,10 @@ def _c5_campaign(s7, vr, mf, sc, held):
     damaged retained or in-flight records under their damage class) fails,
     settled or not, also when another group's scrub reported errors; scrub
     errors (``unclassified`` shards among them), a group without a result,
-    or a scrub that printed no classes (not a 0.2.0 binary) leave C5
-    Inconclusive, never Passed. v3's count rule does not apply."""
+    a group whose result printed no classes (not a 0.2.0 binary), shards
+    still in flight, or more retained shards than records pending reclaim
+    before the scrub leave C5 Inconclusive, never Passed. v3's count rule
+    does not apply."""
     by = s7.get("scrub_by_class")
     found = sum(by) if isinstance(by, list) else sc
     ev = {"scrub_by_class": by, "scrub_held": held, "scrub_errors": s7.get("scrub_errors"),
@@ -617,10 +619,23 @@ def _c5_campaign(s7, vr, mf, sc, held):
         return verdict("C5", FAILED, [f"manifest findings {mf}, scrub findings {found}"], **ev)
     if not vr.get("complete") or mf is None or sc is None:
         return verdict("C5", INCONCLUSIVE, ["the verification, the manifests or the scrub incomplete"], **ev)
-    if not isinstance(held, dict):
-        return verdict("C5", INCONCLUSIVE, ["the scrub printed no per-shard classes (0.2.0 plan §4.1)"], **ev)
+    if not isinstance(held, dict) or s7.get("scrub_groups_without_classes") != []:
+        return verdict("C5", INCONCLUSIVE, ["the scrub of a group printed no per-shard classes (0.2.0 plan "
+                                            "§4.1)"], **ev)
     if held.get("unclassified", 0) > 0:
         return verdict("C5", INCONCLUSIVE, [f"{held['unclassified']} shards not classified by the scrub"], **ev)
+    # Nothing is written, moved or collected after stage 6 and the settle
+    # wait: a shard still in flight is an operation the scrub could not
+    # judge to its end, so it cannot count for a clean pass.
+    if held.get("in_flight", 0) > 0:
+        return verdict("C5", INCONCLUSIVE, [f"{held['in_flight']} shards still in flight at the scrub"], **ev)
+    # A record kept for reclaim is one the nodes count as pending: more
+    # retained shards than records pending just before the scrub (or that
+    # count unknown) is not accounted for by the retention.
+    pend = s7.get("pending_before_scrub")
+    if held.get("retained", 0) > 0 and not (isinstance(pend, (int, float)) and held["retained"] <= pend):
+        return verdict("C5", INCONCLUSIVE, [f"{held['retained']} retained shards, {pend} records pending reclaim "
+                                            "before the scrub"], pending_before_scrub=pend, **ev)
     return verdict("C5", PASSED, [], keys=vr["keys"], unknown_resolved=vr.get("unknown_resolved"), **ev)
 
 

@@ -10,8 +10,10 @@ import io
 import json
 import os
 import unittest
+from unittest import mock
 
-from r110 import driver, judge, remote
+from r110 import common, driver, judge, remote, watchdog
+from r110.tests import test_guard as tg
 from r110.tests import test_driver as td
 
 ZERO = "0" * 64
@@ -51,7 +53,6 @@ class Configuration(td.Base):
         self.refused(lambda c: c["retained_record"].pop("host3"))
         self.refused(lambda c: c.update(retained_record={"/mnt/data/x": ZERO}))
         self.refused(lambda c: c["retained_record"].update(host1={"/x": "not-a-digest"}))
-        self.refused(lambda c: c.update(retained_record={h: {} for h in c["hosts"]}))
         cfg = copy.deepcopy(self.cfg)
         cfg["retained_record"]["host3"] = {}  # listed at the preflight: none there
         driver.validate(cfg)
@@ -81,56 +82,150 @@ class Configuration(td.Base):
         return td.Approval.calls(self)
 
 
+RID = "r110-020-{}-2027010{}T000000Z"
+
+
 class Approval(td.Base):
+    """§3: the run-number ledger in the evidence root, the rerun record, the
+    candidate rules, the archive named by the approval."""
+
     def calls(self):
         return td.Approval.calls(self)
 
     def invoke(self, argv):
         return td.Approval.invoke(self, argv)
 
-    def run_cfg(self, n):
-        cfg = copy.deepcopy(self.cfg)
-        cfg["run_id"] = f"r110-020-{n}-20270101T000000Z"
-        return self.write(cfg)
+    def made(self, n, candidate="interim", connected=True, day=1, record=None):
+        """An earlier attempt of main run ``n`` in the evidence root."""
+        d = os.path.join(self.dir, RID.format(n, day))
+        os.makedirs(d)
+        with open(os.path.join(d, "approval.json"), "w") as f:
+            json.dump({"candidate": candidate, "archive_sha256": ZERO}, f)
+        if connected:
+            open(os.path.join(d, "events.jsonl"), "w").close()
+        if record is not None:
+            with open(os.path.join(d, "rerun-record.json"), "w") as f:
+                json.dump(record, f)
+        return os.path.basename(d)
 
     def preflight(self, n, **extra):
-        p, sha = self.run_cfg(n)
+        cfg = copy.deepcopy(self.cfg)
+        cfg["run_id"] = RID.format(n, 9)
+        p, sha = self.write(cfg)
         return self.invoke(["preflight", p, "--execute",
-                            "--approval", self.approval(sha, ("preflight",), **extra)])
+                            "--approval", self.approval(sha, ("preflight",), **dict({"campaign_run": n}, **extra))])
+
+    def rerun(self, prev):
+        return {"previous_run_id": prev, "cause": "C5 Failed: 2 orphans", "change": "none (a fix in the candidate)",
+                "hypothesis": "the orphans were the bug's"}
 
     def test_an_approval_of_the_earlier_campaign_is_refused(self):
-        self.assertEqual(self.preflight(1, campaign=None, campaign_run=None, candidate=None), (2, []))
+        self.assertEqual(self.preflight(1, campaign=None, candidate=None), (2, []))
         self.assertEqual(self.preflight(1, campaign="0.1.0"), (2, []))
 
-    def test_the_approval_names_this_main_run(self):
-        self.assertEqual(self.preflight(1, campaign_run=2), (2, []))
+    def test_the_approval_names_this_main_run_and_this_archive(self):
+        cfg = copy.deepcopy(self.cfg)
+        p, sha = self.write(cfg)
+        self.assertEqual(self.invoke(["preflight", p, "--execute",
+                                      "--approval", self.approval(sha, ("preflight",), campaign_run=2)]), (2, []))
         self.assertEqual(self.preflight(1, candidate="maybe"), (2, []))
+        self.assertEqual(self.preflight(1, archive_sha256="1" * 64), (2, []))
+        self.assertEqual(self.preflight(1, archive_sha256=None), (2, []))
         self.assertEqual(self.preflight(1)[0], 0)
 
-    def test_a_later_run_records_the_cause_the_change_and_the_hypothesis(self):
-        rerun = {"previous_run_id": "r110-020-1-20270101T000000Z", "cause": "C5 Failed: 2 orphans",
-                 "change": "none (a product fix in the candidate)", "hypothesis": "the orphans were the bug's"}
-        self.assertEqual(self.preflight(2, campaign_run=2), (2, []))
-        for k in rerun:
-            self.assertEqual(self.preflight(2, campaign_run=2, rerun=dict(rerun, **{k: " "})), (2, []), k)
-        self.assertEqual(self.preflight(2, campaign_run=2,
-                                        rerun=dict(rerun, previous_run_id="r110-020-2-20270101T000000Z")), (2, []))
-        self.assertEqual(self.preflight(2, campaign_run=2, rerun=rerun)[0], 0)
+    def test_a_main_run_already_made_is_refused(self):
+        self.made(1, connected=False)  # never reached a host: not counted
+        self.assertEqual(self.preflight(1)[0], 0)
+        self.made(1, day=2)
+        self.assertEqual(self.preflight(1), (2, []))
 
-    def test_the_last_run_is_kept_for_the_final_candidate(self):
-        rerun = {"previous_run_id": "r110-020-2-20270101T000000Z", "cause": "c", "change": "c", "hypothesis": "h"}
-        self.assertEqual(self.preflight(3, campaign_run=3, rerun=rerun), (2, []))
-        self.assertEqual(self.preflight(3, campaign_run=3, rerun=rerun, candidate="final")[0], 0)
+    def test_a_later_run_needs_the_previous_run_and_its_rerun_record(self):
+        self.assertEqual(self.preflight(2, rerun=self.rerun(RID.format(1, 1))), (2, []))  # no run 1
+        prev = self.made(1)
+        rr = self.rerun(prev)
+        self.assertEqual(self.preflight(2, rerun=rr), (2, []))  # no record with run 1's evidence
+        with open(os.path.join(self.dir, prev, "rerun-record.json"), "w") as f:
+            json.dump(dict(rr, cause="another cause"), f)
+        self.assertEqual(self.preflight(2, rerun=rr), (2, []))  # the record differs
+        with open(os.path.join(self.dir, prev, "rerun-record.json"), "w") as f:
+            json.dump(rr, f)
+        self.assertEqual(self.preflight(2), (2, []))
+        for k in rr:
+            self.assertEqual(self.preflight(2, rerun=dict(rr, **{k: " "})), (2, []), k)
+        self.assertEqual(self.preflight(2, rerun=dict(rr, previous_run_id=RID.format(1, 5))), (2, []))
+        # An attempt of run 1 that never reached a host is not run 1, even
+        # with a record.
+        never = self.made(1, connected=False, day=6)
+        with open(os.path.join(self.dir, never, "rerun-record.json"), "w") as f:
+            json.dump(self.rerun(never), f)
+        self.assertEqual(self.preflight(2, rerun=self.rerun(never)), (2, []))
+        self.assertEqual(self.preflight(2, rerun=rr)[0], 0)
+
+    def test_interim_never_leaves_no_run_for_the_final_candidate(self):
+        p1 = self.made(1)
+        p2 = self.made(2, record=self.rerun(p1))
+        with open(os.path.join(self.dir, p2, "rerun-record.json"), "w") as f:
+            json.dump(self.rerun(p2), f)
+        self.assertEqual(self.preflight(3, rerun=self.rerun(p2)), (2, []))
+        self.assertEqual(self.preflight(3, rerun=self.rerun(p2), candidate="final")[0], 0)
+
+    def test_no_interim_run_after_a_final_one(self):
+        p1 = self.made(1, candidate="final", record=None)
+        with open(os.path.join(self.dir, p1, "rerun-record.json"), "w") as f:
+            json.dump(self.rerun(p1), f)
+        self.assertEqual(self.preflight(2, rerun=self.rerun(p1)), (2, []))
+        self.assertEqual(self.preflight(2, rerun=self.rerun(p1), candidate="final")[0], 0)
+        # An earlier approval that cannot be read counts as possibly final.
+        os.remove(os.path.join(self.dir, p1, "approval.json"))
+        self.assertEqual(self.preflight(2, rerun=self.rerun(p1)), (2, []))
+
+    def test_a_run_starts_from_its_preflight_boot_ids(self):
+        """§4.5: no preflight record, no run; with it, the watchdog's seed."""
+        cfg = copy.deepcopy(self.cfg)
+        p, sha = self.write(cfg)
+        made = []
+        argv = ["run", p, "--execute", "--evidence", self.dir, "--approval", self.approval(sha, ("run",))]
+
+        class Stub:
+            def __init__(self, cfg, cluster, ev, collect=None):
+                made.append(cluster)
+
+            def execute(self):
+                return {"outcome": judge.INCONCLUSIVE}
+
+        with mock.patch.object(driver, "Run", Stub):
+            self.assertEqual(driver.main(argv, now=td.NOW, cluster_factory=td.FakeCluster), 2)
+            self.assertEqual(made, [])
+            rec = {"run_id": cfg["run_id"], "checks": {f"host {h}": {"boot_id": f"b-{h}"} for h in cfg["hosts"]}}
+            with open(driver.preflight_record_path(self.dir, cfg), "w") as f:
+                json.dump(dict(rec, checks=dict(rec["checks"], **{"host host3": {}})), f)
+            self.assertEqual(driver.main(argv, now=td.NOW, cluster_factory=td.FakeCluster), 2)
+            with open(driver.preflight_record_path(self.dir, cfg), "w") as f:
+                json.dump(rec, f)
+            self.assertEqual(driver.main(argv, now=td.NOW, cluster_factory=td.FakeCluster), 1)
+        self.assertEqual(made[0].boot_seed, {h: f"b-{h}" for h in cfg["hosts"]})
+        saved = json.load(open(os.path.join(self.dir, cfg["run_id"], "approval.json")))
+        self.assertEqual(saved["candidate"], "interim")
+        # The attempt is made once its run started: the ledger counts it.
+        self.assertFalse(driver.campaign_ledger(self.dir)[1][0]["connected"])  # the stub contacted nothing
+
+    def test_the_preflight_saves_its_record(self):
+        p, sha = self.write(self.cfg)
+        rc, made = self.invoke(["preflight", p, "--execute", "--approval", self.approval(sha, ("preflight",))])
+        self.assertEqual(rc, 0)
+        rec = json.load(open(driver.preflight_record_path(self.dir, self.cfg)))
+        self.assertEqual((rec["run_id"], rec["config_sha256"]), (self.cfg["run_id"], sha))
 
 
-def s7(sc, by, held, errors=0, unread=(), settled=None, pending=10, complete=True):
+def s7(sc, by, held, errors=0, unread=(), settled=None, pending=10, complete=True, unclassed=()):
     return {"campaign": "0.2.0",
             "7": {"verify": {"violations": [], "complete": complete, "keys": 1}, "manifest_findings": 0,
                   "scrub_findings": sc, "scrub_by_class": by, "scrub_held": held, "scrub_errors": errors,
-                  "scrub_unread_groups": list(unread), "settled_ms": settled, "pending_before_scrub": pending}}
+                  "scrub_unread_groups": list(unread), "settled_ms": settled, "pending_before_scrub": pending,
+                  "scrub_groups_without_classes": list(unclassed)}}
 
 
-HELD = {"retained": 40, "retained_damaged": 0, "in_flight": 3, "unclassified": 0}
+HELD = {"retained": 4, "retained_damaged": 0, "in_flight": 0, "unclassified": 0}
 
 
 class ScrubClasses(unittest.TestCase):
@@ -140,10 +235,29 @@ class ScrubClasses(unittest.TestCase):
     def c5(self, *a, **k):
         return judge.c5(s7(*a, **k))
 
-    def test_retained_and_in_flight_shards_are_not_findings(self):
+    def test_retained_shards_are_not_findings(self):
         r = self.c5(0, [0] * 8, HELD)
         self.assertEqual(r["outcome"], judge.PASSED, r)
         self.assertEqual(r["evidence"]["scrub_held"], HELD)
+
+    def test_shards_in_flight_after_the_settle_are_inconclusive(self):
+        """Nothing is written, moved or collected then: not a clean pass,
+        not a finding either."""
+        r = self.c5(0, [0] * 8, dict(HELD, in_flight=3), settled=100)
+        self.assertEqual(r["outcome"], judge.INCONCLUSIVE, r)
+        self.assertIn("in flight", r["reasons"][0])
+
+    def test_retained_shards_are_capped_at_the_records_pending(self):
+        self.assertEqual(self.c5(0, [0] * 8, dict(HELD, retained=10), pending=10)["outcome"], judge.PASSED)
+        self.assertEqual(self.c5(0, [0] * 8, dict(HELD, retained=11), pending=10)["outcome"], judge.INCONCLUSIVE)
+        self.assertEqual(self.c5(0, [0] * 8, HELD, pending=None)["outcome"], judge.INCONCLUSIVE)
+        self.assertEqual(self.c5(0, [0] * 8, dict(HELD, retained=0), pending=None)["outcome"], judge.PASSED)
+
+    def test_every_group_prints_its_classes(self):
+        self.assertEqual(self.c5(0, [0] * 8, HELD, unclassed=[2])["outcome"], judge.INCONCLUSIVE)
+        tl = s7(0, [0] * 8, HELD)
+        del tl["7"]["scrub_groups_without_classes"]
+        self.assertEqual(judge.c5(tl)["outcome"], judge.INCONCLUSIVE)
 
     def test_every_finding_fails_settled_or_not(self):
         for settled in (None, 100):
@@ -241,6 +355,20 @@ class Engine(td.EngineBase):
             tl = json.load(f)
         self.assertEqual(tl["campaign"], "0.2.0")
         self.assertTrue(tl["3"]["write_ownership_strict"])
+
+    def test_the_attempt_is_marked_made_before_its_first_contact(self):
+        """§3: the ledger counts an attempt by its events; the first is
+        written before the cluster is asked anything."""
+        c = td.FakeCluster(self.cfg, self.clock)
+        seen = []
+        real = c.clock_offset_ms
+        c.clock_offset_ms = lambda: seen.append(os.path.exists(os.path.join(ev_dir[0], "events.jsonl"))) or real()
+        ev_dir = [os.path.join(self.dir, "evidence", self.cfg["run_id"])]
+        self.go(c)
+        self.assertTrue(seen and seen[0], "contacted before the attempt was recorded")
+        with open(os.path.join(ev_dir[0], "events.jsonl")) as f:
+            self.assertEqual(json.loads(f.readline())["event"], "contact")
+        self.assertTrue(driver.campaign_ledger(os.path.join(self.dir, "evidence"))[1][0]["connected"])
 
     def test_nodes_not_strict_before_the_fill_end_the_run_before_any_write(self):
         c = td.FakeCluster(self.cfg, self.clock)
@@ -348,6 +476,86 @@ class Preflight(td.Base):
         self.assertEqual(self.host_check(20 << 30), [True] * 3)
         self.assertEqual(self.host_check(None), [True] * 3)  # no data mount there
         self.assertEqual(self.host_check(2 << 30), [False] * 3)
+
+
+class Reboot(unittest.TestCase):
+    """§4.5: the watchdog starts from the preflight's boot IDs."""
+
+    def test_a_reboot_before_the_first_round_is_seen(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            hosts = tg.FakeHosts({"t1": tg.healthy(system=True), "t2": tg.healthy(load_host=True)})
+            cfg = {"run_id": "r", "hosts": {"h1": "t1", "h2": "t2"}, "load_host": "h2", "system_fdb_hosts": ["h1"],
+                   "remote_run_dir": "/r", "remote_data_mount": "/d", "remote_heartbeat": "/r/hb.json",
+                   "remote_test_dirs": ["/r"], "remote_test_fdb_cluster": "/r/fdb.cluster", "local_dir": d,
+                   "limits": {"max_test_dir_bytes": 8 << 30}}
+            self.assertEqual(watchdog.Watchdog(dict(cfg, boot_ids={"h1": "boot-1", "h2": "boot-1"}), hosts,
+                                               common.FakeClock()).run(max_rounds=2), 0)
+            w = watchdog.Watchdog(dict(cfg, boot_ids={"h1": "boot-0"}), hosts, common.FakeClock())
+            self.assertEqual(w.run(max_rounds=2), 2)
+            self.assertIn("host-reboot", [json.loads(a[1])["reason"] for t, sc, a in hosts.writes
+                                           if sc == watchdog.WRITE_STOP])
+
+
+
+class PreflightArchive(td.Base):
+    HOST = td.Commands.HOST
+    cluster = td.Commands.cluster
+
+    def test_the_run_passes_the_seed_to_the_watchdog(self):
+        c, _, cfg = self.cluster()
+        c.boot_seed = {"host1": "b1"}
+        with mock.patch.object(remote.subprocess, "Popen") as popen:
+            c.start_watchdog()
+        with open(os.path.join(cfg["local_dir"], "watchdog.json")) as f:
+            self.assertEqual(json.load(f)["boot_ids"], {"host1": "b1"})
+        self.assertEqual(popen.call_count, 1)
+
+    def archive(self, out):
+        c, rec, cfg = self.cluster(answers=[("mktemp -d", out)])
+        r = c._archive()
+        cmd = [x for _, x, _ in rec.commands if "mktemp -d" in x][0]
+        self.assertIn("tar -xzf " + cfg["remote"]["archive_path"], cmd)
+        self.assertIn("rm -rf --", cmd)
+        return r["ok"]
+
+    def test_the_extracted_binary_is_the_approved_one(self):
+        self.assertTrue(self.archive(f"{ZERO}\n{ZERO}\n"))
+        self.assertFalse(self.archive(f"{'1' * 64}\n{ZERO}\n"))  # another archive
+        self.assertFalse(self.archive(f"{ZERO}\n{'2' * 64}\n"))  # another binary in it
+        self.assertFalse(self.archive(f"{ZERO}\n{ZERO}\n{ZERO}\n"))  # two binaries
+        self.assertFalse(self.archive(f"{ZERO}\n"))  # none extracted
+        c, _, _ = self.cluster()
+        self.assertIn("archive", c.required_checks())
+
+    def test_a_p41_directory_not_in_the_record_fails(self):
+        place = "/mnt/data/retained-cluster-placeholder"
+        c, _, _ = self.cluster(answers=[("find " + place, ZERO + "\n"), ("/p41-*", "/mnt/data/p41-x\n")])
+        r = c._retained()
+        self.assertFalse(r["ok"])
+        self.assertEqual(set(r["unrecorded"]), {"host1", "host2", "host3"})
+        c, _, cfg = self.cluster(answers=[("find ", ZERO + "\n"), ("/p41-*", "/mnt/data/p41-x\n")])
+        for h in c.cfg["retained_record"]:
+            c.cfg["retained_record"][h] = {"/mnt/data/p41-x": ZERO}
+        self.assertTrue(c._retained()["ok"])
+
+    def test_an_all_empty_record_is_valid_and_checked_at_the_preflight(self):
+        cfg = copy.deepcopy(self.cfg)
+        cfg["retained_record"] = {h: {} for h in cfg["hosts"]}
+        driver.validate(cfg)
+        c = remote.SshCluster(driver.validate(cfg), runner=td.Recorder([("/p41-*", "/mnt/data/p41-y\n")]))
+        self.assertFalse(c._retained()["ok"])
+        c = remote.SshCluster(driver.validate(cfg), runner=td.Recorder())
+        self.assertTrue(c._retained()["ok"])
+
+    def test_a_group_without_its_classes_line_is_recorded(self):
+        g1 = ("scrub group 1 verified 9 bytes 1 findings [0, 0, 0, 0, 0, 0, 0, 0] enqueued 0 errors 0 "
+              "retained 0 retained_damaged 0 in_flight 0 unclassified 0\n")
+        g2 = "scrub group 2 verified 9 bytes 1 findings [0, 0, 0, 0, 0, 0, 0, 0] enqueued 0 errors 0\n"
+        c, _, _ = self.cluster(answers=[("grep '^group '", "group 1 x\ngroup 2 y\n"),
+                                        ("scrub --group 1 ", g1), ("scrub --group 2 ", g2)])
+        self.assertEqual(c.integrity("scrub"), 0)
+        self.assertEqual(c.last_scrub_unclassed, [2])
 
 
 if __name__ == "__main__":

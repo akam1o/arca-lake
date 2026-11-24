@@ -74,7 +74,8 @@ class Base(unittest.TestCase):
         p = os.path.join(self.dir, "approval.json")
         # The 0.2.0 campaign's fields for main run 1 (the example's).
         a = {"config_sha256": sha, "scope": list(scope), "window_start": start, "window_end": end,
-             "approved_by": by, "campaign": "0.2.0", "campaign_run": 1, "candidate": "interim"}
+             "approved_by": by, "campaign": "0.2.0", "campaign_run": 1, "candidate": "interim",
+             "archive_sha256": "0" * 64}
         a.update(extra)
         with open(p, "w") as f:
             json.dump({k: v for k, v in a.items() if v is not None}, f)
@@ -160,6 +161,9 @@ class Approval(Base):
 
     def invoke(self, argv):
         made, factory = self.calls()
+        if "--evidence" not in argv:
+            # The evidence root (the campaign's ledger and preflight records).
+            argv = argv + ["--evidence", self.dir]
         with NoContact():
             rc = driver.main(argv, now=NOW, cluster_factory=factory)
         return rc, made
@@ -376,7 +380,7 @@ class FakeCluster:
             # A 0.2.0 scrub's output: classes and the shards held.
             self.last_scrub_classes = [0] * 8
             self.last_scrub_held = {"retained": 0, "retained_damaged": 0, "in_flight": 0, "unclassified": 0}
-            self.last_scrub_errors, self.last_scrub_unread = 0, []
+            self.last_scrub_errors, self.last_scrub_unread, self.last_scrub_unclassed = 0, [], []
         return 0
 
     def ledger_records(self):
@@ -1701,7 +1705,8 @@ class Commands(Base):
         p, sha = self.write(undetermined)
         with NoContact():
             # Chosen at the preflight: a preflight runs without it, a run never.
-            self.assertEqual(driver.main(["preflight", p, "--execute", "--approval", self.approval(sha, ("preflight",))],
+            self.assertEqual(driver.main(["preflight", p, "--execute", "--evidence", self.dir,
+                                          "--approval", self.approval(sha, ("preflight",))],
                                          now=NOW, cluster_factory=lambda cfg: FakeCluster(cfg)), 0)
             self.assertEqual(driver.main(["run", p, "--execute", "--evidence", self.dir,
                                           "--approval", self.approval(sha, ("run",))],

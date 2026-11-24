@@ -19,7 +19,8 @@ activity, CPU iowait, kernel OOM or hung-task messages, the test
 directories' allocated bytes, the test FoundationDB and the guard's own
 identity; every system FoundationDB. A reading that cannot be made is a
 monitor failure unless the approved configuration declares it optional
-(``optional_checks``). It never kills a process itself.
+(``optional_checks``). It never kills a process itself. ``boot_ids``
+(host name -> boot ID, optional): the reference of the first round.
 
 What fires is acted on by class (``common.REASONS``): a limit or an anomaly
 writes the run's stop file on the load host (the first reason wins; the
@@ -237,9 +238,11 @@ class Watchdog:
         self.optional = set(cfg.get("optional_checks", []))
         self.unreachable = {h: 0 for h in cfg["hosts"]}
         # Each host's boot ID at its first reading: a later one that differs
-        # is a reboot (0.2.0 plan §5), a monitor stop of its own
+        # is a reboot (0.2.0 plan §4.5), a monitor stop of its own
         # (``host-reboot``), never an unreachable host or a stop by a guard.
-        self.boot = {}
+        # Seeded from the preflight's record (``boot_ids``): a reboot between
+        # the preflight and the first round is seen too.
+        self.boot = dict(cfg.get("boot_ids") or {})
         self.prev = {}
         self.swap_hist = []
         self.iow_hist = []
