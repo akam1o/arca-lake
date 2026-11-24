@@ -25,6 +25,7 @@ secrets are never printed or written to the ledger.
 """
 
 import argparse
+import base64
 import hashlib
 import http.client
 import json
@@ -32,9 +33,11 @@ import os
 import random
 import re
 import socket
+import struct
 import sys
 import threading
 import time
+import zlib
 
 BUCKET = "v3h"
 REGION = "us-east-1"
@@ -132,6 +135,20 @@ def xml_tag(content, tag):
     body = content["body"] if content else b""
     m = re.search(rf"<{tag}>(.*?)</{tag}>", body.decode("utf-8", "replace"), re.S)
     return m.group(1) if m else None
+
+
+def b64_md5(data):
+    return base64.b64encode(hashlib.md5(data).digest()).decode()
+
+
+def b64_crc32(data):
+    """`x-amz-checksum-crc32`: base64 of the big-endian CRC-32."""
+    return base64.b64encode(struct.pack(">I", zlib.crc32(data) & 0xFFFFFFFF)).decode()
+
+
+def delete_xml(keys):
+    objs = "".join(f"<Object><Key>{k}</Key></Object>" for k in keys)
+    return f'<?xml version="1.0" encoding="UTF-8"?><Delete>{objs}</Delete>'.encode()
 
 
 class State:
@@ -374,6 +391,27 @@ class Runner:
                   "key": name, "status": status, "outcome": "ok" if ok else "VIOLATION", "err": code})
         return ok
 
+    def note_refused_put(self, key, res, body):
+        """A PUT expected to be refused: if it was taken (2xx) or its outcome
+        is unknown (5xx, no answer), the ledger state follows, so a later
+        GET is judged against what may be stored."""
+        cand = [hashlib.sha256(body).hexdigest(), len(body)]
+        with self.state.lock:
+            if res[3] == "http" and 200 <= res[0] < 300:
+                self.state.keys[key] = [cand]
+            elif res[3] == "unknown" or (res[3] == "http" and res[0] >= 500):
+                self.state.keys[key] = self.state.cands(key) + [cand]
+
+    def note_delete_objects(self, keys, res):
+        """As `note_refused_put` for a DeleteObjects of `keys`."""
+        with self.state.lock:
+            for k in keys:
+                cur = self.state.cands(k)
+                if res[3] == "http" and 200 <= res[0] < 300:
+                    self.state.keys[k] = [ABSENT]
+                elif (res[3] == "unknown" or (res[3] == "http" and res[0] >= 500)) and ABSENT not in cur:
+                    self.state.keys[k] = cur + [ABSENT]
+
     def auth_check(self, creds):
         owner, other = tuple(creds["owner"]), tuple(creds["other"])
         unknown = ("AKIAV3HUNKNOWN000000", "0" * 40)
@@ -409,15 +447,40 @@ class Runner:
             signed = body_for(f"tamper-signed-{gw[0]}", 4097)
             sent = body_for(f"tamper-sent-{gw[0]}", 4097)
             res = call(gw, "PUT", path, signed, keep_body=True, send_body=sent)
-            if res[3] == "http" and 200 <= res[0] < 300:
-                with self.state.lock:
-                    self.state.keys[key] = [[hashlib.sha256(sent).hexdigest(), len(sent)]]
-            elif res[3] != "http" or res[0] >= 500:
-                with self.state.lock:
-                    self.state.keys[key] = self.state.cands(key) + [[hashlib.sha256(sent).hexdigest(), len(sent)]]
+            self.note_refused_put(key, res, sent)
             self.expect(cases, "body changed after signing", gw, res, {400, 403},
                         {"XAmzContentSHA256Mismatch", "SignatureDoesNotMatch", "BadDigest"})
             cases.append({"case": "tampered PUT not stored", "gw": gw[0], "ok": self.do_get(0, gw, key) == "ok"})
+            # Added after the rehearsal for features merged since: a
+            # Content-MD5 that does not match the body.
+            res = call(gw, "PUT", path, body_for(f"md5-{gw[0]}", 4097), keep_body=True,
+                       headers={"Content-MD5": b64_md5(b"not the body")})
+            self.note_refused_put(key, res, body_for(f"md5-{gw[0]}", 4097))
+            self.expect(cases, "Content-MD5 mismatch", gw, res, {400}, {"BadDigest"})
+            cases.append({"case": "Content-MD5 mismatch not stored", "gw": gw[0],
+                          "ok": self.do_get(0, gw, key) == "ok"})
+            # DeleteObjects with a wrong x-amz-checksum-crc32: nothing
+            # deleted; then with the right one: both deleted.
+            dkeys = [f"auth/{gw[0]}-del{i}" for i in (1, 2)]
+            for k in dkeys:
+                cases.append({"case": "owner PUT (to delete)", "gw": gw[0], "ok": self.do_put(0, gw, k, 1024) == "ack"})
+            xml = delete_xml(dkeys)
+            res = call(gw, "POST", f"/{BUCKET}", xml, query="delete", keep_body=True,
+                       headers={"x-amz-checksum-crc32": b64_crc32(b"not the body")})
+            self.note_delete_objects(dkeys, res)
+            self.expect(cases, "DeleteObjects checksum mismatch", gw, res, {400}, {"BadDigest"})
+            for k in dkeys:
+                cases.append({"case": "DeleteObjects mismatch deleted nothing", "gw": gw[0],
+                              "ok": self.do_get(0, gw, k) == "ok"})
+            res = call(gw, "POST", f"/{BUCKET}", xml, query="delete", keep_body=True,
+                       headers={"x-amz-checksum-crc32": b64_crc32(xml)})
+            self.note_delete_objects(dkeys, res)
+            self.expect(cases, "DeleteObjects right checksum", gw, res, {200})
+            cases.append({"case": "DeleteObjects right checksum no per-key error", "gw": gw[0],
+                          "ok": res[3] == "http" and xml_tag(res[5], "Error") is None
+                          and (res[5]["body"].count(b"<Deleted>") == len(dkeys))})
+            for k in dkeys:
+                cases.append({"case": "DeleteObjects deleted", "gw": gw[0], "ok": self.do_get(0, gw, k) == "ok"})
             # Another principal on the owner's bucket.
             self.expect(cases, "other GET", gw, call(gw, "GET", path, creds=other, keep_body=True),
                         {403}, {"AccessDenied"})

@@ -17,7 +17,13 @@ requests SigV4-signed with keys from a credentials file.
   HOST_A=... HOST_B=... HOST_C=... RUN_ID=id three-host-validate.py teardown
 
 `run` is the main scenario (steps 0 to 10), `upgrade` the upgrade from the
-published 0.1.0 (steps U0 to U9). Every host needs, under ROOT (default
+published 0.1.0 (steps U0 to U9). A judged run sets JUDGED=1 and
+SOURCE_SHA; it refuses to start if CONTINUE_ON_FAIL or STOP_AFTER is set
+(script debugging only), if the binary under test does not print
+EXPECT_VERSION (default `arca-lake 0.2.0`) on every host, and like every
+run if that binary's SHA-256 differs between hosts or, for `upgrade`, the
+0.1.0 binary is not the published one. Every run records each host's
+binary SHA-256 and `--version` in meta.json and results.md. Every host needs, under ROOT (default
 /mnt/arca-fdb/v020-v3h, marker file .owner), bin/arca-lake (the fdb build
 under test) and for `upgrade` bin/arca-lake-0.1.0 (the release binary),
 Python 3; host A and B fdbserver and fdbcli; host C botocore. Everything
@@ -396,20 +402,25 @@ def scrub(groups):
     res = {}
     for g in groups:
         rc, out, err = admin(f"integrity scrub --group {g} --wait", timeout=900)
-        m = re.search(r"verified (\d+) bytes (\d+) findings \[([\d, ]+)\] enqueued (\d+) errors (\d+)", out)
-        if not m:
-            res[g] = {"rc": rc, "error": redact((out + err)[-400:])}
-            continue
-        f = [int(x) for x in m.group(3).split(",")]
-        res[g] = {"verified": int(m.group(1)), "bytes": int(m.group(2)),
-                  "findings": dict(zip(DAMAGE, f)), "enqueued": int(m.group(4)), "errors": int(m.group(5))}
-        # 0.2.0 binaries also print the shards held legitimately or not
-        # classified (the latter are counted in errors too).
-        h = re.search(r"retained (\d+) retained_damaged (\d+) in_flight (\d+) unclassified (\d+)", out)
-        if h:
-            res[g]["held"] = dict(zip(("retained", "retained_damaged", "in_flight", "unclassified"),
-                                      (int(x) for x in h.groups())))
+        res[g] = parse_scrub(out) or {"rc": rc, "error": redact((out + err)[-400:])}
     return res
+
+
+def parse_scrub(out):
+    """One `integrity scrub --wait` line; None if absent."""
+    m = re.search(r"verified (\d+) bytes (\d+) findings \[([\d, ]+)\] enqueued (\d+) errors (\d+)", out)
+    if not m:
+        return None
+    f = [int(x) for x in m.group(3).split(",")]
+    r = {"verified": int(m.group(1)), "bytes": int(m.group(2)),
+         "findings": dict(zip(DAMAGE, f)), "enqueued": int(m.group(4)), "errors": int(m.group(5))}
+    # 0.2.0 binaries also print the shards held legitimately or not
+    # classified (the latter are counted in errors too).
+    h = re.search(r"retained (\d+) retained_damaged (\d+) in_flight (\d+) unclassified (\d+)", out)
+    if h:
+        r["held"] = dict(zip(("retained", "retained_damaged", "in_flight", "unclassified"),
+                             (int(x) for x in h.groups())))
+    return r
 
 
 def damage_free(scrubbed, ignore=("UnexpectedShard",)):
@@ -519,9 +530,14 @@ def chunk_groups(key):
     whole (`integrity verify-object` prints only those); None if the object
     line is missing (not found or not read)."""
     rc, o, e = admin(f"integrity verify-object --bucket v3h --key {q(key)}", timeout=120)
-    if not re.search(rf"^object v3h/{re.escape(key)} .* verdict \w+", o, re.M):
+    return parse_verify_object(o, key)
+
+
+def parse_verify_object(out, key):
+    """`chunk_groups` from the command's output."""
+    if not re.search(rf"^object v3h/{re.escape(key)} .* verdict \w+", out, re.M):
         return None
-    return {int(g) for g in re.findall(r"^  part \S+ chunk \d+ id \S+ group (\d+) ", o, re.M)}
+    return {int(g) for g in re.findall(r"^  part \S+ chunk \d+ id \S+ group (\d+) ", out, re.M)}
 
 
 def acked_in(recs, t0, t1):
@@ -1849,7 +1865,13 @@ UPGRADE = [("U1-data-0.1.0", u1), ("U2-storage-nodes", u2), ("U3-controllers", u
 
 
 def write_md(meta):
-    lines = [f"# three-host validation run {RUN_ID} ({meta.get('scenario')})", "", f"source {meta.get('sha')}", ""]
+    lines = [f"# three-host validation run {RUN_ID} ({meta.get('scenario')})", "", f"source {meta.get('sha')}", "",
+             f"judged: {'yes' if meta.get('judged') else 'no (rehearsal or script debugging)'}", ""]
+    for h, f in sorted((meta.get("binaries") or {}).items()):
+        lines += [f"- host {h}: `{f.get('version')}` sha256 `{f.get('sha256')}`"
+                  + (f"; 0.1.0 binary `{f.get('v010_version')}` sha256 `{f.get('v010_sha256')}`"
+                     if meta.get("scenario") == "upgrade" else "")]
+    lines += [""]
     if meta.get("continue_on_fail"):
         lines += ["**Script debugging run (CONTINUE_ON_FAIL): not a validation; verdicts after the first FAIL "
                   "are not judged.**", ""]
@@ -1859,11 +1881,71 @@ def write_md(meta):
     save("results.md", "\n".join(lines))
 
 
+# The published v0.1.0 binary (archive SHA-256 975c036c…8de83).
+V010_SHA256 = "c1cd2221991a11e9eaaacc2e96227599ef86e1769b2d126ebe8598d7c9addd56"
+
+
+def judged_refusal(env):
+    """Why a judged run (JUDGED=1) may not start: it runs the plan as
+    written, every step, from a fresh setup, on a named source."""
+    if not env.get("JUDGED"):
+        return []
+    why = []
+    for var in ("CONTINUE_ON_FAIL", "STOP_AFTER"):
+        if env.get(var):
+            why.append(f"{var} is set: script debugging only, never in a judged run")
+    if not env.get("SOURCE_SHA"):
+        why.append("SOURCE_SHA (the commit the binary was built from) is not set")
+    return why
+
+
+def binary_facts():
+    """Per host: `--version` and SHA-256 of the binary under test and of the
+    0.1.0 binary."""
+    facts = {}
+    for h in "abc":
+        _, out, _ = ssh(h, f"{BIN} --version 2>&1 | head -1; sha256sum {BIN} 2>&1 | cut -c1-64; "
+                           f"{BIN_V010} --version 2>&1 | head -1; sha256sum {BIN_V010} 2>&1 | cut -c1-64")
+        v = (out.splitlines() + ["", "", "", ""])[:4]
+        facts[h] = {"version": v[0].strip(), "sha256": v[1].strip(), "v010_version": v[2].strip(),
+                    "v010_sha256": v[3].strip()}
+    return facts
+
+
+def preflight_problems(facts, scenario, judged, expect_version):
+    """What makes the binaries unfit for the run."""
+    why = []
+    shas = {f["sha256"] for f in facts.values()}
+    if len(shas) != 1 or not re.fullmatch(r"[0-9a-f]{64}", next(iter(shas))):
+        why.append(f"the binary under test differs between hosts or is missing: {shas}")
+    if judged:
+        for h, f in sorted(facts.items()):
+            if f["version"] != expect_version:
+                why.append(f"host {h}: `{f['version']}`, a judged run needs `{expect_version}`")
+    if scenario == "upgrade":
+        for h, f in sorted(facts.items()):
+            if f["v010_sha256"] != V010_SHA256 or f["v010_version"] != "arca-lake 0.1.0":
+                why.append(f"host {h}: the 0.1.0 binary is not the published one ({f['v010_version']}, "
+                           f"{f['v010_sha256'][:16]})")
+    return why
+
+
 def run(scenario):
+    judged = bool(os.environ.get("JUDGED"))
+    refused = judged_refusal(os.environ)
+    if refused:
+        sys.exit("refused: " + "; ".join(refused))
     OUT.mkdir(parents=True, exist_ok=True)
     meta = {"run_id": RUN_ID, "scenario": scenario, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "sha": os.environ.get("SOURCE_SHA", "")}
+            "sha": os.environ.get("SOURCE_SHA", ""), "judged": judged}
     addresses()
+    meta["binaries"] = binary_facts()
+    problems = preflight_problems(meta["binaries"], scenario, judged,
+                                  os.environ.get("EXPECT_VERSION", "arca-lake 0.2.0"))
+    if problems:
+        meta["refused"] = problems
+        save("meta.json", json.dumps(meta, indent=1))
+        sys.exit("refused: " + "; ".join(problems))
     stopped = False
     first, steps = ("0-setup", MAIN) if scenario == "run" else ("U0-setup-0.1.0", UPGRADE)
     try:
