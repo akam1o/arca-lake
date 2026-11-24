@@ -15,12 +15,16 @@ requests SigV4-signed with keys from a credentials file.
   HOST_A=user@a HOST_B=user@b HOST_C=user@c [RUN_ID=id] [OUT=dir] \\
     benchmarks/linux/three-host-validate.py run|upgrade
   HOST_A=... HOST_B=... HOST_C=... RUN_ID=id three-host-validate.py teardown
-  HOST_A=... HOST_B=... HOST_C=... SOURCE_SHA=<commit> three-host-validate.py build
+  HOST_A=... HOST_B=... HOST_C=... SOURCE_SHA=<commit> three-host-validate.py \\
+    install-candidate <archive from deploy/release/package.sh> <its sha256>
+  HOST_A=... HOST_B=... HOST_C=... SOURCE_SHA=<commit> three-host-validate.py build   # rehearsals only
   HOST_A=... HOST_B=... HOST_C=... three-host-validate.py fetch-v010
 
 `run` is the main scenario (steps 0 to 10), `upgrade` the upgrade from the
 published 0.1.0 (steps U0 to U9). A judged run sets JUDGED=1 and
-SOURCE_SHA; it refuses to start if CONTINUE_ON_FAIL or STOP_AFTER is set
+SOURCE_SHA and the binary installed by `install-candidate` from the release
+candidate archive (deploy/release/package.sh; `build` is for rehearsals
+only); it refuses to start if CONTINUE_ON_FAIL or STOP_AFTER is set
 (script debugging only), if the binary under test does not print
 EXPECT_VERSION (default `arca-lake 0.2.0`) on every host, and like every
 run if that binary's SHA-256 differs between hosts or, for `upgrade`, the
@@ -77,6 +81,7 @@ DAMAGE = ["MissingShard", "ChecksumMismatch", "TruncatedShard", "InvalidHeader",
           "UnexpectedShard", "StalePlacementEpoch", "MetadataDataMismatch", "UnrecoverableStripe"]
 
 ADDR = {}
+TEARDOWN = {}  # host -> what the teardown found still running
 IDS = {}  # node name -> node id
 RESULTS = []
 SECRETS = []
@@ -501,6 +506,15 @@ def need_window(name, recs, t0, t1, gws=tuple(GATEWAYS), n=MIN_WINDOW_ACKED):
     return c["ok"]
 
 
+def load_command(phase, args):
+    """The wrapper's command: the client's own pid is recorded too
+    (client-<phase>-py.pid), so that the teardown signals the client and
+    not only this wrapper, and its exit status is written for the check."""
+    p = phase
+    return (f"{CLIENT} load {R}/state.json {R}/ledger.jsonl {p} {args} & "
+            f"echo $! > {R}/client-{p}-py.pid; wait $!; echo $? > {R}/client-{p}.rc")
+
+
 class Load:
     def __init__(self, phase, extra=""):
         self.phase, self.extra = phase, extra
@@ -508,8 +522,8 @@ class Load:
     def __enter__(self):
         p = self.phase
         ssh("c", f"rm -f {R}/stop-{p} {R}/client-{p}.rc", check=True)
-        inner = (f"{CLIENT} load {R}/state.json {R}/ledger.jsonl {p} {q(gw_spec())} --creds {R}/creds.json "
-                 f"--duration 1800 --pause-ms 25 --stop-file {R}/stop-{p} {self.extra}; echo $? > {R}/client-{p}.rc")
+        inner = load_command(p, f"{q(gw_spec())} --creds {R}/creds.json --duration 1800 --pause-ms 25 "
+                                f"--stop-file {R}/stop-{p} {self.extra}")
         ssh("c", f"cd {R} && {{ nohup sh -c {q(inner)} > {R}/logs/client-{p}.log 2>&1 < /dev/null & "
                  f"echo $! > {R}/client-{p}.pid; }}", check=True)
         time.sleep(1)
@@ -518,11 +532,17 @@ class Load:
     def __exit__(self, *exc):
         p = self.phase
         ssh("c", f"touch {R}/stop-{p}")
-        if not wait_dead("c", f"client-{p}", 150):
-            log(f"client {p} did not stop in 150 s")
+        stopped = wait_dead("c", f"client-{p}-py", 150) and wait_dead("c", f"client-{p}", 10)
+        if not stopped:
+            log(f"client {p} did not stop in 150 s; stopping it")
+            stop("c", f"client-{p}-py")
+            stop("c", f"client-{p}")
         _, rc_text, _ = ssh("c", f"cat {R}/client-{p}.rc 2>/dev/null")
         _, log_text, _ = ssh("c", f"cat {R}/logs/client-{p}.log 2>/dev/null")
-        CHECKS.append(load_check(p, rc_text, redact(log_text), ledger(p)))
+        c = load_check(p, rc_text, redact(log_text), ledger(p))
+        if not stopped:
+            c.update({"stopped_by_itself": False, "ok": False})
+        CHECKS.append(c)
         return False
 
 
@@ -769,6 +789,12 @@ def teardown():
                f"grep -qa {TAG} /proc/$q/cmdline 2>/dev/null && kill $q; done; sleep 3; "
                f"for p in {R}/*.pid; do [ -f \"$p\" ] || continue; q=$(cat \"$p\"); "
                f"grep -qa {TAG} /proc/$q/cmdline 2>/dev/null && kill -9 $q; done; sleep 1; true", timeout=60)
+        # Confirmed gone: every pid file's process (the load clients' own
+        # pids included, not only their wrappers), then anything naming the
+        # run directory.
+        _, still, _ = ssh(h, f"for p in {R}/*.pid; do [ -f \"$p\" ] || continue; q=$(cat \"$p\"); "
+                             f"grep -qa {TAG} /proc/$q/cmdline 2>/dev/null && echo \"$(basename $p) $q\"; done; true")
+        TEARDOWN[h] = {"left_by_pid_file": still.split("\n")[:-1] if still.strip() else []}
         # Logs (sanitized later), never keys or credentials; then the run
         # directory, once nothing of ours runs.
         dest = OUT / "logs" / f"host-{h}"
@@ -776,6 +802,7 @@ def teardown():
         subprocess.run(f"ssh -o BatchMode=yes {HOSTS[h]} 'cd {R} && tar -cf - logs fdb/log fdb2a/log fdb2b/log 2>/dev/null' "
                        f"| tar -xf - -C {dest}", shell=True, timeout=300)
         rc, left, _ = ssh(h, f"pgrep -af {TAG} | grep -v pgrep || true")
+        TEARDOWN[h]["left_by_command_line"] = len(left.strip().splitlines())
         if left.strip():
             log(f"host {h}: processes still running, {R} kept:\n{left}")
             continue
@@ -2056,6 +2083,10 @@ def preflight_problems(facts, scenario, judged, expect_version, source_sha="", b
     shas = {f.get("sha256") for f in facts.values()}
     if len(shas) != 1 or not re.fullmatch(r"[0-9a-f]{64}", next(iter(shas)) or ""):
         why.append(f"the binary under test differs between hosts or is missing: {shas}")
+    if judged:
+        cands = {(f.get("record") or {}).get("archive_sha256") for f in facts.values()}
+        if len(cands) != 1 or not re.fullmatch(r"[0-9a-f]{64}", next(iter(cands)) or ""):
+            why.append(f"the candidate archive differs between hosts or is not recorded: {cands}")
     for h, f in sorted(facts.items()):
         if "error" in f:
             why.append(f"host {h}: no facts ({f['error']})")
@@ -2064,7 +2095,10 @@ def preflight_problems(facts, scenario, judged, expect_version, source_sha="", b
             if f["version"] != expect_version:
                 why.append(f"host {h}: `{f['version']}`, a judged run needs `{expect_version}`")
             rec = f.get("record") or {}
-            if rec.get("source_sha") != source_sha or rec.get("binary_sha256") != f["sha256"]:
+            if rec.get("kind") != "release-candidate":
+                why.append(f"host {h}: the binary was not installed from a release candidate archive "
+                           f"(record kind {rec.get('kind')}): run install-candidate")
+            elif rec.get("source_sha") != source_sha or rec.get("binary_sha256") != f["sha256"]:
                 why.append(f"host {h}: the build record ({rec.get('source_sha')}, {str(rec.get('binary_sha256'))[:16]}) "
                            f"does not name SOURCE_SHA {source_sha} and this binary")
         if scenario == "upgrade":
@@ -2145,6 +2179,7 @@ def run(scenario):
             meta["teardown_error"] = redact(repr(e))[-500:]
             log(f"teardown: {meta['teardown_error']}")
         finally:
+            meta["teardown"] = TEARDOWN
             meta["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             save("meta.json", json.dumps(meta, indent=1))
             write_md(meta)
@@ -2181,8 +2216,86 @@ os.replace(dest + ".new", dest)
 """ % V010_SHA256
 
 
+CANDIDATE_SCRIPT = r"""
+import hashlib, json, os, re, subprocess, sys, tarfile, time
+archive, expected, source_sha, expect_version, d, dest = sys.argv[1:7]
+def fail(m):
+    sys.exit(f"install-candidate: {m}")
+with open(archive, "rb") as f:
+    got = hashlib.file_digest(f, "sha256").hexdigest()
+if got != expected:
+    fail(f"archive SHA-256 {got}, expected {expected}")
+x = os.path.join(d, "x")
+os.mkdir(x)
+with tarfile.open(archive, "r:gz") as t:
+    t.extractall(x, filter="data")
+tops = os.listdir(x)
+if len(tops) != 1:
+    fail(f"the archive holds {tops}, not one directory")
+top = os.path.join(x, tops[0])
+with open(os.path.join(top, "BUILD-INFO.txt")) as f:
+    m = re.search(r"source commit: ([0-9a-f]{40})", f.read())
+commit = m and m.group(1)
+if commit != source_sha:
+    fail(f"BUILD-INFO names commit {commit}, SOURCE_SHA is {source_sha}")
+binary = os.path.join(top, "arca-lake")
+version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30).stdout.strip()
+if version != expect_version:
+    fail(f"`{version}`, expected `{expect_version}`")
+with open(binary, "rb") as f:
+    bsha = hashlib.file_digest(f, "sha256").hexdigest()
+with open(binary, "rb") as src, open(dest + ".new", "wb") as out:
+    out.write(src.read())
+os.chmod(dest + ".new", 0o755)
+os.replace(dest + ".new", dest)
+record = {"kind": "release-candidate", "archive": os.path.basename(archive), "archive_sha256": got,
+          "binary_sha256": bsha, "source_sha": commit, "version": version, "installed_from": d,
+          "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+with open(os.path.join(os.path.dirname(dest), "build-record.json.new"), "w") as f:
+    json.dump(record, f, indent=1)
+os.replace(os.path.join(os.path.dirname(dest), "build-record.json.new"),
+           os.path.join(os.path.dirname(dest), "build-record.json"))
+print(json.dumps(record))
+"""
+
+
+def install_candidate(archive, expected):
+    """Install the release candidate archive (deploy/release/package.sh) on
+    every host: its SHA-256 checked here and on each host against
+    `expected`, extracted in a fresh directory, BUILD-INFO's source commit
+    checked against SOURCE_SHA and `--version` against EXPECT_VERSION; the
+    binary becomes BIN and the build record is written from the archive."""
+    import hashlib
+    sha = os.environ.get("SOURCE_SHA", "")
+    version = os.environ.get("EXPECT_VERSION", "arca-lake 0.2.0")
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        sys.exit("install-candidate: SOURCE_SHA must be a full commit id")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        sys.exit("install-candidate: the expected SHA-256 must be 64 hex digits")
+    name = Path(archive).name
+    if not re.fullmatch(r"arca-lake-[0-9A-Za-z.+-]+-x86_64-unknown-linux-gnu\.tar\.gz", name):
+        sys.exit(f"install-candidate: {name} is not a package.sh archive name")
+    with open(archive, "rb") as f:
+        got = hashlib.file_digest(f, "sha256").hexdigest()
+    if got != expected:
+        sys.exit(f"install-candidate: {name} has SHA-256 {got}, not {expected}")
+    d = f"{ROOT}/candidate-{expected[:12]}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+    records = {}
+    for h in "abc":
+        ssh(h, f"test -f {ROOT}/.owner && mkdir {d}", check=True)
+        subprocess.run(["scp", "-q", "-o", "BatchMode=yes", archive, f"{HOSTS[h]}:{d}/{name}"], check=True, timeout=600)
+        rc, out, err = ssh(h, f"python3 -I -c {q(CANDIDATE_SCRIPT)} {d}/{name} {expected} {sha} {q(version)} {d} {BIN}",
+                           timeout=300)
+        if rc != 0:
+            sys.exit(f"host {h}: {redact(err).strip()[-500:]}")
+        records[h] = json.loads(out.strip().splitlines()[-1])
+    if len({r["binary_sha256"] for r in records.values()}) != 1:
+        sys.exit(f"install-candidate: the binaries differ between hosts: {records}")
+    print(json.dumps(records["a"]))
+
+
 def build():
-    """Build SOURCE_SHA on host B (`cargo build --release --locked -p
+    """Rehearsals only (a judged run needs install-candidate): build SOURCE_SHA on host B (`cargo build --release --locked -p
     arca-lake --features fdb` from `git archive`), write the build record
     next to the binary, copy both to hosts A and C and check the SHA-256;
     the target directory is removed."""
@@ -2205,7 +2318,7 @@ def build():
                          f"sha256sum {BIN} | cut -c1-64 && {BIN} --version && $HOME/.cargo/bin/rustc -V && "
                          f"rm -rf {d}/target", check=True)
     bsha, version, rustc = out.strip().splitlines()[:3]
-    record = {"source_sha": sha, "binary_sha256": bsha, "version": version, "command": cmd, "rustc": rustc,
+    record = {"kind": "rehearsal-build", "source_sha": sha, "binary_sha256": bsha, "version": version, "command": cmd, "rustc": rustc,
               "built_on": "host B", "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     ssh("b", f"cat > {ROOT}/bin/build-record.json", check=True, input=json.dumps(record, indent=1) + "\n")
     for h in "ac":
@@ -2230,6 +2343,8 @@ def main():
         fetch_v010()
     elif cmd == "build":
         build()
+    elif cmd == "install-candidate" and len(sys.argv) == 4:
+        install_candidate(sys.argv[2], sys.argv[3])
     elif cmd == "teardown":
         OUT.mkdir(parents=True, exist_ok=True)
         teardown()

@@ -35,7 +35,8 @@ SOURCE = "a" * 40
 
 def facts(version="arca-lake 0.2.0", sha=SHA, v010=drv.V010_SHA256, v010_version="arca-lake 0.1.0"):
     return {h: {"version": version, "sha256": sha, "v010_version": v010_version, "v010_sha256": v010,
-                "record": {"source_sha": SOURCE, "binary_sha256": sha},
+                "record": {"kind": "release-candidate", "source_sha": SOURCE, "binary_sha256": sha,
+                           "archive_sha256": "4" * 64},
                 "archive_sha256": drv.V010_ARCHIVE_SHA256, "archive_commit": drv.V010_COMMIT,
                 "archive_binary_sha256": drv.V010_SHA256, "free_bytes": 20 << 30, "on_root_fs": h != "a"}
             for h in "abc"}
@@ -78,7 +79,19 @@ class JudgedRun(unittest.TestCase):
             self.assertEqual(problems(f, judged=False), [])
         f = facts()
         f["a"]["record"] = None
-        self.assertIn("build record", problems(f)[0])
+        why = problems(f)
+        self.assertTrue(any("host a" in w and "install-candidate" in w for w in why), why)
+
+    def test_a_judged_run_needs_the_release_candidate_archive(self):
+        f = facts()
+        f["b"]["record"]["kind"] = "rehearsal-build"
+        why = problems(f)
+        self.assertEqual(len(why), 1, why)
+        self.assertIn("install-candidate", why[0])
+        self.assertEqual(problems(f, judged=False), [])
+        f = facts()
+        f["c"]["record"]["archive_sha256"] = "5" * 64
+        self.assertIn("candidate archive differs", problems(f)[0])
 
     def test_every_run_needs_one_binary_on_every_host(self):
         f = facts()
@@ -166,6 +179,91 @@ class Remote(unittest.TestCase):
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("not the published binary", p.stderr)
             self.assertFalse(os.path.exists(dest) or os.path.exists(dest + ".new"))
+
+
+class Candidate(unittest.TestCase):
+    """install-candidate's host script on a fake package.sh archive."""
+
+    def archive(self, d, commit=SOURCE, version="arca-lake 0.2.0"):
+        import io
+        import tarfile
+        path = os.path.join(d, "arca-lake-0.2.0-x86_64-unknown-linux-gnu.tar.gz")
+        files = (("arca-lake", f"#!/bin/sh\necho '{version}'\n".encode(), 0o755),
+                 ("BUILD-INFO.txt", f"version: 0.2.0\nsource commit: {commit} (HEAD verified, tree clean)\n".encode(), 0o644))
+        with tarfile.open(path, "w:gz") as t:
+            for name, data, mode in files:
+                info = tarfile.TarInfo(f"arca-lake-0.2.0-x86_64-unknown-linux-gnu/{name}")
+                info.size, info.mode = len(data), mode
+                t.addfile(info, io.BytesIO(data))
+        with open(path, "rb") as f:
+            return path, hashlib.sha256(f.read()).hexdigest()
+
+    def install(self, d, path, expected, sha=SOURCE):
+        import subprocess
+        import sys
+        work = os.path.join(d, "candidate")
+        os.mkdir(work)
+        os.mkdir(os.path.join(d, "bin"))
+        dest = os.path.join(d, "bin", "arca-lake")
+        p = subprocess.run([sys.executable, "-I", "-c", drv.CANDIDATE_SCRIPT, path, expected, sha, "arca-lake 0.2.0",
+                            work, dest], capture_output=True, text=True)
+        return p, dest
+
+    def test_the_candidate_is_installed_with_its_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, digest = self.archive(d)
+            p, dest = self.install(d, path, digest)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(os.path.join(d, "bin", "build-record.json")) as f:
+                rec = json.load(f)
+            with open(dest, "rb") as f:
+                self.assertEqual(rec["binary_sha256"], hashlib.sha256(f.read()).hexdigest())
+            self.assertEqual((rec["kind"], rec["archive_sha256"], rec["source_sha"], rec["version"]),
+                             ("release-candidate", digest, SOURCE, "arca-lake 0.2.0"))
+            # And a judged preflight takes it.
+            g = facts(sha=rec["binary_sha256"])
+            for h in "abc":
+                g[h]["record"] = rec
+            self.assertEqual(problems(g), [])
+
+    def test_a_wrong_digest_commit_or_version_installs_nothing(self):
+        for case in ("digest", "commit", "version"):
+            with tempfile.TemporaryDirectory() as d:
+                path, digest = self.archive(d, commit="b" * 40 if case == "commit" else SOURCE,
+                                            version="arca-lake 0.1.0" if case == "version" else "arca-lake 0.2.0")
+                p, dest = self.install(d, path, "0" * 64 if case == "digest" else digest)
+                self.assertNotEqual(p.returncode, 0, case)
+                self.assertIn("install-candidate:", p.stderr, case)
+                self.assertFalse(os.path.exists(dest), case)
+                self.assertFalse(os.path.exists(os.path.join(d, "bin", "build-record.json")), case)
+
+
+class LoadWrapper(unittest.TestCase):
+    def test_the_client_pid_and_its_exit_status_are_recorded(self):
+        import subprocess
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            saved = drv.CLIENT, drv.R
+            fake = os.path.join(d, "fake-client.sh")
+            with open(fake, "w") as f:
+                f.write("#!/bin/sh\nsleep 0.3\nexit 3\n")
+            os.chmod(fake, 0o755)
+            drv.CLIENT, drv.R = f"sh {fake}", d
+            try:
+                inner = drv.load_command("s9", "x")
+            finally:
+                drv.CLIENT, drv.R = saved
+            w = subprocess.Popen(["sh", "-c", inner])
+            for _ in range(50):
+                if os.path.exists(os.path.join(d, "client-s9-py.pid")):
+                    break
+                time.sleep(0.02)
+            with open(os.path.join(d, "client-s9-py.pid")) as f:
+                py = int(f.read())
+            self.assertNotEqual(py, w.pid)  # the client itself, not its wrapper
+            w.wait(5)
+            with open(os.path.join(d, "client-s9.rc")) as f:
+                self.assertEqual(f.read().strip(), "3")
 
 
 class Checks(unittest.TestCase):
