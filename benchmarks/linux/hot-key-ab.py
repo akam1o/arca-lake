@@ -34,6 +34,7 @@ check and scrub), OUT/summary.json and OUT/summary.md (per arm and
 scenario means over the valid runs, each target of the plan, the verdict).
 """
 
+import datetime
 import json
 import math
 import os
@@ -515,6 +516,21 @@ def log(msg):
         f.write(line + "\n")
 
 
+class HostUnreachable(RuntimeError):
+    """ssh could not reach a host (its own exit status 255 with a connection
+    error): the campaign stops, no further run is started (plan §10
+    amendment)."""
+
+
+UNREACHABLE = re.compile(r"ssh: connect to host|Network is unreachable|No route to host|Connection timed out|"
+                         r"Operation timed out|Connection refused|Could not resolve hostname|Connection closed by|"
+                         r"Connection reset by")
+
+
+def unreachable(rc, err):
+    return rc == 255 and bool(UNREACHABLE.search(err or ""))
+
+
 def ssh(h, cmd, timeout=120, check=False, stdin=None):
     try:
         p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
@@ -523,6 +539,8 @@ def ssh(h, cmd, timeout=120, check=False, stdin=None):
         if check:
             raise RuntimeError(f"timeout on host {h}: {redact(cmd)[:200]}")
         return 124, "", "timeout"
+    if unreachable(p.returncode, p.stderr):
+        raise HostUnreachable(f"host {h} unreachable: {redact(p.stderr.strip())[-300:]}")
     if check and p.returncode != 0:
         raise RuntimeError(f"host {h} rc {p.returncode}: {redact(cmd)[:200]}: {redact(p.stderr)[-500:]}")
     return p.returncode, p.stdout, p.stderr
@@ -996,6 +1014,7 @@ class Run:
                "sha256": rec_build["arms"][BUILD_OF[self.arm]]["sha256"],
                "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
         deadline = time.time() + RUN_BOUND_S
+        rec["load_started"] = False
         try:
             rec["binaries_match"] = binaries_match(rec_build)
             self.off = clock_offsets()
@@ -1005,6 +1024,7 @@ class Run:
             self.samplers("start")
             time.sleep(3)
             gw0, fdb0 = self.gw_metrics(), rec["fdb_before"]
+            rec["load_started"] = True
             self.load()
             Rc = self.R["c"]
             for _ in range(30):
@@ -1057,12 +1077,18 @@ class Run:
                 rec["aborted"] = "run time bound exceeded"
         except Exception as e:  # noqa: BLE001
             rec["aborted"] = redact(repr(e))[-800:]
+            rec["host_unreachable"] = isinstance(e, HostUnreachable)
         finally:
             try:
                 self.samplers("stop")
             except Exception:  # noqa: BLE001
                 pass
-            self.teardown()
+            try:
+                self.teardown()
+            except HostUnreachable as e:
+                # Left for the operator: the run's processes may still run.
+                rec["host_unreachable"] = True
+                rec["teardown_incomplete"] = redact(str(e))
             rec["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         chk = rec.get("check") or {}
         rec["correct"] = (chk.get("violations") == 0 and chk.get("definite_failures_visible") == 0
@@ -1070,18 +1096,68 @@ class Run:
         rec.setdefault("metrics", {})
         rec["invalid_reasons"] = invalid_reasons(rec)
         rec["invalid"] = bool(rec["invalid_reasons"])
+        rec["not_run"] = not_run(rec)
         return rec
 
 
 # --- campaign -------------------------------------------------------------
 
+def not_run(r):
+    """A run that aborted before measuring because a host was unreachable
+    counts as not run: neither valid nor an invalid repeat (plan §10
+    amendment). Records written before the field existed: aborted on an
+    unreachable host before setup completed (no FoundationDB status read)."""
+    if not r.get("aborted"):
+        return False
+    if "load_started" in r:
+        return bool(r.get("host_unreachable")) and not r["load_started"]
+    return bool(UNREACHABLE.search(r["aborted"])) and "fdb_before" not in r and "puts" not in r.get("metrics", {})
+
+
 def load_records(out):
-    return [json.loads(p.read_text()) for p in sorted((Path(out) / "runs").glob("*.json"))]
+    """Every run record (`not_run` set on each), in run-id order."""
+    recs = [json.loads(p.read_text()) for p in sorted((Path(out) / "runs").glob("*.json"))]
+    for r in recs:
+        r["not_run"] = not_run(r)
+    return recs
+
+
+def run_seconds(r):
+    try:
+        f = "%Y-%m-%dT%H:%M:%S%z"
+        return (datetime.datetime.strptime(r["finished"], f) - datetime.datetime.strptime(r["started"], f)).total_seconds()
+    except (KeyError, ValueError):
+        return None
+
+
+def estimate_s(records, k):
+    """The time a run of kind `k` is assumed to take before it is started:
+    the longest valid run of that kind so far in this campaign, or
+    EST_RUN_S before there is one."""
+    seen = [run_seconds(r) for r in counted(records) if not r["invalid"] and kind(r["scenario"]) == k]
+    seen = [x for x in seen if x]
+    return max(seen) if seen else EST_RUN_S[k]
+
+
+def counted(records):
+    return [r for r in records if not r.get("not_run")]
+
+
+def resume_state(records):
+    """Where an interrupted campaign continues: the scheduled items not yet
+    run (runs not run are scheduled again), the repeats done per cell, and
+    the next run index."""
+    done = [r for r in counted(records) if r.get("round") != "repeat"]
+    extra = {}
+    for r in counted(records):
+        if r.get("round") == "repeat":
+            extra[f"{r['arm']}/{r['scenario']}"] = extra.get(f"{r['arm']}/{r['scenario']}", 0) + 1
+    return schedule()[len(done):], extra, len(records)
 
 
 def write_summary(out, meta):
     out = Path(out)
-    j = judge(load_records(out))
+    j = judge(counted(load_records(out)))
     j["meta"] = meta
     (out / "summary.json").write_text(redact(json.dumps(j, indent=1, sort_keys=True)))
     (out / "summary.md").write_text(redact(summary_md(j, meta)))
@@ -1096,14 +1172,27 @@ def campaign():
     meta = {"campaign": CAMPAIGN, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "budget_s": TOTAL_BUDGET_S,
             "run_bound_s": RUN_BOUND_S, "plan": "docs/verification/0.2.0-hot-key-plan.md",
             "control": CONTROL, "arms": {a: {**rec_build["arms"][BUILD_OF[a]], "label": ARM_LABEL[a]} for a in ARMS}}
+    prev = OUT / "meta.json"
+    if prev.exists():
+        meta["previous_sessions"] = [json.loads(prev.read_text())]
     t0 = time.time()
     deadline = t0 + TOTAL_BUDGET_S
-    records = load_records(OUT)
+    all_records = load_records(OUT)
     # Resuming an interrupted campaign: the schedule continues where it
     # stopped (the order is fixed).
-    queue = schedule()[len(records):]
-    extra, idx, stopped = {}, len(records), None
+    queue, extra, idx = resume_state(all_records)
+    records, stopped = counted(all_records), None
     while True:
+        unreached = []
+        for h in "abc":
+            try:
+                ssh(h, "true", timeout=30)
+            except HostUnreachable as e:
+                unreached.append(str(e))
+        if unreached:
+            stopped = f"host unreachable before a run: {unreached}"
+            log(stopped)
+            break
         if not queue:
             more = reruns_needed(records, extra)
             if not more:
@@ -1112,7 +1201,7 @@ def campaign():
                 extra[f"{a}/{s}"] = extra.get(f"{a}/{s}", 0) + 1
             queue = [{"round": "repeat", "scenario": s, "arm": a} for a, s in more]
         item = queue.pop(0)
-        if time.time() + EST_RUN_S[kind(item["scenario"])] > deadline:
+        if time.time() + estimate_s(records, kind(item["scenario"])) > deadline:
             stopped = "campaign time budget reached"
             log(stopped)
             break
@@ -1127,12 +1216,20 @@ def campaign():
         r = Run(run_id, item["arm"], item["scenario"]).execute(rec_build)
         r["round"] = item["round"]
         save(f"runs/{run_id}.json", json.dumps(r, indent=1, sort_keys=True))
-        records.append(r)
-        log(f"run {run_id}: {'INVALID ' + '; '.join(r['invalid_reasons']) if r['invalid'] else 'valid'}; "
-            f"correct {r['correct']}; ack/s {r['metrics'].get('acked_per_s')}; "
+        if not r["not_run"]:
+            records.append(r)
+        verdict = "NOT RUN" if r["not_run"] else (
+            "INVALID " + "; ".join(r["invalid_reasons"]) if r["invalid"] else "valid")
+        log(f"run {run_id}: {verdict}; correct {r['correct']}; ack/s {r['metrics'].get('acked_per_s')}; "
             f"SlowDown {r['metrics'].get('slowdown_share')}")
+        if r.get("host_unreachable"):
+            stopped = f"host unreachable during run {run_id}" + (
+                "; its teardown did not complete" if r.get("teardown_incomplete") else "")
+            log(stopped)
         meta.update({"elapsed_s": round(time.time() - t0), "stopped": stopped})
         write_summary(OUT, meta)
+        if stopped:
+            break
     meta.update({"finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "elapsed_s": round(time.time() - t0),
                  "stopped": stopped})
     save("meta.json", json.dumps(meta, indent=1, sort_keys=True))
