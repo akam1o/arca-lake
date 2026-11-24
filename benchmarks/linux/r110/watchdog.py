@@ -17,7 +17,10 @@ Every ``interval`` (10 s) one round: each host's memory, free space of
 ``/`` and the data mount, load per CPU, boot ID (a change: ``host-reboot``); on the load host also swap
 activity, CPU iowait, kernel OOM or hung-task messages, the test
 directories' allocated bytes, the test FoundationDB and the guard's own
-identity; every system FoundationDB. A reading that cannot be made is a
+identity; every system FoundationDB (a failed check is logged, event
+``system-fdb-check``, with fdbcli's exit status, time, timeout, the first
+lines of its output and the host's load, memory and root free space then:
+diagnostic only). A reading that cannot be made is a
 monitor failure unless the approved configuration declares it optional
 (``optional_checks``). It never kills a process itself. ``boot_ids``
 (host name -> boot ID, optional): the reference of the first round.
@@ -67,7 +70,7 @@ _LOOSER = {"min_free_gib": "lower", "min_mem_mib": "lower", "max_load_per_cpu": 
 # reading that cannot be made is null (the watchdog decides what that
 # means), never 0.
 CHECK_SCRIPT = r'''
-import json, os, subprocess, sys
+import json, os, subprocess, sys, time
 a = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
 out = {}
 def tryit(name, f):
@@ -169,10 +172,42 @@ if a.get("detail"):
             return "is available" in r.stdout
         tryit("test_fdb_available", tfdb)
 if a.get("system_fdb"):
+    def head(text):
+        if isinstance(text, bytes):
+            text = text.decode(errors="replace")
+        return [l[:200] for l in (text or "").splitlines()[:10]]
+    def snapshot():
+        # The host at the failed check (read-only, as the readings above).
+        s = {}
+        for k, f in (("load1", lambda: float(open("/proc/loadavg").read().split()[0])),
+                     ("mem_available", mem), ("free_root", lambda: free("/"))):
+            try:
+                s[k] = f()
+            except Exception:
+                s[k] = None
+        return s
     def sfdb():
-        r = subprocess.run(["fdbcli", "-C", "/etc/foundationdb/fdb.cluster", "--timeout", "10",
-                            "--exec", "status minimal"], capture_output=True, text=True, timeout=20)
-        return "is available" in r.stdout
+        # A failed check is recorded with what fdbcli said (status minimal
+        # only); the rule is unchanged: the reading is False, or null when
+        # fdbcli could not be run to its end.
+        t0 = time.monotonic()
+        try:
+            r = subprocess.run(["fdbcli", "-C", "/etc/foundationdb/fdb.cluster", "--timeout", "10",
+                                "--exec", "status minimal"], capture_output=True, text=True, timeout=20)
+        except Exception as e:
+            timed_out = isinstance(e, subprocess.TimeoutExpired)
+            out["system_fdb_check"] = {
+                "rc": None, "timed_out": timed_out, "elapsed_s": round(time.monotonic() - t0, 3),
+                "error": None if timed_out else str(e)[:200],
+                "stdout_head": head(getattr(e, "stdout", None)), "stderr_head": head(getattr(e, "stderr", None)),
+                "host": snapshot()}
+            raise
+        ok = "is available" in r.stdout
+        if not ok:
+            out["system_fdb_check"] = {
+                "rc": r.returncode, "timed_out": False, "elapsed_s": round(time.monotonic() - t0, 3),
+                "error": None, "stdout_head": head(r.stdout), "stderr_head": head(r.stderr), "host": snapshot()}
+        return ok
     tryit("system_fdb_available", sfdb)
 print(json.dumps(out))
 '''
@@ -299,6 +334,13 @@ class Watchdog:
                     out.append(("host-unreachable", {"host": host, "rounds": self.unreachable[host]}))
                 continue
             self.unreachable[host] = 0
+            if host in c.get("system_fdb_hosts", []) and r.get("system_fdb_check") is not None:
+                # Diagnostic only: what the failed check saw (the stop below
+                # is decided as before, whether or not this can be written).
+                try:
+                    self.log(event="system-fdb-check", host=host, check=r["system_fdb_check"])
+                except OSError:
+                    pass
 
             def need(name):
                 v = r.get(name)

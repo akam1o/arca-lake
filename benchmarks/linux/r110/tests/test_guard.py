@@ -729,6 +729,49 @@ class Watchdogs(unittest.TestCase):
         self.wd().run(max_rounds=2)
         self.assertEqual(self.stops(), ["system-fdb"])
 
+    def watchdog_log(self):
+        with open(os.path.join(self.tmp.name, "watchdog.jsonl")) as f:
+            return [json.loads(l) for l in f]
+
+    def test_a_failed_system_foundationdb_check_is_logged_with_what_it_saw(self):
+        """Diagnostic only (0.2.0 plan §8, before run 2): the stop is as
+        before, and the log says what the failed check saw."""
+        check = {"rc": 1, "timed_out": False, "elapsed_s": 10.2, "error": None,
+                 "stdout_head": ["Specified timeout reached"], "stderr_head": [],
+                 "host": {"load1": 0.5, "mem_available": 6 * GIB, "free_root": 4 * GIB}}
+        self.hosts.readings["t1"].update(system_fdb_available=False, system_fdb_check=check)
+        self.assertEqual(self.wd().run(max_rounds=2), 2)
+        self.assertEqual(self.stops(), ["system-fdb"])
+        logged = [r for r in self.watchdog_log() if r["event"] == "system-fdb-check"]
+        self.assertEqual([(r["host"], r["check"]) for r in logged], [("h1", check)])
+
+    def test_a_diagnostic_log_that_cannot_be_written_does_not_delay_the_stop(self):
+        self.hosts.readings["t1"].update(system_fdb_available=False, system_fdb_check={"rc": 1})
+        w = self.wd()
+        log = w.log
+
+        def failing(**rec):
+            if rec.get("event") == "system-fdb-check":
+                raise OSError("No space left on device")
+            log(**rec)
+        w.log = failing
+        self.assertEqual(w.run(max_rounds=1), 2)
+        self.assertEqual(self.stops(), ["system-fdb"])
+        self.assertEqual(len(os.listdir(os.path.join(self.tmp.name, "alarms"))), 1)
+
+    def test_a_check_that_could_not_finish_is_logged_and_stays_a_monitor_failure(self):
+        check = {"rc": None, "timed_out": True, "elapsed_s": 20.0, "error": None, "stdout_head": [],
+                 "stderr_head": [], "host": {"load1": None, "mem_available": None, "free_root": None}}
+        self.hosts.readings["t3"].update(system_fdb_available=None, system_fdb_check=check)
+        self.assertEqual(self.wd().run(max_rounds=2), 2)
+        self.assertEqual(self.stops(), ["monitor-failed"])
+        self.assertEqual([(r["host"], r["check"]) for r in self.watchdog_log() if r["event"] == "system-fdb-check"],
+                         [("h3", check)])
+
+    def test_a_healthy_round_logs_no_check(self):
+        self.assertEqual(self.wd().run(max_rounds=2), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "watchdog.jsonl")))
+
     def test_swap_activity_kernel_alerts_and_test_directories(self):
         for change, reason in ((("swap_pages", 101), "swap"), (("kernel_alerts", ["Out of memory: Killed"]), "oom"),
                                (("test_dir_bytes", 9 * GIB), "test-dirs")):
@@ -798,6 +841,46 @@ class Watchdogs(unittest.TestCase):
             self.assertIn(k, out)
             if not sys.platform.startswith("linux"):
                 self.assertIsNone(out[k], k)
+
+    def check_with_fdbcli(self, body):
+        """The check script on this machine with a fake ``fdbcli`` first in
+        PATH (``body``: its shell code); its arguments are recorded."""
+        bindir = os.path.join(self.tmp.name, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        argv = os.path.join(self.tmp.name, "fdbcli.argv")
+        with open(os.path.join(bindir, "fdbcli"), "w") as f:
+            f.write(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{argv}'\n{body}\n")
+        os.chmod(os.path.join(bindir, "fdbcli"), 0o755)
+        env = dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"])
+        r = subprocess.run([sys.executable, "-I", "-", json.dumps({"data_mount": "/", "system_fdb": True})],
+                           input=watchdog.CHECK_SCRIPT, capture_output=True, text=True, timeout=60, env=env)
+        with open(argv) as f:
+            self.assertEqual(f.read().splitlines(),
+                             ["-C", "/etc/foundationdb/fdb.cluster", "--timeout", "10", "--exec", "status minimal"])
+        return json.loads(r.stdout)
+
+    def test_the_check_script_records_a_failed_system_check(self):
+        out = self.check_with_fdbcli("echo 'Specified timeout reached -- Disconnected'; echo two >&2; exit 1")
+        self.assertIs(out["system_fdb_available"], False)
+        c = out["system_fdb_check"]
+        self.assertEqual((c["rc"], c["timed_out"], c["error"], c["stdout_head"], c["stderr_head"]),
+                         (1, False, None, ["Specified timeout reached -- Disconnected"], ["two"]))
+        self.assertGreaterEqual(c["elapsed_s"], 0)
+        self.assertEqual(set(c["host"]), {"load1", "mem_available", "free_root"})
+        self.assertIsNotNone(c["host"]["free_root"])
+
+    def test_the_check_script_records_nothing_for_an_available_system_database(self):
+        out = self.check_with_fdbcli("echo 'The database is available.'")
+        self.assertIs(out["system_fdb_available"], True)
+        self.assertNotIn("system_fdb_check", out)
+
+    def test_the_check_script_records_a_timed_out_system_check(self):
+        out = self.check_with_fdbcli("echo partial; exec sleep 30")
+        self.assertIsNone(out["system_fdb_available"])
+        c = out["system_fdb_check"]
+        self.assertEqual((c["rc"], c["timed_out"]), (None, True))
+        self.assertGreaterEqual(c["elapsed_s"], 20)
+        self.assertEqual(set(c["host"]), {"load1", "mem_available", "free_root"})
 
 
 if __name__ == "__main__":

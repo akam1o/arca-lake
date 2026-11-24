@@ -249,6 +249,10 @@ muts = [
  ("0.2.0: retained of the load host only", "r110/remote.py", "        by_host = rec if per_host else", "        by_host = {self.host: rec} if False else", "test_campaign"),
  ("0.2.0: scrub stops at the first group without a result", "r110/remote.py", "            if not m:\n                self.last_scrub_unread.append(int(g))\n                continue", "            if not m:\n                return None", "test_driver"),
  ("0.2.0: a reboot not seen by the watchdog", "r110/watchdog.py", "                if self.boot.setdefault(host, boot) != boot:", "                if False:", "test_guard"),
+ ("0.2.0 run 2: a failed system check not logged", "r110/watchdog.py", "                    self.log(event=\"system-fdb-check\", host=host, check=r[\"system_fdb_check\"])", "                    pass", "test_guard"),
+ ("0.2.0 run 2: a failing diagnostic log delays the stop", "r110/watchdog.py", "                except OSError:\n                    pass\n\n            def need", "                except ZeroDivisionError:\n                    pass\n\n            def need", "test_guard"),
+ ("0.2.0 run 2: a failed system check's output not kept", "r110/watchdog.py", "        if not ok:\n            out[\"system_fdb_check\"] = {", "        if False:\n            out[\"system_fdb_check\"] = {", "test_guard"),
+ ("0.2.0 run 2: a timed-out system check not kept", "r110/watchdog.py", "            raise\n        ok = \"is available\" in r.stdout", "            out.pop(\"system_fdb_check\")\n            raise\n        ok = \"is available\" in r.stdout", "test_guard"),
 ]
 for entry in muts:
     name, path, old, new = entry[:4]
