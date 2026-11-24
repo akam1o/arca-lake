@@ -213,6 +213,7 @@ arca_gateway_population_queue_running	gauge	gateway	populations	-	cache populati
 arca_gateway_put_in_flight	gauge	gateway	requests	-	PUTs being written now
 arca_gateway_put_phase_max_seconds	gauge	gateway	seconds	phase=body_read|encode|shard_write|append|lease_renew|commit|total	longest PUT phase observed
 arca_gateway_put_phase_seconds	histogram	gateway	seconds	phase=body_read|encode|shard_write|append|lease_renew|commit|total	PUT time per phase
+arca_gateway_refused_write_settle_timeouts_total	counter	gateway	events	-	failed PUT or UploadPart writes whose chunk placements in flight outlasted the settle deadline and were aborted
 arca_gateway_s3_bytes_total	counter	gateway	bytes	dir=in|out	S3 body bytes received and sent
 arca_gateway_s3_request_seconds	histogram	gateway	seconds	op=~s3op	S3 request time by operation
 arca_gateway_s3_requests_total	counter	gateway	requests	op=~s3op,status=2xx|3xx|4xx|5xx	S3 requests by operation and status class

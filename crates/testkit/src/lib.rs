@@ -134,6 +134,8 @@ pub struct ClusterOptions {
     pub populations_per_node: usize,
     /// Chunk placements in flight per PUT (see `ClusterConfig::write_pipeline`).
     pub write_pipeline: usize,
+    /// See `ClusterConfig::failed_write_settle`.
+    pub failed_write_settle: Duration,
     /// Gateway access records for tiering (`ClusterConfig::record_access`).
     pub record_access: bool,
     /// Per-key commit queue (`ClusterConfig::commit_queue`, ADR-0041).
@@ -236,6 +238,7 @@ impl ClusterOptions {
             population_queue_depth: 64,
             populations_per_node: 4,
             write_pipeline: 2,
+            failed_write_settle: arca_lake_gateway::cluster::FAILED_WRITE_SETTLE,
             record_access: true,
             commit_queue: arca_lake_gateway::cluster::commit_queue::CommitQueueConfig::default(),
             access: arca_lake_gateway::cluster::access::AccessConfig {
@@ -495,6 +498,7 @@ impl<S: KvStore + 'static> TestCluster<S> {
             populations_per_node: opts.populations_per_node,
             write_pipeline: opts.write_pipeline,
             multipart_min_part_bytes: opts.multipart_min_part_bytes,
+            failed_write_settle: opts.failed_write_settle,
             process_id: format!("gateway-test-{}", uuid::Uuid::new_v4().simple()),
             heartbeat: opts.heartbeat,
             // Test clusters run no controller unless a test spawns one.

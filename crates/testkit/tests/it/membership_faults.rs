@@ -691,7 +691,10 @@ async fn mem_decommission_across_groups() {
 
 #[tokio::test]
 async fn mem_direct_copy() {
-    direct_copy_moves_verified_shards(TestCluster::start(opts(5, 1, 0)).await).await;
+    Box::pin(direct_copy_moves_verified_shards(
+        TestCluster::start(opts(5, 1, 0)).await,
+    ))
+    .await;
 }
 
 #[cfg(feature = "fdb")]
@@ -732,7 +735,7 @@ mod fdb {
         let Some(c) = start(opts(5, 1, 0)).await else {
             return;
         };
-        direct_copy_moves_verified_shards(c).await;
+        Box::pin(direct_copy_moves_verified_shards(c)).await;
     }
 
     #[tokio::test]
