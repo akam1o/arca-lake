@@ -364,7 +364,8 @@ class FakeHosts:
 
 
 def healthy(load_host=False, system=False):
-    r = {"mem_available": 6 * GIB, "cpus": 4, "load1": 1.0, "free_root": 20 * GIB, "free_data": 20 * GIB}
+    r = {"mem_available": 6 * GIB, "cpus": 4, "load1": 1.0, "free_root": 20 * GIB, "free_data": 20 * GIB,
+         "boot_id": "boot-1"}
     if load_host:
         r.update(swap_pages=100, cpu_iowait_total=[10, 1000], kernel_alerts=[], test_dir_bytes=GIB,
                  test_fdb_available=True)
@@ -660,6 +661,28 @@ class Watchdogs(unittest.TestCase):
         self.assertEqual(self.beats(), [])
         self.assertEqual(self.stops(), ["host-unreachable"])
 
+    def test_a_host_that_booted_again_stops_as_host_reboot(self):
+        """0.2.0 plan §5 (the 2026-11-23 and 2026-11-24 reboots): a host
+        back within the unreachable rounds with another boot ID is a reboot,
+        not a healthy host; on any host, the load host's or another."""
+        for target in ("t1", "t2"):
+            self.setUp()
+            w = self.wd()
+            self.assertEqual(w.run(max_rounds=1), 0)
+            self.hosts.down[target] = 2
+            self.hosts.readings[target]["boot_id"] = "boot-2"
+            self.assertEqual(w.run(max_rounds=5), 2)
+            self.assertEqual(self.stops(), ["host-reboot"], target)
+            self.assertEqual(len(os.listdir(os.path.join(self.tmp.name, "alarms"))), 1)
+            self.assertEqual(common.reason_class("host-reboot"), "monitor")
+            self.tearDown()
+        self.setUp()
+
+    def test_a_boot_id_that_cannot_be_read_is_a_monitor_failure(self):
+        self.hosts.readings["t3"]["boot_id"] = None
+        self.assertEqual(self.wd().run(max_rounds=2), 2)
+        self.assertEqual(self.stops(), ["monitor-failed"])
+
     def test_system_foundationdb_unavailable(self):
         self.hosts.readings["t1"]["system_fdb_available"] = False
         self.wd().run(max_rounds=2)
@@ -730,7 +753,7 @@ class Watchdogs(unittest.TestCase):
                            input=watchdog.CHECK_SCRIPT, capture_output=True, text=True, timeout=60)
         out = json.loads(r.stdout)
         self.assertIsNotNone(out["free_root"])
-        for k in ("mem_available", "swap_pages", "cpu_iowait_total"):
+        for k in ("mem_available", "swap_pages", "cpu_iowait_total", "boot_id"):
             self.assertIn(k, out)
             if not sys.platform.startswith("linux"):
                 self.assertIsNone(out[k], k)

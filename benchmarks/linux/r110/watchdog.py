@@ -14,7 +14,7 @@ looser than the plan's) and ``optional_checks`` (checks whose source may
 be missing, decided at preflight: ``kernel_log``, ``swap``).
 
 Every ``interval`` (10 s) one round: each host's memory, free space of
-``/`` and the data mount, load per CPU; on the load host also swap
+``/`` and the data mount, load per CPU, boot ID (a change: ``host-reboot``); on the load host also swap
 activity, CPU iowait, kernel OOM or hung-task messages, the test
 directories' allocated bytes, the test FoundationDB and the guard's own
 identity; every system FoundationDB. A reading that cannot be made is a
@@ -87,6 +87,7 @@ tryit("mem_available", mem)
 tryit("cpus", os.cpu_count)
 tryit("load1", lambda: float(open("/proc/loadavg").read().split()[0]))
 tryit("free_root", lambda: free("/"))
+tryit("boot_id", lambda: open("/proc/sys/kernel/random/boot_id").read().strip())
 if a.get("data_mount"):
     tryit("free_data", lambda: free(a["data_mount"]))
 if a.get("detail"):
@@ -235,6 +236,10 @@ class Watchdog:
         self.clock = clock or common.Clock()
         self.optional = set(cfg.get("optional_checks", []))
         self.unreachable = {h: 0 for h in cfg["hosts"]}
+        # Each host's boot ID at its first reading: a later one that differs
+        # is a reboot (0.2.0 plan §5), a monitor stop of its own
+        # (``host-reboot``), never an unreachable host or a stop by a guard.
+        self.boot = {}
         self.prev = {}
         self.swap_hist = []
         self.iow_hist = []
@@ -299,6 +304,9 @@ class Watchdog:
                 return v
 
             try:
+                boot = need("boot_id")
+                if self.boot.setdefault(host, boot) != boot:
+                    out.append(("host-reboot", {"host": host, "boot_id": self.boot[host], "now": boot}))
                 if need("mem_available") < lim["min_mem_mib"] * (1 << 20):
                     out.append(("memory", {"host": host, "bytes": r["mem_available"]}))
                 if need("free_root") < lim["min_free_gib"] * (1 << 30):

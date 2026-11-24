@@ -19,8 +19,11 @@ approval file (JSON, written by the approver, never by this tool):
 ``config_sha256`` (the sha256 of CONFIG's bytes: any change of the
 configuration voids the approval), ``scope`` (``preflight``, ``run``,
 ``collect``, ``teardown``), ``window_start`` and ``window_end`` (ISO 8601
-UTC; the command is refused outside), ``approved_by``. The example
-configuration in this directory is not approved.
+UTC; the command is refused outside), ``approved_by``; for a preflight or
+a run of the 0.2.0 campaign (docs/verification/0.2.0-r110-plan.md §3,
+§6) also ``campaign``, ``campaign_run``, ``candidate`` and, from the
+second main run, ``rerun``. The example configuration in this directory
+is not approved.
 
 Evidence before teardown (``evidence.py``): at a run's end, after the
 safe stops, every file of the run on the host is saved under
@@ -78,6 +81,22 @@ STOP_RULES = {"guard": {"min_free_gib": 3.0, "min_mem_mib": 1024.0, "heartbeat_t
               "preflight_free_gib": 12.2, "preflight_root_free_gib": 3.0}
 SCOPES = ("preflight", "run", "collect", "teardown")
 MAX_WINDOW_H = 24
+# The 0.2.0 campaign (docs/verification/0.2.0-r110-plan.md): at most three
+# main runs, numbered in the run ID; the 0.1.0 campaign's IDs, configurations
+# and approvals are not taken for a preflight or a run (its leftovers can
+# still be collected and torn down).
+CAMPAIGN = "0.2.0"
+CAMPAIGN_RUNS = 3
+CAMPAIGN_RUN_ID = re.compile(r"r110-020-([1-9][0-9]*)-[0-9]{8}T[0-9]{6}Z")
+LEGACY_RUN_ID = re.compile(r"r110-[0-9]{8}T[0-9]{6}Z")
+RERUN_FIELDS = ("previous_run_id", "cause", "change", "hypothesis")
+CANDIDATES = ("interim", "final")
+
+
+def campaign_run(run_id):
+    """The 0.2.0 campaign's main-run number of ``run_id``, or None."""
+    m = CAMPAIGN_RUN_ID.fullmatch(run_id) if isinstance(run_id, str) else None
+    return int(m.group(1)) if m else None
 
 
 class ConfigError(Exception):
@@ -96,16 +115,26 @@ def check_path(name, p, depth=3):
         raise ConfigError(f"{name}: a directory of the retained cluster")
 
 
-def validate(cfg, execute=False):
+def validate(cfg, execute=False, legacy=False):
     """Raise ``ConfigError`` for anything missing or looser than the plan.
     ``execute``: the configuration is about to be run (preflight, run,
-    teardown): a value left undetermined (``fdb_memory`` null) is refused."""
+    teardown): a value left undetermined (``fdb_memory`` null) is refused.
+    ``legacy``: a run of the 0.1.0 campaign is accepted too (``collect`` and
+    ``teardown`` of its leftovers only)."""
     for k in ("run_id", "hosts", "load_host", "remote", "binary", "limits", "settings", "stage_max_s",
               "stop_rules", "judgement", "teardown"):
         if k not in cfg:
             raise ConfigError(f"{k} missing")
-    if not re.fullmatch(r"r110-[0-9]{8}T[0-9]{6}Z", cfg["run_id"]):
-        raise ConfigError("run_id: r110-YYYYMMDDTHHMMSSZ")
+    n = campaign_run(cfg["run_id"])
+    if n is None and not (legacy and isinstance(cfg["run_id"], str) and LEGACY_RUN_ID.fullmatch(cfg["run_id"])):
+        raise ConfigError("run_id: r110-020-<n>-YYYYMMDDTHHMMSSZ (the 0.2.0 campaign's main run n)")
+    if n is not None:
+        if not 1 <= n <= CAMPAIGN_RUNS:
+            raise ConfigError(f"run_id: the 0.2.0 campaign has at most {CAMPAIGN_RUNS} main runs")
+        if cfg.get("campaign") != CAMPAIGN:
+            raise ConfigError(f"campaign: {CAMPAIGN!r} for a run ID of the 0.2.0 campaign")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(cfg["binary"].get("archive_sha256", ""))):
+            raise ConfigError("binary.archive_sha256: the candidate archive the binary was extracted from")
     if cfg["load_host"] not in cfg["hosts"]:
         raise ConfigError("load_host not among the hosts")
     r = cfg["remote"]
@@ -157,10 +186,20 @@ def validate(cfg, execute=False):
     if not 0 < cfg["stop_rules"].get("max_test_dir_bytes", 0) <= cap:
         raise ConfigError(f"stop_rules.max_test_dir_bytes: at most the allotments plus 3 GiB ({cap})")
     check_path("local_dir", cfg.get("local_dir"), depth=2)
-    rr = cfg.get("retained_record")
-    if not isinstance(rr, dict) or not rr or not all(
+    def listing_record(rr):
+        return isinstance(rr, dict) and all(
             isinstance(k, str) and k.startswith("/") and os.path.normpath(k) == k
-            and isinstance(d, str) and re.fullmatch(r"[0-9a-f]{64}", d) for k, d in rr.items()):
+            and isinstance(d, str) and re.fullmatch(r"[0-9a-f]{64}", d) for k, d in rr.items())
+
+    rr = cfg.get("retained_record")
+    if n is not None:
+        # 0.2.0 plan §5: the retained directories of every host, each host
+        # named (an empty record: none there, as listed at the preflight).
+        if not isinstance(rr, dict) or set(rr) != set(cfg["hosts"]) or not all(
+                listing_record(v) for v in rr.values()) or not any(rr.values()):
+            raise ConfigError("retained_record: every host -> {absolute directory -> sha256 of its listing} "
+                              "(0.2.0 plan §5)")
+    elif not rr or not listing_record(rr):
         raise ConfigError("retained_record: absolute directory -> sha256 of its listing (plan §10)")
     sf = cfg.get("system_fdb_hosts")
     if not isinstance(sf, list) or not sf or not set(sf) <= set(cfg["hosts"]):
@@ -192,15 +231,36 @@ def validate(cfg, execute=False):
     return cfg
 
 
-def load_config(path, execute=False):
+def load_config(path, execute=False, legacy=False):
     with open(path, "rb") as f:
         raw = f.read()
-    return validate(json.loads(raw), execute), hashlib.sha256(raw).hexdigest()
+    return validate(json.loads(raw), execute, legacy), hashlib.sha256(raw).hexdigest()
 
 
-def check_approval(path, config_sha, scope, now, duration_s=0):
+def check_campaign_approval(a, run_n):
+    """The 0.2.0 campaign's part of an approval for main run ``run_n``: of
+    this campaign and this run; for a later run, the previous run's cause,
+    the change and the hypothesis, recorded before it; the last run only on
+    the final candidate (0.2.0 plan §3)."""
+    if a.get("campaign") != CAMPAIGN or a.get("campaign_run") != run_n:
+        raise NotApproved(f"the approval is not for main run {run_n} of the {CAMPAIGN} campaign")
+    if a.get("candidate") not in CANDIDATES:
+        raise NotApproved(f"candidate: one of {CANDIDATES}")
+    if run_n == CAMPAIGN_RUNS and a["candidate"] != "final":
+        raise NotApproved(f"main run {run_n} is kept for the final candidate")
+    if run_n > 1:
+        r = a.get("rerun")
+        if not isinstance(r, dict) or not all(isinstance(r.get(k), str) and r[k].strip() for k in RERUN_FIELDS):
+            raise NotApproved(f"rerun: {', '.join(RERUN_FIELDS)} of the previous run, recorded before this one")
+        if campaign_run(r["previous_run_id"]) != run_n - 1:
+            raise NotApproved(f"rerun.previous_run_id: main run {run_n - 1} of the campaign")
+
+
+def check_approval(path, config_sha, scope, now, duration_s=0, run_n=None):
     """Raise ``NotApproved`` unless the approval names this configuration,
-    this scope and a window containing ``now`` (an aware datetime)."""
+    this scope and a window containing ``now`` (an aware datetime).
+    ``run_n``: a preflight or run of the 0.2.0 campaign's main run ``run_n``
+    (``check_campaign_approval``)."""
     if not path:
         raise NotApproved("no approval file")
     try:
@@ -216,6 +276,8 @@ def check_approval(path, config_sha, scope, now, duration_s=0):
         raise NotApproved(f"the approval does not cover {scope}")
     if not a.get("approved_by"):
         raise NotApproved("approved_by missing")
+    if run_n is not None:
+        check_campaign_approval(a, run_n)
     try:
         w0 = datetime.datetime.fromisoformat(a["window_start"])
         w1 = datetime.datetime.fromisoformat(a["window_end"])
@@ -359,6 +421,7 @@ SETTLE_S = 180  # three compaction passes after the last reclaim (§8 C2)
 SETTLE7_S = 1500
 SCRUB_RESERVE_S = 900
 DRAIN_OBSERVE_S = 1800  # §6.2: observe the drain after a stop that is not a resource danger
+STRICT_WAIT_S = 120  # 0.2.0 plan §4.2: the nodes strict before stage 3's first write
 COLLECT_S = 1800  # the host's evidence at the run's end (after the stops); a teardown collects again
 
 
@@ -375,6 +438,9 @@ class Run:
         self.clock = clock or common.Clock()
         self.poll_s = poll_s
         self.tl = {"clock_offsets": []}
+        if campaign_run(cfg["run_id"]) is not None:
+            # The judge applies the 0.2.0 plan's amendments to this timeline.
+            self.tl["campaign"] = CAMPAIGN
         self.stop = None
         self.current = None
         self.offset_ms = 0
@@ -445,11 +511,14 @@ class Run:
         sample again."""
         if len(samples) < self._prot_n:
             self._prot_n = 0  # a list that shrank: look at it all again
+        watch = (("arca_controller_gc_skipped_referenced_total", "controller"), ("arca_node_reclaim_damaged", None))
+        if self.tl.get("campaign"):
+            # 0.2.0 plan §4.2: a strict cluster takes no unproven write.
+            watch += (("arca_node_writes_unproven_total", None),)
         for x in samples[self._prot_n:]:
             if self._prot_seen:
                 break
-            for k, t in (("arca_controller_gc_skipped_referenced_total", "controller"),
-                         ("arca_node_reclaim_damaged", None)):
+            for k, t in watch:
                 if (t is None or x.get("target") == t) and x.get("values", {}).get(k, {}).get("value", 0) > 0:
                     self._prot_seen = {"target": x.get("target"), "counter": k}
                     break
@@ -561,6 +630,16 @@ class Run:
         return bool(r.get("stop_layers_exercised")) and bool(r.get("limits_exercised")) and r.get("errors") == 0
 
     def s3(self, st, deadline):
+        if self.tl.get("campaign"):
+            # 0.2.0 plan §4.2: every node strict (ADR-0037) and the controller
+            # counting none lenient before the first write of the main run;
+            # otherwise the precondition is not formed and the run ends.
+            ok = self.wait("3", min(deadline, self.clock.monotonic() + STRICT_WAIT_S), lambda s: self._all_nodes(
+                s, "arca_node_write_ownership_strict", lambda v: v == 1)
+                and self._fresh(s, "controller", "arca_controller_nodes_write_ownership_lenient") == 0)
+            self.tl["3"]["write_ownership_strict"] = bool(ok)
+            if not ok:
+                return False
         self.c.start_load(remaining_s=self.remaining())
         bucket, fill, base = st["steps"]
         if not self.run_step(dict(bucket, stage="3"), deadline) or self._stopped("3"):
@@ -758,6 +837,8 @@ class Run:
         tl7["scrub_findings"] = self.c.integrity("scrub")
         tl7["scrub_by_class"] = getattr(self.c, "last_scrub_classes", None)
         tl7["scrub_held"] = getattr(self.c, "last_scrub_held", None)
+        tl7["scrub_errors"] = getattr(self.c, "last_scrub_errors", None)
+        tl7["scrub_unread_groups"] = getattr(self.c, "last_scrub_unread", None)
         if self._stopped("7"):
             return False
         self.run_step({"kind": "finish", "stage": "7"}, deadline)
@@ -988,7 +1069,7 @@ def main(argv=None, now=None, cluster_factory=None):
                                     ("call_s", a.call_timeout)) if v is not None}
     try:
         # The memory limit is chosen at the preflight: only a run needs it.
-        cfg, sha = load_config(a.config, execute=a.command == "run")
+        cfg, sha = load_config(a.config, execute=a.command == "run", legacy=a.command in ("collect", "teardown"))
     except (ConfigError, OSError, ValueError) as e:
         print(f"configuration refused: {e}", file=sys.stderr)
         return 2
@@ -1005,7 +1086,8 @@ def main(argv=None, now=None, cluster_factory=None):
     try:
         # A run must end inside the window: its time and the drain's.
         duration = (min(RUN_MAX_S, cfg["limits"]["run_seconds"]) + DRAIN_OBSERVE_S) if a.command == "run" else 0
-        check_approval(a.approval, sha, a.command, now, duration)
+        check_approval(a.approval, sha, a.command, now, duration,
+                       run_n=campaign_run(cfg["run_id"]) if a.command in ("preflight", "run") else None)
     except NotApproved as e:
         print(f"not approved: {e}", file=sys.stderr)
         return 2

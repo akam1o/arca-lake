@@ -70,11 +70,14 @@ class Base(unittest.TestCase):
             return p, hashlib.sha256(f.read()).hexdigest()
 
     def approval(self, sha, scope=("run",), start="2027-01-01T00:00:00+00:00", end="2027-01-02T00:00:00+00:00",
-                 by="approver"):
+                 by="approver", **extra):
         p = os.path.join(self.dir, "approval.json")
+        # The 0.2.0 campaign's fields for main run 1 (the example's).
+        a = {"config_sha256": sha, "scope": list(scope), "window_start": start, "window_end": end,
+             "approved_by": by, "campaign": "0.2.0", "campaign_run": 1, "candidate": "interim"}
+        a.update(extra)
         with open(p, "w") as f:
-            json.dump({"config_sha256": sha, "scope": list(scope), "window_start": start, "window_end": end,
-                       "approved_by": by}, f)
+            json.dump({k: v for k, v in a.items() if v is not None}, f)
         return p
 
 
@@ -249,6 +252,9 @@ class FakeCluster:
         self.listing_error = None
         self.setup_started = True
         self._samples = []
+        # A 0.2.0 binary's (ADR-0037): strict nodes, no unproven write.
+        self.strict = 1
+        self.unproven = 0
 
     def nodes(self):
         return ["node0", "node1"]
@@ -314,8 +320,11 @@ class FakeCluster:
             self._samples.append(mk("gateway0", {"arca_gateway_admission_state": self.admission}))
         self._samples += [mk("controller", {"arca_controller_gc_backlog": self.backlog,
                                             "arca_controller_backpressure_state": 0,
-                                            "arca_controller_reclaimed_total": self.reclaimed})]
-        self._samples += [mk(n, {"arca_node_reclaim_pending_records": self.pending}) for n in self.nodes()]
+                                            "arca_controller_reclaimed_total": self.reclaimed,
+                                            "arca_controller_nodes_write_ownership_lenient": 0 if self.strict else 1})]
+        self._samples += [mk(n, {"arca_node_reclaim_pending_records": self.pending,
+                                 "arca_node_write_ownership_strict": self.strict,
+                                 "arca_node_writes_unproven_total": self.unproven}) for n in self.nodes()]
 
     def samples(self):
         self.sample()
@@ -363,6 +372,11 @@ class FakeCluster:
 
     def integrity(self, kind):
         self.integrity_calls.append(kind)
+        if kind == "scrub":
+            # A 0.2.0 scrub's output: classes and the shards held.
+            self.last_scrub_classes = [0] * 8
+            self.last_scrub_held = {"retained": 0, "retained_damaged": 0, "in_flight": 0, "unclassified": 0}
+            self.last_scrub_errors, self.last_scrub_unread = 0, []
         return 0
 
     def ledger_records(self):
@@ -1372,14 +1386,35 @@ class Commands(Base):
                "retained 3 retained_damaged 0 in_flight 1 unclassified 0\n")
         bad = ("scrub group 7 verified 9 bytes 1 findings [0, 0, 0, 0, 0, 0, 0, 0] enqueued 0 errors 2 "
                "retained 1 retained_damaged 0 in_flight 0 unclassified 2\n")
-        for line, total, classes, held in (
-                (old, 3, [0, 0, 0, 0, 3, 0, 0, 0], None),
-                (new, 0, [0] * 8, {"retained": 3, "retained_damaged": 0, "in_flight": 1, "unclassified": 0}),
-                (bad, None, None, {"retained": 1, "retained_damaged": 0, "in_flight": 0, "unclassified": 2})):
+        # A scrub with errors: incomplete (None), its classes kept (0.2.0
+        # plan §4.1: a finding beside an error still fails C5).
+        for line, total, classes, held, errors in (
+                (old, 3, [0, 0, 0, 0, 3, 0, 0, 0], None, 0),
+                (new, 0, [0] * 8, {"retained": 3, "retained_damaged": 0, "in_flight": 1, "unclassified": 0}, 0),
+                (bad, None, [0] * 8, {"retained": 1, "retained_damaged": 0, "in_flight": 0, "unclassified": 2}, 2)):
             c, _, _ = self.cluster(answers=[("grep '^group '", "group 7 x\n"), ("integrity scrub", line)])
             self.assertEqual(c.integrity("scrub"), total, line)
             self.assertEqual(c.last_scrub_classes, classes, line)
             self.assertEqual(c.last_scrub_held, held, line)
+            self.assertEqual(c.last_scrub_errors, errors, line)
+
+    def test_every_group_is_scrubbed_after_one_with_errors(self):
+        """0.2.0 plan §4.1: group 1's errors (an unclassified shard) do not
+        hide group 2's checksum finding, nor a group without a result."""
+        g1 = ("scrub group 1 verified 9 bytes 1 findings [0, 0, 0, 0, 0, 0, 0, 0] enqueued 0 errors 1 "
+              "retained 0 retained_damaged 0 in_flight 0 unclassified 1\n")
+        g2 = ("scrub group 2 verified 9 bytes 1 findings [0, 1, 0, 0, 0, 0, 0, 0] enqueued 1 errors 0 "
+              "retained 2 retained_damaged 0 in_flight 0 unclassified 0\n")
+        c, rec, _ = self.cluster(answers=[("grep '^group '", "group 1 x\ngroup 2 y\ngroup 3 z\n"),
+                                          ("scrub --group 1 ", g1), ("scrub --group 2 ", g2),
+                                          ("scrub --group 3 ", "error: timed out\n")])
+        self.assertIsNone(c.integrity("scrub"))
+        self.assertEqual(len([cmd for _, cmd, _ in rec.commands if "integrity scrub" in cmd]), 3)
+        self.assertEqual(c.last_scrub_classes, [0, 1, 0, 0, 0, 0, 0, 0])
+        self.assertEqual(c.last_scrub_errors, 1)
+        self.assertEqual(c.last_scrub_unread, [3])
+        self.assertEqual(c.last_scrub_held, {"retained": 2, "retained_damaged": 0, "in_flight": 0,
+                                             "unclassified": 1})
 
     def test_teardown_removes_only_marked_run_directories(self):
         c, rec, cfg = self.cluster(answers=[('print("checked %d"', "checked 0\n"), ("rm -rf --", "removed\n")])

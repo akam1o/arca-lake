@@ -283,7 +283,7 @@ class Watching(unittest.TestCase):
     def test_an_anomaly_then_low_memory_still_stops_the_services(self):
         node = self.service("node0")
         unrelated = self.service("x", record=False)
-        readings = {"t2": {"mem_available": 6 << 30, "cpus": 4, "load1": 1.0, "free_root": 20 << 30,
+        readings = {"t2": {"mem_available": 6 << 30, "cpus": 4, "load1": 1.0, "free_root": 20 << 30, "boot_id": "b",
                            "free_data": 20 << 30, "swap_pages": 0, "cpu_iowait_total": [1, 100], "kernel_alerts": [],
                            "test_fdb_available": False}}
         cfg = {"run_id": "run-w", "hosts": {"h2": "t2"}, "load_host": "h2", "remote_run_dir": os.path.join(self.dir, "load"),
