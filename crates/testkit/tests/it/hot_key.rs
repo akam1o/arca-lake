@@ -9,7 +9,7 @@
 //! overlap and conflict as they do on FoundationDB.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,11 @@ const BUCKET: &str = "hot";
 const KEY: &str = "k";
 /// Commit latency of [`SlowKv`].
 const COMMIT_LATENCY: Duration = Duration::from_millis(3);
+/// The longest [`SlowKv`] holds a commit for its hold condition.
+const HOLD_LIMIT: Duration = Duration::from_secs(10);
+
+/// A condition the first commit writing the watched key waits for.
+type Hold = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// A store whose commits each take [`COMMIT_LATENCY`] before they are
 /// applied, counting the conflicts of commits that write `watched`.
@@ -40,6 +45,8 @@ struct SlowKv<S> {
     inner: S,
     watched: Arc<Mutex<Option<Key>>>,
     conflicts: Arc<AtomicU64>,
+    hold: Arc<Mutex<Option<Hold>>>,
+    held: Arc<AtomicBool>,
 }
 
 impl<S> SlowKv<S> {
@@ -48,7 +55,15 @@ impl<S> SlowKv<S> {
             inner,
             watched: Arc::default(),
             conflicts: Arc::default(),
+            hold: Arc::default(),
+            held: Arc::default(),
         }
+    }
+
+    /// Hold the first commit that writes the watched key until `until`
+    /// is true (at most [`HOLD_LIMIT`]).
+    fn hold_first_watched_commit(&self, until: impl Fn() -> bool + Send + Sync + 'static) {
+        *self.hold.lock().unwrap() = Some(Arc::new(until));
     }
 
     fn watch(&self, key: Key) {
@@ -65,6 +80,8 @@ struct SlowTx<T> {
     writes_watched: bool,
     watched: Option<Key>,
     conflicts: Arc<AtomicU64>,
+    hold: Option<Hold>,
+    held: Arc<AtomicBool>,
 }
 
 impl<S: KvStore> KvStore for SlowKv<S>
@@ -79,6 +96,8 @@ where
             writes_watched: false,
             watched: self.watched.lock().unwrap().clone(),
             conflicts: Arc::clone(&self.conflicts),
+            hold: self.hold.lock().unwrap().clone(),
+            held: Arc::clone(&self.held),
         })
     }
 
@@ -148,6 +167,18 @@ impl<T: Txn + 'static> Txn for SlowTx<T> {
 
     async fn commit(self) -> Result<u64, KvError> {
         tokio::time::sleep(COMMIT_LATENCY).await;
+        if self.writes_watched
+            && let Some(until) = &self.hold
+            && !self.held.swap(true, Relaxed)
+        {
+            // The condition is another task's state (a gateway's commit
+            // queue), with nothing to wait on: check it every millisecond,
+            // bounded; the test asserts the condition afterwards.
+            let start = Instant::now();
+            while !until() && start.elapsed() < HOLD_LIMIT {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
         let r = self.inner.commit().await;
         if self.writes_watched && matches!(r, Err(KvError::Conflict)) {
             self.conflicts.fetch_add(1, Relaxed);
@@ -499,7 +530,10 @@ async fn put_through(
 
 /// Several gateways on one key, versioned, with a short wait bound so that
 /// some PUTs are refused: the history is consistent and every refused PUT
-/// left nothing behind.
+/// left nothing behind. Refusals are time-based (a turn awaited longer
+/// than the bound): writers that reach the commit spread out (a loaded
+/// machine) may never wait that long, so the first commit on the key is
+/// held until a PUT queued behind it has been refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn several_gateways_on_one_key_keep_a_consistent_history() {
     let mut opts = ClusterOptions::rs(3, 2, 1, MIB, 0);
@@ -514,6 +548,12 @@ async fn several_gateways_on_one_key_keep_a_consistent_history() {
         c.extra_backend().await.unwrap(),
         c.extra_backend().await.unwrap(),
     ];
+    let observed = gateways.clone();
+    c.meta.hold_first_watched_commit(move || {
+        observed
+            .iter()
+            .any(|g| g.commit_queue_stats().refused_wait > 0)
+    });
     let outcomes = put_through(&gateways, 12).await;
     let refused = outcomes.iter().filter(|o| o.result.is_err()).count();
     let waited: u64 = gateways
