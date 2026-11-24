@@ -481,8 +481,11 @@ beyond the standard CRC combination step below).
   so the client reads the `400`. The wrapper recognizes those operations
   as `s3s` routes them: the percent-decoded path-style path (a PUT only on
   a bucket path; an object PUT is the backend's, whatever its query or
-  path encoding) and decoded query names (`?%64elete`); never an
-  `aws-chunked` body. Virtual-hosted-style addressing, not served today,
+  path encoding) and decoded query names (`?%64elete`). An `aws-chunked`
+  body on these operations is refused with `400 InvalidRequest` (its wire
+  bytes are not the content, and AWS documents `aws-chunked` for PutObject
+  and UploadPart only), so a digest of it is never left unchecked.
+  Virtual-hosted-style addressing, not served today,
   would need this matching revisited. Surrounding whitespace is ignored;
   unpadded base64 is malformed. DeleteObjects is authorized per entry
   (RFC-012), after its body is read: an anonymous one with a wrong digest
@@ -494,10 +497,13 @@ beyond the standard CRC combination step below).
   of `Content-MD5`): the same server wrapper computes the named algorithm
   (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) over the body as `s3s` reads it
   and answers as PutObject does: mismatch → `400 BadDigest`, a value that
-  is not base64 of the algorithm's length or more than one checksum header
-  → `400 InvalidRequest`, an algorithm the gateway does not implement →
-  `501 NotImplemented`; the operation does not run. With `Content-MD5` as
-  well, both must match. On CompleteMultipartUpload the header is the
+  is not base64 of the algorithm's length, more than one checksum header,
+  or a value or `Content-MD5` header repeated → `400 InvalidRequest`, an
+  algorithm the gateway does not implement → `501 NotImplemented`;
+  `x-amz-sdk-checksum-algorithm` or `x-amz-checksum-algorithm` without its
+  value header, naming another algorithm than it, or naming none known →
+  `400 InvalidRequest` (as AWS; the SDKs send the pair consistently). The
+  operation does not run. With `Content-MD5` as well, both must match. On CompleteMultipartUpload the header is the
   object's checksum (above), not the body's, and is left to the backend.
 - **Signed payload and body framing** (PUT and UploadPart): `s3s`
   verifies the body against the signed `x-amz-content-sha256` and the
@@ -636,4 +642,4 @@ phase report.
 | A17 | Performance regression with multipart PUT added | see the Phase 3.1 report (`benchmarks/linux/results`) |
 | A18 | A signed PUT or UploadPart whose body does not match its `x-amz-content-sha256` is `400 XAmzContentSHA256Mismatch` and changes nothing; re-creating one's own bucket is `409 BucketAlreadyOwnedByYou`, another principal's `409 BucketAlreadyExists` | Verified (`s3_errors.rs`, cluster and memory backends, AWS SDK for Rust; body stream error mapping unit tests in `gateway/src/body.rs`) |
 | A19 | `Content-MD5`: malformed → `400 InvalidDigest`, mismatch → `400 BadDigest`, nothing committed, on PutObject (single and multi-chunk, plain and `aws-chunked`) and UploadPart, and on the DeleteObjects and PutBucketPolicy bodies | Verified (`s3_content_md5.rs`, cluster and memory backends, AWS SDK for Rust; `gateway/src/xml_digest.rs` unit tests) |
-| A20 | `x-amz-checksum-*` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) of the DeleteObjects, PutBucketPolicy, PutBucketVersioning and CreateBucket bodies: mismatch → `400 BadDigest`, malformed → `400 InvalidRequest`, the operation not applied; the SDK's own checksums accepted; CompleteMultipartUpload's header stays the object's checksum | Verified (`s3_xml_checksums.rs`, AWS SDK for Rust; `gateway/src/xml_digest.rs` unit tests) |
+| A20 | `x-amz-checksum-*` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) of the DeleteObjects, PutBucketPolicy, PutBucketVersioning and CreateBucket bodies: mismatch → `400 BadDigest`, malformed, repeated or inconsistent headers and `aws-chunked` bodies → `400 InvalidRequest`, an unimplemented algorithm → `501 NotImplemented`, the operation not applied; the SDK's own checksums accepted; CompleteMultipartUpload's header stays the object's checksum | Verified (`s3_xml_checksums.rs`, AWS SDK for Rust; `gateway/src/xml_digest.rs` unit tests) |

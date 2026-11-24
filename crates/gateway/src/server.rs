@@ -271,7 +271,7 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
             .unwrap_or(0);
         req.extensions_mut().insert(record.clone());
         let started = Instant::now();
-        let expected = crate::xml_digest::checked_here(req.method(), req.uri(), req.headers())
+        let expected = crate::xml_digest::checked_here(req.method(), req.uri())
             .and_then(|scope| crate::xml_digest::Expected::from_headers(req.headers(), scope));
         let digest_outcome = Arc::new(std::sync::OnceLock::new());
         let fut = if let Some(expected) = expected {

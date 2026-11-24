@@ -51,10 +51,10 @@ pub(crate) enum Refusal {
     ChecksumMalformed(ChecksumAlgorithm),
     /// The body's checksum differs.
     ChecksumMismatch(ChecksumAlgorithm),
-    /// More than one `x-amz-checksum-*` value.
-    ChecksumMultiple,
     /// A checksum algorithm the gateway does not implement.
     ChecksumUnsupported,
+    /// Inconsistent digest headers (`400 InvalidRequest`).
+    Invalid(&'static str),
 }
 
 impl Refusal {
@@ -79,13 +79,11 @@ impl Refusal {
                 "the {} you specified did not match the calculated checksum",
                 a.name()
             ),
-            Self::ChecksumMultiple => {
-                s3_error!(InvalidRequest, "expecting a single x-amz-checksum-* header")
-            }
             Self::ChecksumUnsupported => s3_error!(
                 NotImplemented,
                 "only CRC32, CRC32C, CRC64NVME, SHA1 and SHA256 checksums are supported"
             ),
+            Self::Invalid(m) => S3Error::with_message(s3s::S3ErrorCode::InvalidRequest, m),
         }
     }
 }
@@ -107,25 +105,9 @@ pub(crate) enum Scope {
 /// so `?%64elete` is `?delete` and `/b%2Fk` an object). PUT only on a
 /// bucket path (PutBucketPolicy, PutBucketVersioning, CreateBucket): an
 /// object PUT carries object data, which the backend checks over the
-/// decoded body, whatever its query. Never an `aws-chunked` body, whose
-/// wire bytes are not the content. Virtual-hosted-style addressing (not
+/// decoded body, whatever its query. Virtual-hosted-style addressing (not
 /// served today) would need the bucket from the `Host` header here.
-pub(crate) fn checked_here(
-    method: &http::Method,
-    uri: &http::Uri,
-    headers: &http::HeaderMap,
-) -> Option<Scope> {
-    let chunked = headers
-        .get("x-amz-content-sha256")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.starts_with("STREAMING-"))
-        || headers
-            .get_all(http::header::CONTENT_ENCODING)
-            .iter()
-            .any(|v| v.to_str().is_ok_and(|v| v.contains("aws-chunked")));
-    if chunked {
-        return None;
-    }
+pub(crate) fn checked_here(method: &http::Method, uri: &http::Uri) -> Option<Scope> {
     let path = urlencoding::decode(uri.path()).ok()?;
     let path = s3s::path::parse_path_style(&path).ok()?;
     let names: Vec<_> = uri
@@ -143,45 +125,117 @@ pub(crate) fn checked_here(
     }
 }
 
+/// Whether the body is `aws-chunked` (its wire bytes are not the content).
+fn aws_chunked(headers: &http::HeaderMap) -> bool {
+    headers
+        .get("x-amz-content-sha256")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("STREAMING-"))
+        || headers
+            .get_all(http::header::CONTENT_ENCODING)
+            .iter()
+            .any(|v| v.to_str().is_ok_and(|v| v.contains("aws-chunked")))
+}
+
+/// The one value of header `name`, if any; an error if it is repeated.
+fn single<'h>(headers: &'h http::HeaderMap, name: &str) -> Result<Option<&'h str>, Refusal> {
+    let mut all = headers.get_all(name).iter();
+    let first = all.next();
+    if all.next().is_some() {
+        return Err(Refusal::Invalid("a digest or checksum header is repeated"));
+    }
+    Ok(first.map(|v| v.to_str().unwrap_or("")))
+}
+
 /// What a body must hash to, from its headers. A header error is kept
 /// and answered at the end of the body.
 #[derive(Default)]
 pub(crate) struct Expected {
-    md5: Option<Result<[u8; 16], Refusal>>,
-    checksum: Option<Result<(ChecksumAlgorithm, Vec<u8>), Refusal>>,
+    /// The first header error, in the order PutObject checks them.
+    refusal: Option<Refusal>,
+    md5: Option<[u8; 16]>,
+    checksum: Option<(ChecksumAlgorithm, Vec<u8>)>,
 }
 
 impl Expected {
     /// The digests `headers` ask for within `scope`; `None` if none.
     pub(crate) fn from_headers(headers: &http::HeaderMap, scope: Scope) -> Option<Self> {
-        let md5 = headers.get("content-md5").map(|v| {
-            checksum::content_md5(v.to_str().ok().or(Some("")))
-                .ok()
-                .flatten()
-                .ok_or(Refusal::Malformed)
-        });
-        let checksum = if scope == Scope::All {
-            let present: Vec<_> = CHECKSUMS
-                .iter()
-                .filter_map(|(name, a)| headers.get(*name).map(|v| (*a, v)))
-                .collect();
-            if UNSUPPORTED.iter().any(|n| headers.contains_key(*n)) {
-                Some(Err(Refusal::ChecksumUnsupported))
-            } else if present.len() > 1 {
-                Some(Err(Refusal::ChecksumMultiple))
-            } else {
-                present.first().map(|(a, v)| {
-                    v.to_str()
-                        .ok()
-                        .and_then(|s| checksum::decode_b64(*a, s))
-                        .map(|d| (*a, d))
-                        .ok_or(Refusal::ChecksumMalformed(*a))
-                })
+        let mut e = Self::default();
+        if let Err(r) = e.read(headers, scope) {
+            e.refusal = Some(r);
+        }
+        (e.refusal.is_some() || e.md5.is_some() || e.checksum.is_some()).then_some(e)
+    }
+
+    fn read(&mut self, headers: &http::HeaderMap, scope: Scope) -> Result<(), Refusal> {
+        // AWS accepts aws-chunked bodies on PutObject and UploadPart only;
+        // here the wire bytes would be hashed, not the content.
+        if aws_chunked(headers) {
+            return Err(Refusal::Invalid(
+                "aws-chunked bodies are supported on PutObject and UploadPart only",
+            ));
+        }
+        if let Some(v) = single(headers, "content-md5")? {
+            self.md5 = Some(
+                checksum::content_md5(Some(v))
+                    .ok()
+                    .flatten()
+                    .ok_or(Refusal::Malformed)?,
+            );
+        }
+        if scope == Scope::Md5 {
+            return Ok(());
+        }
+        if UNSUPPORTED.iter().any(|n| headers.contains_key(*n)) {
+            return Err(Refusal::ChecksumUnsupported);
+        }
+        let mut present = Vec::new();
+        for (name, a) in CHECKSUMS {
+            if let Some(v) = single(headers, name)? {
+                present.push((a, v));
             }
-        } else {
-            None
-        };
-        (md5.is_some() || checksum.is_some()).then_some(Self { md5, checksum })
+        }
+        if present.len() > 1 {
+            return Err(Refusal::Invalid(
+                "expecting a single x-amz-checksum-* header",
+            ));
+        }
+        if let Some((a, v)) = present.first() {
+            let d = checksum::decode_b64(*a, v).ok_or(Refusal::ChecksumMalformed(*a))?;
+            self.checksum = Some((*a, d));
+        }
+        // An algorithm named without its value, or another one than the
+        // value header's, is refused as AWS does.
+        for name in ["x-amz-sdk-checksum-algorithm", "x-amz-checksum-algorithm"] {
+            let Some(v) = single(headers, name)? else {
+                continue;
+            };
+            let Some(named) = ChecksumAlgorithm::parse(v.trim()) else {
+                return Err(
+                    if ["SHA512", "MD5", "XXHASH64", "XXHASH3", "XXHASH128"]
+                        .contains(&v.trim().to_ascii_uppercase().as_str())
+                    {
+                        Refusal::ChecksumUnsupported
+                    } else {
+                        Refusal::Invalid("the checksum algorithm header is invalid")
+                    },
+                );
+            };
+            match &self.checksum {
+                None => {
+                    return Err(Refusal::Invalid(
+                        "a checksum algorithm is specified, but no corresponding x-amz-checksum-* header was found",
+                    ));
+                }
+                Some((a, _)) if *a != named => {
+                    return Err(Refusal::Invalid(
+                        "the checksum algorithm header names another algorithm than the x-amz-checksum-* header",
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -199,11 +253,8 @@ pub(crate) struct DigestChecked {
 impl DigestChecked {
     /// Wrap `inner`.
     pub(crate) fn new(inner: Body, expected: Expected, outcome: Arc<OnceLock<Refusal>>) -> Self {
-        let md5 = matches!(expected.md5, Some(Ok(_))).then(Md5::new);
-        let hasher = match &expected.checksum {
-            Some(Ok((a, _))) => Some(Hasher::new(*a)),
-            _ => None,
-        };
+        let md5 = expected.md5.is_some().then(Md5::new);
+        let hasher = expected.checksum.as_ref().map(|(a, _)| Hasher::new(*a));
         Self {
             inner,
             expected,
@@ -217,18 +268,15 @@ impl DigestChecked {
     /// The refusal at the end of the body, if any: header errors first,
     /// then mismatches.
     fn verdict(&mut self) -> Option<Refusal> {
-        if let Some(Err(r)) = &self.expected.md5 {
-            return Some(*r);
+        if let Some(r) = self.expected.refusal {
+            return Some(r);
         }
-        if let Some(Err(r)) = &self.expected.checksum {
-            return Some(*r);
-        }
-        if let (Some(Ok(e)), Some(m)) = (&self.expected.md5, self.md5.take())
+        if let (Some(e), Some(m)) = (&self.expected.md5, self.md5.take())
             && m.finalize().as_ref() != e.as_slice()
         {
             return Some(Refusal::Mismatch);
         }
-        if let (Some(Ok((a, e))), Some(h)) = (&self.expected.checksum, self.hasher.take())
+        if let (Some((a, e)), Some(h)) = (&self.expected.checksum, self.hasher.take())
             && h.finalize() != *e
         {
             return Some(Refusal::ChecksumMismatch(*a));
@@ -384,7 +432,9 @@ mod tests {
             )
             .await
             .1,
-            Some(Refusal::ChecksumMultiple)
+            Some(Refusal::Invalid(
+                "expecting a single x-amz-checksum-* header"
+            ))
         );
         assert_eq!(
             read_with(&[("x-amz-checksum-sha512", "AAAA")], Scope::All, body)
@@ -397,13 +447,10 @@ mod tests {
             Expected::from_headers(&headers(&[("x-amz-checksum-crc32", "AAAA")]), Scope::Md5)
                 .is_none()
         );
-        // Not values: nothing to check.
+        // Not a value: nothing to check.
         assert!(
             Expected::from_headers(
-                &headers(&[
-                    ("x-amz-sdk-checksum-algorithm", "CRC32"),
-                    ("x-amz-checksum-type", "FULL_OBJECT")
-                ]),
+                &headers(&[("x-amz-checksum-type", "FULL_OBJECT")]),
                 Scope::All
             )
             .is_none()
@@ -417,7 +464,7 @@ mod tests {
                 Refusal::ChecksumMalformed(ChecksumAlgorithm::Crc32),
                 "InvalidRequest",
             ),
-            (Refusal::ChecksumMultiple, "InvalidRequest"),
+            (Refusal::Invalid("x"), "InvalidRequest"),
             (Refusal::ChecksumUnsupported, "NotImplemented"),
         ] {
             assert_eq!(r.error().code().as_str(), code);
@@ -426,9 +473,7 @@ mod tests {
 
     #[test]
     fn the_xml_operations_are_checked_here() {
-        let plain = http::HeaderMap::new();
-        let scope =
-            |m: &str, u: &str| checked_here(&m.parse().unwrap(), &u.parse().unwrap(), &plain);
+        let scope = |m: &str, u: &str| checked_here(&m.parse().unwrap(), &u.parse().unwrap());
         let c = |m: &str, u: &str| scope(m, u).is_some();
         assert_eq!(scope("POST", "/bkt?delete"), Some(Scope::All));
         assert_eq!(scope("PUT", "/bkt?policy"), Some(Scope::All));
@@ -453,30 +498,114 @@ mod tests {
         assert!(!c("GET", "/bkt?delete"));
         // Not routable by s3s: left to it.
         assert!(!c("PUT", "/b?policy"));
-        // An aws-chunked body is never hashed here.
-        let mut chunked = http::HeaderMap::new();
-        chunked.insert(
-            "x-amz-content-sha256",
-            "STREAMING-UNSIGNED-PAYLOAD-TRAILER".parse().unwrap(),
+        // An aws-chunked body is refused here (AWS: PutObject and
+        // UploadPart only), digest headers or not, on every scope.
+        let chunked =
+            Refusal::Invalid("aws-chunked bodies are supported on PutObject and UploadPart only");
+        for (h, v) in [
+            ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
+            ("x-amz-content-sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"),
+            ("content-encoding", "aws-chunked"),
+        ] {
+            for scope in [Scope::All, Scope::Md5] {
+                let e = Expected::from_headers(&headers(&[(h, v)]), scope).unwrap();
+                assert_eq!(e.refusal, Some(chunked), "{h}: {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn inconsistent_digest_headers_are_refused() {
+        let body = b"<Delete/>";
+        let crc = checksum::encode_b64(&checksum::digest(ChecksumAlgorithm::Crc32, body));
+        let refusal = |pairs: &[(&str, &str)], scope| {
+            Expected::from_headers(&headers(pairs), scope).and_then(|e| e.refusal)
+        };
+        let repeated = Some(Refusal::Invalid("a digest or checksum header is repeated"));
+        // A repeated value header, also with the same value twice.
+        assert_eq!(
+            refusal(
+                &[
+                    ("x-amz-checksum-crc32", &crc),
+                    ("x-amz-checksum-crc32", &crc)
+                ],
+                Scope::All
+            ),
+            repeated
         );
+        let md5 = b64_md5(body);
+        assert_eq!(
+            refusal(&[("content-md5", &md5), ("content-md5", &md5)], Scope::All),
+            repeated
+        );
+        assert_eq!(
+            refusal(&[("content-md5", &md5), ("content-md5", &md5)], Scope::Md5),
+            repeated
+        );
+        // The SDK's pair, in either case of the name: accepted.
+        for name in ["CRC32", "crc32"] {
+            for header in ["x-amz-sdk-checksum-algorithm", "x-amz-checksum-algorithm"] {
+                assert_eq!(
+                    refusal(
+                        &[(header, name), ("x-amz-checksum-crc32", &crc)],
+                        Scope::All
+                    ),
+                    None
+                );
+            }
+        }
+        // An algorithm without its value, another one, an unknown or an
+        // unsupported one.
+        assert!(matches!(
+            refusal(&[("x-amz-sdk-checksum-algorithm", "CRC32")], Scope::All),
+            Some(Refusal::Invalid(_))
+        ));
+        assert!(matches!(
+            refusal(
+                &[
+                    ("x-amz-sdk-checksum-algorithm", "SHA256"),
+                    ("x-amz-checksum-crc32", &crc)
+                ],
+                Scope::All
+            ),
+            Some(Refusal::Invalid(_))
+        ));
+        assert!(matches!(
+            refusal(
+                &[
+                    ("x-amz-checksum-algorithm", "FOO"),
+                    ("x-amz-checksum-crc32", &crc)
+                ],
+                Scope::All
+            ),
+            Some(Refusal::Invalid(_))
+        ));
+        assert_eq!(
+            refusal(
+                &[
+                    ("x-amz-sdk-checksum-algorithm", "SHA512"),
+                    ("x-amz-checksum-crc32", &crc)
+                ],
+                Scope::All
+            ),
+            Some(Refusal::ChecksumUnsupported)
+        );
+        assert_eq!(
+            refusal(
+                &[
+                    ("x-amz-sdk-checksum-algorithm", "CRC32"),
+                    ("x-amz-sdk-checksum-algorithm", "CRC32"),
+                    ("x-amz-checksum-crc32", &crc)
+                ],
+                Scope::All
+            ),
+            repeated
+        );
+        // CompleteMultipartUpload: its checksum headers are the object's.
         assert!(
-            checked_here(
-                &http::Method::PUT,
-                &"/bkt?policy".parse().unwrap(),
-                &chunked
-            )
-            .is_none()
-        );
-        let mut encoded = http::HeaderMap::new();
-        encoded.insert(
-            http::header::CONTENT_ENCODING,
-            "aws-chunked".parse().unwrap(),
-        );
-        assert!(
-            checked_here(
-                &http::Method::POST,
-                &"/bkt?delete".parse().unwrap(),
-                &encoded
+            Expected::from_headers(
+                &headers(&[("x-amz-sdk-checksum-algorithm", "CRC32")]),
+                Scope::Md5
             )
             .is_none()
         );

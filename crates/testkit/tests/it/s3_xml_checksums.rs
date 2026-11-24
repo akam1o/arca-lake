@@ -56,6 +56,8 @@ struct SetChecksum {
     algo: ChecksumAlgorithm,
     name: &'static str,
     value: Value,
+    /// Headers appended after it (`None`: the same value again).
+    extra: Vec<(&'static str, Option<String>)>,
 }
 
 impl Intercept for SetChecksum {
@@ -85,7 +87,11 @@ impl Intercept for SetChecksum {
         for n in names {
             req.headers_mut().remove(n);
         }
-        req.headers_mut().insert(self.name, value);
+        req.headers_mut().insert(self.name, value.clone());
+        for (name, v) in &self.extra {
+            req.headers_mut()
+                .append(*name, v.clone().unwrap_or_else(|| value.clone()));
+        }
         Ok(())
     }
 
@@ -97,22 +103,33 @@ impl Intercept for SetChecksum {
     ) -> Result<(), BoxError> {
         let h = context.request().headers();
         assert!(h.get("authorization").is_some(), "unsigned request");
-        let checksums: Vec<_> = h
+        let mut checksums: Vec<_> = h
             .iter()
             .map(|(k, _)| k)
-            .filter(|k| k.starts_with("x-amz-checksum-"))
+            .filter(|k| k.starts_with("x-amz-checksum-") || *k == "x-amz-sdk-checksum-algorithm")
             .collect();
-        assert_eq!(
-            checksums,
-            [self.name],
-            "the SDK changed the checksum headers"
-        );
+        checksums.sort_unstable();
+        let mut sent: Vec<_> = std::iter::once(self.name)
+            .chain(self.extra.iter().map(|(n, _)| *n))
+            .filter(|n| n.starts_with("x-amz-checksum-") || *n == "x-amz-sdk-checksum-algorithm")
+            .collect();
+        sent.sort_unstable();
+        assert_eq!(checksums, sent, "the SDK changed the checksum headers");
         Ok(())
     }
 }
 
 fn set(algo: ChecksumAlgorithm, name: &'static str, value: Value) -> SetChecksum {
-    SetChecksum { algo, name, value }
+    SetChecksum {
+        algo,
+        name,
+        value,
+        extra: Vec::new(),
+    }
+}
+
+fn crc32(value: Value) -> SetChecksum {
+    set(ChecksumAlgorithm::Crc32, "x-amz-checksum-crc32", value)
 }
 
 fn client(endpoint: &str, ak: &str, sk: &str) -> Client {
@@ -368,4 +385,126 @@ async fn complete_checksum_header_is_the_objects() {
         .await
         .unwrap();
     assert!(exists(&s3, "mp").await);
+}
+
+/// Inconsistent checksum headers on an XML body are refused as AWS
+/// refuses them, and the operation is not applied: an algorithm the
+/// gateway does not implement (501), a repeated value header, an algorithm
+/// header naming another algorithm or without its value, an `aws-chunked`
+/// body (400 InvalidRequest). The SDK's own requests pass.
+#[tokio::test]
+async fn inconsistent_xml_checksum_headers_are_refused() {
+    let c = cluster().await;
+    let endpoint = format!("http://{}", c.gateway_addr);
+    let s3 = client(&endpoint, &c.credentials.0, &c.credentials.1);
+    s3.create_bucket().bucket(BUCKET).send().await.unwrap();
+    s3.put_object()
+        .bucket(BUCKET)
+        .key("k")
+        .body(ByteStream::from_static(b"data"))
+        .send()
+        .await
+        .unwrap();
+    let delete = || {
+        s3.delete_objects().bucket(BUCKET).delete(
+            Delete::builder()
+                .objects(ObjectIdentifier::builder().key("k").build().unwrap())
+                .build()
+                .unwrap(),
+        )
+    };
+    let with = |extra: Vec<(&'static str, Option<String>)>| SetChecksum {
+        extra,
+        ..crc32(Value::Right)
+    };
+    let invalid = (400, "InvalidRequest".to_string());
+    for (header, expected) in [
+        (
+            with(vec![("x-amz-checksum-sha512", Some("AAAA".into()))]),
+            (501, "NotImplemented".to_string()),
+        ),
+        // The same value twice.
+        (with(vec![("x-amz-checksum-crc32", None)]), invalid.clone()),
+        (
+            with(vec![(
+                "x-amz-sdk-checksum-algorithm",
+                Some("SHA256".into()),
+            )]),
+            invalid.clone(),
+        ),
+        (
+            with(vec![("content-encoding", Some("aws-chunked".into()))]),
+            invalid.clone(),
+        ),
+    ] {
+        let ctx = format!("{:?}", header.extra);
+        let err = delete()
+            .customize()
+            .interceptor(header)
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(status_code(&err), expected, "{ctx}");
+        assert!(exists(&s3, "k").await, "{ctx}: deleted anyway");
+    }
+    let err = delete()
+        .customize()
+        .interceptor(AlgorithmOnly)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(status_code(&err), invalid);
+    assert!(exists(&s3, "k").await);
+
+    // The SDK's own requests (x-amz-sdk-checksum-algorithm with its
+    // x-amz-checksum-crc32) pass on every operation.
+    s3.put_bucket_versioning()
+        .bucket(BUCKET)
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_policy()
+        .bucket(BUCKET)
+        .policy(r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::xmlcs/*"}]}"#)
+        .send()
+        .await
+        .unwrap();
+    delete().send().await.unwrap();
+    assert!(!exists(&s3, "k").await);
+}
+
+/// An algorithm header with no value header at all.
+#[derive(Debug)]
+struct AlgorithmOnly;
+
+impl Intercept for AlgorithmOnly {
+    fn name(&self) -> &'static str {
+        "AlgorithmOnly"
+    }
+
+    fn modify_before_signing(
+        &self,
+        context: &mut BeforeTransmitInterceptorContextMut<'_>,
+        _rc: &RuntimeComponents,
+        _cfg: &mut ConfigBag,
+    ) -> Result<(), BoxError> {
+        let req = context.request_mut();
+        let names: Vec<String> = req
+            .headers()
+            .iter()
+            .map(|(k, _)| k.to_string())
+            .filter(|k| k.starts_with("x-amz-checksum-") || k.starts_with("x-amz-sdk-checksum"))
+            .collect();
+        for n in names {
+            req.headers_mut().remove(n);
+        }
+        req.headers_mut()
+            .insert("x-amz-sdk-checksum-algorithm", "CRC32");
+        Ok(())
+    }
 }
