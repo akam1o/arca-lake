@@ -173,7 +173,7 @@ def ssh_runner(target, command, stdin=None, timeout=120):
 
 
 HOST_CHECK = r'''
-import json, os
+import json, os, sys
 out = {"cpus": os.cpu_count()}
 for l in open("/proc/meminfo"):
     if l.startswith("MemAvailable:"):
@@ -181,6 +181,13 @@ for l in open("/proc/meminfo"):
 out["load1"] = float(open("/proc/loadavg").read().split()[0])
 s = os.statvfs("/")
 out["free_root"] = s.f_bavail * s.f_frsize
+# The data mount's free space where the host has it (null: not there).
+if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
+    s = os.statvfs(sys.argv[1])
+    out["free_data"] = s.f_bavail * s.f_frsize
+else:
+    out["free_data"] = None
+out["boot_id"] = open("/proc/sys/kernel/random/boot_id").read().strip()
 out["swaps"] = open("/proc/swaps").read().splitlines()[1:]
 print(json.dumps(out))
 '''
@@ -252,7 +259,8 @@ class SshCluster:
         hosts = list(self.cfg["hosts"])
         return (["space", "dirs_absent", "ports_free", "binary", "tools", "proc_stat", "kernel_log",
                  "fdb_memory", "fdb_memory_fits", "retained"] + [f"host {h}" for h in hosts] + [f"clock {h}" for h in hosts]
-                + [f"system_fdb {h}" for h in self.cfg.get("system_fdb_hosts", [])])
+                + [f"system_fdb {h}" for h in self.cfg.get("system_fdb_hosts", [])]
+                + (["archive"] if self.cfg["binary"].get("archive_sha256") else []))
 
     def clock_offset_ms(self, host=None):
         """The host's wall clock minus this machine's, in ms (the midpoint
@@ -281,6 +289,8 @@ class SshCluster:
         c["ports_free"] = {"ok": busy == "", "busy": busy}
         sha = self.ssh(f"sha256sum {Q(self.bin)} | cut -c1-64", check=False).strip()
         c["binary"] = {"ok": sha == self.cfg["binary"]["sha256"], "sha256": sha}
+        if self.cfg["binary"].get("archive_sha256"):
+            c["archive"] = self._archive()
         for h in self.cfg.get("system_fdb_hosts", []):
             o = self.ssh("timeout 20 fdbcli -C /etc/foundationdb/fdb.cluster --exec 'status minimal'",
                          check=False, host=h)
@@ -298,10 +308,13 @@ class SshCluster:
         mem = self.ssh("fdbserver --help 2>&1 | grep -c -- '--memory' || true", check=False).strip()
         c["fdb_memory"] = {"ok": mem not in ("", "0")}
         for h in self.cfg["hosts"]:
-            raw = self.ssh("python3 -I -", stdin=HOST_CHECK, check=False, host=h, timeout=60)
+            raw = self.ssh(f"python3 -I - {Q(self.mount)}", stdin=HOST_CHECK, check=False, host=h, timeout=60)
             try:
                 r = json.loads(raw.strip().splitlines()[-1])
-                ok = r["mem_available"] >= (1 << 30) and r["load1"] <= 4 * r["cpus"] and r["free_root"] >= 3 << 30
+                # Every host's data mount, where it has one, keeps the
+                # watchdog's floor too (0.2.0 plan §5: an earlier ENOSPC).
+                ok = r["mem_available"] >= (1 << 30) and r["load1"] <= 4 * r["cpus"] and r["free_root"] >= 3 << 30 \
+                    and (r["free_data"] is None or r["free_data"] >= 3 << 30)
             except (ValueError, IndexError, KeyError, TypeError):
                 r, ok = {"raw": raw[-200:]}, False
             c[f"host {h}"] = dict(r, ok=ok)
@@ -328,22 +341,51 @@ class SshCluster:
         c["retained"] = self._retained()
         return c
 
+    def _archive(self):
+        """0.2.0 plan §5: the candidate archive on the load host has the
+        approved sha256, and the binary extracted from it (in a temporary
+        directory under the data mount, removed again) is the approved one."""
+        arc = self.cfg["remote"]["archive_path"]
+        out = self.ssh(f"d=$(mktemp -d {Q(self.mount)}/r110-preflight-XXXXXX) || exit 1; "
+                       f"sha256sum {Q(arc)} | cut -c1-64; "
+                       f"tar -xzf {Q(arc)} -C \"$d\" && for f in \"$d\"/*/arca-lake; do "
+                       f"[ -f \"$f\" ] && sha256sum \"$f\" | cut -c1-64; done; rm -rf -- \"$d\"",
+                       check=False, timeout=300)
+        lines = out.split()
+        want = (self.cfg["binary"]["archive_sha256"], self.cfg["binary"]["sha256"])
+        # Exactly the archive's digest and one binary's.
+        return {"ok": len(lines) == 2 and tuple(lines) == want, "found": lines[:4]}
+
     def _retained(self):
         """The retained cluster's directories unchanged since the last
         record (plan §10): per directory, the sha256 of the sorted listing of
         every entry below it (path, size, modification time; metadata only,
         read with ``find``, nothing opened or changed), compared to
-        ``retained_record`` of the configuration."""
+        ``retained_record`` of the configuration: of every host for the
+        0.2.0 campaign (host -> directory -> sha256), else of
+        ``retained_host``."""
         rec = self.cfg.get("retained_record")
         if not rec:
             return {"ok": False, "detail": "no retained_record in the configuration to compare against"}
-        host = self.cfg.get("retained_host", self.host)
-        now = {}
-        for path in sorted(rec):
-            out = self.ssh(f"[ -d {Q(path)} ] && find {Q(path)} -printf '%P %s %T@\\n' | LC_ALL=C sort | sha256sum "
-                           f"| cut -c1-64 || echo missing", check=False, host=host)
-            now[path] = out.strip()
-        return {"ok": now == rec, "now": now}
+        per_host = set(rec) == set(self.cfg["hosts"]) and all(isinstance(v, dict) for v in rec.values())
+        by_host = rec if per_host else {self.cfg.get("retained_host", self.host): rec}
+        now, unrecorded = {}, {}
+        for host in sorted(by_host):
+            now[host] = {}
+            for path in sorted(by_host[host]):
+                out = self.ssh(f"[ -d {Q(path)} ] && find {Q(path)} -printf '%P %s %T@\\n' | LC_ALL=C sort "
+                               f"| sha256sum | cut -c1-64 || echo missing", check=False, host=host)
+                now[host][path] = out.strip()
+            if per_host:
+                # 0.2.0 plan §5: every p41-* directory under the data mount
+                # is in the record (an empty record: none found).
+                found = self.ssh(f"for d in {Q(self.mount)}/p41-*; do [ -d \"$d\" ] && echo \"$d\"; done; true",
+                                 check=False, host=host).split()
+                extra = sorted(set(found) - set(by_host[host]))
+                if extra:
+                    unrecorded[host] = extra
+        return {"ok": now == by_host and not unrecorded, "now": now if per_host else now[next(iter(by_host))],
+                **({"unrecorded": unrecorded} if unrecorded else {})}
 
     # -- setup, smoke ----------------------------------------------------------
 
@@ -440,7 +482,9 @@ class SshCluster:
                      "arca_node_compaction_errors_total", "arca_node_compaction_skipped_no_space_total",
                      "arca_node_dead_records", "arca_node_index_entries", "arca_node_device_free_bytes",
                      "arca_node_reclaim_retention_seconds", "arca_node_admission_refused_total",
-                     "arca_node_live_bytes", "arca_node_segment_bytes"]
+                     "arca_node_live_bytes", "arca_node_segment_bytes",
+                     # 0.2.0 (ADR-0037): strict write ownership, unproven writes.
+                     "arca_node_write_ownership_strict", "arca_node_writes_unproven_total"]
         ctl_fams = ["arca_controller_gc_backlog", "arca_controller_gc_backlog_bytes", "arca_controller_gc_collected_total",
                     "arca_controller_reclaimed_total", "arca_controller_reclaimed_bytes_total",
                     "arca_controller_reclaim_refused_total", "arca_controller_reclaim_errors_total",
@@ -448,10 +492,13 @@ class SshCluster:
                     "arca_controller_gc_skipped_referenced_total", "arca_controller_pass_running_since_seconds",
                     "arca_controller_pass_last_seconds", "arca_controller_gc_backlog_physical_bytes",
                     "arca_controller_gc_backlog_oldest_age_seconds", "arca_controller_shards_deleted_total",
-                    "arca_controller_gc_reclaimed_bytes_total", "arca_controller_admission_excluded_groups"]
+                    "arca_controller_gc_reclaimed_bytes_total", "arca_controller_admission_excluded_groups",
+                    "arca_controller_nodes_write_ownership_lenient"]
         gw_fams = ["arca_gateway_admission_state", "arca_gateway_admission_rejected_total",
                    "arca_gateway_admission_throttled_total",
-                   "arca_gateway_node_capacity_refusals_total", "arca_gateway_placement_capacity_failures_total"]
+                   "arca_gateway_node_capacity_refusals_total", "arca_gateway_placement_capacity_failures_total",
+                   # 0.2.0 (ADR-0041): SlowDown from the commit queue, before any commit.
+                   "arca_gateway_commit_queue_refused_full_total", "arca_gateway_commit_queue_refused_wait_total"]
         t = [{"name": f"node{i}", "kind": "metrics", "url": f"http://127.0.0.1:{p['node_metrics'] + i}/metrics",
               "families": node_fams} for i in range(n)]
         t += [{"name": f"node{i}-dir", "kind": "dir", "path": f"{self.run_dir}/d{i}"} for i in range(n)]
@@ -632,6 +679,8 @@ class SshCluster:
                "remote_sentinel_record": f"{self.run_dir}/services/sentinel.json",
                "remote_sentinel_result": f"{self.run_dir}/sentinel.json",
                "local_dir": self.cfg["local_dir"], "optional_checks": self.cfg.get("optional_checks", []),
+               # 0.2.0 plan §4.5: the preflight's boot IDs, the first reference.
+               "boot_ids": getattr(self, "boot_seed", None) or {},
                "limits": {"max_test_dir_bytes": self.cfg["stop_rules"]["max_test_dir_bytes"]}}
         os.makedirs(self.cfg["local_dir"], exist_ok=False)
         path = os.path.join(self.cfg["local_dir"], "watchdog.json")
@@ -736,8 +785,18 @@ class SshCluster:
         # not print them: its unexpected shards include the records kept
         # for reclaim). Unclassified shards are also counted in `errors`.
         self.last_scrub_held = None
+        # 0.2.0 plan §4.1: every group is scrubbed even after one reported
+        # errors or no result, and the findings of those that did are kept,
+        # so that a finding beside an error still fails C5. The scrub errors
+        # (unclassified shards among them) and the groups without a result
+        # make the total None (incomplete).
+        self.last_scrub_errors = None
+        self.last_scrub_unread = []
+        # Groups whose result printed no per-shard classes (a 0.1.0 line).
+        self.last_scrub_unclassed = []
         classes = None
         held = None
+        errors = 0
         out = self.ssh(f"{admin} status 2>&1 | grep '^group '", check=False)
         groups = re.findall(r"^group (\d+)", out, re.M)
         if not groups:
@@ -750,15 +809,19 @@ class SshCluster:
                 row_h = dict(zip(("retained", "retained_damaged", "in_flight", "unclassified"),
                                  (int(x) for x in h.groups())))
                 held = row_h if held is None else {k: held[k] + v for k, v in row_h.items()}
-                self.last_scrub_held = held
-            if not m or int(m.group(2)) > 0:
-                return None
+            if not m:
+                self.last_scrub_unread.append(int(g))
+                continue
+            if not h:
+                self.last_scrub_unclassed.append(int(g))
+            errors += int(m.group(2))
             row = [int(x) for x in m.group(1).split(",") if x.strip()]
             classes = row if classes is None else [a + b for a, b in zip(classes, row)]
             total += sum(row)
         self.last_scrub_classes = classes
         self.last_scrub_held = held
-        return total
+        self.last_scrub_errors = errors
+        return None if errors or self.last_scrub_unread else total
 
     # -- the host's evidence ---------------------------------------------------
 

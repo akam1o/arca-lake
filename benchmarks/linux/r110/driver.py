@@ -3,7 +3,7 @@
 and only with an approval runs the stages, keeps the evidence and judges.
 
   driver.py check CONFIG                      (the default: local only)
-  driver.py preflight CONFIG --approval FILE --execute
+  driver.py preflight CONFIG --approval FILE --execute --evidence DIR
   driver.py run CONFIG --approval FILE --execute --evidence DIR
   driver.py collect CONFIG --approval FILE --execute --evidence DIR
   driver.py teardown CONFIG --approval FILE --execute --evidence DIR
@@ -19,8 +19,13 @@ approval file (JSON, written by the approver, never by this tool):
 ``config_sha256`` (the sha256 of CONFIG's bytes: any change of the
 configuration voids the approval), ``scope`` (``preflight``, ``run``,
 ``collect``, ``teardown``), ``window_start`` and ``window_end`` (ISO 8601
-UTC; the command is refused outside), ``approved_by``. The example
-configuration in this directory is not approved.
+UTC; the command is refused outside), ``approved_by``; for a preflight or
+a run of the 0.2.0 campaign (docs/verification/0.2.0-r110-plan.md §3,
+§6) also ``campaign``, ``campaign_run``, ``candidate`` and, from the
+second main run, ``rerun``. ``--evidence`` is the campaign's evidence
+root: its ledger of main runs (``campaign_ledger``) and the preflight's
+record (``<run id>.preflight.json``, every host's boot ID) that a run
+needs. The example configuration in this directory is not approved.
 
 Evidence before teardown (``evidence.py``): at a run's end, after the
 safe stops, every file of the run on the host is saved under
@@ -78,6 +83,22 @@ STOP_RULES = {"guard": {"min_free_gib": 3.0, "min_mem_mib": 1024.0, "heartbeat_t
               "preflight_free_gib": 12.2, "preflight_root_free_gib": 3.0}
 SCOPES = ("preflight", "run", "collect", "teardown")
 MAX_WINDOW_H = 24
+# The 0.2.0 campaign (docs/verification/0.2.0-r110-plan.md): at most three
+# main runs, numbered in the run ID; the 0.1.0 campaign's IDs, configurations
+# and approvals are not taken for a preflight or a run (its leftovers can
+# still be collected and torn down).
+CAMPAIGN = "0.2.0"
+CAMPAIGN_RUNS = 3
+CAMPAIGN_RUN_ID = re.compile(r"r110-020-([1-9][0-9]*)-[0-9]{8}T[0-9]{6}Z")
+LEGACY_RUN_ID = re.compile(r"r110-[0-9]{8}T[0-9]{6}Z")
+RERUN_FIELDS = ("previous_run_id", "cause", "change", "hypothesis")
+CANDIDATES = ("interim", "final")
+
+
+def campaign_run(run_id):
+    """The 0.2.0 campaign's main-run number of ``run_id``, or None."""
+    m = CAMPAIGN_RUN_ID.fullmatch(run_id) if isinstance(run_id, str) else None
+    return int(m.group(1)) if m else None
 
 
 class ConfigError(Exception):
@@ -96,16 +117,28 @@ def check_path(name, p, depth=3):
         raise ConfigError(f"{name}: a directory of the retained cluster")
 
 
-def validate(cfg, execute=False):
+def validate(cfg, execute=False, legacy=False):
     """Raise ``ConfigError`` for anything missing or looser than the plan.
     ``execute``: the configuration is about to be run (preflight, run,
-    teardown): a value left undetermined (``fdb_memory`` null) is refused."""
+    teardown): a value left undetermined (``fdb_memory`` null) is refused.
+    ``legacy``: a run of the 0.1.0 campaign is accepted too (``collect`` and
+    ``teardown`` of its leftovers only)."""
     for k in ("run_id", "hosts", "load_host", "remote", "binary", "limits", "settings", "stage_max_s",
               "stop_rules", "judgement", "teardown"):
         if k not in cfg:
             raise ConfigError(f"{k} missing")
-    if not re.fullmatch(r"r110-[0-9]{8}T[0-9]{6}Z", cfg["run_id"]):
-        raise ConfigError("run_id: r110-YYYYMMDDTHHMMSSZ")
+    n = campaign_run(cfg["run_id"])
+    if n is None and not (legacy and isinstance(cfg["run_id"], str) and LEGACY_RUN_ID.fullmatch(cfg["run_id"])):
+        raise ConfigError("run_id: r110-020-<n>-YYYYMMDDTHHMMSSZ (the 0.2.0 campaign's main run n)")
+    if n is not None:
+        if not 1 <= n <= CAMPAIGN_RUNS:
+            raise ConfigError(f"run_id: the 0.2.0 campaign has at most {CAMPAIGN_RUNS} main runs")
+        if cfg.get("campaign") != CAMPAIGN:
+            raise ConfigError(f"campaign: {CAMPAIGN!r} for a run ID of the 0.2.0 campaign")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(cfg["binary"].get("archive_sha256", ""))):
+            raise ConfigError("binary.archive_sha256: the candidate archive the binary was extracted from")
+        # 0.2.0 plan §5: the preflight extracts it on the load host.
+        check_path("archive_path", cfg["remote"].get("archive_path"))
     if cfg["load_host"] not in cfg["hosts"]:
         raise ConfigError("load_host not among the hosts")
     r = cfg["remote"]
@@ -157,10 +190,21 @@ def validate(cfg, execute=False):
     if not 0 < cfg["stop_rules"].get("max_test_dir_bytes", 0) <= cap:
         raise ConfigError(f"stop_rules.max_test_dir_bytes: at most the allotments plus 3 GiB ({cap})")
     check_path("local_dir", cfg.get("local_dir"), depth=2)
-    rr = cfg.get("retained_record")
-    if not isinstance(rr, dict) or not rr or not all(
+    def listing_record(rr):
+        return isinstance(rr, dict) and all(
             isinstance(k, str) and k.startswith("/") and os.path.normpath(k) == k
-            and isinstance(d, str) and re.fullmatch(r"[0-9a-f]{64}", d) for k, d in rr.items()):
+            and isinstance(d, str) and re.fullmatch(r"[0-9a-f]{64}", d) for k, d in rr.items())
+
+    rr = cfg.get("retained_record")
+    if n is not None:
+        # 0.2.0 plan §5: the retained directories of every host, each host
+        # named (an empty record: none there; the preflight fails if it finds
+        # one the record does not name).
+        if not isinstance(rr, dict) or set(rr) != set(cfg["hosts"]) or not all(
+                listing_record(v) for v in rr.values()):
+            raise ConfigError("retained_record: every host -> {absolute directory -> sha256 of its listing} "
+                              "(0.2.0 plan §5)")
+    elif not rr or not listing_record(rr):
         raise ConfigError("retained_record: absolute directory -> sha256 of its listing (plan §10)")
     sf = cfg.get("system_fdb_hosts")
     if not isinstance(sf, list) or not sf or not set(sf) <= set(cfg["hosts"]):
@@ -192,15 +236,102 @@ def validate(cfg, execute=False):
     return cfg
 
 
-def load_config(path, execute=False):
+def load_config(path, execute=False, legacy=False):
     with open(path, "rb") as f:
         raw = f.read()
-    return validate(json.loads(raw), execute), hashlib.sha256(raw).hexdigest()
+    return validate(json.loads(raw), execute, legacy), hashlib.sha256(raw).hexdigest()
 
 
-def check_approval(path, config_sha, scope, now, duration_s=0):
+def campaign_ledger(root):
+    """The campaign's main runs with evidence under ``root`` (0.2.0 plan
+    §3): run number -> [{"run_id", "connected", "candidate",
+    "archive_sha256"}]. An attempt is connected once its ``events.jsonl``
+    exists (the driver writes it before its first contact with a host);
+    the candidate and the archive are read from its saved approval (None:
+    unreadable)."""
+    out = {}
+    try:
+        names = sorted(os.listdir(root))
+    except FileNotFoundError:
+        return out
+    for name in names:
+        n, p = campaign_run(name), os.path.join(root, name)
+        if n is None or not os.path.isdir(p):
+            continue
+        try:
+            a = common.read_json(os.path.join(p, "approval.json"))
+        except (OSError, ValueError):
+            a = {}
+        a = a if isinstance(a, dict) else {}
+        out.setdefault(n, []).append({"run_id": name, "connected": os.path.exists(os.path.join(p, "events.jsonl")),
+                                      "candidate": a.get("candidate"), "archive_sha256": a.get("archive_sha256")})
+    return out
+
+
+def check_campaign_approval(a, cfg, ledger, root):
+    """The 0.2.0 campaign's part of an approval (0.2.0 plan §3): of this
+    campaign, this main run, this candidate archive; main run n not made
+    yet (no connected attempt in ``ledger``); from run 2 on, run n − 1 made,
+    and its cause, change and hypothesis recorded with its evidence
+    (``<root>/<previous run>/rerun-record.json``) and in the approval, the
+    same; ``interim`` refused for the last run and after any final run."""
+    run_n = campaign_run(cfg["run_id"])
+    if a.get("campaign") != CAMPAIGN or a.get("campaign_run") != run_n:
+        raise NotApproved(f"the approval is not for main run {run_n} of the {CAMPAIGN} campaign")
+    if a.get("archive_sha256") != cfg["binary"]["archive_sha256"]:
+        raise NotApproved("archive_sha256: the approval names another candidate archive")
+    if a.get("candidate") not in CANDIDATES:
+        raise NotApproved(f"candidate: one of {CANDIDATES}")
+    made = [x["run_id"] for x in ledger.get(run_n, []) if x["connected"] and x["run_id"] != cfg["run_id"]]
+    if made:
+        raise NotApproved(f"main run {run_n} was already made ({', '.join(made)}): the next is {run_n + 1}")
+    earlier = [x for k in range(1, run_n) for x in ledger.get(k, []) if x["connected"]]
+    if a["candidate"] == "interim":
+        if run_n == CAMPAIGN_RUNS:
+            raise NotApproved(f"main run {run_n} is the last: kept for the final candidate")
+        if any(x["candidate"] != "interim" for x in earlier):
+            raise NotApproved("an earlier main run was on the final candidate (or its approval is unreadable): "
+                              "no interim run after it")
+    if run_n > 1:
+        r = a.get("rerun")
+        if not isinstance(r, dict) or not all(isinstance(r.get(k), str) and r[k].strip() for k in RERUN_FIELDS):
+            raise NotApproved(f"rerun: {', '.join(RERUN_FIELDS)} of the previous run, recorded before this one")
+        prev = [x["run_id"] for x in ledger.get(run_n - 1, []) if x["connected"]]
+        if r["previous_run_id"] not in prev:
+            raise NotApproved(f"rerun.previous_run_id: a made main run {run_n - 1} with its evidence in {root} "
+                              f"(found: {prev})")
+        try:
+            rec = common.read_json(os.path.join(root, r["previous_run_id"], "rerun-record.json"))
+        except (OSError, ValueError) as e:
+            raise NotApproved(f"the rerun record of {r['previous_run_id']} not in its evidence: {e}") from None
+        if not isinstance(rec, dict) or any(rec.get(k) != r[k] for k in RERUN_FIELDS):
+            raise NotApproved("the rerun record in the previous run's evidence differs from the approval's")
+
+
+def preflight_record_path(root, cfg):
+    return os.path.join(root, cfg["run_id"] + ".preflight.json")
+
+
+def preflight_boot_ids(root, cfg):
+    """Every host's boot ID from this run's preflight record (0.2.0 plan
+    §4.5): the watchdog's first reference, so that a reboot between the
+    preflight and its first round is seen. Raises ``NotApproved`` without
+    a record naming every host's."""
+    try:
+        rec = common.read_json(preflight_record_path(root, cfg))
+        ids = {h: rec["checks"][f"host {h}"]["boot_id"] for h in cfg["hosts"]}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise NotApproved(f"no preflight record with every host's boot ID for {cfg['run_id']}: {e!r}") from None
+    if rec.get("run_id") != cfg["run_id"] or not all(isinstance(v, str) and v for v in ids.values()):
+        raise NotApproved("the preflight record names another run or lacks a boot ID")
+    return ids
+
+
+def check_approval(path, config_sha, scope, now, duration_s=0, campaign=None):
     """Raise ``NotApproved`` unless the approval names this configuration,
-    this scope and a window containing ``now`` (an aware datetime)."""
+    this scope and a window containing ``now`` (an aware datetime).
+    ``campaign``: ``(cfg, evidence root)`` of a preflight or run of the
+    0.2.0 campaign (``check_campaign_approval``)."""
     if not path:
         raise NotApproved("no approval file")
     try:
@@ -216,6 +347,8 @@ def check_approval(path, config_sha, scope, now, duration_s=0):
         raise NotApproved(f"the approval does not cover {scope}")
     if not a.get("approved_by"):
         raise NotApproved("approved_by missing")
+    if campaign is not None:
+        check_campaign_approval(a, campaign[0], campaign_ledger(campaign[1]), campaign[1])
     try:
         w0 = datetime.datetime.fromisoformat(a["window_start"])
         w1 = datetime.datetime.fromisoformat(a["window_end"])
@@ -359,6 +492,7 @@ SETTLE_S = 180  # three compaction passes after the last reclaim (§8 C2)
 SETTLE7_S = 1500
 SCRUB_RESERVE_S = 900
 DRAIN_OBSERVE_S = 1800  # §6.2: observe the drain after a stop that is not a resource danger
+STRICT_WAIT_S = 120  # 0.2.0 plan §4.2: the nodes strict before stage 3's first write
 COLLECT_S = 1800  # the host's evidence at the run's end (after the stops); a teardown collects again
 
 
@@ -375,6 +509,9 @@ class Run:
         self.clock = clock or common.Clock()
         self.poll_s = poll_s
         self.tl = {"clock_offsets": []}
+        if campaign_run(cfg["run_id"]) is not None:
+            # The judge applies the 0.2.0 plan's amendments to this timeline.
+            self.tl["campaign"] = CAMPAIGN
         self.stop = None
         self.current = None
         self.offset_ms = 0
@@ -445,11 +582,14 @@ class Run:
         sample again."""
         if len(samples) < self._prot_n:
             self._prot_n = 0  # a list that shrank: look at it all again
+        watch = (("arca_controller_gc_skipped_referenced_total", "controller"), ("arca_node_reclaim_damaged", None))
+        if self.tl.get("campaign"):
+            # 0.2.0 plan §4.2: a strict cluster takes no unproven write.
+            watch += (("arca_node_writes_unproven_total", None),)
         for x in samples[self._prot_n:]:
             if self._prot_seen:
                 break
-            for k, t in (("arca_controller_gc_skipped_referenced_total", "controller"),
-                         ("arca_node_reclaim_damaged", None)):
+            for k, t in watch:
                 if (t is None or x.get("target") == t) and x.get("values", {}).get(k, {}).get("value", 0) > 0:
                     self._prot_seen = {"target": x.get("target"), "counter": k}
                     break
@@ -561,6 +701,16 @@ class Run:
         return bool(r.get("stop_layers_exercised")) and bool(r.get("limits_exercised")) and r.get("errors") == 0
 
     def s3(self, st, deadline):
+        if self.tl.get("campaign"):
+            # 0.2.0 plan §4.2: every node strict (ADR-0037) and the controller
+            # counting none lenient before the first write of the main run;
+            # otherwise the precondition is not formed and the run ends.
+            ok = self.wait("3", min(deadline, self.clock.monotonic() + STRICT_WAIT_S), lambda s: self._all_nodes(
+                s, "arca_node_write_ownership_strict", lambda v: v == 1)
+                and self._fresh(s, "controller", "arca_controller_nodes_write_ownership_lenient") == 0)
+            self.tl["3"]["write_ownership_strict"] = bool(ok)
+            if not ok:
+                return False
         self.c.start_load(remaining_s=self.remaining())
         bucket, fill, base = st["steps"]
         if not self.run_step(dict(bucket, stage="3"), deadline) or self._stopped("3"):
@@ -758,6 +908,9 @@ class Run:
         tl7["scrub_findings"] = self.c.integrity("scrub")
         tl7["scrub_by_class"] = getattr(self.c, "last_scrub_classes", None)
         tl7["scrub_held"] = getattr(self.c, "last_scrub_held", None)
+        tl7["scrub_errors"] = getattr(self.c, "last_scrub_errors", None)
+        tl7["scrub_unread_groups"] = getattr(self.c, "last_scrub_unread", None)
+        tl7["scrub_groups_without_classes"] = getattr(self.c, "last_scrub_unclassed", None)
         if self._stopped("7"):
             return False
         self.run_step({"kind": "finish", "stage": "7"}, deadline)
@@ -765,6 +918,9 @@ class Run:
 
     def execute(self):
         bodies = {"1": self.s1, "2": self.s2, "3": self.s3, "4": self.s4, "5": self.s5, "6": self.s6, "7": self.s7}
+        # Before the first contact with a host: from here on the attempt
+        # counts as made (0.2.0 plan §3, ``campaign_ledger``).
+        self.ev.event(self.clock.wall_ms(), "contact")
         try:
             for st in stages(self.cfg):
                 if self._stopped(st["stage"]):
@@ -988,7 +1144,7 @@ def main(argv=None, now=None, cluster_factory=None):
                                     ("call_s", a.call_timeout)) if v is not None}
     try:
         # The memory limit is chosen at the preflight: only a run needs it.
-        cfg, sha = load_config(a.config, execute=a.command == "run")
+        cfg, sha = load_config(a.config, execute=a.command == "run", legacy=a.command in ("collect", "teardown"))
     except (ConfigError, OSError, ValueError) as e:
         print(f"configuration refused: {e}", file=sys.stderr)
         return 2
@@ -1001,11 +1157,19 @@ def main(argv=None, now=None, cluster_factory=None):
     if not a.execute:
         print(f"{a.command} contacts the hosts: --execute and an approval are required", file=sys.stderr)
         return 2
+    if not a.evidence:
+        print(f"{a.command} needs --evidence (the evidence root: the campaign's runs and preflights are read and "
+              f"saved there; the host's evidence under <root>/{cfg['run_id']} before anything on the host is "
+              "removed)", file=sys.stderr)
+        return 2
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    campaign = a.command in ("preflight", "run") and campaign_run(cfg["run_id"]) is not None
     try:
         # A run must end inside the window: its time and the drain's.
         duration = (min(RUN_MAX_S, cfg["limits"]["run_seconds"]) + DRAIN_OBSERVE_S) if a.command == "run" else 0
-        check_approval(a.approval, sha, a.command, now, duration)
+        approval = check_approval(a.approval, sha, a.command, now, duration,
+                                  campaign=(cfg, a.evidence) if campaign else None)
+        seed = preflight_boot_ids(a.evidence, cfg) if campaign and a.command == "run" else None
     except NotApproved as e:
         print(f"not approved: {e}", file=sys.stderr)
         return 2
@@ -1013,13 +1177,18 @@ def main(argv=None, now=None, cluster_factory=None):
         from . import remote
         cluster_factory = remote.SshCluster
     cluster = cluster_factory(cfg)
+    if seed is not None:
+        # 0.2.0 plan §4.5: the watchdog starts from the preflight's boot IDs.
+        cluster.boot_seed = seed
     if a.command == "preflight":
-        print(json.dumps(cluster.preflight(), indent=1))
+        res = cluster.preflight()
+        if campaign:
+            if not os.path.isdir(a.evidence):
+                os.makedirs(a.evidence)
+            common.atomic_write_json(preflight_record_path(a.evidence, cfg), {
+                "run_id": cfg["run_id"], "config_sha256": sha, "at": now.isoformat(), "checks": res})
+        print(json.dumps(res, indent=1))
         return 0
-    if not a.evidence:
-        print(f"{a.command} needs --evidence (the evidence root: the host's evidence is saved under "
-              f"<root>/{cfg['run_id']} before anything on the host is removed)", file=sys.stderr)
-        return 2
     if a.command in ("collect", "teardown"):
         d = os.path.join(a.evidence, cfg["run_id"])
         os.makedirs(d, exist_ok=True)
@@ -1029,6 +1198,8 @@ def main(argv=None, now=None, cluster_factory=None):
         return 0 if (res.get("complete") if a.command == "collect" else "kept" not in res) else 1
     ev = Evidence(a.evidence, cfg["run_id"])
     ev.save("config.json", {"config": cfg, "config_sha256": sha})
+    # The campaign's ledger reads the candidate and the archive from here.
+    ev.save("approval.json", approval)
     res = Run(cfg, cluster, ev, collect=collect_kw).execute()
     print(json.dumps({"outcome": res["outcome"], "evidence": ev.dir}))
     return 0 if res["outcome"] == judge.PASSED else 1

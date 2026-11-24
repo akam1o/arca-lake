@@ -24,6 +24,9 @@ PASSED, FAILED, INCONCLUSIVE, NOT_RUN = "Passed", "Failed", "Inconclusive", "Not
 # The plan version these criteria implement (recorded with every result;
 # runs judged under v1 are never re-judged under it).
 PLAN_VERSION = 3
+# The 0.2.0 campaign's amendments of v3 (docs/verification/0.2.0-r110-plan.md
+# §4), applied to a timeline the driver marked with ``campaign``.
+CAMPAIGN = "0.2.0"
 
 VALUES = {
     "interval_s": 15,
@@ -158,7 +161,20 @@ def _increase_outer(samples, target, key, t0, t1, iv, gap):
     return b[1] - a[1]
 
 
-def d1_reclaimed_bound(samples, t0, t1, v, sub_from=None):
+QUEUE_REFUSALS = ("arca_gateway_commit_queue_refused_full_total", "arca_gateway_commit_queue_refused_wait_total")
+
+
+def _queue_refusals(samples, t0, t1, iv, gap):
+    """0.2.0 plan §4.3: PUTs the gateway's commit queue answered SlowDown
+    over [t0, t1] (from the samples just outside it, an upper bound), or
+    None when not sampled. Such a PUT streamed its body (its shards
+    stored) before its turn was refused; its pending generation is
+    aborted, and GC retires its shards like an aborted write's."""
+    incs = [_increase_outer(samples, "gateway0", k, t0, t1, iv, gap) for k in QUEUE_REFUSALS]
+    return None if any(x is None for x in incs) else sum(incs)
+
+
+def d1_reclaimed_bound(samples, t0, t1, v, sub_from=None, queue=False):
     """A lower bound of D1's records reclaimed over [t0, t1] (plan v2 §8.3):
     the reclaimed records, less those reconciliation's orphans could account
     for (each removed orphan one record), less 3 per shard write a node
@@ -168,17 +184,21 @@ def d1_reclaimed_bound(samples, t0, t1, v, sub_from=None):
     samples just outside it (an upper bound), so that the bound stays a
     lower bound at the edges. ``sub_from``: the subtractions start there
     instead (an earlier time whose aborted writes or orphans can be
-    reclaimed inside the interval). ``(bound, parts)``; bound None when a
-    part is not sampled over the interval."""
+    reclaimed inside the interval). ``queue`` (0.2.0 campaign): also less 3
+    per PUT the commit queue refused (``_queue_refusals``). ``(bound,
+    parts)``; bound None when a part is not sampled over the interval."""
     s0 = t0 if sub_from is None else min(sub_from, t0)
     iv, gap = v["interval_s"] * 1000, v["max_gap_factor"]
     parts = {"reclaimed": _increase(samples, "controller", "arca_controller_reclaimed_total", t0, t1, iv, gap),
              "reconcile_deleted": _increase_outer(samples, "controller-log", "reconcile_deleted", s0, t1, iv, gap),
              "node_capacity_refusals": _increase_outer(samples, "gateway0",
                                                        "arca_gateway_node_capacity_refusals_total", s0, t1, iv, gap)}
+    if queue:
+        parts["commit_queue_refusals"] = _queue_refusals(samples, s0, t1, iv, gap)
     if any(x is None for x in parts.values()):
         return None, parts
-    return parts["reclaimed"] - parts["reconcile_deleted"] - 3 * parts["node_capacity_refusals"], parts
+    return parts["reclaimed"] - parts["reconcile_deleted"] - 3 * parts["node_capacity_refusals"] \
+        - 3 * parts.get("commit_queue_refusals", 0), parts
 
 
 def _d1(records, tl):
@@ -218,7 +238,8 @@ def c1a(samples, records, tl, v, nodes):
     collected = _increase(samples, "controller", "arca_controller_gc_collected_total", t_r, t_e, iv, gap)
     # Writes a node refused during the fill, before admission showed the
     # refusal, are reclaimed inside it: subtracted from D1's end on.
-    bound, parts = d1_reclaimed_bound(samples, t_r, t_e, v, sub_from=s4.get("d1_done_ms"))
+    bound, parts = d1_reclaimed_bound(samples, t_r, t_e, v, sub_from=s4.get("d1_done_ms"),
+                                      queue=tl.get("campaign") == CAMPAIGN)
     ev.update(gc_collected=collected, d1_reclaimed_at_least=bound, **{f"reclaim_{k}": x for k, x in parts.items()})
     if collected is None or bound is None:
         return verdict("C1a", INCONCLUSIVE, ["GC or reclaim counters not sampled through the refusal"], **ev)
@@ -290,7 +311,7 @@ def c1b(samples, records, tl, v, nodes):
     # The controller counts a reclaim pass after it went over every node: a
     # node can read 0 pending before that pass is counted, so the count is
     # read up to two intervals after the quiet point (independent review).
-    bound, parts = d1_reclaimed_bound(samples, t_d, t_q + 2 * iv, v)
+    bound, parts = d1_reclaimed_bound(samples, t_d, t_q + 2 * iv, v, queue=tl.get("campaign") == CAMPAIGN)
     need = v["c1_records_per_object"] * d1
     ev.update(d1_reclaimed_at_least=bound, d1_reclaimed_needed=need, **{f"reclaim_{k}": x for k, x in parts.items()})
     if bound is None:
@@ -337,6 +358,14 @@ def c2(samples, records, tl, v, nodes):
     # probe to each node's decrease bounds its freed bytes from above (the
     # stricter threshold).
     probe_puts = sum(1 for r in _attempts(records, "5", "probe", "PUT", t_s, t_j) if r != "refused")
+    queued = None
+    if tl.get("campaign") == CAMPAIGN:
+        # 0.2.0 plan §4.3: a probe the commit queue refused had stored its
+        # shards first. With any queue refusal in stage 5 (or none known),
+        # every refused probe counts as added too: the stricter bound.
+        queued = _queue_refusals(samples, t_s, t_j, iv, v["max_gap_factor"])
+        if queued is None or queued > 0:
+            probe_puts = len(_attempts(records, "5", "probe", "PUT", t_s, t_j))
     shard = v["shard_bytes_per_object"] // 3
     reasons, per, freed_total = [], {}, 0
     for n in nodes:
@@ -390,6 +419,8 @@ def c2(samples, records, tl, v, nodes):
     ref = series(samples, "gateway0", "arca_gateway_node_capacity_refusals_total", t_s, hold_end)
     if ref and ref[-1][1] > ref[0][1]:
         approx.append("PUTs refused by a node after writing shards during stage 5")
+    if queued:
+        approx.append(f"{queued:.0f} PUTs refused by the commit queue after writing shards during stage 5")
     rec_del = series(samples, "controller-log", "reconcile_deleted", t_s, hold_end)
     if not rec_del:
         approx.append("reconcile counts not sampled")
@@ -534,6 +565,8 @@ def c5(tl):
     if mf is not None and mf > 0:
         return verdict("C5", FAILED, [f"manifest findings {mf}, scrub findings {sc}"])
     held = s7.get("scrub_held")
+    if tl.get("campaign") == CAMPAIGN:
+        return _c5_campaign(s7, vr, mf, sc, held)
     if sc is not None and sc > 0 and isinstance(held, dict):
         # 0.2.0 binary: the scrub classifies each shard itself (records kept
         # for reclaim are not findings), so every finding fails, settled or
@@ -567,6 +600,45 @@ def c5(tl):
                    **({"scrub_held": held} if held is not None else {}))
 
 
+def _c5_campaign(s7, vr, mf, sc, held):
+    """C5's scrub part in the 0.2.0 campaign (0.2.0 plan §4.1): the scrub
+    classifies each shard; ``retained`` and ``in_flight`` shards are not
+    findings, every finding (an orphan's unexpected shard, any damage,
+    damaged retained or in-flight records under their damage class) fails,
+    settled or not, also when another group's scrub reported errors; scrub
+    errors (``unclassified`` shards among them), a group without a result,
+    a group whose result printed no classes (not a 0.2.0 binary), shards
+    still in flight, or more retained shards than records pending reclaim
+    before the scrub leave C5 Inconclusive, never Passed. v3's count rule
+    does not apply."""
+    by = s7.get("scrub_by_class")
+    found = sum(by) if isinstance(by, list) else sc
+    ev = {"scrub_by_class": by, "scrub_held": held, "scrub_errors": s7.get("scrub_errors"),
+          "scrub_unread_groups": s7.get("scrub_unread_groups")}
+    if found is not None and found > 0:
+        return verdict("C5", FAILED, [f"manifest findings {mf}, scrub findings {found}"], **ev)
+    if not vr.get("complete") or mf is None or sc is None:
+        return verdict("C5", INCONCLUSIVE, ["the verification, the manifests or the scrub incomplete"], **ev)
+    if not isinstance(held, dict) or s7.get("scrub_groups_without_classes") != []:
+        return verdict("C5", INCONCLUSIVE, ["the scrub of a group printed no per-shard classes (0.2.0 plan "
+                                            "§4.1)"], **ev)
+    if held.get("unclassified", 0) > 0:
+        return verdict("C5", INCONCLUSIVE, [f"{held['unclassified']} shards not classified by the scrub"], **ev)
+    # Nothing is written, moved or collected after stage 6 and the settle
+    # wait: a shard still in flight is an operation the scrub could not
+    # judge to its end, so it cannot count for a clean pass.
+    if held.get("in_flight", 0) > 0:
+        return verdict("C5", INCONCLUSIVE, [f"{held['in_flight']} shards still in flight at the scrub"], **ev)
+    # A record kept for reclaim is one the nodes count as pending: more
+    # retained shards than records pending just before the scrub (or that
+    # count unknown) is not accounted for by the retention.
+    pend = s7.get("pending_before_scrub")
+    if held.get("retained", 0) > 0 and not (isinstance(pend, (int, float)) and held["retained"] <= pend):
+        return verdict("C5", INCONCLUSIVE, [f"{held['retained']} retained shards, {pend} records pending reclaim "
+                                            "before the scrub"], pending_before_scrub=pend, **ev)
+    return verdict("C5", PASSED, [], keys=vr["keys"], unknown_resolved=vr.get("unknown_resolved"), **ev)
+
+
 CRITERIA_STAGE = {"C1a": "4", "C1b": "4", "C2": "5", "C3a": "5", "C3b": "6", "C4": "6", "C5": "7"}
 
 
@@ -589,10 +661,19 @@ def judge(samples, records, tl, stop=None, values=None, nodes=("node0", "node1",
     forbidden, unwatched = [], []
     watch = [("controller", "arca_controller_gc_skipped_referenced_total")] + \
             [(n, "arca_node_reclaim_damaged") for n in nodes]
+    # 0.2.0 plan §4.2: a cluster 0.2.0 initialised is strict from its first
+    # write (ADR-0037): no node takes a write without proof of its cluster,
+    # and every node is strict over the run's stages with load.
+    strict = [(n, "arca_node_write_ownership_strict") for n in nodes] if tl.get("campaign") == CAMPAIGN else []
+    if strict:
+        watch += [(n, "arca_node_writes_unproven_total") for n in nodes]
     span = _run_span(tl)
-    for target, k in watch:
+    for target, k in watch + strict:
         pts = series(samples, target, k)
-        if any(x > 0 for _, x in pts):
+        if (target, k) in strict:
+            if span and any(x != 1 for t, x in pts if span[0] <= t <= span[1]):
+                forbidden.append(f"{target} {k} not 1")
+        elif any(x > 0 for _, x in pts):
             forbidden.append(f"{target} {k}")
         # A protection counter not sampled over the run cannot show it held.
         if span and not covered([p for p in pts if span[0] <= p[0] <= span[1]], span[0], span[1],
@@ -624,5 +705,6 @@ def judge(samples, records, tl, stop=None, values=None, nodes=("node0", "node1",
         overall = NOT_RUN
     else:
         overall = INCONCLUSIVE
-    return {"outcome": overall, "plan_version": PLAN_VERSION, "criteria": res, "stop": stop, "forbidden": forbidden,
+    return {"outcome": overall, "plan_version": PLAN_VERSION, "campaign": tl.get("campaign"), "criteria": res,
+            "stop": stop, "forbidden": forbidden,
             "protections_not_sampled": unwatched, "values": v}

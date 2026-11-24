@@ -197,6 +197,9 @@ REASONS = {
     "unexpected-5xx": "anomaly",
     "heartbeat-lost": "monitor",
     "host-unreachable": "monitor",
+    # A host booted again (its boot ID changed): every process of the run
+    # on it ended with the boot, none was stopped (0.2.0 plan §5).
+    "host-reboot": "monitor",
     "monitor-failed": "monitor",
     "stop-file-unreadable": "monitor",
     "guard-lost": "monitor",

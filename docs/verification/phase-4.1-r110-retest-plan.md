@@ -1,5 +1,10 @@
 # R-110: capacity-pressure retest plan
 
+*0.2.0 (2026-11-24): a new campaign runs version 3 with the amendments of
+[the 0.2.0 R-110 plan](0.2.0-r110-plan.md) (scrub classes, strict write
+ownership, the commit queue's refusals, host reboots, new run IDs and
+approvals); the 0.1.0 campaign below is closed.*
+
 Status: **version 3** (2026-11-22: stage 7 reads the manifests and the
 scrub only after the background passes settled, §7; the scrub's findings
 are recorded by class, §8 C5). Version 2 (C1 split into C1a and C1b,

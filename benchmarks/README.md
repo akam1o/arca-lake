@@ -133,7 +133,8 @@ Results are written by criterion to `target/criterion/`.
   `linux/adr35-loader.py` its bounded GET load, logged per request;
   `linux/adr35-summary.py` a run's publishable summary.
 - `linux/r110/` (R-110 capacity retest,
-  `docs/verification/phase-4.1-r110-retest-plan.md`; standard library
+  `docs/verification/phase-4.1-r110-retest-plan.md`, for 0.2.0 with
+  `docs/verification/0.2.0-r110-plan.md`; standard library
   only, tests in `linux/r110/tests`, run by CI without any host:
   `cd benchmarks/linux && python3 -I -m unittest discover -s r110/tests -t .`).
   `budget.py`: the run's one budget for every data-plane HTTP attempt
