@@ -336,8 +336,11 @@ class Watchdog:
             self.unreachable[host] = 0
             if host in c.get("system_fdb_hosts", []) and r.get("system_fdb_check") is not None:
                 # Diagnostic only: what the failed check saw (the stop below
-                # is decided as before).
-                self.log(event="system-fdb-check", host=host, check=r["system_fdb_check"])
+                # is decided as before, whether or not this can be written).
+                try:
+                    self.log(event="system-fdb-check", host=host, check=r["system_fdb_check"])
+                except OSError:
+                    pass
 
             def need(name):
                 v = r.get(name)

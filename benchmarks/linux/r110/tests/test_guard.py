@@ -745,6 +745,20 @@ class Watchdogs(unittest.TestCase):
         logged = [r for r in self.watchdog_log() if r["event"] == "system-fdb-check"]
         self.assertEqual([(r["host"], r["check"]) for r in logged], [("h1", check)])
 
+    def test_a_diagnostic_log_that_cannot_be_written_does_not_delay_the_stop(self):
+        self.hosts.readings["t1"].update(system_fdb_available=False, system_fdb_check={"rc": 1})
+        w = self.wd()
+        log = w.log
+
+        def failing(**rec):
+            if rec.get("event") == "system-fdb-check":
+                raise OSError("No space left on device")
+            log(**rec)
+        w.log = failing
+        self.assertEqual(w.run(max_rounds=1), 2)
+        self.assertEqual(self.stops(), ["system-fdb"])
+        self.assertEqual(len(os.listdir(os.path.join(self.tmp.name, "alarms"))), 1)
+
     def test_a_check_that_could_not_finish_is_logged_and_stays_a_monitor_failure(self):
         check = {"rc": None, "timed_out": True, "elapsed_s": 20.0, "error": None, "stdout_head": [],
                  "stderr_head": [], "host": {"load1": None, "mem_available": None, "free_root": None}}
