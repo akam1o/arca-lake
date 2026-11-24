@@ -402,14 +402,14 @@ def judge(records):
         return t(name, scen, "met" if rel(T[key], C[key]) else "not met", {BASE: T[key], TEST: C[key]})
 
     for s in ("unv", "ver"):
-        cmp("SlowDown share ≤ half the tag rebuild's and ≤ 25 %", s, "slowdown_share",
+        cmp(f"SlowDown share ≤ half of {BASE}'s and ≤ 25 %", s, "slowdown_share",
             lambda T, C: C <= 0.5 * T and C <= 0.25)
         cmp("attempts per acknowledged PUT ≤ half", s, "attempts_per_ack", lambda T, C: C <= 0.5 * T)
         cmp("acknowledged PUT/s ≥ 1.3 ×", s, "acked_per_s", lambda T, C: C >= 1.3 * T)
     cmp("acknowledged PUT/s ≥ 0.95 ×", "unv16", "acked_per_s", lambda T, C: C >= 0.95 * T)
-    cmp("SlowDown share ≤ tag rebuild's + 0.5 points", "unv16", "slowdown_share", lambda T, C: C <= T + 0.005)
+    cmp(f"SlowDown share ≤ {BASE}'s + 0.5 points", "unv16", "slowdown_share", lambda T, C: C <= T + 0.005)
     cmp("acknowledged p99 ≤ 1.5 ×", "unv16", "ack_p99_ms", lambda T, C: C <= 1.5 * T)
-    cmp("SlowDown after 3 retries ≤ tag rebuild's", "retry", "slowdown_share", lambda T, C: C <= T)
+    cmp(f"SlowDown after 3 retries ≤ {BASE}'s", "retry", "slowdown_share", lambda T, C: C <= T)
     # The control (plan §10) asks it of every run, the main plan of the
     # candidate's fault-free runs.
     judged = ARMS if CONTROL else (TEST,)

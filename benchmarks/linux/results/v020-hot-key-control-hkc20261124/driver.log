@@ -1,0 +1,149 @@
+07:19:01 building candidate (d7df11062b7c) on host B
+07:23:09 building candidate (d7df11062b7c) on host B
+07:27:18 build done: candidate d7df11062b7c 738eba64c6976800
+07:27:33 run hkc20261124-01-unv-off (round 1)
+07:32:21 run hkc20261124-01-unv-off: valid; correct True; ack/s 71.8039789899299; SlowDown 0.5456073980664145
+07:32:23 run hkc20261124-02-unv-on (round 1)
+07:37:09 run hkc20261124-02-unv-on: valid; correct True; ack/s 112.0630887646848; SlowDown 0.0010353498003253957
+07:37:11 run hkc20261124-03-ver-off (round 1)
+07:43:09 run hkc20261124-03-ver-off: valid; correct True; ack/s 74.21205903528848; SlowDown 0.5418874847125968
+07:43:12 run hkc20261124-04-ver-on (round 1)
+07:49:47 run hkc20261124-04-ver-on: valid; correct True; ack/s 121.6496677029754; SlowDown 0.00380383100122266
+07:49:48 run hkc20261124-05-unv16-off (round 1)
+07:54:49 run hkc20261124-05-unv16-off: valid; correct True; ack/s 478.6121305809272; SlowDown 0.0005902982742456335
+07:54:50 run hkc20261124-06-unv16-on (round 1)
+07:59:51 run hkc20261124-06-unv16-on: valid; correct True; ack/s 512.4677497454362; SlowDown 0.0
+07:59:52 run hkc20261124-07-ver-on (round 2)
+08:05:42 run hkc20261124-07-ver-on: valid; correct True; ack/s 100.14934914065438; SlowDown 0.019553975436328377
+08:05:43 run hkc20261124-08-ver-off (round 2)
+08:11:11 run hkc20261124-08-ver-off: valid; correct True; ack/s 73.3632161970076; SlowDown 0.5459858505075361
+08:11:12 run hkc20261124-09-unv16-on (round 2)
+08:29:53 host a: no marker in run directory, nothing removed
+08:29:59 host b: no marker in run directory, nothing removed
+08:30:06 host c: no marker in run directory, nothing removed
+08:30:06 run hkc20261124-09-unv16-on: INVALID the check did not complete; the scrub did not complete; correct False; ack/s 508.1598385271829; SlowDown 0.0
+08:30:21 run hkc20261124-10-unv16-off (round 2)
+08:31:15 host a: no marker in run directory, nothing removed
+08:31:22 host b: no marker in run directory, nothing removed
+08:31:29 host c: no marker in run directory, nothing removed
+08:31:29 run hkc20261124-10-unv16-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:31:53 run hkc20261124-11-unv-on (round 2)
+08:32:42 host a: no marker in run directory, nothing removed
+08:32:48 host b: no marker in run directory, nothing removed
+08:32:58 host c: no marker in run directory, nothing removed
+08:32:58 run hkc20261124-11-unv-on: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:33:17 run hkc20261124-12-unv-off (round 2)
+08:34:09 host a: no marker in run directory, nothing removed
+08:34:16 host b: no marker in run directory, nothing removed
+08:34:23 host c: no marker in run directory, nothing removed
+08:34:23 run hkc20261124-12-unv-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:34:42 run hkc20261124-13-unv16-off (round 3)
+08:35:37 host a: no marker in run directory, nothing removed
+08:35:43 host b: no marker in run directory, nothing removed
+08:35:49 host c: no marker in run directory, nothing removed
+08:35:49 run hkc20261124-13-unv16-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:36:07 run hkc20261124-14-unv16-on (round 3)
+08:37:02 host a: no marker in run directory, nothing removed
+08:37:09 host b: no marker in run directory, nothing removed
+08:37:15 host c: no marker in run directory, nothing removed
+08:37:15 run hkc20261124-14-unv16-on: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:37:37 run hkc20261124-15-unv-off (round 3)
+08:38:35 host a: no marker in run directory, nothing removed
+08:38:41 host b: no marker in run directory, nothing removed
+08:38:48 host c: no marker in run directory, nothing removed
+08:38:48 run hkc20261124-15-unv-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Operation timed out\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:39:12 run hkc20261124-16-unv-on (round 3)
+08:40:06 host a: no marker in run directory, nothing removed
+08:40:12 host b: no marker in run directory, nothing removed
+08:40:18 host c: no marker in run directory, nothing removed
+08:40:18 run hkc20261124-16-unv-on: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:40:36 run hkc20261124-17-ver-off (round 3)
+08:41:30 host a: no marker in run directory, nothing removed
+08:41:37 host b: no marker in run directory, nothing removed
+08:41:44 host c: no marker in run directory, nothing removed
+08:41:44 run hkc20261124-17-ver-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:42:03 run hkc20261124-18-ver-on (round 3)
+08:42:53 host a: no marker in run directory, nothing removed
+08:42:59 host b: no marker in run directory, nothing removed
+08:43:06 host c: no marker in run directory, nothing removed
+08:43:06 run hkc20261124-18-ver-on: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:43:24 run hkc20261124-19-unv-off (round repeat)
+08:44:15 host a: no marker in run directory, nothing removed
+08:44:21 host b: no marker in run directory, nothing removed
+08:44:27 host c: no marker in run directory, nothing removed
+08:44:27 run hkc20261124-19-unv-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:44:47 run hkc20261124-20-unv-on (round repeat)
+08:45:40 host a: no marker in run directory, nothing removed
+08:45:50 host b: no marker in run directory, nothing removed
+08:45:57 host c: no marker in run directory, nothing removed
+08:45:57 run hkc20261124-20-unv-on: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:46:16 run hkc20261124-21-ver-off (round repeat)
+08:47:15 host a: no marker in run directory, nothing removed
+08:47:22 host b: no marker in run directory, nothing removed
+08:47:29 host c: no marker in run directory, nothing removed
+08:47:29 run hkc20261124-21-ver-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Operation timed out\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:47:47 run hkc20261124-22-ver-on (round repeat)
+08:48:41 host a: no marker in run directory, nothing removed
+08:48:47 host b: no marker in run directory, nothing removed
+08:48:53 host c: no marker in run directory, nothing removed
+08:48:53 run hkc20261124-22-ver-on: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:49:11 run hkc20261124-23-unv16-off (round repeat)
+08:50:04 host a: no marker in run directory, nothing removed
+08:50:10 host b: no marker in run directory, nothing removed
+08:50:16 host c: no marker in run directory, nothing removed
+08:50:16 run hkc20261124-23-unv16-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:50:38 run hkc20261124-24-unv16-on (round repeat)
+08:51:32 host a: no marker in run directory, nothing removed
+08:51:38 host b: no marker in run directory, nothing removed
+08:51:44 host c: no marker in run directory, nothing removed
+08:51:44 run hkc20261124-24-unv16-on: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:52:03 run hkc20261124-25-unv-off (round repeat)
+08:52:53 host a: no marker in run directory, nothing removed
+08:52:59 host b: no marker in run directory, nothing removed
+08:53:05 host c: no marker in run directory, nothing removed
+08:53:05 run hkc20261124-25-unv-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:53:27 run hkc20261124-26-unv-on (round repeat)
+08:54:20 host a: no marker in run directory, nothing removed
+08:54:27 host b: no marker in run directory, nothing removed
+08:54:33 host c: no marker in run directory, nothing removed
+08:54:33 run hkc20261124-26-unv-on: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:54:52 run hkc20261124-27-ver-off (round repeat)
+08:55:45 host a: no marker in run directory, nothing removed
+08:55:52 host b: no marker in run directory, nothing removed
+08:55:58 host c: no marker in run directory, nothing removed
+08:55:58 run hkc20261124-27-ver-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:56:21 run hkc20261124-28-ver-on (round repeat)
+08:57:17 host a: no marker in run directory, nothing removed
+08:57:24 host b: no marker in run directory, nothing removed
+08:57:31 host c: no marker in run directory, nothing removed
+08:57:32 run hkc20261124-28-ver-on: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:57:53 run hkc20261124-29-unv16-off (round repeat)
+08:58:47 host a: no marker in run directory, nothing removed
+08:58:57 host b: no marker in run directory, nothing removed
+08:59:06 host c: no marker in run directory, nothing removed
+08:59:06 run hkc20261124-29-unv16-off: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+08:59:27 run hkc20261124-30-unv16-on (round repeat)
+09:00:18 host a: no marker in run directory, nothing removed
+09:00:24 host b: no marker in run directory, nothing removed
+09:00:31 host c: no marker in run directory, nothing removed
+09:00:31 run hkc20261124-30-unv16-on: INVALID run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\n'); a binary's SHA-256 does not match its build record; FoundationDB not healthy before the run; the check did not complete; the scrub did not complete; correct False; ack/s None; SlowDown None
+18:49:50 run hkc20261124-31-unv16-off (round 2)
+18:54:53 run hkc20261124-31-unv16-off: valid; correct True; ack/s 499.77887678789085; SlowDown 0.0005321979776476849
+18:54:55 run hkc20261124-32-unv-on (round 2)
+18:59:39 run hkc20261124-32-unv-on: valid; correct True; ack/s 106.33355927907729; SlowDown 0.011965025310630465
+18:59:41 run hkc20261124-33-unv-off (round 2)
+19:04:43 run hkc20261124-33-unv-off: valid; correct True; ack/s 67.23721888118786; SlowDown 0.5399638744637616
+19:04:45 run hkc20261124-34-unv16-off (round 3)
+19:09:46 run hkc20261124-34-unv16-off: valid; correct True; ack/s 493.00884862786626; SlowDown 0.00013484358144552318
+19:09:49 run hkc20261124-35-unv16-on (round 3)
+19:14:49 run hkc20261124-35-unv16-on: valid; correct True; ack/s 527.2129677115278; SlowDown 0.0
+19:14:51 run hkc20261124-36-unv-off (round 3)
+19:19:55 run hkc20261124-36-unv-off: valid; correct True; ack/s 71.72562462776082; SlowDown 0.5456357532522031
+19:19:57 run hkc20261124-37-unv-on (round 3)
+19:24:43 run hkc20261124-37-unv-on: valid; correct True; ack/s 116.55377372793976; SlowDown 0.0009955909543450433
+19:24:45 run hkc20261124-38-ver-off (round 3)
+19:30:11 run hkc20261124-38-ver-off: valid; correct True; ack/s 76.0043061169013; SlowDown 0.544589774078478
+19:30:14 run hkc20261124-39-ver-on (round 3)
+19:35:46 run hkc20261124-39-ver-on: valid; correct True; ack/s 76.76410172214779; SlowDown 0.05386178861788618
+19:35:49 run hkc20261124-40-unv16-on (round repeat)
+19:40:52 run hkc20261124-40-unv16-on: valid; correct True; ack/s 511.3276694446262; SlowDown 0.0

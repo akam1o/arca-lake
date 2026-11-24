@@ -26,7 +26,8 @@ break compatibility).
   about 200 → 450 ms, p99 about 0.8 → 1.7 s); 16 keys within 3–6 %
   ([results](docs/verification/0.2.0-hot-key-results.md); measured
   against the 0.1.0 tag, so the gain is of all 0.2.0 changes, the queue
-  being its cause by mechanism; an on/off control is pending). Every
+  being its cause by mechanism; an on/off control in one binary confirms
+  it: SlowDown 54 % → 0.5–2.6 %, acknowledged PUT/s 1.34–1.59 ×). Every
   DELETE form (single, version-specific, DeleteObjects entries) takes
   the same turn and backoff. No format change.
 - Gateway deletes of its own partial cache copies (a population that

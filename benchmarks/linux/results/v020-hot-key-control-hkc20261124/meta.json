@@ -1,0 +1,68 @@
+{
+ "arms": {
+  "off": {
+   "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+   "commit": "d7df11062b7ceeb0e3ce7c659de7bffc09d57778",
+   "features": "fdb",
+   "label": "queue-off (the PR head build, gateways with --commit-queue off)",
+   "locked": true,
+   "profile": "release",
+   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+   "sha256": "738eba64c6976800792838ab53f920f908ac2bea7fb0bf6f2c1d46086b2f922b"
+  },
+  "on": {
+   "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+   "commit": "d7df11062b7ceeb0e3ce7c659de7bffc09d57778",
+   "features": "fdb",
+   "label": "queue-on (the same binary, default gateways)",
+   "locked": true,
+   "profile": "release",
+   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+   "sha256": "738eba64c6976800792838ab53f920f908ac2bea7fb0bf6f2c1d46086b2f922b"
+  }
+ },
+ "budget_s": 3420,
+ "campaign": "hkc20261124",
+ "control": true,
+ "elapsed_s": 3065,
+ "finished": "2026-11-24T19:40:53+0900",
+ "plan": "docs/verification/0.2.0-hot-key-plan.md",
+ "previous_sessions": [
+  {
+   "arms": {
+    "off": {
+     "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+     "commit": "d7df11062b7ceeb0e3ce7c659de7bffc09d57778",
+     "features": "fdb",
+     "label": "queue-off (the PR head build, gateways with --commit-queue off)",
+     "locked": true,
+     "profile": "release",
+     "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+     "sha256": "738eba64c6976800792838ab53f920f908ac2bea7fb0bf6f2c1d46086b2f922b"
+    },
+    "on": {
+     "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+     "commit": "d7df11062b7ceeb0e3ce7c659de7bffc09d57778",
+     "features": "fdb",
+     "label": "queue-on (the same binary, default gateways)",
+     "locked": true,
+     "profile": "release",
+     "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+     "sha256": "738eba64c6976800792838ab53f920f908ac2bea7fb0bf6f2c1d46086b2f922b"
+    }
+   },
+   "budget_s": 9000,
+   "campaign": "hkc20261124",
+   "control": true,
+   "elapsed_s": 5579,
+   "finished": "2026-11-24T09:00:31+0900",
+   "plan": "docs/verification/0.2.0-hot-key-plan.md",
+   "run_bound_s": 1800,
+   "started": "2026-11-24T07:27:32+0900",
+   "stopped": null
+  }
+ ],
+ "run_bound_s": 1800,
+ "started": "2026-11-24T18:49:48+0900",
+ "stopped": null
+}
