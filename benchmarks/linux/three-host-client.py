@@ -37,6 +37,7 @@ import struct
 import sys
 import threading
 import time
+import traceback
 import zlib
 
 BUCKET = "v3h"
@@ -48,6 +49,10 @@ CREDS = None
 SIZES = [1024, 4097, 65535, 65537, 300_000, 1 << 20, (4 << 20) - 1, (4 << 20) + 1, 9 << 20, 16 << 20]
 WEIGHTS = [4, 2, 1, 1, 2, 2, 1, 1, 1, 0.5]
 ABSENT = "absent"
+PUT_BUDGET_MIB = 3072
+# Requests not sent: the state does not change. "local-error" is a fault of
+# this client (never expected; the driver fails the step).
+LOCAL_OUTCOME = {"refused": "refused", "local": "local-error"}
 
 
 def body_for(seed, size):
@@ -83,18 +88,22 @@ def sign_headers(method, host, port, path, query, body, creds, headers):
 def call(gw, method, path, body=None, timeout=60.0, query="", creds="default", headers=None,
          keep_body=False, send_body=None):
     """One request. Returns (status, body_sha, body_len, outcome_hint, error,
-    content) where outcome_hint is 'http' (an answer), 'refused' (not sent)
-    or 'unknown' (sent, no answer); content is the response body when
+    content) where outcome_hint is 'http' (an answer), 'refused' (not sent),
+    'local' (not sent: the client failed to build or sign it) or 'unknown'
+    (sent, no answer); content is the response body when
     keep_body (else None). `creds` "default" uses CREDS; None is unsigned.
     `send_body` replaces the signed body on the wire (a tampered request)."""
     _, host, port = gw
     if creds == "default":
         creds = CREDS
-    hdrs = dict(headers or {})
-    if creds is not None:
-        hdrs = sign_headers(method, host, port, path, query, body, creds, hdrs)
-    wire = send_body if send_body is not None else body
-    hdrs["Content-Length"] = str(len(wire) if wire is not None else 0)
+    try:
+        hdrs = dict(headers or {})
+        if creds is not None:
+            hdrs = sign_headers(method, host, port, path, query, body, creds, hdrs)
+        wire = send_body if send_body is not None else body
+        hdrs["Content-Length"] = str(len(wire) if wire is not None else 0)
+    except Exception as e:  # noqa: BLE001 - a client fault, counted as such
+        return None, None, 0, "local", f"sign: {type(e).__name__}: {e}"[:300], None
     conn = http.client.HTTPConnection(host, port, timeout=timeout)
     try:
         try:
@@ -190,6 +199,9 @@ class Runner:
         self.ledger = open(args.ledger, "a")
         self.ledger_lock = threading.Lock()
         self.stop = threading.Event()
+        # Faults of this client (a worker's exception, the put budget
+        # spent): the run exits non-zero and the driver fails the step.
+        self.failures = []
         self.rate_lock = threading.Lock()
         self.rate_next = now()
 
@@ -223,8 +235,8 @@ class Runner:
         t1 = now()
         if hint == "http" and 200 <= status < 300:
             outcome = "ack"
-        elif hint == "refused":
-            outcome = "refused"
+        elif hint in LOCAL_OUTCOME:
+            outcome = LOCAL_OUTCOME[hint]
         elif hint == "http":
             outcome = "error"
         else:
@@ -248,8 +260,8 @@ class Runner:
         t1 = now()
         if hint == "http" and 200 <= status < 300:
             outcome = "ack"
-        elif hint == "refused":
-            outcome = "refused"
+        elif hint in LOCAL_OUTCOME:
+            outcome = LOCAL_OUTCOME[hint]
         elif hint == "http":
             outcome = "error"
         else:
@@ -278,8 +290,8 @@ class Runner:
             outcome = "ok"
         elif m is False:
             outcome = "VIOLATION"
-        elif hint == "refused":
-            outcome = "refused"
+        elif hint in LOCAL_OUTCOME:
+            outcome = LOCAL_OUTCOME[hint]
         elif hint == "http":
             outcome = "error"
         else:
@@ -302,6 +314,28 @@ class Runner:
     def keys_of(self, tid):
         return [f"k{tid:02d}/{i:03d}" for i in range(self.args.keys_per_thread)]
 
+    def guarded(self, fn, *args):
+        """Run a worker; an exception stops every worker and is recorded."""
+        try:
+            fn(*args)
+        except Exception:  # noqa: BLE001 - recorded, the process exits non-zero
+            tb = traceback.format_exc()
+            with self.ledger_lock:
+                self.failures.append(tb[-2000:])
+            sys.stderr.write(f"worker failed:\n{tb}")
+            self.stop.set()
+
+    def budget_spent(self, size):
+        """True (and the run fails) when a PUT of `size` would pass the put
+        budget: a load must never go on without its writes."""
+        if self.state.put_bytes + size <= self.args.put_budget_mib * (1 << 20):
+            return False
+        with self.ledger_lock:
+            self.failures.append(f"put budget of {self.args.put_budget_mib} MiB spent "
+                                 f"({self.state.put_bytes} bytes written)")
+        self.stop.set()
+        return True
+
     def worker(self, tid, deadline, ops):
         rnd = random.Random(f"{self.args.phase}/{tid}/{time.time()}")
         keys = self.keys_of(tid)
@@ -313,6 +347,8 @@ class Runner:
                     if (gi * len(SIZES) + si) % self.args.threads != tid:
                         continue
                     key = keys[(gi * len(SIZES) + si) // self.args.threads % len(keys)]
+                    if self.budget_spent(size):
+                        return
                     self.do_put(tid, gw, key, size)
                     self.do_get(tid, gw, key)
                     done += 2
@@ -320,8 +356,11 @@ class Runner:
             gw = self.gws[rnd.randrange(len(self.gws))]
             key = keys[rnd.randrange(len(keys))]
             r = rnd.random()
-            if r < self.args.put_frac and self.state.put_bytes < self.args.put_budget_mib * (1 << 20):
-                self.do_put(tid, gw, key, rnd.choices(SIZES, WEIGHTS)[0])
+            if r < self.args.put_frac:
+                size = rnd.choices(SIZES, WEIGHTS)[0]
+                if self.budget_spent(size):
+                    return
+                self.do_put(tid, gw, key, size)
             elif r < self.args.put_frac + self.args.del_frac:
                 self.do_delete(tid, gw, key)
             else:
@@ -336,7 +375,8 @@ class Runner:
     def load(self):
         deadline = now() + self.args.duration if self.args.duration else float("inf")
         per = self.args.ops // self.args.threads if self.args.ops else 0
-        ts = [threading.Thread(target=self.worker, args=(t, deadline, per)) for t in range(self.args.threads)]
+        ts = [threading.Thread(target=self.guarded, args=(self.worker, t, deadline, per))
+              for t in range(self.args.threads)]
         for t in ts:
             t.start()
         stop_file = self.args.stop_file
@@ -365,10 +405,10 @@ class Runner:
                 # retried once through the other gateway.
                 gw = self.gws[i % len(self.gws)]
                 out = self.do_get(tid, gw, key, collapse=self.args.collapse)
-                if out in ("error", "unknown", "refused"):
+                if out in ("error", "unknown", "refused", "local-error"):
                     self.do_get(tid, self.gws[(i + 1) % len(self.gws)], key, collapse=self.args.collapse)
 
-        ts = [threading.Thread(target=run, args=(t,)) for t in range(self.args.threads)]
+        ts = [threading.Thread(target=self.guarded, args=(run, t)) for t in range(self.args.threads)]
         for t in ts:
             t.start()
         for t in ts:
@@ -561,7 +601,7 @@ class Runner:
         t1 = now()
         status, hint = res[0], res[3]
         outcome = ("ack" if hint == "http" and status == 200 and xml_tag(res[5], "Error") is None
-                   else "refused" if hint == "refused" else "error" if hint == "http" else "unknown")
+                   else LOCAL_OUTCOME[hint] if hint in LOCAL_OUTCOME else "error" if hint == "http" else "unknown")
         with st.lock:
             if outcome == "ack":
                 st.keys[key] = [[sha, len(whole)]]
@@ -602,6 +642,11 @@ class Runner:
         self.expect(cases, "complete after abort", g[0],
                     call(g[0], "POST", apath, body, query=f"uploadId={auid}", keep_body=True),
                     {404}, {"NoSuchUpload"})
+        # In the state from here on: every later verify reads it as 404.
+        with st.lock:
+            st.keys[akey] = [ABSENT]
+        res = call(g[0], "GET", apath, keep_body=True)
+        self.expect(cases, "aborted key NoSuchKey", g[0], res, {404}, {"NoSuchKey"})
         cases.append({"case": "aborted key absent", "gw": g[0][0], "ok": self.do_get(0, g[0], akey) == "ok"})
         st.save()
         return {"key": key, "size": len(whole), "cases": cases, "failed": [c for c in cases if not c["ok"]],
@@ -657,7 +702,9 @@ def main():
     p.add_argument("--put-frac", type=float, default=0.45)
     p.add_argument("--del-frac", type=float, default=0.15)
     p.add_argument("--put-rate-mib", type=float, default=2.0)
-    p.add_argument("--put-budget-mib", type=float, default=2600)
+    # The whole run's logical PUT bytes (state.json carries the count across
+    # phases): a judged sequence wrote at most 1.65 GiB in the rehearsal.
+    p.add_argument("--put-budget-mib", type=float, default=PUT_BUDGET_MIB)
     p.add_argument("--pause-ms", type=float, default=0)
     p.add_argument("--timeout", type=float, default=60)
     p.add_argument("--cover", action="store_true")
@@ -682,9 +729,10 @@ def main():
         out = r.multipart()
     r.ledger.close()
     out.update({"phase": args.phase, "cmd": args.cmd, "seconds": round(now() - t0, 1),
-                "put_bytes_total": r.state.put_bytes, "keys": len(r.state.keys), "signed": CREDS is not None})
+                "put_bytes_total": r.state.put_bytes, "keys": len(r.state.keys), "signed": CREDS is not None,
+                "failures": r.failures})
     print(json.dumps(out))
-    return 0
+    return 3 if r.failures else 0
 
 
 if __name__ == "__main__":

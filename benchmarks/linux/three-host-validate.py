@@ -15,6 +15,8 @@ requests SigV4-signed with keys from a credentials file.
   HOST_A=user@a HOST_B=user@b HOST_C=user@c [RUN_ID=id] [OUT=dir] \\
     benchmarks/linux/three-host-validate.py run|upgrade
   HOST_A=... HOST_B=... HOST_C=... RUN_ID=id three-host-validate.py teardown
+  HOST_A=... HOST_B=... HOST_C=... SOURCE_SHA=<commit> three-host-validate.py build
+  HOST_A=... HOST_B=... HOST_C=... three-host-validate.py fetch-v010
 
 `run` is the main scenario (steps 0 to 10), `upgrade` the upgrade from the
 published 0.1.0 (steps U0 to U9). A judged run sets JUDGED=1 and
@@ -440,12 +442,13 @@ def group_check():
 # --- client ---------------------------------------------------------------
 
 CLIENT = f"python3 {R}/client.py"
+PUT_BUDGET_MIB = 3072  # the client's default, for the free-space preflight
 
 
 def client_sync(cmd, phase, extra="", timeout=900):
     rc, out, err = ssh("c", f"cd {R} && {CLIENT} {cmd} {R}/state.json {R}/ledger.jsonl {phase} "
                             f"{q(gw_spec())} --creds {R}/creds.json {extra}", timeout=timeout)
-    if rc != 0:
+    if rc != 0 or "Traceback" in err:
         raise RuntimeError(f"client {cmd} {phase} rc {rc}: {redact(err)[-800:]}")
     return json.loads(out.strip().splitlines()[-1])
 
@@ -458,24 +461,68 @@ def probe(key, spec=None):
         return {"error": redact(err)[-300:]}
 
 
+# Background load (review of #57): every load phase must have carried
+# requests through every gateway, and the client must have ended cleanly.
+MIN_PHASE_ACKED = 20  # acknowledged operations per gateway per load phase
+MIN_WINDOW_ACKED = 3  # acknowledged operations per gateway per judged window
+CHECKS = []  # load and window checks since the last step's result
+
+
+def acked_per_gw(recs, gws):
+    c = {g: 0 for g in gws}
+    for r in recs:
+        if r["gw"] in c and r["outcome"] in ("ack", "ok"):
+            c[r["gw"]] += 1
+    return c
+
+
+def load_check(phase, rc_text, log_text, recs, gws=tuple(GATEWAYS)):
+    """The verdict on one background load phase: the client's exit status
+    (written by its wrapper), no traceback in its log, no request it failed
+    to build or sign, and at least MIN_PHASE_ACKED acknowledged operations
+    through each gateway."""
+    rc = rc_text.strip()
+    tb = "Traceback" in log_text or "worker failed" in log_text
+    local = [r for r in recs if r["outcome"] == "local-error"]
+    acked = acked_per_gw(recs, gws)
+    ok = rc == "0" and not tb and not local and all(v >= MIN_PHASE_ACKED for v in acked.values())
+    return {"check": f"load {phase}", "exit_status": rc or None, "traceback": tb,
+            "local_errors": len(local), "acked_per_gateway": acked, "min": MIN_PHASE_ACKED,
+            "log_tail": log_text.strip().splitlines()[-3:] if tb or rc != "0" else [], "ok": ok}
+
+
+def need_window(name, recs, t0, t1, gws=tuple(GATEWAYS), n=MIN_WINDOW_ACKED):
+    """At least `n` operations acknowledged through each of `gws` among the
+    requests within [t0, t1]; recorded for the step's result."""
+    acked = acked_per_gw([r for r in recs if within(r, t0, t1)], gws)
+    c = {"check": f"window {name}", "t": [round(t0, 3), round(t1, 3)], "acked_per_gateway": acked, "min": n,
+         "ok": all(v >= n for v in acked.values())}
+    CHECKS.append(c)
+    return c["ok"]
+
+
 class Load:
     def __init__(self, phase, extra=""):
         self.phase, self.extra = phase, extra
 
     def __enter__(self):
-        ssh("c", f"rm -f {R}/stop-{self.phase}", check=True)
-        ssh("c", f"cd {R} && {{ nohup {CLIENT} load {R}/state.json {R}/ledger.jsonl {self.phase} "
-                 f"{q(gw_spec())} --creds {R}/creds.json --duration 1800 --pause-ms 25 "
-                 f"--stop-file {R}/stop-{self.phase} {self.extra} "
-                 f"> {R}/logs/client-{self.phase}.log 2>&1 < /dev/null & echo $! > {R}/client-{self.phase}.pid; }}",
-            check=True)
+        p = self.phase
+        ssh("c", f"rm -f {R}/stop-{p} {R}/client-{p}.rc", check=True)
+        inner = (f"{CLIENT} load {R}/state.json {R}/ledger.jsonl {p} {q(gw_spec())} --creds {R}/creds.json "
+                 f"--duration 1800 --pause-ms 25 --stop-file {R}/stop-{p} {self.extra}; echo $? > {R}/client-{p}.rc")
+        ssh("c", f"cd {R} && {{ nohup sh -c {q(inner)} > {R}/logs/client-{p}.log 2>&1 < /dev/null & "
+                 f"echo $! > {R}/client-{p}.pid; }}", check=True)
         time.sleep(1)
         return self
 
     def __exit__(self, *exc):
-        ssh("c", f"touch {R}/stop-{self.phase}")
-        if not wait_dead("c", f"client-{self.phase}", 150):
-            log(f"client {self.phase} did not stop in 150 s")
+        p = self.phase
+        ssh("c", f"touch {R}/stop-{p}")
+        if not wait_dead("c", f"client-{p}", 150):
+            log(f"client {p} did not stop in 150 s")
+        _, rc_text, _ = ssh("c", f"cat {R}/client-{p}.rc 2>/dev/null")
+        _, log_text, _ = ssh("c", f"cat {R}/logs/client-{p}.log 2>/dev/null")
+        CHECKS.append(load_check(p, rc_text, redact(log_text), ledger(p)))
         return False
 
 
@@ -493,7 +540,7 @@ def counts(recs):
     return dict(sorted(c.items()))
 
 
-BAD = ("error", "unknown", "refused")
+BAD = ("error", "unknown", "refused", "local-error")
 
 
 def within(r, a, b):
@@ -568,7 +615,19 @@ def no_chunk_on(keys, groups_of_node):
     return placed, bad, unread
 
 
+def judge_checks(verdict, evidence, checks):
+    """A step passes only if its load and window checks pass too."""
+    if not checks:
+        return verdict, evidence
+    evidence = {**evidence, "load_and_window_checks": checks}
+    if verdict == "PASS" and not all(c["ok"] for c in checks):
+        verdict = "FAIL"
+    return verdict, evidence
+
+
 def result(step, verdict, evidence, expected=""):
+    verdict, evidence = judge_checks(verdict, evidence, CHECKS[:])
+    CHECKS.clear()
     RESULTS.append({"step": step, "verdict": verdict, "expected": expected, "evidence": evidence})
     save("results.json", json.dumps(RESULTS, indent=1, sort_keys=True))
     log(f"STEP {step}: {verdict}")
@@ -898,6 +957,7 @@ def step3a():
     viol = [r for r in recs if r["outcome"] == "VIOLATION"]
     puts_acked = sum(1 for r in absent_window if r["op"] == "PUT" and r["outcome"] == "ack")
     gets_ok = sum(1 for r in absent_window if r["op"] == "GET" and r["outcome"] == "ok" and r["status"] == 200)
+    need_window("b0 down", recs, t_kill, t_restart)
     q_ = wait_queue_empty(240)
     v = verify("s3a-verify")
     ok = (not bad_absent and not bad_after and not viol and v["ok"] and puts_acked > 0 and gets_ok > 0
@@ -929,6 +989,8 @@ def step3b():
     gwb_down = [r for r in recs if r["gw"] == "gw-b" and within(r, t_kill, t_restart)]
     inflight = [r for r in recs if r["gw"] == "gw-b" and r["t0"] < t_kill < r["t1"]]
     viol = [r for r in recs if r["outcome"] == "VIOLATION"]
+    need_window("gw-b down", recs, t_kill, t_restart, gws=("gw-c",))
+    need_window("gw-b back", recs, t_restart + 5, t_restart + 25)
     v = verify("s3b-verify")
     ok = not gwc_bad and not gwb_after and not viol and v["ok"]
     return result("3b-gateway-restart", "PASS" if ok else "FAIL",
@@ -951,6 +1013,7 @@ def step3c():
     put_failed = [r for r in win if r["op"] == "PUT" and r["outcome"] != "ack"]
     after_bad = [r for r in recs if r["t0"] >= t_restart + 10 and r["outcome"] in BAD]
     viol = [r for r in recs if r["outcome"] == "VIOLATION"]
+    need_window("host B nodes down", recs, t_kill, t_restart)
     q_ = wait_queue_empty(240)
     v = verify("s3c-verify")
     ok = (not get_bad and not put_acked and put_failed and not after_bad and not viol and v["ok"]
@@ -999,9 +1062,12 @@ def step4():
             time.sleep(8)
             st2 = status()
             cycles.append({"killed": old, "new_leader": st2["leader"]["holder"] if st2["leader"] else None,
-                           "takeover_s": took and round(took, 2), "restarted_alive": alive(CONTROLLERS[old], old)})
+                           "takeover_s": took and round(took, 2), "restarted_alive": alive(CONTROLLERS[old], old),
+                           "window": [t_kill, ts("c")]})
             time.sleep(5)
     recs = ledger(phase)
+    for i, c in enumerate(cycles):
+        need_window(f"takeover {i + 1}", recs, *c.pop("window"))
     bad = [r for r in recs if r["outcome"] in BAD or r["outcome"] == "VIOLATION"]
     v = verify("s4-verify")
     _, lg, _ = ssh("a", f"grep -E 'acquired leadership|standing by|lost leadership' {R}/logs/ctl-a.log | tail -20")
@@ -1038,6 +1104,7 @@ def step5():
     st1 = status()
     same = all(st1["groups"][g]["members"] == st0["groups"][g]["members"] and st1["groups"][g]["state"] == "Active"
                for g in st0["groups"])
+    need_window("a1 down", recs, t_kill, t_restart)
     q_ = wait_queue_empty(300)
     sc = scrub(groups_of)
     v = verify("s5-verify")
@@ -1088,6 +1155,8 @@ def step6():
         viol = [r for r in recs if r["outcome"] == "VIOLATION"]
         post = [r for r in recs if ready is not None and r["t0"] >= t_resume + ready and r["t1"] <= t_window_end]
         post_bad = [r for r in post if r["outcome"] in BAD]
+        if ready is not None:
+            need_window(f"{mode} 30 s after ready", recs, t_resume + ready, t_window_end)
         procs = {f"{h}:{p}": alive(h, p) for h, p in all_procs()[1:]}
         st = status()
         unknown_ops = [r for r in recs if r["op"] in ("PUT", "DELETE") and r["outcome"] in ("unknown", "error")]
@@ -1447,6 +1516,7 @@ def r117_step(step, tag, same_ca):
     v = verify(f"{phase}-verify")
     viol = [r for r in recs if r["outcome"] == "VIOLATION"]
     late_bad = [r for r in recs if r["t0"] >= t_imp + 10 and r["t1"] <= t_end and r["outcome"] in BAD]
+    need_window("impostor at c1's address", recs, t_imp + 10, t_end)
     ev.update({"window_s": round(t_end - t_imp, 1), "ops": counts(recs), "acked_puts_in_window": len(keys),
                "chunk_groups_not_whole_of_acked": {k: g for k, g in placed.items() if g},
                "acked_with_chunk_in_c1_groups": on_c1, "unreadable": unread,
@@ -1464,7 +1534,8 @@ def r117_step(step, tag, same_ca):
               and ev.get("replaced_after_s") is not None and ev["one_member_per_host_after_replace"]
               and ev["rejoin"]["rc"] == 0)
     else:
-        ok = ok and quarantined_after is None and (ev["impostor_handshake_failures"] or 0) > 0
+        ok = (ok and quarantined_after is None and ev["c1_state_on_return"] == "active"
+              and (ev["impostor_handshake_failures"] or 0) > 0)
     return result(step, "PASS" if ok else "FAIL", ev,
                   "the impostor adopts the second cluster's identity (strict) at another port, then answers at "
                   "c1's address; no PUT acked while it runs has a chunk in c1's groups (verify-object with nothing "
@@ -1472,7 +1543,7 @@ def r117_step(step, tag, same_ca):
                   + ("the leader quarantines c1's id within 60 s for another identity token, rejoin --check refuses "
                      "naming another cluster's disk, refusals logged; after c1's return its slots are replaced in "
                      "domain c and rejoin --yes makes it active; " if same_ca else
-                     "the impostor counts TLS handshake failures and c1 is not quarantined; ")
+                     "the impostor counts TLS handshake failures and c1 is never quarantined (active on its return); ")
                   + "queue drains, scrub of c1's groups 0 damage, group check exit 0, verify clean")
 
 
@@ -1497,10 +1568,14 @@ def step8c():
     push_pki()
     t0 = time.time()
     start("c", "n-c2", node_cmd("c2", capacity=1 << 30))
-    joined, s = None, ""
+    joined, s, row = None, "", []
     while time.time() - t0 < 60:
         s = node_status(nid)
-        if "identity given (acknowledged: true)" in s and "write ownership strict" in s:
+        # Healthy: active and seen by the leader's last health passes.
+        state, nl = node_state(nid)
+        row = next((l.split() for l in nl.splitlines() if l.split()[:1] == [str(nid)]), [])
+        if ("identity given (acknowledged: true)" in s and "write ownership strict" in s and state == "active"
+                and row and int(row[-1]) <= 15):
             joined = round(time.time() - t0, 1)
             break
         time.sleep(2)
@@ -1528,13 +1603,13 @@ def step8c():
     ok = (joined is not None and rc == 0 and groups_ok and rc_c == 0 and live > 0 and damage_free(sc)
           and not bad and v["ok"])
     return result("8c-new-node-joins", "PASS" if ok else "FAIL",
-                  {"node_id": nid, "joined_after_s": joined, "status_at_join": s.splitlines(),
+                  {"node_id": nid, "joined_after_s": joined, "status_at_join": s.splitlines(), "node_list_row": row,
                    "create_groups": redact(cg + cge).strip().splitlines(),
                    "new_groups": {g: {**st["groups"][g], "members": [st["nodes"][m]["name"] for m in st["groups"][g]["members"]],
                                       "domain": st["domains"].get(g)} for g in new},
                    "group_check_rc": rc_c, "status_after_load": s_after.splitlines(), "live_shards": live,
                    "ops": counts(recs), "bad_samples": samples(bad), "scrub_new_groups": sc, "verify": v},
-                  "c2 acknowledged and strict within 60 s; 2 new Active groups, one member per host, c2 in at least one, "
+                  "c2 acknowledged, strict and healthy (active, seen <= 15 s ago) within 60 s; 2 new Active groups, one member per host, c2 in at least one, "
                   "domain host (created); group check exit 0; c2 holds shards after a 40 s load; scrub 0 damage; "
                   "0 client errors; verify clean")
 
@@ -1617,6 +1692,8 @@ def u2():
     bounds = restarts + [t_end]
     late_bad = [r for r in recs if r["outcome"] in BAD and any(
         bounds[i] + 10 <= r["t0"] and r["t1"] <= bounds[i + 1] for i in range(len(restarts)))]
+    for i, n in enumerate(NODES):
+        need_window(f"after {n}'s restart", recs, bounds[i] + 10, bounds[i + 1])
     v = verify("u2-verify")
     ok = not viol and not late_bad and all(x is not None for x in seen.values()) and v["ok"]
     return result("U2-storage-nodes", "PASS" if ok else "FAIL",
@@ -1648,9 +1725,12 @@ def u3():
             time.sleep(10)
             st = status()
             cycles.append({"upgraded": cid, "was_leader": cid == lead, "leader_within_s": took and round(took, 2),
-                           "leader_after": st["leader"] and st["leader"]["holder"], "alive": alive(CONTROLLERS[cid], cid)})
+                           "leader_after": st["leader"] and st["leader"]["holder"], "alive": alive(CONTROLLERS[cid], cid),
+                           "window": [t, ts("c")]})
     ADMIN["bin"] = BIN
     recs = ledger(phase)
+    for c in cycles:
+        need_window(f"{c['upgraded']} restarted", recs, *c.pop("window"))
     bad = [r for r in recs if r["outcome"] in BAD or r["outcome"] == "VIOLATION"]
     rc, chk = group_check()
     v = verify("u3-verify")
@@ -1707,6 +1787,8 @@ def u5():
         other = next(x for x in GATEWAYS if x != g)
         bad += [r for r in recs if r["gw"] == other and r["outcome"] in BAD and t_stop - 1 <= r["t0"] <= t + 25]
         bad += [r for r in recs if r["gw"] == g and r["outcome"] in BAD and t + 5 <= r["t0"] <= t + 25]
+        need_window(f"{g} restarting: {other}", recs, t_stop, t + 25, gws=(other,))
+        need_window(f"{g} restarted", recs, t + 5, t + 25, gws=(g,))
     time.sleep(5)
     vs = versions()
     fresh_old = [l for l in vs.splitlines() if l.endswith("below-schema-5")]
@@ -1828,6 +1910,7 @@ def u8():
     # Stopped: a chunk counted on the 0.1.0 node would show as not whole.
     stop("c", "n-c1")
     recs2 = ledger("u8-old-node")
+    need_window("0.1.0 node at c1", recs2, t_old, t_end)
     keys = acked_in(recs2, t_old, t_end)
     placed, on_c1, unread = no_chunk_on(keys, c1_groups)
     BINS["n-c1"] = BIN
@@ -1841,14 +1924,17 @@ def u8():
                "acked_while_0.1.0_node": len(keys), "chunk_groups_of_acked": placed,
                "acked_with_chunk_in_c1_groups": on_c1, "unreadable": unread, "ops_old_node": counts(recs2),
                "c1_state_after": state, "verify": v, "client": c})
+    gate = "requires software with M in [5, 6]"
+    ev["schema_gate_refusal_logged"] = {p: any(gate in l for l in ev[f"{p}_log_tail"]) for p in ("ctl-old", "gw-old")}
     ok = (v0["ok"] and not bad and mp["ok"] and set(exited) == {"ctl-old", "gw-old"}
+          and all(ev["schema_gate_refusal_logged"].values())
           and q_after is not None and keys and not on_c1 and not unread and not viol2
           and rc != 0 and "schema" in " ".join(ev["rejoin_check_0.1.0"]["out"])
           and ev["replaced_after_s"] is not None and ev["one_member_per_host_after_replace"]
           and ev["rejoin"]["rc"] == 0 and state == "active" and v["ok"])
     return result("U8-after-finalize", "PASS" if ok else "FAIL", ev,
                   "every key reads back; 300-op load 0 errors; multipart exact; 0.1.0 controller and gateway exit "
-                  "within 30 s; a 0.1.0 node at c1 quarantined within 60 s and no PUT acked meanwhile has a chunk "
+                  "within 30 s, each logging the schema gate's refusal (`requires software with M in [5, 6]`); a 0.1.0 node at c1 quarantined within 60 s and no PUT acked meanwhile has a chunk "
                   "in c1's groups; rejoin --check refuses it naming the schema; on 0.2.0 again its slots are replaced in "
                   "their domain, then rejoin --yes makes it active")
 
@@ -1899,34 +1985,103 @@ def judged_refusal(env):
     return why
 
 
+V010_ARCHIVE = "arca-lake-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
+V010_ARCHIVE_SHA256 = "975c036c6fa0a479b2bd0a0e6c313fd0dc5d83bcfb29ed9a2f730f2611c8de83"
+V010_URL = f"https://github.com/akam1o/arca-lake/releases/download/v0.1.0/{V010_ARCHIVE}"
+V010_COMMIT = "5601018a92b2eb9eb4c9106b43a637545056963c"
+FREE_MARGIN = 5 << 30  # free space required beyond the put budget, bytes
+
+# Run on each host with `python3 -I -` (the archive is untrusted data: it is
+# read, never extracted or executed here).
+FACTS_SCRIPT = r"""
+import hashlib, json, os, re, shutil, subprocess, sys, tarfile
+root, bin_, v010, archive = sys.argv[1:5]
+def sha(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.file_digest(f, "sha256").hexdigest()
+    except OSError:
+        return None
+def version(path):
+    try:
+        return subprocess.run([path, "--version"], capture_output=True, text=True, timeout=30).stdout.strip()
+    except OSError:
+        return None
+out = {"version": version(bin_), "sha256": sha(bin_), "v010_version": version(v010), "v010_sha256": sha(v010)}
+try:
+    with open(os.path.join(os.path.dirname(bin_), "build-record.json")) as f:
+        out["record"] = json.load(f)
+except (OSError, ValueError):
+    out["record"] = None
+out["archive_sha256"] = sha(archive)
+out["archive_binary_sha256"] = out["archive_commit"] = None
+if out["archive_sha256"]:
+    try:
+        with tarfile.open(archive, "r:gz") as t:
+            for m in t.getmembers():
+                if m.isfile() and m.name.endswith("/arca-lake"):
+                    out["archive_binary_sha256"] = hashlib.sha256(t.extractfile(m).read()).hexdigest()
+                elif m.isfile() and m.name.endswith("/BUILD-INFO.txt"):
+                    c = re.search(rb"source commit: ([0-9a-f]{40})", t.extractfile(m).read())
+                    out["archive_commit"] = c and c.group(1).decode()
+    except (OSError, tarfile.TarError):
+        pass
+out["free_bytes"] = shutil.disk_usage(root).free
+out["on_root_fs"] = os.stat(root).st_dev == os.stat("/").st_dev
+print(json.dumps(out))
+"""
+
+
 def binary_facts():
     """Per host: `--version` and SHA-256 of the binary under test and of the
-    0.1.0 binary."""
+    0.1.0 binary, the build record, the 0.1.0 archive's digests and
+    commit, and the free space of ROOT's file system."""
     facts = {}
     for h in "abc":
-        _, out, _ = ssh(h, f"{BIN} --version 2>&1 | head -1; sha256sum {BIN} 2>&1 | cut -c1-64; "
-                           f"{BIN_V010} --version 2>&1 | head -1; sha256sum {BIN_V010} 2>&1 | cut -c1-64")
-        v = (out.splitlines() + ["", "", "", ""])[:4]
-        facts[h] = {"version": v[0].strip(), "sha256": v[1].strip(), "v010_version": v[2].strip(),
-                    "v010_sha256": v[3].strip()}
+        _, out, err = ssh(h, f"python3 -I - {ROOT} {BIN} {BIN_V010} {ROOT}/v010-dl/{V010_ARCHIVE}",
+                          input=FACTS_SCRIPT)
+        try:
+            facts[h] = json.loads(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            facts[h] = {"error": redact(err)[-300:]}
     return facts
 
 
-def preflight_problems(facts, scenario, judged, expect_version):
-    """What makes the binaries unfit for the run."""
+def preflight_problems(facts, scenario, judged, expect_version, source_sha="", budget_mib=None):
+    """What makes the hosts unfit for the run: the binaries (one binary
+    under test; for a judged run its version and its build record naming
+    SOURCE_SHA; for `upgrade` the published 0.1.0, checked against the
+    archive), and the free space."""
     why = []
-    shas = {f["sha256"] for f in facts.values()}
-    if len(shas) != 1 or not re.fullmatch(r"[0-9a-f]{64}", next(iter(shas))):
+    shas = {f.get("sha256") for f in facts.values()}
+    if len(shas) != 1 or not re.fullmatch(r"[0-9a-f]{64}", next(iter(shas)) or ""):
         why.append(f"the binary under test differs between hosts or is missing: {shas}")
-    if judged:
-        for h, f in sorted(facts.items()):
+    for h, f in sorted(facts.items()):
+        if "error" in f:
+            why.append(f"host {h}: no facts ({f['error']})")
+            continue
+        if judged:
             if f["version"] != expect_version:
                 why.append(f"host {h}: `{f['version']}`, a judged run needs `{expect_version}`")
-    if scenario == "upgrade":
-        for h, f in sorted(facts.items()):
+            rec = f.get("record") or {}
+            if rec.get("source_sha") != source_sha or rec.get("binary_sha256") != f["sha256"]:
+                why.append(f"host {h}: the build record ({rec.get('source_sha')}, {str(rec.get('binary_sha256'))[:16]}) "
+                           f"does not name SOURCE_SHA {source_sha} and this binary")
+        if scenario == "upgrade":
+            if (f["archive_sha256"] != V010_ARCHIVE_SHA256 or f["archive_commit"] != V010_COMMIT
+                    or f["archive_binary_sha256"] != V010_SHA256):
+                why.append(f"host {h}: the 0.1.0 archive is missing or not the published one "
+                           f"({str(f['archive_sha256'])[:16]}, commit {f['archive_commit']}): run fetch-v010")
             if f["v010_sha256"] != V010_SHA256 or f["v010_version"] != "arca-lake 0.1.0":
                 why.append(f"host {h}: the 0.1.0 binary is not the published one ({f['v010_version']}, "
-                           f"{f['v010_sha256'][:16]})")
+                           f"{str(f['v010_sha256'])[:16]})")
+        if budget_mib is not None:
+            need = int(budget_mib * (1 << 20)) + FREE_MARGIN
+            if f["free_bytes"] < need:
+                why.append(f"host {h}: {f['free_bytes'] >> 20} MiB free under {ROOT}, needs {need >> 20} MiB "
+                           "(put budget + 5 GiB)")
+            if h == "a" and f["on_root_fs"]:
+                why.append(f"host a: {ROOT} is on the root file system, which this validation never uses")
     return why
 
 
@@ -1941,10 +2096,12 @@ def run(scenario):
     addresses()
     meta["binaries"] = binary_facts()
     problems = preflight_problems(meta["binaries"], scenario, judged,
-                                  os.environ.get("EXPECT_VERSION", "arca-lake 0.2.0"))
+                                  os.environ.get("EXPECT_VERSION", "arca-lake 0.2.0"),
+                                  os.environ.get("SOURCE_SHA", ""), PUT_BUDGET_MIB)
     if problems:
         meta["refused"] = problems
         save("meta.json", json.dumps(meta, indent=1))
+        subprocess.run([sys.executable, str(HERE / "sanitize.py"), str(OUT)])
         sys.exit("refused: " + "; ".join(problems))
     stopped = False
     first, steps = ("0-setup", MAIN) if scenario == "run" else ("U0-setup-0.1.0", UPGRADE)
@@ -1982,13 +2139,83 @@ def run(scenario):
         except Exception as e:  # noqa: BLE001
             log(f"evidence: {e}")
     finally:
-        teardown()
-        meta["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        save("meta.json", json.dumps(meta, indent=1))
-        write_md(meta)
-        subprocess.run([sys.executable, str(HERE / "sanitize.py"), str(OUT)])
+        try:
+            teardown()
+        except Exception as e:  # noqa: BLE001 - the evidence is still written and sanitized
+            meta["teardown_error"] = redact(repr(e))[-500:]
+            log(f"teardown: {meta['teardown_error']}")
+        finally:
+            meta["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            save("meta.json", json.dumps(meta, indent=1))
+            write_md(meta)
+            subprocess.run([sys.executable, str(HERE / "sanitize.py"), str(OUT)])
     for r in RESULTS:
         print(f"{r['step']}: {r['verdict']}")
+
+
+def fetch_v010():
+    """Download the published v0.1.0 archive on every host, check its
+    SHA-256 before anything reads it, and install its binary as BIN_V010
+    (read from the archive with `python3 -I`, never extracted)."""
+    dl = f"{ROOT}/v010-dl"
+    for h in "abc":
+        ssh(h, f"test -f {ROOT}/.owner && mkdir -p {dl} && cd {dl} && "
+               f"{{ test -f {V010_ARCHIVE} || {{ curl -sSfL -o {V010_ARCHIVE}.part {V010_URL} && mv {V010_ARCHIVE}.part {V010_ARCHIVE}; }}; }} && "
+               f"echo '{V010_ARCHIVE_SHA256}  {V010_ARCHIVE}' | sha256sum -c --quiet - || "
+               f"{{ rm -f {V010_ARCHIVE}; echo 'archive SHA-256 mismatch, removed' >&2; exit 1; }}", timeout=600, check=True)
+        ssh(h, f"python3 -I -c {q(INSTALL_V010)} {dl}/{V010_ARCHIVE} {BIN_V010}", check=True)
+        log(f"host {h}: 0.1.0 archive verified, binary installed")
+
+
+INSTALL_V010 = """
+import hashlib, os, sys, tarfile
+archive, dest = sys.argv[1:3]
+with tarfile.open(archive, "r:gz") as t:
+    m = next(m for m in t.getmembers() if m.isfile() and m.name.endswith("/arca-lake"))
+    data = t.extractfile(m).read()
+assert hashlib.sha256(data).hexdigest() == "%s", "not the published binary"
+with open(dest + ".new", "wb") as f:
+    f.write(data)
+os.chmod(dest + ".new", 0o755)
+os.replace(dest + ".new", dest)
+""" % V010_SHA256
+
+
+def build():
+    """Build SOURCE_SHA on host B (`cargo build --release --locked -p
+    arca-lake --features fdb` from `git archive`), write the build record
+    next to the binary, copy both to hosts A and C and check the SHA-256;
+    the target directory is removed."""
+    sha = os.environ.get("SOURCE_SHA", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        sys.exit("build: SOURCE_SHA must be a full commit id")
+    d = f"{ROOT}/build-{sha[:12]}"
+    _, free, _ = ssh("b", f"test -f {ROOT}/.owner && df -B1 --output=avail {ROOT} | tail -1", check=True)
+    if int(free) < 10 << 30:
+        sys.exit("build: less than 10 GiB free on host B")
+    p = subprocess.run(f"git -C {q(str(HERE.parent.parent))} archive --format=tar {sha} | "
+                       f"ssh -o BatchMode=yes {HOSTS['b']} 'rm -rf {d} && mkdir -p {d}/src && tar -xf - -C {d}/src'",
+                       shell=True, timeout=600)
+    if p.returncode != 0:
+        sys.exit("build: source copy failed")
+    cmd = "cargo build --release --locked -p arca-lake --features fdb"
+    ssh("b", f"cd {d}/src && export PATH=$HOME/.cargo/bin:$PATH && CARGO_TARGET_DIR={d}/target timeout 5400 nice "
+             f"{cmd} > {d}/build.log 2>&1", timeout=5500, check=True)
+    _, out, _ = ssh("b", f"cp {d}/target/release/arca-lake {BIN}.new && mv {BIN}.new {BIN} && "
+                         f"sha256sum {BIN} | cut -c1-64 && {BIN} --version && $HOME/.cargo/bin/rustc -V && "
+                         f"rm -rf {d}/target", check=True)
+    bsha, version, rustc = out.strip().splitlines()[:3]
+    record = {"source_sha": sha, "binary_sha256": bsha, "version": version, "command": cmd, "rustc": rustc,
+              "built_on": "host B", "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    ssh("b", f"cat > {ROOT}/bin/build-record.json", check=True, input=json.dumps(record, indent=1) + "\n")
+    for h in "ac":
+        p = subprocess.run(f"ssh -o BatchMode=yes {HOSTS['b']} 'tar -cf - -C {ROOT} bin/arca-lake bin/build-record.json' | "
+                           f"ssh -o BatchMode=yes {HOSTS[h]} 'test -f {ROOT}/.owner && tar -xf - -C {ROOT}'",
+                           shell=True, timeout=600)
+        _, got, _ = ssh(h, f"sha256sum {BIN} | cut -c1-64")
+        if p.returncode != 0 or got.strip() != bsha:
+            sys.exit(f"build: copy to host {h} failed")
+    print(json.dumps(record))
 
 
 def main():
@@ -1997,6 +2224,12 @@ def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd in ("run", "upgrade"):
         run(cmd)
+    elif cmd == "fetch-v010":
+        OUT.mkdir(parents=True, exist_ok=True)
+        addresses()
+        fetch_v010()
+    elif cmd == "build":
+        build()
     elif cmd == "teardown":
         OUT.mkdir(parents=True, exist_ok=True)
         teardown()
