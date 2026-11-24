@@ -124,6 +124,8 @@ pub(crate) fn pass(
         .collect();
     candidates.sort_by(|a, b| dead(b).total_cmp(&dead(a)));
     let mut budget = policy.max_copy_bytes;
+    // One rollover of the active segment for the whole pass (RFC-005 §5.6).
+    let mut compaction = store.compaction_pass(candidates.len().min(policy.max_segments));
     for (i, s) in candidates.into_iter().take(policy.max_segments).enumerate() {
         if i > 0 && s.live_bytes > budget {
             break;
@@ -140,7 +142,7 @@ pub(crate) fn pass(
             continue;
         }
         budget = budget.saturating_sub(s.live_bytes);
-        match store.compact(s.segment_id) {
+        match compaction.compact(s.segment_id) {
             Ok(r) if r.no_progress => {
                 tracing::debug!(
                     segment = s.segment_id,

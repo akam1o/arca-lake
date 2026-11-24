@@ -146,6 +146,18 @@ impl SegmentWriter {
         Ok(())
     }
 
+    /// Cut the file back to [`Self::end`] and sync it: removes the bytes of
+    /// a failed or partial append, which would otherwise read as a torn
+    /// record in a segment that is no longer the last one.
+    pub fn trim_to_end(&self) -> Result<()> {
+        faults::guard(&faults::IoOp::SetLen {
+            segment: self.header.segment_id,
+        })?;
+        self.file.set_len(self.end)?;
+        faults::sync_all(&self.file, "segment")?;
+        Ok(())
+    }
+
     /// Read-only handle to the same file for serving reads.
     pub fn reader(&self) -> Result<File> {
         Ok(self.file.try_clone()?)

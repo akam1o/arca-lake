@@ -252,12 +252,47 @@ pub struct SegmentStats {
 pub enum CompactionStep {
     /// A record was copied to the output segment (count so far).
     Copied(usize),
+    /// The output is synced and the active segment is numbered above it;
+    /// the output does not have its segment name yet.
+    BeforePublish,
     /// The output segment is durable.
     Synced,
     /// The index points at the output segment.
     IndexSwapped,
     /// The source segment file has been unlinked.
     Unlinked,
+}
+
+/// A compaction pass ([`Store::compaction_pass`]).
+#[derive(Debug)]
+pub struct CompactionPass<'a> {
+    store: &'a Store,
+    ids: std::ops::Range<u64>,
+}
+
+impl CompactionPass<'_> {
+    /// [`Store::compact`] with the pass's next reserved output id.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::compact`].
+    pub fn compact(&mut self, segment_id: u64) -> Result<CompactionReport> {
+        self.compact_with_hooks(segment_id, &mut |_| Ok(()))
+    }
+
+    /// [`Store::compact_with_hooks`] with the pass's next reserved output id.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::compact_with_hooks`].
+    pub fn compact_with_hooks(
+        &mut self,
+        segment_id: u64,
+        hooks: &mut dyn FnMut(CompactionStep) -> Result<()>,
+    ) -> Result<CompactionReport> {
+        let id = self.ids.next();
+        self.store.compact_reserved(segment_id, id, hooks)
+    }
 }
 
 /// Compaction result.
@@ -921,10 +956,9 @@ impl Store {
         let append_started = Instant::now();
         if w.active.end() >= self.cfg.segment_max_bytes || w.poisoned {
             let t = Instant::now();
-            // A poisoned segment is sealed without syncing it again: its
-            // last acknowledged position was synced before the failure.
+            // A poisoned segment is cut back to its last good record and
+            // sealed (`rollover`).
             self.rollover(&mut w)?;
-            w.poisoned = false;
             self.timings.rollover.observe(t.elapsed());
         }
         let sequence = w.next_sequence;
@@ -1032,19 +1066,42 @@ impl Store {
     }
 
     /// Seal the active segment (making it fully durable) and start a new one.
+    ///
+    /// After a failed append the segment is first cut back to its last
+    /// good record: the torn bytes would otherwise stay in a segment that
+    /// is no longer the last one, where recovery cannot tell them from
+    /// damage. If that fails the writer stays poisoned and the next append
+    /// tries again. A segment that holds no record is removed instead of
+    /// sealed.
+    ///
+    /// A rollover that fails leaves the writer poisoned: the next append
+    /// rolls over again before it writes anything, so that a new segment
+    /// left behind by the failure (one that could not be removed) is never
+    /// above an active segment that takes appends.
     fn rollover(&self, w: &mut Writer) -> Result<()> {
-        w.active.sync()?;
+        let r = self.try_rollover(w);
+        if r.is_err() {
+            w.poisoned = true;
+        }
+        r
+    }
+
+    fn try_rollover(&self, w: &mut Writer) -> Result<()> {
+        if w.poisoned {
+            w.active.trim_to_end()?;
+        } else {
+            w.active.sync()?;
+        }
         let old_id = w.active.header().segment_id;
+        let old_empty = w.active_min_seq.is_none();
         // Consume the id first: a creation that fails after the file exists
         // (a write or fsync error) must not make every later rollover try
         // the same name again (`EEXIST` forever, found by the soak test).
         let id = w.next_segment_id;
         w.next_segment_id = id + 1;
-        let new = Self::create_segment(&self.cfg, self.device_id, id, self.format_write())?;
-        self.written
-            .rollover
-            .fetch_add(new.end(), std::sync::atomic::Ordering::Relaxed);
-        // Every sequence the new segment can take stays below the bound.
+        // Every sequence the new segment can take stays below the bound;
+        // written before the segment exists, so that nothing can fail
+        // between its creation and its taking over.
         write_sequence_bound(
             &self.cfg.dir,
             reserve(w.next_sequence, sequences_per_segment(&self.cfg))?,
@@ -1054,16 +1111,44 @@ impl Store {
             std::fs::metadata(self.cfg.dir.join(SEQUENCE_BOUND_FILE)).map_or(0, |m| m.len()),
             std::sync::atomic::Ordering::Relaxed,
         );
+        let new = Self::create_segment(&self.cfg, self.device_id, id, self.format_write())?;
+        let reader = match new.reader() {
+            Ok(r) => r,
+            Err(e) => {
+                // Not above the active segment if it can be helped (the
+                // writer is poisoned either way).
+                drop(new);
+                if std::fs::remove_file(segment_path(&self.cfg.dir, id)).is_ok()
+                    && let Ok(dir) = File::open(&self.cfg.dir)
+                {
+                    let _ = faults::sync_all(&dir, "dir");
+                }
+                return Err(e);
+            }
+        };
+        self.written
+            .rollover
+            .fetch_add(new.end(), std::sync::atomic::Ordering::Relaxed);
         let start = (id, new.end());
+        // Best effort: a failed unlink leaves an empty sealed segment,
+        // which reads as clean and is compacted away.
+        let old_removed = old_empty
+            && faults::guard(&faults::IoOp::Remove { segment: old_id }).is_ok()
+            && std::fs::remove_file(segment_path(&self.cfg.dir, old_id)).is_ok();
+        if old_removed && let Ok(dir) = File::open(&self.cfg.dir) {
+            let _ = faults::sync_all(&dir, "dir");
+        }
         {
             let mut readers = self.readers.write().unwrap_or_else(PoisonError::into_inner);
-            if let Some(old) = readers.get_mut(&old_id) {
+            if old_removed {
+                readers.remove(&old_id);
+            } else if let Some(old) = readers.get_mut(&old_id) {
                 old.min_seq = w.active_min_seq;
             }
             readers.insert(
                 id,
                 SegmentInfo {
-                    file: new.reader()?,
+                    file: reader,
                     header: *new.header(),
                     min_seq: None,
                 },
@@ -1080,6 +1165,7 @@ impl Store {
         }
         w.active = new;
         w.active_min_seq = None;
+        w.poisoned = false;
         Ok(())
     }
 
@@ -1694,7 +1780,32 @@ impl Store {
         segment_id: u64,
         hooks: &mut dyn FnMut(CompactionStep) -> Result<()>,
     ) -> Result<CompactionReport> {
-        let mut output_id = None;
+        self.compact_reserved(segment_id, None, hooks)
+    }
+
+    /// Start a pass of up to `outputs` compactions: their output ids are
+    /// reserved together now, so that the first output to be published
+    /// rolls the active segment over past all of them and the others need
+    /// no rollover (one sealed segment and one writer pause per pass, not
+    /// per output). More compactions than reserved take ids one at a time.
+    #[must_use]
+    pub fn compaction_pass(&self, outputs: usize) -> CompactionPass<'_> {
+        let mut w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        let first = w.next_segment_id;
+        w.next_segment_id += outputs as u64;
+        CompactionPass {
+            store: self,
+            ids: first..first + outputs as u64,
+        }
+    }
+
+    fn compact_reserved(
+        &self,
+        segment_id: u64,
+        preset: Option<u64>,
+        hooks: &mut dyn FnMut(CompactionStep) -> Result<()>,
+    ) -> Result<CompactionReport> {
+        let mut output_id = preset;
         let r = self.compact_into(segment_id, hooks, &mut output_id);
         // An output not yet published (renamed) is nobody's: removed now
         // rather than at the next open (Phase 3.9 review), so repeated
@@ -1719,7 +1830,7 @@ impl Store {
         hooks: &mut dyn FnMut(CompactionStep) -> Result<()>,
         reserved: &mut Option<u64>,
     ) -> Result<CompactionReport> {
-        // Reserve an output ID.
+        // Reserve an output ID (unless the pass reserved one).
         let output_id = {
             let mut w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
             if w.active.header().segment_id == segment_id {
@@ -1727,9 +1838,13 @@ impl Store {
                     "cannot compact the active segment".into(),
                 ));
             }
-            let id = w.next_segment_id;
-            w.next_segment_id += 1;
-            id
+            if let Some(id) = *reserved {
+                id
+            } else {
+                let id = w.next_segment_id;
+                w.next_segment_id += 1;
+                id
+            }
         };
         *reserved = Some(output_id);
 
@@ -1765,7 +1880,10 @@ impl Store {
         // into an identical new segment, every pass (soak test): leave it,
         // and let `segment_stats` mark it blocked until that changes.
         let mut kept_keys = Vec::new();
+        // An empty clean segment (a rollover that could not unlink it)
+        // is simply removed.
         let progress = !scan.damaged.is_empty()
+            || (scan.records.is_empty() && scan.end == ScanEnd::Clean)
             || scan.records.iter().any(|r| {
                 let p = r.header.prefix();
                 if p.is_tombstone() {
@@ -1914,7 +2032,20 @@ impl Store {
         }
         if let Some(out) = &output {
             out.sync()?;
-            out.publish(&self.cfg.dir)?;
+            {
+                // The active segment stays the last one (RFC-005 §5.3): a
+                // torn append to it is a torn tail only there. Sealed (and
+                // synced) first, under the writer lock so that no append is
+                // half-written meanwhile; then the output gets its name.
+                let mut w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+                if w.active.header().segment_id < output_id {
+                    let t = Instant::now();
+                    self.rollover(&mut w)?;
+                    self.timings.rollover.observe(t.elapsed());
+                }
+                hooks(CompactionStep::BeforePublish)?;
+                out.publish(&self.cfg.dir)?;
+            }
             report.output_segment_id = Some(output_id);
             self.readers
                 .write()
@@ -2027,6 +2158,9 @@ fn read_sequence_bound(dir: &Path) -> (u64, bool) {
 
 /// Replace the bound durably (write, sync, rename, sync the directory).
 fn write_sequence_bound(dir: &Path, bound: u64, epoch: u64) -> Result<()> {
+    faults::guard(&faults::IoOp::SideFile {
+        name: SEQUENCE_BOUND_FILE,
+    })?;
     let tmp = dir.join(format!("{SEQUENCE_BOUND_FILE}.tmp"));
     {
         let f = File::create(&tmp)?;
