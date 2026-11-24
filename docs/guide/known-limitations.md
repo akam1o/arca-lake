@@ -41,17 +41,20 @@ unknown outcome read as one of its candidates (the earlier body, the new
 one, or absent) once FoundationDB returned
 ([report](../verification/0.1.0-three-host-validation.md)).
 
-## Open risks to plan for in 0.1.0
+## Open risks to plan for in 0.2.0
 
-0.1.0 is experimental and not production-ready. Each item links its
+0.2.0 is experimental and not production-ready. Each item links its
 entry in the [risk register](../architecture/risks.md).
 
-- R-117 (residual): a node that has adopted an incarnation refuses
-  shard writes of another one (0.1.0), but still accepts a write that
-  carries no incarnation, and a node that has adopted none yet accepts
-  any. Use one CA or trust domain per cluster; plaintext is for tests
+- R-117 (residual, ADR-0037): a node refuses shard writes of another
+  incarnation or for another node, and a node that has adopted none yet
+  refuses every write. Until a cluster upgraded from 0.1.0 is finalized
+  to schema 5, writes carrying no incarnation or naming no node are
+  still accepted (counted in `arca_node_writes_unproven_total`); a new
+  0.2.0 cluster is strict from its first write. The incarnation is not a
+  secret: use one CA or trust domain per cluster; plaintext is for tests
   only.
-- R-119 (residual, fixed in 0.2.0 preparation, ADR-0038): groups
+- R-119 (residual, fixed in 0.2.0, ADR-0038): groups
   created by 0.1.0 have no recorded failure domain and move no member
   until `admin group set-failure-domain` records it; on a store upgraded
   from 0.1.0, while the metadata schema is below 5 (a new 0.2.0 store
@@ -60,13 +63,13 @@ entry in the [risk register](../architecture/risks.md).
   `--failure-domain` only (reported as degraded, re-checked by the next
   0.2.0 leader); groups that already break their domain are reported
   (`admin group check`), not moved automatically.
-- R-118 (residual, fixed in 0.2.0 preparation): a generation with a
+- R-118 (residual, fixed in 0.2.0): a generation with a
   chunk that cannot move is retried by every pass in which it qualifies;
   a partly promoted generation whose reads age out stays split over two
   tiers until it is demoted (readable throughout).
 - R-111: small objects cost far more node capacity than their payload
   (about 24 KiB for a 1 KiB object with three replicas).
-- R-112 (reduced in 0.2.0 preparation, ADR-0041): with 64 writers on
+- R-112 (reduced in 0.2.0, ADR-0041): with 64 writers on
   one key through four gateways, under 1 % of PUTs are answered `503
   SlowDown` (55 % in 0.1.0), but each write waits for the ones ahead of
   it (acknowledged p50 about 450 ms, p99 about 1.7 s, measured); a wait

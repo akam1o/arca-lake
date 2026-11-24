@@ -20,10 +20,11 @@ disclosure timeline, and credit you if you wish.
 
 ## Supported versions
 
-0.1.0 is the first experimental release.
+0.2.0 is the second experimental release (0.1.0 was the first).
 
 | Version | Status |
 | --- | --- |
+| 0.2.x | Experimental: security fixes on a best-effort basis, no guaranteed timeline |
 | 0.1.x | Experimental: security fixes on a best-effort basis, no guaranteed timeline |
 | `main` | Development; fixes land here first |
 

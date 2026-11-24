@@ -5,8 +5,9 @@ written in Rust. It combines stateless S3 gateways, FoundationDB metadata,
 an append-only storage engine, erasure coding or replication, and native
 multi-tier storage.
 
-> **Status: experimental, not production-ready.** 0.1.0 is the first
-> experimental release ([0.1.0 release](https://github.com/akam1o/arca-lake/releases/tag/v0.1.0)), for evaluation
+> **Status: experimental, not production-ready.** 0.2.0 is the second
+> experimental release (in preparation; the latest published one is the
+> [0.1.0 release](https://github.com/akam1o/arca-lake/releases/tag/v0.1.0)), for evaluation
 > and development. The code is under active development; it has been verified by
 > automated tests and short, dense load and fault-injection runs on
 > virtual machines, **not** by long-duration operation or on physical
@@ -31,8 +32,8 @@ not imply production readiness or support for every S3 API.
 
 The [quick start](docs/guide/quick-start.md) walks through a local S3 smoke
 test and a development cluster on one Linux host, including an AWS CLI
-round trip and cleanup. Use the 0.1.0 Linux x86_64 binary archive once
-published, or build from source; no container image or crates.io package
+round trip and cleanup. Use the 0.2.0 Linux x86_64 binary archive once
+published (or the published 0.1.0 one), or build from source; no container image or crates.io package
 is published.
 
 ```sh
