@@ -329,12 +329,21 @@ class FakeHosts:
 
     def __init__(self, clock, build):
         self.clock, self.build, self.cmds, self.signals = clock, build, [], []
+        self.down = None  # (h, cmd) -> bool: that call finds the host unreachable
 
     def ssh(self, h, cmd, timeout=120, check=False, stdin=None):
         self.cmds.append((h, cmd))
+        if self.down and self.down(h, cmd):
+            raise ab.HostUnreachable(f"host {h} unreachable: ssh: connect to host port 22: Network is unreachable")
         t = f"{self.clock.now:.6f}"
         ok = lambda out="": (0, out, "")  # noqa: E731
         if "nohup env" in cmd:
+            return ok("")
+        if "build-record.json" in cmd and cmd.startswith("cat"):
+            return ok(json.dumps(self.build))
+        if "df -B1" in cmd:
+            return ok(f"{100 * GiB} /mnt/x\n")
+        if cmd == "true":
             return ok("")
         if "hostname -I" in cmd:
             return ok({"a": "192.0.2.1", "b": "192.0.2.2", "c": "192.0.2.3"}[h] + "\n")
@@ -413,7 +422,7 @@ class DryRun(unittest.TestCase):
                 import subprocess
                 return subprocess.CompletedProcess(a, 0, b"" if not k.get("text") else "", "")
         ab.subprocess = Sub
-        ab.HOSTS.update({"a": "ha", "b": "hb", "c": "hc"})
+        ab.HOSTS.update({"a": "target-of-a", "b": "target-of-b", "c": "target-of-c"})
         ab.addresses()
 
     def tearDown(self):
@@ -511,6 +520,114 @@ class Control(unittest.TestCase):
         self.assertFalse([t for t in j["targets"] if t["scenario"] in ("retry", "fdbstall", "gwkill")])
         recs[0]["metrics"]["unknown"] = 1  # an off run: the control judges every run
         self.assertEqual(cb.judge(recs)["verdict"], "not adopted")
+
+
+class Unreachable(unittest.TestCase):
+    """A host that cannot be reached stops the campaign (plan §10
+    amendment)."""
+
+    def test_ssh_tells_an_unreachable_host_from_a_failing_command(self):
+        import subprocess
+        saved = ab.subprocess.run
+        try:
+            for rc, err, raised in ((255, "ssh: connect to host x port 22: Network is unreachable", True),
+                                    (255, "ssh: connect to host x port 22: Operation timed out", True),
+                                    (255, "some remote command exited 255", False),
+                                    (1, "Network is unreachable", False)):
+                ab.subprocess.run = lambda *a, rc=rc, err=err, **k: subprocess.CompletedProcess(a, rc, "", err)
+                if raised:
+                    with self.assertRaises(ab.HostUnreachable):
+                        ab.ssh("a", "date")
+                else:
+                    self.assertEqual(ab.ssh("a", "date")[0], rc)
+        finally:
+            ab.subprocess.run = saved
+
+    def test_runs_that_never_measured_are_not_run(self):
+        base = valid_record()
+        self.assertFalse(ab.not_run(base))
+        new = dict(base, aborted="HostUnreachable(...)", host_unreachable=True, load_started=False)
+        self.assertTrue(ab.not_run(new))
+        self.assertFalse(ab.not_run(dict(new, load_started=True)), "unreachable after the load started: invalid")
+        self.assertFalse(ab.not_run(dict(new, host_unreachable=False)), "another abort: invalid")
+        # Records written before the fields existed (the control's runs 10-30).
+        old = {"run_id": "r10", "arm": "off", "scenario": "unv", "metrics": {},
+               "aborted": "RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: "
+                          "Network is unreachable')"}
+        self.assertTrue(ab.not_run(old))
+        run9 = dict(old, fdb_before={"healthy": True}, metrics={"puts": 10})
+        self.assertFalse(ab.not_run(run9))
+
+    def test_resume_reschedules_runs_not_run_and_counts_repeats(self):
+        sched = ab.schedule()
+        recs = []
+        for i, item in enumerate(sched[:10]):
+            r = {"run_id": f"r{i:02d}", **item, "invalid": False, "not_run": i >= 8, "metrics": {}}
+            recs.append(r)
+        recs.append({"run_id": "r10", "round": "repeat", "arm": "tag", "scenario": "unv", "invalid": True,
+                     "not_run": False, "metrics": {}})
+        recs.append({"run_id": "r11", "round": "repeat", "arm": "tag", "scenario": "ver", "invalid": False,
+                     "not_run": True, "metrics": {}})
+        queue, extra, idx = ab.resume_state(recs)
+        self.assertEqual(queue, sched[8:])
+        self.assertEqual(extra, {"tag/unv": 1})
+        self.assertEqual(idx, 12)
+
+    def test_the_estimate_is_the_longest_valid_run(self):
+        mk = lambda a, b, invalid=False: {"scenario": "unv", "invalid": invalid, "not_run": False,  # noqa: E731
+                                          "started": f"2026-11-24T07:{a}+0900", "finished": f"2026-11-24T07:{b}+0900"}
+        self.assertEqual(ab.estimate_s([], "perf"), ab.EST_RUN_S["perf"])
+        self.assertEqual(ab.estimate_s([mk("00:00", "05:00"), mk("10:00", "16:40"),
+                                        mk("20:00", "50:00", invalid=True)], "perf"), 400)
+
+
+class CampaignStops(DryRun):
+    def campaign(self, down):
+        self.hosts.down = down
+        ab.campaign()
+        return sorted(p.name for p in (Path(self.tmp.name) / "runs").glob("*.json"))
+
+    def meta(self):
+        return json.loads((Path(self.tmp.name) / "meta.json").read_text())
+
+    def test_unreachable_before_a_run_starts_no_run(self):
+        # Reachable for the first run, then host A is gone.
+        state = {"runs": 0}
+
+        def down(h, cmd):
+            if "--mode check" in cmd:
+                state["runs"] += 1
+            return h == "a" and cmd == "true" and state["runs"] >= 1
+        files = self.campaign(down)
+        self.assertEqual(len(files), 1)
+        self.assertIn("host unreachable before a run", self.meta()["stopped"])
+
+    def test_unreachable_during_setup_is_not_run_and_stops(self):
+        state = {"runs": 0}
+
+        def down(h, cmd):
+            if "--mode check" in cmd:
+                state["runs"] += 1
+            return h == "a" and "fdbserver" in cmd and state["runs"] >= 1
+        files = self.campaign(down)
+        self.assertEqual(len(files), 2)
+        r = json.loads((Path(self.tmp.name) / "runs" / files[1]).read_text())
+        self.assertTrue(r["not_run"] and r["host_unreachable"] and not r["load_started"])
+        self.assertIn("host unreachable during run", self.meta()["stopped"])
+        self.assertEqual(ab.judge(ab.counted(ab.load_records(self.tmp.name)))["cells"]["tag/unv"]["invalid_runs"], 0)
+
+    def test_unreachable_after_the_load_is_invalid_and_stops(self):
+        gone = {"a": False}
+
+        def down(h, cmd):
+            # Host A is lost at the scrub and stays lost (the teardown too).
+            gone["a"] = gone["a"] or (h == "a" and "integrity scrub" in cmd)
+            return h == "a" and gone["a"]
+        files = self.campaign(down)
+        self.assertEqual(len(files), 1)
+        r = json.loads((Path(self.tmp.name) / "runs" / files[0]).read_text())
+        self.assertTrue(r["invalid"] and not r["not_run"] and r["load_started"])
+        self.assertTrue(r["teardown_incomplete"])
 
 
 class Redaction(unittest.TestCase):

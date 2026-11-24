@@ -1,0 +1,23 @@
+{
+ "aborted": "RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\\n')",
+ "arm": "on",
+ "binaries_match": false,
+ "commit": "d7df11062b7ceeb0e3ce7c659de7bffc09d57778",
+ "correct": false,
+ "finished": "2026-11-24T08:54:33+0900",
+ "invalid": true,
+ "invalid_reasons": [
+  "run aborted: RuntimeError('host a rc 255: date +%s.%N: ssh: connect to host <host-a> port 22: Network is unreachable\\n')",
+  "a binary's SHA-256 does not match its build record",
+  "FoundationDB not healthy before the run",
+  "the check did not complete",
+  "the scrub did not complete"
+ ],
+ "label": "queue-on (the same binary, default gateways)",
+ "metrics": {},
+ "round": "repeat",
+ "run_id": "hkc20261124-26-unv-on",
+ "scenario": "unv",
+ "sha256": "738eba64c6976800792838ab53f920f908ac2bea7fb0bf6f2c1d46086b2f922b",
+ "started": "2026-11-24T08:53:27+0900"
+}

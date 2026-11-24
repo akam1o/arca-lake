@@ -7,10 +7,13 @@ four gateways SlowDown 55 % → 0.5–0.8 %, acknowledged PUT/s 1.6–1.7 ×;
 acknowledged PUTs on one key wait longer (p50 about 200 → 450 ms, p99
 about 0.8 → 1.7 s); 16 keys within 3–6 % (0.97 × PUT/s, 1.06 × p99).
 That comparison is of the tag rebuild against the whole candidate, which
-carries other 0.2.0 changes too: the gain is attributed to the queue by
-mechanism only, the 16-key differences not at all, until the
-pre-registered on/off control in one binary (plan §10) is reported. No
-record, key, protocol or format change.
+carries other 0.2.0 changes too. The pre-registered on/off control in
+one binary (plan §10, [results §6](../verification/0.2.0-hot-key-results.md))
+met every target and attributes the single-key gain to the queue
+(SlowDown 54 % → 0.5–2.6 %, acknowledged PUT/s 1.34–1.59 ×, the same
+latency cost); with 16 keys queue-on is 1.05 × queue-off, so the 0.97 ×
+of the first comparison is not the queue's. No record, key, protocol or
+format change.
 
 ## 1. Problem
 
