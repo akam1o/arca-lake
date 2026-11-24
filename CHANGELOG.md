@@ -115,6 +115,12 @@ break compatibility).
 
 ### Fixed
 
+- A PUT or UploadPart that fails while its body is streamed (a refused
+  body, a failed chunk) waits for its chunk placements in flight before
+  it is answered, instead of cancelling them: a shard already sent could
+  be stored after the error reply, after the write's abort and GC. Such
+  shards are still reclaimed by node reconciliation; none appears after
+  the reply now.
 - `Content-MD5` is verified. Before, a body that did not match it was
   stored and answered `200` (a false success for a client that asked for
   the check). PutObject and UploadPart (plain and `aws-chunked`, any

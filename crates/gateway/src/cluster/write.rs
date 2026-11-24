@@ -607,12 +607,40 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
     /// Stream `body` into chunks of `generation`: encode, place, append
     /// manifest entries; compute MD5 and the requested checksum in the same
     /// pass. Does not commit.
-    #[allow(clippy::too_many_lines)]
     async fn stream_generation(
         &self,
         generation: GenId,
         body: &mut StreamingBlob,
         algorithm: Option<ChecksumAlgorithm>,
+    ) -> Result<Streamed, WriteFailure> {
+        // Placements in flight; dropped (if this future is dropped) they are
+        // aborted, and a cancelled shard stream stores nothing (ADR-0011).
+        let mut pipeline = PipelineGuard(std::collections::VecDeque::new());
+        let result = self
+            .stream_into(generation, body, algorithm, &mut pipeline)
+            .await;
+        if result.is_err() {
+            // A failed write (a refused body, a failed chunk) lets the
+            // placements in flight finish before it is answered, as a
+            // successful one waits for them: aborted, a shard stream already
+            // sent can still be stored after the reply and after the
+            // caller's abort and GC, an orphan only node reconciliation
+            // finds (RFC-004 §5.10).
+            while let Some((_, _, h)) = pipeline.pop_front() {
+                let _ = h.await;
+            }
+        }
+        result
+    }
+
+    /// The body of [`Self::stream_generation`], placing into `pipeline`.
+    #[allow(clippy::too_many_lines)]
+    async fn stream_into(
+        &self,
+        generation: GenId,
+        body: &mut StreamingBlob,
+        algorithm: Option<ChecksumAlgorithm>,
+        pipeline: &mut PipelineGuard,
     ) -> Result<Streamed, WriteFailure> {
         let max_chunk = usize::try_from(self.cfg.profile.max_chunk_bytes).unwrap_or(usize::MAX);
         let mut md5 = Md5::new();
@@ -623,10 +651,6 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         let mut batch: Vec<(u32, ChunkRecord)> = Vec::new();
         let mut buf = BytesMut::with_capacity(max_chunk.min(8 << 20));
         let mut finished = false;
-        // Placements in flight; dropped (on any early return or if this
-        // future is dropped) they are aborted, and a cancelled shard stream
-        // stores nothing (ADR-0011).
-        let mut pipeline = PipelineGuard(std::collections::VecDeque::new());
 
         // Read the first chunk to learn whether this is a small object.
         let mut first = true;
@@ -703,7 +727,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             index += 1;
             if pipeline.len() >= self.cfg.write_pipeline.max(1) {
                 self.collect_placement(
-                    &mut pipeline,
+                    pipeline,
                     &mut batch,
                     generation,
                     lease_ms,
@@ -731,7 +755,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         }
         while !pipeline.is_empty() {
             self.collect_placement(
-                &mut pipeline,
+                pipeline,
                 &mut batch,
                 generation,
                 lease_ms,
