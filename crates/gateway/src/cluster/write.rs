@@ -130,35 +130,35 @@ struct Placed {
 }
 
 /// Chunk placements in flight: `(index, started, task)` in chunk order.
-type Pipeline = std::collections::VecDeque<(
-    u32,
-    std::time::Instant,
-    tokio::task::JoinHandle<Result<Placed, S3Error>>,
-)>;
+/// Dropped (on an early return, or with the request's future), each is
+/// aborted, and a cancelled shard stream stores nothing (ADR-0011).
+type Pipeline = std::collections::VecDeque<(u32, std::time::Instant, Placement)>;
 
-/// Owns the pipeline and aborts whatever is still in flight on drop.
-struct PipelineGuard(Pipeline);
+/// A chunk placement task, aborted when dropped, also while it is being
+/// awaited (a dropped `JoinHandle` would detach the task and let it keep
+/// writing shards).
+struct Placement(tokio::task::JoinHandle<Result<Placed, S3Error>>);
 
-impl Drop for PipelineGuard {
+impl Drop for Placement {
     fn drop(&mut self) {
-        for (_, _, h) in &self.0 {
-            h.abort();
-        }
+        self.0.abort();
     }
 }
 
-impl std::ops::Deref for PipelineGuard {
-    type Target = Pipeline;
-    fn deref(&self) -> &Pipeline {
-        &self.0
+impl Future for Placement {
+    type Output = Result<Result<Placed, S3Error>, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
     }
 }
 
-impl std::ops::DerefMut for PipelineGuard {
-    fn deref_mut(&mut self) -> &mut Pipeline {
-        &mut self.0
-    }
-}
+/// The longest a failed write waits for its placements in flight before
+/// it aborts them and answers (see [`ClusterBackend::stream_generation`]).
+pub const FAILED_WRITE_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Decrements a gauge when dropped (PUTs in flight).
 struct InFlightGuard<'a>(&'a std::sync::atomic::AtomicU64);
@@ -613,21 +613,32 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         body: &mut StreamingBlob,
         algorithm: Option<ChecksumAlgorithm>,
     ) -> Result<Streamed, WriteFailure> {
-        // Placements in flight; dropped (if this future is dropped) they are
-        // aborted, and a cancelled shard stream stores nothing (ADR-0011).
-        let mut pipeline = PipelineGuard(std::collections::VecDeque::new());
+        let mut pipeline = Pipeline::new();
         let result = self
             .stream_into(generation, body, algorithm, &mut pipeline)
             .await;
-        if result.is_err() {
+        if result.is_err() && !pipeline.is_empty() {
             // A failed write (a refused body, a failed chunk) lets the
             // placements in flight finish before it is answered, as a
             // successful one waits for them: aborted, a shard stream already
             // sent can still be stored after the reply and after the
             // caller's abort and GC, an orphan only node reconciliation
-            // finds (RFC-004 §5.10).
-            while let Some((_, _, h)) = pipeline.pop_front() {
-                let _ = h.await;
+            // finds (RFC-004 §5.10). Bounded: a refusal the client caused
+            // is not held by a slow node. The bound is at most a third of
+            // the lease, which no renewal extends meanwhile: streaming
+            // renews it every third, so it cannot expire while settling.
+            let deadline = self.cfg.failed_write_settle.min(self.cfg.lease / 3);
+            let settle = async {
+                while let Some((_, _, p)) = pipeline.pop_front() {
+                    let _ = p.await;
+                }
+            };
+            if tokio::time::timeout(deadline, settle).await.is_err() {
+                // What is left is aborted as it is dropped (the old
+                // behaviour); reconciliation reclaims what it stored.
+                self.put_stats
+                    .settle_timeouts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
         result
@@ -640,7 +651,7 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
         generation: GenId,
         body: &mut StreamingBlob,
         algorithm: Option<ChecksumAlgorithm>,
-        pipeline: &mut PipelineGuard,
+        pipeline: &mut Pipeline,
     ) -> Result<Streamed, WriteFailure> {
         let max_chunk = usize::try_from(self.cfg.profile.max_chunk_bytes).unwrap_or(usize::MAX);
         let mut md5 = Md5::new();
@@ -716,11 +727,11 @@ impl<S: KvStore + 'static> ClusterBackend<S> {
             let placing = {
                 let backend = self.clone();
                 let offset = size;
-                tokio::spawn(async move {
+                Placement(tokio::spawn(async move {
                     backend
                         .place_chunk(generation, index, chunk, offset, small)
                         .await
-                })
+                }))
             };
             pipeline.push_back((index, std::time::Instant::now(), placing));
             size += chunk_len as u64;
