@@ -1710,6 +1710,7 @@ async fn run_gateway(args: GatewayArgs) -> ExitCode {
                 populations_per_node: args.cache.cache_populations_per_node,
                 write_pipeline: args.write_pipeline,
                 multipart_min_part_bytes: args.multipart_min_part_bytes,
+                failed_write_settle: arca_lake_gateway::cluster::FAILED_WRITE_SETTLE,
                 process_id: format!("gateway@{}", args.listen),
                 heartbeat: Some(Duration::from_secs(30)),
                 admission_without_controller: false,
@@ -5713,6 +5714,11 @@ fn render_put_stats(out: &mut String, p: &arca_lake_gateway::cluster::PutStatsSn
         out,
         "# TYPE arca_gateway_put_in_flight gauge\narca_gateway_put_in_flight {}",
         p.in_flight
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE arca_gateway_refused_write_settle_timeouts_total counter\narca_gateway_refused_write_settle_timeouts_total {}",
+        p.settle_timeouts
     );
     let phases = [
         ("body_read", &p.body_read),

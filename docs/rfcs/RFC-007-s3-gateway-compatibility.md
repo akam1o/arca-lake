@@ -594,7 +594,16 @@ measured in Phase 3.1).
   already placed for chunks not yet recorded in the generation are
   reclaimed by node reconciliation (RFC-004 §5.10), not by the abort.
   Deleting them at abort time would free the space sooner; no change
-  for now.
+  for now. Such a write waits for its placements in flight before it is
+  answered (as a successful one does), so that none of its shards is
+  stored after the reply, for at most 5 s or a third of the lease
+  (whichever is smaller: no renewal runs meanwhile, and streaming renews
+  every third, so the lease cannot expire while it waits). A refusal the
+  client caused is so not held for long by a slow node; past the deadline
+  the placements left are aborted, as before, and counted
+  (`arca_gateway_refused_write_settle_timeouts_total`); what they store
+  is reconciliation's. A placement is aborted when its task handle is
+  dropped, also while awaited, so a dropped request stops its writes.
 
 ## 11. Acceptance criteria
 

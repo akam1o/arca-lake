@@ -115,6 +115,16 @@ break compatibility).
 
 ### Fixed
 
+- A PUT or UploadPart that fails while its body is streamed (a refused
+  body, a failed chunk) waits for its chunk placements in flight before
+  it is answered, instead of cancelling them: a shard already sent could
+  be stored after the error reply, after the write's abort and GC. Such
+  shards are still reclaimed by node reconciliation; none appears after
+  the reply now. The wait is bounded (5 s, or a third of the lease if
+  smaller); past it the placements are aborted as before and counted in
+  `arca_gateway_refused_write_settle_timeouts_total`. A request dropped
+  by its client now also aborts the placement it was waiting for, which
+  kept running before.
 - `Content-MD5` is verified. Before, a body that did not match it was
   stored and answered `200` (a false success for a client that asked for
   the check). PutObject and UploadPart (plain and `aws-chunked`, any

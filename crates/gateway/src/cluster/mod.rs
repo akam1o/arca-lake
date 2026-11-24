@@ -18,4 +18,4 @@ pub use backend::{
 };
 pub use map::ClusterMap;
 pub use popqueue::{PopQueueStats, PopQueueStatsSnapshot, PopulationQueue};
-pub use write::Committed;
+pub use write::{Committed, FAILED_WRITE_SETTLE};

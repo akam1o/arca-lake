@@ -84,6 +84,11 @@ pub struct ClusterConfig {
     /// Chunk placements of one PUT in flight at once (bounded memory:
     /// that many chunks plus their shards per PUT).
     pub write_pipeline: usize,
+    /// The longest a failed PUT or UploadPart waits for its chunk
+    /// placements in flight before it aborts them and answers (also at
+    /// most a third of `lease`); [`super::write::FAILED_WRITE_SETTLE`] by
+    /// default.
+    pub failed_write_settle: Duration,
     /// Minimum size of every multipart part but the last (AWS: 5 MiB;
     /// smaller values are a documented non-AWS extension for labs).
     pub multipart_min_part_bytes: u64,
@@ -530,6 +535,9 @@ pub struct PutStats {
     pub total: Histogram,
     /// PUTs currently in progress.
     pub in_flight: std::sync::atomic::AtomicU64,
+    /// Failed writes whose placements in flight outlasted the settle
+    /// deadline and were aborted.
+    pub settle_timeouts: std::sync::atomic::AtomicU64,
 }
 
 /// A copy of [`PutStats`].
@@ -551,6 +559,8 @@ pub struct PutStatsSnapshot {
     pub total: HistogramSnapshot,
     /// See [`PutStats::in_flight`].
     pub in_flight: u64,
+    /// See [`PutStats::settle_timeouts`].
+    pub settle_timeouts: u64,
 }
 
 impl PutStats {
@@ -566,6 +576,9 @@ impl PutStats {
             commit: self.commit.snapshot(),
             total: self.total.snapshot(),
             in_flight: self.in_flight.load(std::sync::atomic::Ordering::Relaxed),
+            settle_timeouts: self
+                .settle_timeouts
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
