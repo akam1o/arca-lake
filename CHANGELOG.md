@@ -115,6 +115,19 @@ break compatibility).
 
 ### Fixed
 
+- A write torn by a crash or a failed write (a full device, an I/O error)
+  could make the storage node report a segment as corrupt
+  (`corrupt_segments`, "record truncated", at every open from then on)
+  instead of discarding the torn bytes; affects 0.1.0. It happened when
+  a compaction had published its output under a number above the segment
+  being written, or when the store went on after the failed write in a new
+  segment. No acknowledged record was lost and the node started; the
+  segment was no longer appended to. The segment being written now
+  always has the highest number, and a failed write is cut off before its
+  segment is sealed. A segment 0.1.0 already reported this way stays
+  reported until it is compacted (recovery cannot tell it from a damaged
+  segment); its records before the torn bytes are intact. No format
+  change (RFC-005 §5.3, §5.5).
 - `x-amz-checksum-*` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) of the XML
   bodies of DeleteObjects, PutBucketPolicy, PutBucketVersioning and
   CreateBucket is verified. Before, it was ignored: a corrupted body was

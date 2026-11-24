@@ -921,10 +921,9 @@ impl Store {
         let append_started = Instant::now();
         if w.active.end() >= self.cfg.segment_max_bytes || w.poisoned {
             let t = Instant::now();
-            // A poisoned segment is sealed without syncing it again: its
-            // last acknowledged position was synced before the failure.
+            // A poisoned segment is cut back to its last good record and
+            // sealed (`rollover`).
             self.rollover(&mut w)?;
-            w.poisoned = false;
             self.timings.rollover.observe(t.elapsed());
         }
         let sequence = w.next_sequence;
@@ -1032,9 +1031,21 @@ impl Store {
     }
 
     /// Seal the active segment (making it fully durable) and start a new one.
+    ///
+    /// After a failed append the segment is first cut back to its last
+    /// good record: the torn bytes would otherwise stay in a segment that
+    /// is no longer the last one, where recovery cannot tell them from
+    /// damage. If that fails the writer stays poisoned and the next append
+    /// tries again. A segment that holds no record is removed instead of
+    /// sealed.
     fn rollover(&self, w: &mut Writer) -> Result<()> {
-        w.active.sync()?;
+        if w.poisoned {
+            w.active.trim_to_end()?;
+        } else {
+            w.active.sync()?;
+        }
         let old_id = w.active.header().segment_id;
+        let old_empty = w.active_min_seq.is_none();
         // Consume the id first: a creation that fails after the file exists
         // (a write or fsync error) must not make every later rollover try
         // the same name again (`EEXIST` forever, found by the soak test).
@@ -1055,9 +1066,19 @@ impl Store {
             std::sync::atomic::Ordering::Relaxed,
         );
         let start = (id, new.end());
+        // Best effort: a failed unlink leaves an empty sealed segment,
+        // which reads as clean and is compacted away.
+        let old_removed = old_empty
+            && faults::guard(&faults::IoOp::Remove { segment: old_id }).is_ok()
+            && std::fs::remove_file(segment_path(&self.cfg.dir, old_id)).is_ok();
+        if old_removed && let Ok(dir) = File::open(&self.cfg.dir) {
+            let _ = faults::sync_all(&dir, "dir");
+        }
         {
             let mut readers = self.readers.write().unwrap_or_else(PoisonError::into_inner);
-            if let Some(old) = readers.get_mut(&old_id) {
+            if old_removed {
+                readers.remove(&old_id);
+            } else if let Some(old) = readers.get_mut(&old_id) {
                 old.min_seq = w.active_min_seq;
             }
             readers.insert(
@@ -1080,6 +1101,7 @@ impl Store {
         }
         w.active = new;
         w.active_min_seq = None;
+        w.poisoned = false;
         Ok(())
     }
 
@@ -1765,7 +1787,10 @@ impl Store {
         // into an identical new segment, every pass (soak test): leave it,
         // and let `segment_stats` mark it blocked until that changes.
         let mut kept_keys = Vec::new();
+        // An empty clean segment (a rollover that could not unlink it)
+        // is simply removed.
         let progress = !scan.damaged.is_empty()
+            || (scan.records.is_empty() && scan.end == ScanEnd::Clean)
             || scan.records.iter().any(|r| {
                 let p = r.header.prefix();
                 if p.is_tombstone() {
@@ -1914,7 +1939,19 @@ impl Store {
         }
         if let Some(out) = &output {
             out.sync()?;
-            out.publish(&self.cfg.dir)?;
+            {
+                // The active segment stays the last one (RFC-005 §5.3): a
+                // torn append to it is a torn tail only there. Sealed (and
+                // synced) first, under the writer lock so that no append is
+                // half-written meanwhile; then the output gets its name.
+                let mut w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+                if w.active.header().segment_id < output_id {
+                    let t = Instant::now();
+                    self.rollover(&mut w)?;
+                    self.timings.rollover.observe(t.elapsed());
+                }
+                out.publish(&self.cfg.dir)?;
+            }
             report.output_segment_id = Some(output_id);
             self.readers
                 .write()
