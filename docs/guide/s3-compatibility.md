@@ -20,8 +20,10 @@ for clients:
   are serialized by FoundationDB.
 - The minimum part size is 5 MiB by default (`--multipart-min-part-bytes`).
 - `Content-MD5` is verified (`400 BadDigest` on a mismatch, `400
-  InvalidDigest` if malformed; nothing is stored). DeleteObjects does not
-  require it.
+  InvalidDigest` if malformed; nothing is stored), and so is
+  `x-amz-checksum-*` on uploads and on XML request bodies such as
+  DeleteObjects (`400 BadDigest`; `400 InvalidRequest` if malformed).
+  DeleteObjects requires neither.
 - Re-creating a bucket you own is `409 BucketAlreadyOwnedByYou` in every
   region, including us-east-1, where AWS answers `200 OK`.
 - A body that does not match its signed `x-amz-content-sha256` is `400

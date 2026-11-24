@@ -271,17 +271,14 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
             .unwrap_or(0);
         req.extensions_mut().insert(record.clone());
         let started = Instant::now();
-        let md5_header = req
-            .headers()
-            .get("content-md5")
-            .filter(|_| crate::content_md5::checked_here(req.method(), req.uri(), req.headers()))
-            .map(|v| v.to_str().unwrap_or("").to_string());
-        let md5_outcome = Arc::new(std::sync::OnceLock::new());
-        let fut = if let Some(header) = md5_header {
-            let outcome = Arc::clone(&md5_outcome);
+        let expected = crate::xml_digest::checked_here(req.method(), req.uri())
+            .and_then(|scope| crate::xml_digest::Expected::from_headers(req.headers(), scope));
+        let digest_outcome = Arc::new(std::sync::OnceLock::new());
+        let fut = if let Some(expected) = expected {
+            let outcome = Arc::clone(&digest_outcome);
             let req = req.map(move |b| {
                 let checked: s3s::stream::DynByteStream = Box::pin(
-                    crate::content_md5::Md5Checked::new(s3s::Body::from(b), &header, outcome),
+                    crate::xml_digest::DigestChecked::new(s3s::Body::from(b), expected, outcome),
                 );
                 s3s::Body::from(checked)
             });
@@ -294,9 +291,9 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Audited {
         let s3_stats = self.stats.clone();
         Box::pin(async move {
             let mut res = fut.await;
-            // A refused Content-MD5 fails the body read, which `s3s`
-            // answers `500`: answer the digest error instead.
-            if let Some(r) = md5_outcome.get()
+            // A refused digest fails the body read, which `s3s` answers
+            // `500`: answer the digest error instead.
+            if let Some(r) = digest_outcome.get()
                 && let Ok(refused) = r.error().to_http_response()
             {
                 res = Ok(refused);

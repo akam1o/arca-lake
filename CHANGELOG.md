@@ -115,6 +115,15 @@ break compatibility).
 
 ### Fixed
 
+- `x-amz-checksum-*` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) of the XML
+  bodies of DeleteObjects, PutBucketPolicy, PutBucketVersioning and
+  CreateBucket is verified. Before, it was ignored: a corrupted body was
+  applied and answered `200` (current SDKs send CRC32 on DeleteObjects
+  instead of `Content-MD5`). A mismatch is now `400 BadDigest`; a
+  malformed value, several or repeated checksum headers, an algorithm
+  header without its value or naming another algorithm, or an
+  `aws-chunked` body on these operations `400 InvalidRequest`; the
+  operation is not applied (RFC-007 §5.7).
 - A PUT or UploadPart that fails while its body is streamed (a refused
   body, a failed chunk) waits for its chunk placements in flight before
   it is answered, instead of cancelling them: a shard already sent could
