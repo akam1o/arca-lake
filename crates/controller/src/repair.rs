@@ -749,6 +749,21 @@ async fn reconstruct_member<S: KvStore>(
     report.timings.verify = verify_time;
     let mut walker = GroupWalker::new(clients, nodes, group, cursor, opts.page_size);
     let mut first_unrebuilt: Option<ControlError> = None;
+    // The cursor never passes a chunk this walk could not rebuild: from
+    // the first one on, the cursor stays where it was (the last chunk done
+    // before it), so that whatever ends the walk (its end with the chunk
+    // queued, a budget, a target failure, an epoch change), the next walk
+    // meets that chunk again. A cursor past it made the next attempt
+    // rebuild nothing, fail only its completeness check and report an
+    // unrecoverable group as temporarily blocked (it then held rebalancing
+    // and tiering) until a walk from the start met the chunk again.
+    // Once held, the cursor is persisted only when it is held (once) and
+    // when the pass ends: a transaction per later chunk would write the
+    // same value again (quadratic with small budgets). The epoch is still
+    // checked at every write (the node refuses a stale one) and by the
+    // persist at the end of the pass.
+    let mut done_up_to = cursor.unwrap_or([0; 16]);
+    let mut held_at: Option<[u8; 16]> = None;
     let class = if group.is_cache() {
         // A cache group's copies are written as cache (Phase 3.12 review):
         // the node learns its role from the class, and a repair write would
@@ -870,9 +885,12 @@ async fn reconstruct_member<S: KvStore>(
                         .await?;
                         report.unrebuilt += 1;
                         first_unrebuilt.get_or_insert(e);
-                        let t = std::time::Instant::now();
-                        persist_cursor(meta, group, index, cid).await?;
-                        report.timings.cursor += t.elapsed();
+                        if held_at.is_none() {
+                            held_at = Some(done_up_to);
+                            let t = std::time::Instant::now();
+                            persist_cursor(meta, group, index, done_up_to).await?;
+                            report.timings.cursor += t.elapsed();
+                        }
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -880,9 +898,12 @@ async fn reconstruct_member<S: KvStore>(
                 let Some((bytes, how)) = rebuilt else {
                     // Deleted meanwhile (no live generation accounts for it).
                     report.skipped += 1;
-                    let t = std::time::Instant::now();
-                    persist_cursor(meta, group, index, cid).await?;
-                    report.timings.cursor += t.elapsed();
+                    if held_at.is_none() {
+                        let t = std::time::Instant::now();
+                        persist_cursor(meta, group, index, cid).await?;
+                        done_up_to = cid;
+                        report.timings.cursor += t.elapsed();
+                    }
                     continue;
                 };
                 match written {
@@ -909,9 +930,12 @@ async fn reconstruct_member<S: KvStore>(
                     }
                     None => unreachable!("a rebuilt shard is written"),
                 }
-                let t = std::time::Instant::now();
-                persist_cursor(meta, group, index, cid).await?;
-                report.timings.cursor += t.elapsed();
+                if held_at.is_none() {
+                    let t = std::time::Instant::now();
+                    persist_cursor(meta, group, index, cid).await?;
+                    done_up_to = cid;
+                    report.timings.cursor += t.elapsed();
+                }
                 match how {
                     Source::Direct => report.copied_direct += 1,
                     Source::WithFormer => report.used_former += 1,
@@ -927,19 +951,30 @@ async fn reconstruct_member<S: KvStore>(
                 .await?;
                 if opts.max_chunks > 0 && report.reconstructed >= opts.max_chunks {
                     report.budget_exhausted = true;
+                    if let Some(held) = held_at {
+                        // The epoch check of the chunks since the hold.
+                        persist_cursor(meta, group, index, held).await?;
+                    }
                     return Ok(report);
                 }
             }
         }
         if let Some(cid) = skip {
             report.skipped += 1;
-            let t = std::time::Instant::now();
-            persist_cursor(meta, group, index, cid).await?;
-            report.timings.cursor += t.elapsed();
+            if held_at.is_none() {
+                let t = std::time::Instant::now();
+                persist_cursor(meta, group, index, cid).await?;
+                done_up_to = cid;
+                report.timings.cursor += t.elapsed();
+            }
         }
         if walked_all {
             break;
         }
+    }
+    if let Some(held) = held_at {
+        // The epoch check of the chunks since the hold.
+        persist_cursor(meta, group, index, held).await?;
     }
     if let Some(e) = first_unrebuilt {
         // Its task stays queued: completeness counts the member incomplete
