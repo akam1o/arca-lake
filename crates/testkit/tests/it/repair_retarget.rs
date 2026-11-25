@@ -459,6 +459,84 @@ async fn an_unrecoverable_group_does_not_hold_drains_or_background_work() {
     c.shutdown().await;
 }
 
+/// Reproduction (R-104 (5), Phase 3.14 reporting): once a group is
+/// classified data-unrecoverable, its status stays so across its rare
+/// retries (here every 500 ms) while nothing changes: no member comes back,
+/// no shard appears. Observed: every retry reports it temporarily blocked
+/// ("completeness: 1 chunks missing") until the next attempt classifies it
+/// unrecoverable again, so the status and `arca_controller_repair_groups`
+/// alternate between the two reasons, and while it is "temporarily
+/// blocked" the group holds rebalancing and tiering.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unrecoverable_group_stays_unrecoverable_across_its_retries() {
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 2,
+        ..ClusterOptions::rs(9, 2, 1, MIB, 0)
+    })
+    .await;
+    let objects = put_objects(&c, 24, 500).await;
+    let bad = durable(c.groups().await)[0].clone();
+    let chunk = {
+        let mut found = None;
+        for (k, _) in &objects {
+            let m = c.manifest(BUCKET, k).await;
+            if let Some((_, ch)) = m
+                .chunks
+                .iter()
+                .find(|(_, ch)| ch.placement.group_id == bad.id)
+            {
+                found = Some(ch.chunk_id);
+                break;
+            }
+        }
+        found.expect("a chunk in the first group")
+    };
+    let m1 = c.node_index(&bad.members[1]).unwrap();
+    assert_eq!(c.corrupt_chunk_on_node(m1, bad.id, chunk), 1);
+    let m0 = c.node_index(&bad.members[0]).unwrap();
+    c.stop_node(m0).await;
+    let ctl = spawn(Arc::clone(&c.meta), fast("ctl-unrec-stays"))
+        .await
+        .unwrap();
+    wait_until(
+        "the unrecoverable status",
+        Duration::from_secs(60),
+        async || {
+            status(&c, bad.id)
+                .await
+                .is_some_and(|s| s.reason == RepairReason::DataUnrecoverable)
+        },
+    )
+    .await;
+    // Six retry intervals: every observation of the status says so, and
+    // the group never holds rebalancing and tiering.
+    let t = std::time::Instant::now();
+    let mut held = Vec::new();
+    while t.elapsed() < Duration::from_secs(3) {
+        let statuses = repair_liveness::statuses(c.meta.as_ref()).await.unwrap();
+        if let Some((g, why)) = repair_liveness::holding_group(&c.groups().await, &statuses)
+            && g == bad.id
+        {
+            held.push(format!("{:?}: {why}", t.elapsed()));
+        }
+        let s = status(&c, bad.id).await.unwrap();
+        assert!(
+            held.is_empty(),
+            "the unrecoverable group held background work: {held:?}"
+        );
+        assert_eq!(
+            s.reason,
+            RepairReason::DataUnrecoverable,
+            "after {:?}: {}",
+            t.elapsed(),
+            s.detail
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    ctl.shutdown().await;
+    c.shutdown().await;
+}
+
 /// R-104 (6): a leader crashes between raising the new target's epoch and
 /// committing a target change of a rebuild (the old target still answers:
 /// the change was for repeated failures). The next leader resumes the
