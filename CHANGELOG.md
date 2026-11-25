@@ -156,6 +156,15 @@ release with a supported upgrade predecessor: 0.1.0.
 
 ### Fixed
 
+- A group with a chunk no member can rebuild (data-unrecoverable) was
+  reported as temporarily blocked after each of its retries (hourly by
+  default), and for that time held rebalancing and tiering, until the next
+  attempt classified it unrecoverable again (up to the repair backoff,
+  10 minutes): the member repair left its cursor past the chunk, so the
+  retry resumed after it, rebuilt nothing and failed only its
+  completeness check. The cursor no longer passes a chunk the walk could
+  not rebuild. The status and `arca_controller_repair_groups` flipped; no
+  data was at risk. Affects 0.1.0 and the earlier 0.2.0 candidate.
 - A write torn by a crash or a failed write (a full device, an I/O error)
   could make the storage node report a segment as corrupt
   (`corrupt_segments`, "record truncated", at every open from then on)
