@@ -668,3 +668,149 @@ async fn a_new_leader_repairs_nothing_before_its_first_health_pass() {
     ctl.shutdown().await;
     c.shutdown().await;
 }
+
+/// A group of three members on four nodes with 24 chunks: the shard of
+/// the middle chunk (in walk order) damaged on member 1, member 0 lost,
+/// and a new node for it. Returns the group, the new node's index, the
+/// chunks in walk order and the bad chunk.
+async fn one_bad_chunk_mid_walk() -> (TestCluster, GroupRecord, usize, Vec<[u8; 16]>, [u8; 16]) {
+    let mut c = TestCluster::start(ClusterOptions {
+        groups: 1,
+        ..ClusterOptions::rs(4, 2, 1, 64 << 10, 0)
+    })
+    .await;
+    put_objects(&c, 6, 900).await;
+    let g = durable(c.groups().await).remove(0);
+    let m1 = c.node_index(&g.members[1]).unwrap();
+    let mut chunks: Vec<[u8; 16]> = c
+        .shard_keys(m1, g.id)
+        .into_iter()
+        .map(|k| k.chunk_id)
+        .collect();
+    chunks.sort_unstable();
+    chunks.dedup();
+    assert!(chunks.len() >= 20, "{}", chunks.len());
+    let bad = chunks[chunks.len() / 2];
+    assert_eq!(c.corrupt_chunk_on_node(m1, g.id, bad), 1);
+    let m0 = c.node_index(&g.members[0]).unwrap();
+    c.stop_node(m0).await;
+    let spare = (0..c.nodes.len())
+        .find(|i| !g.members.iter().any(|m| m.node_id == c.nodes[*i].id))
+        .unwrap();
+    (c, g, spare, chunks, bad)
+}
+
+/// What the new member holds of the walk's chunks, and the cursor.
+async fn walk_state(
+    c: &TestCluster,
+    g: &GroupRecord,
+    target: usize,
+    chunks: &[[u8; 16]],
+) -> (Vec<[u8; 16]>, Option<[u8; 16]>) {
+    let held: std::collections::BTreeSet<[u8; 16]> = c
+        .shard_keys(target, g.id)
+        .into_iter()
+        .map(|k| k.chunk_id)
+        .collect();
+    let missing = chunks
+        .iter()
+        .copied()
+        .filter(|c| !held.contains(c))
+        .collect();
+    let cursor = group(c, g.id).await.repair_cursor.map(|r| r.chunk_id);
+    (missing, cursor)
+}
+
+/// A walk split by a budget of two chunks per pass meets the bad chunk in
+/// an early pass and finishes over later passes: every recoverable chunk
+/// after it reaches the new member, the cursor never passes it, and the
+/// walk ends unrecoverable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_budgeted_walk_past_an_unrebuilt_chunk_finishes_and_keeps_the_cursor_before_it() {
+    let (mut c, g, target, chunks, bad) = one_bad_chunk_mid_walk().await;
+    c.repair_options.max_chunks = 2;
+    c.repair_options.parallel = 1;
+    let mut passes = 0;
+    let mut met = false;
+    let end = loop {
+        passes += 1;
+        assert!(passes < 100, "the walk never ended");
+        match c.repair_with(g.id, 0, target, async |_| Ok(())).await {
+            Ok(r) if r.budget_exhausted => {
+                met |= r.unrebuilt > 0;
+                let (_, cursor) = walk_state(&c, &g, target, &chunks).await;
+                if met {
+                    assert!(
+                        cursor.is_none_or(|k| k < bad),
+                        "pass {passes}: {cursor:?} passed {bad:?}"
+                    );
+                }
+            }
+            other => break other,
+        }
+    };
+    assert!(met && passes > 2, "{passes}");
+    assert!(
+        matches!(end, Err(ControlError::Unrecoverable { .. })),
+        "{end:?}"
+    );
+    let (missing, cursor) = walk_state(&c, &g, target, &chunks).await;
+    assert_eq!(missing, vec![bad], "after {passes} passes");
+    assert!(cursor.is_none_or(|k| k < bad), "{cursor:?} passed {bad:?}");
+    c.shutdown().await;
+}
+
+/// The bad chunk in the middle of a parallel batch: the chunks after it in
+/// the batch are written, the cursor stays before it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unrebuilt_chunk_mid_batch_keeps_the_cursor_before_it() {
+    let (mut c, g, target, chunks, bad) = one_bad_chunk_mid_walk().await;
+    c.repair_options.parallel = 8;
+    let end = c.repair_with(g.id, 0, target, async |_| Ok(())).await;
+    assert!(
+        matches!(end, Err(ControlError::Unrecoverable { .. })),
+        "{end:?}"
+    );
+    let (missing, cursor) = walk_state(&c, &g, target, &chunks).await;
+    assert_eq!(missing, vec![bad]);
+    let before = chunks.iter().copied().filter(|k| *k < bad).max();
+    assert_eq!(cursor, before, "held at the last chunk done before it");
+    c.shutdown().await;
+}
+
+/// A target failure on a chunk after the bad one ends the walk: the
+/// cursor is the one held before the bad chunk, and the next walk meets
+/// it again (and writes the rest).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_target_failure_past_an_unrebuilt_chunk_keeps_the_cursor_before_it() {
+    let (mut c, g, target, chunks, bad) = one_bad_chunk_mid_walk().await;
+    c.repair_options.parallel = 1;
+    let after = chunks[chunks.len() / 2 + 2];
+    let addr = c.nodes[target].addr.to_string();
+    c.clients.set_fault_hook(Some(Arc::new(move |ctx| {
+        if ctx.rpc == Rpc::PutShard
+            && ctx.addr == addr
+            && ctx.shard.is_some_and(|s| s.chunk_id == after)
+        {
+            FaultAction::FailBefore(tonic::Code::PermissionDenied, "refused".into())
+        } else {
+            FaultAction::None
+        }
+    })));
+    let end = c.repair_with(g.id, 0, target, async |_| Ok(())).await;
+    assert!(matches!(end, Err(ControlError::Node { .. })), "{end:?}");
+    let (missing, cursor) = walk_state(&c, &g, target, &chunks).await;
+    let before = chunks.iter().copied().filter(|k| *k < bad).max();
+    assert_eq!(cursor, before, "held at the last chunk done before it");
+    assert!(missing.contains(&bad) && missing.contains(&after));
+    c.clients.set_fault_hook(None);
+    let end = c.repair_with(g.id, 0, target, async |_| Ok(())).await;
+    assert!(
+        matches!(end, Err(ControlError::Unrecoverable { .. })),
+        "{end:?}"
+    );
+    let (missing, cursor) = walk_state(&c, &g, target, &chunks).await;
+    assert_eq!(missing, vec![bad]);
+    assert_eq!(cursor, before);
+    c.shutdown().await;
+}
