@@ -1594,7 +1594,11 @@ def step8c():
     tls_issue("ca-main", "node", str(nid), "n-c2")
     push_pki()
     t0 = time.time()
-    start("c", "n-c2", node_cmd("c2", capacity=1 << 30))
+    # The same allotment as every other node: placement takes new chunks
+    # only in groups within 10 % of the roomiest group's room
+    # (placement::pick_group_for_write), so a smaller c2 kept its group out
+    # once its room was known (judged attempt c2-j1).
+    start("c", "n-c2", node_cmd("c2"))
     joined, s, row = None, "", []
     while time.time() - t0 < 60:
         s = node_status(nid)
@@ -1979,6 +1983,7 @@ UPGRADE = [("U1-data-0.1.0", u1), ("U2-storage-nodes", u2), ("U3-controllers", u
 
 def write_md(meta):
     lines = [f"# three-host validation run {RUN_ID} ({meta.get('scenario')})", "", f"source {meta.get('sha')}", "",
+             f"driver {meta.get('driver_sha')}" + (f" ({meta['driver_note']})" if meta.get("driver_note") else ""), "",
              f"judged: {'yes' if meta.get('judged') else 'no (rehearsal or script debugging)'}", ""]
     for h, f in sorted((meta.get("binaries") or {}).items()):
         lines += [f"- host {h}: `{f.get('version')}` sha256 `{f.get('sha256')}`"
@@ -1996,6 +2001,14 @@ def write_md(meta):
 
 # The published v0.1.0 binary (archive SHA-256 975c036c…8de83).
 V010_SHA256 = "c1cd2221991a11e9eaaacc2e96227599ef86e1769b2d126ebe8598d7c9addd56"
+
+
+def driver_sha():
+    """The commit of this driver's checkout (it may differ from SOURCE_SHA,
+    the commit of the binary under test; DRIVER_NOTE says why)."""
+    p = subprocess.run(["git", "-C", str(HERE), "rev-parse", "HEAD"], capture_output=True, text=True)
+    dirty = subprocess.run(["git", "-C", str(HERE), "status", "--porcelain", "--", "."], capture_output=True, text=True)
+    return p.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "") if p.returncode == 0 else ""
 
 
 def judged_refusal(env):
@@ -2126,7 +2139,8 @@ def run(scenario):
         sys.exit("refused: " + "; ".join(refused))
     OUT.mkdir(parents=True, exist_ok=True)
     meta = {"run_id": RUN_ID, "scenario": scenario, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "sha": os.environ.get("SOURCE_SHA", ""), "judged": judged}
+            "sha": os.environ.get("SOURCE_SHA", ""), "judged": judged, "driver_sha": driver_sha(),
+            "driver_note": os.environ.get("DRIVER_NOTE", "")}
     addresses()
     meta["binaries"] = binary_facts()
     problems = preflight_problems(meta["binaries"], scenario, judged,
