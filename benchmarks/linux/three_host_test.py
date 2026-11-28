@@ -318,6 +318,19 @@ class Layout(unittest.TestCase):
         src = (Path(__file__).resolve().parent / "three-host-validate.py").read_text()
         self.assertIn('start("c", "n-c2", node_cmd("c2"))', src)
 
+    def test_upgrade_restart_windows_last_25_s(self):
+        # c2-uj1: an 11.6 s window after a controller restart fell into a
+        # pause of the paced load.
+        self.assertEqual(drv.RESTART_WINDOW_S, 25)
+        self.assertEqual(drv.MIN_WINDOW_ACKED, 3)
+        src = (Path(__file__).resolve().parent / "three-host-validate.py").read_text()
+        u2 = src[src.index("def u2():"):src.index("def u3():")]
+        u3 = src[src.index("def u3():"):src.index("def u4():")]
+        self.assertIn("10 + RESTART_WINDOW_S - (ts(\"c\") - t)", u2)
+        self.assertIn("RESTART_WINDOW_S - (ts(\"c\") - t)", u3)
+        self.assertNotIn("time.sleep(15)", u2)
+        self.assertNotIn("time.sleep(10)\n            st = status()", u3)
+
     def test_the_driver_commit_is_recorded(self):
         self.assertRegex(drv.driver_sha(), r"^([0-9a-f]{40}(-dirty)?)?$")
 

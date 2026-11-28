@@ -470,6 +470,10 @@ def probe(key, spec=None):
 # requests through every gateway, and the client must have ended cleanly.
 MIN_PHASE_ACKED = 20  # acknowledged operations per gateway per load phase
 MIN_WINDOW_ACKED = 3  # acknowledged operations per gateway per judged window
+# Length of U2's and U3's windows after a restart, s: the client paces PUTs
+# at 2 MiB/s over 4 threads (a 16 MiB PUT holds 8 s of it), so a window much
+# shorter than this can hold no request at all (judged attempt c2-uj1).
+RESTART_WINDOW_S = 25
 CHECKS = []  # load and window checks since the last step's result
 
 
@@ -1716,7 +1720,10 @@ def u2():
                     break
                 time.sleep(2)
             seen[n] = back
-            time.sleep(15)
+            # The judged window (10 s after the restart to the next stop)
+            # lasts at least RESTART_WINDOW_S: the load is paced, and a
+            # shorter window can fall into a pause (c2-uj1).
+            time.sleep(max(0.0, 10 + RESTART_WINDOW_S - (ts("c") - t)))
         t_end = ts("c")
     recs = ledger(phase)
     viol = [r for r in recs if r["outcome"] == "VIOLATION"]
@@ -1753,7 +1760,9 @@ def u3():
                     took = ts("a") - t
                     break
                 time.sleep(1)
-            time.sleep(10)
+            # The judged window lasts RESTART_WINDOW_S from the restart
+            # (c2-uj1: 11.6 s fell into a pause of the paced load).
+            time.sleep(max(0.0, RESTART_WINDOW_S - (ts("c") - t)))
             st = status()
             cycles.append({"upgraded": cid, "was_leader": cid == lead, "leader_within_s": took and round(took, 2),
                            "leader_after": st["leader"] and st["leader"]["holder"], "alive": alive(CONTROLLERS[cid], cid),
