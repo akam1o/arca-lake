@@ -304,6 +304,24 @@ class Checks(unittest.TestCase):
         self.assertEqual(drv.judge_checks("FAIL", {}, [ok])[0], "FAIL")
 
 
+class Layout(unittest.TestCase):
+    def test_the_new_node_has_the_same_allotment_as_the_others(self):
+        # c2-j1: a smaller c2 kept its group out of placement's 10 % band.
+        saved = dict(drv.ADDR)
+        drv.ADDR.update({"a": "192.0.2.1", "b": "192.0.2.2", "c": "192.0.2.3"})
+        try:
+            self.assertIn(f"--capacity-bytes {drv.CAPACITY} ", drv.node_cmd("c2"))
+            self.assertIn(f"--capacity-bytes {drv.CAPACITY} ", drv.node_cmd("a0"))
+        finally:
+            drv.ADDR.clear()
+            drv.ADDR.update(saved)
+        src = (Path(__file__).resolve().parent / "three-host-validate.py").read_text()
+        self.assertIn('start("c", "n-c2", node_cmd("c2"))', src)
+
+    def test_the_driver_commit_is_recorded(self):
+        self.assertRegex(drv.driver_sha(), r"^([0-9a-f]{40}(-dirty)?)?$")
+
+
 class Parsing(unittest.TestCase):
     def test_verify_object_lists_only_chunks_not_whole(self):
         head = "object v3h/k00/001 version null generation 01a2 multipart false chunks 2 verdict "
